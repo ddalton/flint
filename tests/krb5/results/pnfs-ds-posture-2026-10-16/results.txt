@@ -1,0 +1,33 @@
+== dspost at 6fcbe890 20:57:26
+
+=== arm E: sec=krb5i, data servers: keys ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 3.7 s  read 4.3 s  md5 bac902221a9cd20b286e4bc0939d7ff3
+allocated bytes: DS1 33579008  DS2 33579008  MDS export 16384
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:26 20490/gss/null:8 20491/none/null:2 20491/gss/compound:174 20491/gss/null:17 20492/none/null:2 20492/gss/compound:178 20492/gss/null:15
+ds1: Security: floor krb5i; Kerberos on (KRB5_KTNAME) | GSS DATA 205 | refused: 
+ds2: Security: floor krb5i; Kerberos on (KRB5_KTNAME) | GSS DATA 206 | refused: 
+gssd upcalls: 
+
+=== arm H: sec=krb5i, data servers: off ===
+mounted: sec=krb5i
+read-back INTACT
+write rc=0  write+fsync 1.6 s  read 2.9 s  md5 bac902221a9cd20b286e4bc0939d7ff3
+allocated bytes: DS1 20480  DS2 20480  MDS export 67125248
+layout stats: 
+dmesg: 
+KDC asked for: 
+KDC unknown: 
+flavors by port: 20490/none/null:1 20490/gss/compound:282 20490/gss/null:9
+ds1: Security: floor none; Kerberos off (RPCSEC_GSS calls refused) | GSS DATA 0 | refused: 
+ds2: Security: floor none; Kerberos off (RPCSEC_GSS calls refused) | GSS DATA 0 | refused: 
+gssd upcalls: 
+
+=== done ===
+== dspost done 21:03:28
+

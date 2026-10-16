@@ -202,8 +202,9 @@ stripe under GSS; **E1 against a refusing DS: the client falls back to the
 MDS** (its data then reaches the DSes over the F66 relay, Phase 5's path);
 a DS with Kerberos but no floor takes the client's AUTH_SYS downgrade, which
 the chart cannot render (one switch sets floor, keytab and the MDS's grant).
-Follow-up: the DS reports its floor at registration, and the MDS grants
-Kerberos callers layouts only for DSes that report one.
+Built since: the DS reports a keytab and its floor at registration, and
+the MDS grants Kerberos callers layouts only while every registered DS has
+both (arm H then keeps every byte on the MDS).
 
 
 - **Share the GSS code:** extract `gss_front` from
