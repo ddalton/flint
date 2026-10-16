@@ -1620,7 +1620,7 @@ impl SpdkCsiDriver {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::Api;
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        let pv_name = crate::identity::storage_id_of_handle(volume_id);
+        let pv_name = pv_name_of_handle(volume_id);
         match pvs.get(pv_name).await {
             Ok(pv) => pv
                 .spec
@@ -1639,7 +1639,7 @@ impl SpdkCsiDriver {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::Api;
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        let pv_name = crate::identity::storage_id_of_handle(volume_id);
+        let pv_name = pv_name_of_handle(volume_id);
         match pvs.get(pv_name).await {
             Ok(pv) => pv
                 .spec
@@ -4123,3 +4123,23 @@ mod placement_tests {
         );
     }
 }
+
+/// The PV name behind a volume handle: the storage id without the
+/// `nfs-server-` prefix (`identity::storage_id_of_handle`) and without a
+/// pNFS shard pin (`~m<shard>`), which handles carry and PV names do not.
+pub(crate) fn pv_name_of_handle(volume_id: &str) -> &str {
+    let id = crate::identity::storage_id_of_handle(volume_id);
+    crate::pnfs_csi::parse_shard_suffix(id).map(|(bare, _)| bare).unwrap_or(id)
+}
+
+#[cfg(test)]
+mod pv_name_of_handle_tests {
+    #[test]
+    fn a_pnfs_handle_names_its_pv_without_the_shard_pin() {
+        assert_eq!(super::pv_name_of_handle("pvc-1234~m0"), "pvc-1234");
+        assert_eq!(super::pv_name_of_handle("pvc-1234~m12"), "pvc-1234");
+        assert_eq!(super::pv_name_of_handle("pvc-1234"), "pvc-1234");
+        assert_eq!(super::pv_name_of_handle("pvc-1234~mx"), "pvc-1234~mx", "not a shard pin");
+    }
+}
+

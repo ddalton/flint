@@ -323,6 +323,17 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **pNFS volumes never detached from a node without SPDK** (2026-10-16).
+  NodeUnstageVolume read the PV by the volume handle, but a pNFS handle
+  carries the shard pin (`<pv>~m<shard>`) and the PV's name does not, so
+  every read 404'd and the volume took the block path: the SPDK teardown
+  failed (no `spdk.sock` on an nfs-only node) and kubelet retried
+  NodeUnstage forever. The volume stayed in the node's `volumesInUse`, and
+  the attach/detach controller never detached it, so the VolumeAttachment
+  outlived its last pod, every time. A shard-pinned handle is now
+  classified as pNFS directly (as ControllerUnpublish and DeleteVolume
+  already did), and the PV reads strip the pin. Found by the pNFS Kerberos
+  Phase 2 kind step, whose revocation rides on the detach.
 - **A created file's owner, as the client first sees it** (2026-10-15).
   OPEN(create) and CREATE stamp the caller's uid and gid with a chown, but
   did not bump the change counter, which is what invalidates the stat
