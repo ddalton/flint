@@ -184,11 +184,11 @@ pub fn incoming(
                     continue;
                 }
             };
-            let (acceptor, tx) = (acceptor.clone(), tx.clone());
+            let (acceptor, conn_tx) = (acceptor.clone(), tx.clone());
             tokio::spawn(async move {
                 match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
                     Ok(Ok(tls)) => {
-                        let _ = tx.send(Ok(TlsConn { inner: tls, remote: Some(remote) })).await;
+                        let _ = conn_tx.send(Ok(TlsConn { inner: tls, remote: Some(remote) })).await;
                     }
                     Ok(Err(e)) => tracing::warn!("control TLS: handshake from {remote}: {e}"),
                     Err(_) => tracing::warn!("control TLS: handshake from {remote} timed out"),
