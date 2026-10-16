@@ -2313,7 +2313,7 @@ fn encode_lock_denied(
 /// is `sec=sys`). AUTH_NONE is kept, LAST, so a client that genuinely
 /// has nothing else still works — but no client that can do better will
 /// choose it.
-fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
+pub(crate) fn encode_secinfo_flavors(encoder: &mut XdrEncoder) {
     // GSS is advertised ONLY when a keytab actually loaded.
     //
     // This used to advertise RPCSEC_GSS unconditionally, which invited

@@ -370,6 +370,18 @@ impl IoOperationHandler {
         offset: u64,
         count: u32,
     ) -> Result<ReadResult> {
+        self.read_with(filehandle, offset, count, crate::nfs::splice::enabled()).await
+    }
+
+    /// [`read`](Self::read), with splice allowed or not: never under
+    /// RPCSEC_GSS, whose reply body is signed or sealed in memory.
+    pub async fn read_with(
+        &self,
+        filehandle: &[u8],
+        offset: u64,
+        count: u32,
+        allow_splice: bool,
+    ) -> Result<ReadResult> {
         // DOS-4, data-server edition. `count` arrives off the wire as a
         // u32 and reached `vec![0u8; count as usize]` unclamped, so a
         // ~100-byte frame demanded 4 GiB — against an empty file, with no
@@ -468,19 +480,18 @@ impl IoOperationHandler {
             }
 
             // The shared clamp → splice → pooled-read fast path
-            // (`read_pool::read_segment`). The two surfaces that force
-            // the standalone lane to decline splice — GSS sealing and
-            // the slot reply cache — do not exist on the DS
-            // (rpc_gss_svc_none only, no replay cache), so its verdict
-            // is `splice::enabled()` alone (default ON,
-            // FLINT_NFS_SPLICE=0 opts out).
+            // (`read_pool::read_segment`). Of the two surfaces that force
+            // the standalone lane to decline splice, the slot reply cache
+            // does not exist on the DS; GSS sealing does since Phase 3,
+            // so the caller decides (`allow_splice`: `splice::enabled()`
+            // and not RPCSEC_GSS).
             let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
             crate::nfs::read_pool::read_segment(
                 &file,
                 file_size,
                 offset,
                 count as usize,
-                crate::nfs::splice::enabled(),
+                allow_splice,
             )
         })
         .map_err(crate::pnfs::Error::Io)?;
