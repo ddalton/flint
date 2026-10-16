@@ -103,7 +103,10 @@ spec:
           for d in $(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}'); do
             l=$(kubectl -n flint-system logs "$d" -c ds --tail=-1)
             echo "$l" | grep -F 'control TLS on' || { echo "FAIL: $d does not serve control TLS"; exit 1; }
-            echo "$l" | grep -F 'Successfully registered with MDS' || { echo "FAIL: $d did not register"; exit 1; }
+            # Its first attempt can come before the MDS listens; the
+            # heartbeat path then re-registers.
+            echo "$l" | grep -E 'Successfully registered with MDS|Re-registration successful' ||
+              { echo "FAIL: $d did not register"; exit 1; }
             if echo "$l" | grep -iE 'handshake|InvalidCertificate|UnknownIssuer'; then
               echo "FAIL: TLS errors on $d"; exit 1
             fi
