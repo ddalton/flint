@@ -149,7 +149,8 @@ spec:
           [ "$size" = 8388608 ] || { echo "FAIL: size $size"; exit 1; }
           [ "$alloc" -lt 1048576 ] || { echo "FAIL: the MDS holds the data ($alloc bytes allocated)"; exit 1; }
           # Under Kerberos, at the data servers: every data call was
-          # RPCSEC_GSS, and none came as AUTH_SYS (the floor refuses those).
+          # RPCSEC_GSS, and none came below the krb5i floor (AUTH_SYS, or
+          # GSS without integrity), which the floor would have refused.
           for d in $dss; do
             l=$(kubectl -n flint-system logs "$d" -c ds --tail=-1)
             echo "$l" | grep -F 'Security: floor krb5i; Kerberos on' ||
@@ -157,8 +158,8 @@ spec:
             n=$(echo "$l" | grep -cF 'RPCSEC_GSS_DATA' || true)
             echo "$d: $n RPCSEC_GSS_DATA calls"
             [ "$n" -gt 0 ] || { echo "FAIL: no Kerberos calls reached $d"; exit 1; }
-            if echo "$l" | grep -F 'Refusing sec=sys'; then
-              echo "FAIL: a client sent $d AUTH_SYS calls"; exit 1
+            if echo "$l" | grep -F 'Refusing sec='; then
+              echo "FAIL: a client sent $d calls below the floor"; exit 1
             fi
           done
           kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F 'layouts for Kerberos callers granted'
