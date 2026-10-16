@@ -14,6 +14,35 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS volumes can mount with Kerberos; the MDS does it, the data
+  servers not yet** (2026-10-16). `pnfs.kerberos.enabled` (off by
+  default; needs the in-chart MDS and krb5-operator) gives each MDS shard
+  its own principal, `nfs/flint-pnfs-mds-<i>.<ns>.svc.<domain>` (keytab
+  Secret `flint-pnfs-mds-<i>-krb5`, mounted by that shard only), and the
+  RWX servers' security env: the `krb5i` floor, the allowlist, `idmap`
+  and the directory, enforced permissions, root squash and required
+  SP4_MACH_CRED (`pnfs.kerberos.{minSec, requireMachCred,
+  enforcePermissions}`; the realm and the rest are `nfs.kerberos`'s). The
+  MDS now refuses to start on a bad `FLINT_NFS_MIN_SEC` or
+  `FLINT_NFS_REQUIRE_MACH_CRED`, and honours the latter (it ignored it).
+  ControllerPublish names the volume's shard, and the node maps the MDS IP
+  to that name before a `sec=krb5*` mount, refusing the mount without
+  one. New StorageClass `flint-pnfs-krb5` (`sec=krb5i`). The data servers
+  do no Kerberos, and a Linux client that cannot get a GSS context with a
+  DS sends it the data as AUTH_SYS, silently (measured), so with a keytab
+  the MDS answers LAYOUTGET from a Kerberos caller with
+  NFS4ERR_LAYOUTUNAVAIL: **all of a Kerberos client's I/O goes through
+  the MDS**, under Kerberos. AUTH_SYS callers get layouts as before
+  (`FLINT_PNFS_LAYOUTS_FOR_GSS=true` turns layouts back on for Kerberos
+  callers, for when the DSes do Kerberos). Consequences: no striping for
+  Kerberos clients; files they write stay on the MDS's PVC, and stay there
+  later too (the F67 guard never pins a file that has bytes); no
+  attached-nodes-only on the MDS yet. Before enabling, drain every
+  `sec=sys` pNFS mount from each node: the kernel reuses a node's AUTH_SYS
+  client for new mounts of the same MDS, which the floor refuses. With
+  `pnfs.kerberos.enabled` false the chart renders exactly as before.
+  See docs/nfs-kerberos.md, "pNFS".
+
 - **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).
   Every NFS server pod used to mount the one shared keytab
   (`nfs/flint-nfs.<ns>.svc.<domain>`), so anyone who got into one server

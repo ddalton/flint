@@ -743,7 +743,7 @@ spec:
             path: /etc/udev/rules.d
             type: Directory
         {{- end }}
-        {{- if .Values.nfs.kerberos.enabled }}
+        {{- if or .Values.nfs.kerberos.enabled (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) }}
         # sec=krb5* mounts: the node plugin maps NFS ClusterIPs to the
         # Kerberos server name here, for rpc.gssd (nfs_krb5.rs).
         - name: host-etc-hosts

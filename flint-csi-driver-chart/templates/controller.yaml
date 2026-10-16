@@ -239,6 +239,13 @@ spec:
             - name: FLINT_PNFS_MDS_SHARD_ENDPOINTS
               value: {{ $eps := list }}{{ range $i := until (int (.Values.pnfs.server.mds.count | default 1)) }}{{ $eps = append $eps (printf "flint-pnfs-mds-%d.%s.svc.cluster.local:50051" $i $.Release.Namespace) }}{{ end }}{{ join "," $eps | quote }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsKrb5Enabled" . }}
+            # pNFS Kerberos (pnfs.kerberos): ControllerPublish names the
+            # volume's MDS shard, flint-pnfs-mds-<shard>.<this>, for the
+            # node's hosts entry (rpc.gssd asks for nfs/<that name>).
+            - name: PNFS_KRB5_MDS_NAME_BASE
+              value: {{ include "flint-csi-driver-chart.pnfsKrb5NameBase" . | quote }}
+            {{- end }}
             {{- if .Values.pnfs.controlToken.enabled }}
             # Attached to CreateVolume/DeleteVolume gRPC — see
             # templates/pnfs-security.yaml.

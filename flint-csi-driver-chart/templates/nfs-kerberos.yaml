@@ -32,34 +32,7 @@ spec:
   deletionPolicy: {{ $k.deletionPolicy }}
 {{- if $k.nodeKeytab.create }}
 ---
-# The nodes' machine credentials for rpc.gssd (host/ and nfs/<node>), in
-# their /etc/krb5.keytab, with the realm's krb5.conf.
-apiVersion: krb5.ddalton.dev/v1alpha1
-kind: KerberosNodeKeytab
-metadata:
-  name: {{ include "flint-csi-driver-chart.fullname" . | trunc 30 | trimSuffix "-" }}-nfs-clients
-  labels:
-    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
-spec:
-  realmRef: {{ $realmRef }}
-  realmNamespace: {{ $realmNs }}
-  services: [host, nfs]
-  {{- with $k.nodeKeytab.nodeSelector }}
-  nodeSelector:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- with $k.nodeKeytab.tolerations }}
-  tolerations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-  {{- with $k.nodeKeytab.domain }}
-  domain: {{ . }}
-  {{- end }}
-  keytabPath: {{ $k.nodeKeytab.keytabPath }}
-  {{- with $k.nodeKeytab.krb5ConfPath }}
-  krb5ConfPath: {{ . }}
-  {{- end }}
-  deletionPolicy: {{ $k.deletionPolicy }}
+{{ include "flint-csi-driver-chart.krb5NodeKeytab" . }}
 {{- end }}
 ---
 # Each volume's NFS server has a principal of its own (perVolumeKeys): the

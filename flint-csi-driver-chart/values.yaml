@@ -725,6 +725,44 @@ pnfs:
     # a policy that blocks all NFS traffic.
     nodeCIDRs: []
 
+  # Kerberos for pNFS volumes (docs/nfs-kerberos.md, "pNFS"). Off by
+  # default. Needs the in-chart MDS (server.enabled) and krb5-operator,
+  # and REUSES nfs.kerberos's realm, realmRef, realmNamespace,
+  # clusterDomain, allowedPrincipals, idmap, machineIdentity,
+  # anonIdentity, ldap, nodeKeytab and deletionPolicy (set them there;
+  # nfs.kerberos.enabled itself may stay false), and nfs.rootSquash.
+  #
+  # Today (Phase 1) the MDS does Kerberos: each shard has its own
+  # principal, nfs/flint-pnfs-mds-<shard>.<namespace>.svc.<clusterDomain>,
+  # and the floor, allowlist, idmap, enforced permissions and
+  # SP4_MACH_CRED apply to pNFS mounts. The data servers do NOT do
+  # Kerberos yet, so a Kerberos client gets no layouts: ALL its I/O goes
+  # through the MDS, under Kerberos, and files it writes stay on the MDS
+  # volume (size pnfs.server.mds.storage for them). AUTH_SYS mounts still
+  # get layouts, but the floor below refuses them.
+  #
+  # Before turning it on, unmount every sec=sys pNFS volume on each node:
+  # the kernel reuses a node's AUTH_SYS client for new mounts of the same
+  # MDS, which the floor refuses.
+  kerberos:
+    enabled: false
+    # FLINT_NFS_MIN_SEC for every MDS shard: krb5i (default) or krb5
+    # refuses sec=sys pNFS mounts. "" for no floor, which also needs
+    # requireMachCred: false.
+    minSec: krb5i
+    # Every client must ask for SP4_MACH_CRED (FLINT_NFS_REQUIRE_MACH_CRED),
+    # as nfs.kerberos.requireMachCred.
+    requireMachCred: true
+    # FLINT_NFS_ENFORCE_PERMISSIONS on the MDS: enforce, warn or off.
+    enforcePermissions: enforce
+    # pNFS volumes mounted with Kerberos: the flint-pnfs class's
+    # parameters (pnfs.storageClass) plus mountOptions sec=<sec>.
+    storageClass:
+      create: true
+      name: flint-pnfs-krb5
+      # krb5, krb5i or krb5p.
+      sec: krb5i
+
   # In-chart pNFS server fleet (durable-DS plan Phase 1).
   server:
     enabled: false
