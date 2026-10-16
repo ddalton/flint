@@ -1829,14 +1829,32 @@ impl MetadataServer {
             // itself as a DS (and attracting stripe writes for new
             // files) or calling CreateVolume/DeleteVolume. Unset =
             // open (backward compatible) with a loud boot warning.
-            let token = std::env::var("FLINT_PNFS_CONTROL_TOKEN").ok();
-            match &token {
-                Some(_) => info!("🔐 MDS control plane requires a bearer token"),
-                None => warn!(
-                    "⚠️ FLINT_PNFS_CONTROL_TOKEN unset — MDS control plane is UNAUTHENTICATED \
-                     (any pod that can reach 50051 can register as a DS)"
-                ),
-            }
+            //
+            // Phase 5b (`pnfs::control_auth`, FLINT_PNFS_CONTROL_AUTH=
+            // serviceaccount): each caller's own pod-bound ServiceAccount
+            // token instead, reviewed, against the role table. A policy
+            // that cannot be built leaves the control plane closed.
+            let sa_policy = match crate::pnfs::control_auth::policy_from_env(crate::pnfs::control_auth::MDS_AUDIENCE).await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("❌ MDS control plane NOT served: {}", e);
+                    return;
+                }
+            };
+            let token = if sa_policy.is_some() {
+                info!("🔐 MDS control plane: each caller's ServiceAccount token, reviewed, by role");
+                None
+            } else {
+                let token = std::env::var("FLINT_PNFS_CONTROL_TOKEN").ok();
+                match &token {
+                    Some(_) => info!("🔐 MDS control plane requires a bearer token"),
+                    None => warn!(
+                        "⚠️ FLINT_PNFS_CONTROL_TOKEN unset — MDS control plane is UNAUTHENTICATED \
+                         (any pod that can reach 50051 can register as a DS)"
+                    ),
+                }
+                token
+            };
             let expected = token.map(|t| format!("Bearer {}", t));
             let svc = tonic::service::interceptor::InterceptedService::new(
                 MdsControlServer::new(control_service),
@@ -1853,7 +1871,9 @@ impl MetadataServer {
 
             info!("🔧 Starting MDS gRPC control server on {}", grpc_addr);
 
-            let router = tonic::transport::Server::builder().add_service(svc);
+            let router = tonic::transport::Server::builder()
+                .layer(tower::util::option_layer(sa_policy.map(crate::pnfs::control_auth::AuthLayer::new)))
+                .add_service(svc);
             // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
             let served = match crate::pnfs::control_tls::bind_incoming(grpc_addr).await {
                 Ok(Some(incoming)) => router.serve_with_incoming(incoming).await.map_err(|e| e.to_string()),

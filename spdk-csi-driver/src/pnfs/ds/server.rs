@@ -1485,7 +1485,9 @@ impl DataServer {
             );
             return;
         };
-        if std::env::var("FLINT_PNFS_CONTROL_TOKEN").is_err() {
+        if std::env::var("FLINT_PNFS_CONTROL_TOKEN").is_err()
+            && !crate::pnfs::control_auth::mode_from_env().unwrap_or(false)
+        {
             warn!(
                 "⚠️ FLINT_PNFS_CONTROL_TOKEN unset — DsControl listener is UNAUTHENTICATED; \
                  anyone who can reach port {} can truncate stripe files", port
@@ -1508,7 +1510,19 @@ impl DataServer {
         };
         info!("🎛️ DsControl gRPC listener on {}", addr);
         tokio::spawn(async move {
+            // Phase 5b: the MDS's own ServiceAccount token, reviewed.
+            let sa_policy = match crate::pnfs::control_auth::policy_from_env(crate::pnfs::control_auth::DS_AUDIENCE).await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("❌ DsControl NOT served: {}", e);
+                    return;
+                }
+            };
+            if sa_policy.is_some() {
+                info!("🔐 DsControl: the MDS's ServiceAccount token, reviewed");
+            }
             let router = tonic::transport::Server::builder()
+                .layer(tower::util::option_layer(sa_policy.map(crate::pnfs::control_auth::AuthLayer::new)))
                 .add_service(tonic::service::interceptor::InterceptedService::new(
                     crate::pnfs::grpc::DsControlServer::new(svc),
                     crate::pnfs::grpc::check_control_token,
