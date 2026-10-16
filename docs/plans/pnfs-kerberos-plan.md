@@ -38,6 +38,46 @@ SP4_MACH_CRED, #19 LDAP identities). Line numbers are `origin/main` at
 E1/E1b decide Phase 1's layout behaviour, E2 Phase 3's naming and SP4,
 E4 Phase 4's error code, E5 gates Phase 5.
 
+### Phase 0 results (2026-10-16): E1, E1b, E2 run
+
+On a KVM Ubuntu 24.04 VM on the build box (kernel 6.8, nfs-utils 2.6.4,
+MIT KDC 1.20), `tests/krb5/pnfs-e1.sh` with `rpcflav.py`: the MDS at
+127.0.0.1:20490 (`nfs/flintsrv.flint.test` keytab), two DSes advertised as
+127.0.0.2:20491 and 127.0.0.3:20492 (`ds1`/`ds2.flint.test` in
+`/etc/hosts`), 64 MiB written with fsync, caches dropped, read back and
+compared. Evidence: `tests/krb5/results/pnfs-phase0-2026-10-16/`.
+
+| Arm | Read-back | Bytes allocated on | RPCs to each DS | Read |
+|---|---|---|---|---|
+| A `sec=sys`, gssd on | intact | DSes, 32 MiB each; MDS export 16 KiB | AUTH_SYS | 0.2 s |
+| B `sec=sys`, gssd off | intact | same | AUTH_SYS | 0.2 s |
+| C `sec=krb5i`, no DS principals | intact | same | **AUTH_SYS** (~590), AUTH_NONE NULL (~99) | 2.3 s |
+| D `sec=krb5i`, DS principals exist | intact | same | **AUTH_SYS** (~585) after **~980 failed GSS context NULLs** | 1.5 s |
+
+- **E1b: no regression.** An AUTH_SYS pNFS mount on a node running
+  `rpc.gssd` behaves exactly as without it.
+- **E2:** `rpc.gssd` names a DS by reverse lookup of the uaddr IP
+  (`nfs/ds1.flint.test`), asking with the machine credential
+  (`host/<node>`, uid 0 for root's I/O). Without the principal the KDC
+  says "Server not found" (C); with it, gssd gets a ticket and our DS's
+  non-GSS reply to the context INIT fails (D).
+- **E1: the kernel does NOT fall back to the MDS.** When it cannot get a
+  GSS context with a DS it **downgrades DS I/O to AUTH_SYS**, silently,
+  data intact, reads 7–11× slower from the retries. So today a
+  `sec=krb5i` pNFS mount sends its data unauthenticated and unsigned,
+  and the DS takes it.
+
+**Consequences for the plan:**
+1. Phase 1 must ship with option **B** (no layouts for GSS sessions, so
+   all I/O goes through the MDS under Kerberos), not A. Option A would
+   put metadata under Kerberos while the data goes as AUTH_SYS — worse
+   than nothing, because it looks protected. The F67 cost of B (files
+   written in Phase 1 stay on the MDS) is accepted until Phase 3, or
+   addressed by migrating them when Phase 3 lands.
+2. Phase 3's DS must enforce the floor (refuse AUTH_SYS/NONE when a floor
+   is set), and E1 must be rerun against a DS that refuses: whether the
+   client then falls back to the MDS or fails the I/O is still unknown.
+
 ## Phase 1: the MDS gets Kerberos
 
 Gives the floor, allowlist, idmap, enforced permissions, root squash and
@@ -72,12 +112,12 @@ Chart:
   requireMachCred:true, enforcePermissions:enforce, storageClass}`; render
   guards as RWX.
 
-Layouts for GSS callers: **A** (recommended, if E1 shows no stall) change
-nothing — the DS GSS attempt fails and I/O falls back to the MDS; files are
-still pinned, so they move to the DS lane after Phase 3. **B** answer
-LAYOUTUNAVAIL to GSS sessions — deterministic, but the F67 orphan guard
-(`pnfs/mds/layout.rs:1701-1718`) then keeps every Phase-1 file on the MDS
-for good. B only as a knob if E1 shows stalls.
+Layouts for GSS callers: **B** (decided by E1, Phase 0 results above):
+answer LAYOUTUNAVAIL to GSS sessions so every byte goes through the MDS
+under Kerberos. The F67 orphan guard (`pnfs/mds/layout.rs:1701-1718`)
+then keeps every Phase-1 file on the MDS; Phase 3 decides whether to
+migrate them. Option A (change nothing) is rejected: E1 showed the client
+then sends the data to the DSes as AUTH_SYS.
 
 Tests: unit (strict hosts entry, publish context name, MDS refuses a bad
 floor, env-name parity); chart legs; **a new `PNFS=1 KRB5=1` kind suite**
@@ -207,10 +247,12 @@ differentials that guard AUTH_SYS.
 
 ## Unsettled until measured
 
-1. DS credentials and flavor (E1b, E2) — if lease ops go krb5i whenever
-   gssd runs, AUTH_SYS pNFS on Kerberos nodes may be degraded today.
-2. DS principal naming (E2).
-3. Fallback when DS GSS fails (E1).
+1. ~~DS credentials and flavor (E1b, E2)~~ — settled: no AUTH_SYS
+   regression; DS I/O uses the mount's flavor, else downgrades to AUTH_SYS.
+2. ~~DS principal naming (E2)~~ — settled: reverse lookup of the IP.
+3. ~~Fallback when DS GSS fails (E1)~~ — settled: downgrade to AUTH_SYS,
+   not the MDS. Still open: what the client does when the DS REFUSES
+   AUTH_SYS (rerun E1 in Phase 3).
 4. SP4_NONE accepted from a DS after asking SP4_MACH_CRED (E2).
 5. Kernel recovery from a refused DS filehandle (E4).
 6. TokenReview `pod-name` extra; tonic + rustls (E5).
