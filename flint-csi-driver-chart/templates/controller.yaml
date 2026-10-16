@@ -170,6 +170,16 @@ spec:
               value: {{ include "flint-csi-driver-chart.nfsKrb5Principals" . | quote }}
             - name: NFS_GSS_IDMAP
               value: {{ include "flint-csi-driver-chart.nfsKrb5Idmap" . | quote }}
+            {{- if .Values.nfs.kerberos.attachedNodesOnly }}
+            - name: NFS_ATTACHED_NODES_ONLY
+              value: "true"
+            - name: NFS_SERVER_SERVICE_ACCOUNT
+              value: flint-nfs-server
+            {{- with .Values.nfs.kerberos.nodeKeytab.domain }}
+            - name: NFS_NODE_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             - name: NFS_GSS_ANON
               value: {{ .Values.nfs.kerberos.anonIdentity | quote }}
             {{- with .Values.nfs.kerberos.minSec }}

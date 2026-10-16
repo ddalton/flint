@@ -13,7 +13,8 @@ spec:
     real ticket (alice, uid 1000 on a node) is refused by the servers'
     principal allowlist, while the node's machine principal is not; bob,
     mapped to 2000:2000, owns what he creates and is denied a file only
-    root may read.
+    root may read; a node the volume is not attached to, with its own
+    valid machine key, is refused.
   steps:
   - name: volumes-and-pods
     try:
@@ -37,6 +38,14 @@ spec:
             name: krb5-b
           status:
             phase: Running
+    catch:
+    # Who the volumes' servers think they serve (nfs::node_authz), and the
+    # attachments as the cluster has them.
+    - script:
+        content: |
+          kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName} {.spec.nodeName} attached={.status.attached}{"\n"}{end}'
+          kubectl -n flint-system get pods -l app=flint-nfs-server -o jsonpath='{range .items[*]}{.metadata.name} sa={.spec.serviceAccountName}{"\n"}{end}'
+          kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -aE 'ATTACHED_NODES|serves nodes|Only the nodes|Kubernetes API|VolumeAttachments' | head -20
   - name: kerberos-mounts-share-files
     try:
     - script:
@@ -179,3 +188,39 @@ spec:
           kubectl -n flint-system delete kerberosprincipal rwx-krb5-bob --ignore-not-found
           node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
             docker exec "$node" rm -f /tmp/bob.keytab /tmp/krb5cc_2000 || true
+  - name: a-node-the-volume-is-not-attached-to-is-refused
+    try:
+    - script:
+        timeout: 4m
+        content: |
+          set -eu
+          # The control plane has its own machine key (host/, nfs/) and
+          # rpc.gssd, but no pod of this volume, so no VolumeAttachment.
+          cp=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].metadata.name}')
+          pv=$(kubectl -n "$NAMESPACE" get pvc krb5-pvc -o jsonpath='{.spec.volumeName}')
+          if kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName} {.spec.nodeName}{"\n"}{end}' | grep -q "^$pv $cp$"; then
+            echo "FAIL: the volume is attached to $cp"; exit 1
+          fi
+          ip=$(kubectl -n flint-system get svc "flint-nfs-$pv" -o jsonpath='{.spec.clusterIP}')
+          # What the node plugin would write before a Kerberos mount.
+          docker exec "$cp" sh -c "echo '$ip flint-nfs.flint-system.svc.cluster.local # rogue-test' >> /etc/hosts && mkdir -p /mnt/rogue"
+          if docker exec "$cp" timeout 90 mount -t nfs4 -o vers=4.2,sec=krb5i "$ip:/" /mnt/rogue; then
+            docker exec "$cp" umount -f /mnt/rogue || true
+            echo "FAIL: $cp mounted a volume not attached to it"; exit 1
+          fi
+          for i in $(seq 30); do
+            if kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -E "EXCHANGE_ID refused: gss:(host|nfs)/$cp@FLINT.TEST is not a node this volume is attached to"; then
+              # The attached nodes still use it.
+              [ "$(kubectl -n "$NAMESPACE" exec krb5-b -- cat /data/a)" = from-a ]
+              echo PASS; exit 0
+            fi
+            sleep 2
+          done
+          echo "FAIL: the server did not refuse $cp by its attachments"
+          kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -aE 'refused|attached|serves nodes' | tail -20
+          exit 1
+    finally:
+    - script:
+        content: |
+          cp=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].metadata.name}')
+          docker exec "$cp" sh -c "umount -f /mnt/rogue 2>/dev/null; grep -v '# rogue-test' /etc/hosts > /tmp/h && cat /tmp/h > /etc/hosts" || true

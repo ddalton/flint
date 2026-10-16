@@ -113,10 +113,32 @@ nfs:
   `root_squash`. Root containers and the kubelet then cannot chown, or
   read what only root may read, on RWX volumes.
 
+## Only the nodes a volume is attached to
+
+With `nfs.kerberos.attachedNodesOnly: true`, each volume's NFS server
+serves only the nodes the volume is attached to. It watches the volume's
+VolumeAttachments and those nodes' hostnames, through a read-only service
+account.
+
+- **Making clients and sessions:** EXCHANGE_ID and CREATE_SESSION come
+  only from an attached node's machine principal (`host/`, `nfs/`,
+  `root/<node>`). Users and AUTH_SYS callers make none.
+- **Using a session:** SEQUENCE and BIND_CONN_TO_SESSION need the
+  session's client to be an attached node's. A machine principal using it
+  must be one too, while a user rides it; that is how a user's calls
+  arrive.
+- **Detach:** when a node is detached, its sessions fail at its next call
+  and its next EXCHANGE_ID is refused.
+- **Before the first list:** every node is refused.
+
+Every RWX mount must then be Kerberos. Session ids are random, but with
+`krb5i` they are visible on the wire: a principal allowed to connect, on an
+attached node, could reuse a session id it sniffed. Use `krb5p` where that
+matters.
+
 Not done yet:
 - reading identities from a directory (LDAP or SSSD, as idmapd does) in
   place of the explicit list;
-- restricting a volume to the nodes Kubernetes published it to.
 
 ## Why the hosts entry
 

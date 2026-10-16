@@ -33,3 +33,8 @@ spec:
     - describe:
         apiVersion: v1
         kind: PersistentVolumeClaim
+    # The per-volume NFS servers (flint-system): why a mount was refused.
+    - podLogs:
+        namespace: flint-system
+        selector: app=flint-nfs-server
+        tail: 60

@@ -166,6 +166,14 @@ pub struct ServerSecurity {
     pub enforce_permissions: Option<String>,
     /// `FLINT_NFS_ROOT_SQUASH`: uid 0 is the anonymous identity.
     pub root_squash: Option<String>,
+    /// `FLINT_NFS_ATTACHED_NODES_ONLY`: only the nodes the volume is
+    /// attached to (`nfs::node_authz`).
+    pub attached_nodes_only: Option<String>,
+    /// `FLINT_NFS_NODE_DOMAIN`: appended to node hostnames without a dot.
+    pub node_domain: Option<String>,
+    /// The NFS server pods' service account: [`Self::attached_nodes_only`]
+    /// reads VolumeAttachments and Nodes.
+    pub service_account: Option<String>,
 }
 
 impl ServerSecurity {
@@ -182,6 +190,9 @@ impl ServerSecurity {
             gss_anon: var("NFS_GSS_ANON"),
             enforce_permissions: var("NFS_ENFORCE_PERMISSIONS"),
             root_squash: var("NFS_ROOT_SQUASH"),
+            attached_nodes_only: var("NFS_ATTACHED_NODES_ONLY"),
+            node_domain: var("NFS_NODE_DOMAIN"),
+            service_account: var("NFS_SERVER_SERVICE_ACCOUNT"),
         }
     }
 }
@@ -238,6 +249,8 @@ pub fn server_pod_parts(sec: &ServerSecurity) -> (Vec<EnvVar>, Vec<Volume>, Vec<
         &sec.enforce_permissions,
     );
     set(&mut env, crate::nfs::gss_idmap::ROOT_SQUASH_ENV, &sec.root_squash);
+    set(&mut env, crate::nfs::node_authz::ENV, &sec.attached_nodes_only);
+    set(&mut env, crate::nfs::node_authz::DOMAIN_ENV, &sec.node_domain);
     (env, volumes, mounts)
 }
 
@@ -351,6 +364,9 @@ mod tests {
             gss_anon: Some("65534:65534".into()),
             enforce_permissions: Some("enforce".into()),
             root_squash: Some("true".into()),
+            attached_nodes_only: Some("true".into()),
+            node_domain: Some("corp.example".into()),
+            service_account: Some("flint-nfs-server".into()),
         };
         let (env, vols, mounts) = server_pod_parts(&sec);
         let get = |n: &str| {
@@ -378,6 +394,8 @@ mod tests {
             Some("enforce")
         );
         assert_eq!(get("FLINT_NFS_ROOT_SQUASH").as_deref(), Some("true"));
+        assert_eq!(get("FLINT_NFS_ATTACHED_NODES_ONLY").as_deref(), Some("true"));
+        assert_eq!(get("FLINT_NFS_NODE_DOMAIN").as_deref(), Some("corp.example"));
         let s = vols[0].secret.as_ref().unwrap();
         assert_eq!(s.secret_name.as_deref(), Some("flint-nfs-krb5-keytab"));
         assert_eq!(

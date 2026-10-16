@@ -159,7 +159,8 @@ if [ "$KRB5" = 1 ]; then
     --set nfs.kerberos.realmRef=flint --set nfs.kerberos.minSec=krb5i
     --set nfs.kerberos.nodeKeytab.tolerations[0].operator=Exists
     --set nfs.kerberos.idmap[0].principal=bob@FLINT.TEST --set nfs.kerberos.idmap[0].uid=2000
-    --set nfs.kerberos.idmap[0].gid=2000 --set nfs.enforcePermissions=enforce"
+    --set nfs.kerberos.idmap[0].gid=2000 --set nfs.enforcePermissions=enforce
+    --set nfs.kerberos.attachedNodesOnly=true"
 fi
 
 step "helm install flint-csi (nfs-only, image tag $TAG)"
