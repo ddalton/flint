@@ -710,6 +710,20 @@ pnfs:
   # and injects FLINT_PNFS_CONTROL_TOKEN into the MDS, DS fleet, and
   # CSI controller. Default ON whenever the in-chart server is
   # deployed — turning it off prints a loud MDS boot warning.
+  # ── TLS on the control path (pNFS Kerberos plan, Phase 5) ──
+  # The MDS's gRPC (50051: data server registration, heartbeats, the CSI
+  # controller's volume calls) and each data server's DsControl (truncates,
+  # the MDS's relay of a client's I/O) speak TLS 1.3. One chart-generated
+  # CA signs one certificate for the name flint-pnfs-control, which every
+  # server presents and every client checks; Secret flint-pnfs-control-tls
+  # (ca.crt, tls.crt, tls.key), generated once and kept on upgrades. Off:
+  # plaintext, as before.
+  controlTls:
+    enabled: true
+    # An existing Secret with ca.crt, tls.crt and tls.key instead (its
+    # certificate must be for flint-pnfs-control).
+    existingSecret: ""
+
   controlToken:
     enabled: true
     # Name of an existing Secret with key `token` to use instead of a

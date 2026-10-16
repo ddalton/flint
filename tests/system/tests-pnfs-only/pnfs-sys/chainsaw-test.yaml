@@ -89,3 +89,23 @@ spec:
           done
           mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
           kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -aE 'F68a|LAYOUT|register|Active' | tail -30
+  - name: the-control-path-is-tls
+    try:
+    - script:
+        content: |
+          set -eu
+          # pnfs.controlTls (default on): the MDS's gRPC and every DS's
+          # DsControl serve TLS, and the DSes registered through it (the
+          # striping step above needs registered DSes).
+          mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F 'control TLS on' ||
+            { echo "FAIL: the MDS does not serve control TLS"; exit 1; }
+          for d in $(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}'); do
+            l=$(kubectl -n flint-system logs "$d" -c ds --tail=-1)
+            echo "$l" | grep -F 'control TLS on' || { echo "FAIL: $d does not serve control TLS"; exit 1; }
+            echo "$l" | grep -F 'Successfully registered with MDS' || { echo "FAIL: $d did not register"; exit 1; }
+            if echo "$l" | grep -iE 'handshake|InvalidCertificate|UnknownIssuer'; then
+              echo "FAIL: TLS errors on $d"; exit 1
+            fi
+          done
+          echo PASS

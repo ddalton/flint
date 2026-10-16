@@ -299,6 +299,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if include "flint-csi-driver-chart.pnfsControlTls" $ }}
+            # TLS on the control path (pnfs.controlTls).
+            {{- include "flint-csi-driver-chart.pnfsControlTlsEnv" $ | nindent 12 }}
+            {{- end }}
             {{- if $.Values.pnfs.controlToken.enabled }}
             # Required Bearer token on every MdsControl gRPC — see
             # templates/pnfs-security.yaml.
@@ -358,11 +362,17 @@ spec:
             {{- if include "flint-csi-driver-chart.pnfsKrb5Enabled" $ }}
             {{- include "flint-csi-driver-chart.krb5ServerMounts" (dict "root" $) | nindent 12 }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlTls" $ }}
+            {{- include "flint-csi-driver-chart.pnfsControlTlsMount" $ | nindent 12 }}
+            {{- end }}
           {{- with $.Values.pnfs.server.mds.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        {{- if include "flint-csi-driver-chart.pnfsControlTls" $ }}
+        {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" $ | nindent 8 }}
+        {{- end }}
         - name: config
           configMap:
             name: {{ $cmName }}

@@ -202,18 +202,68 @@ pub fn incoming(
     tokio_stream::wrappers::ReceiverStream::new(rx)
 }
 
-/// A tonic channel to `endpoint` (`host:port`, or a URI), over TLS with
-/// `config`, checking the server name [`SERVER_NAME`]. Lazy, as the
-/// plaintext channels it replaces: it connects on first use.
-pub fn channel(endpoint: &str, config: Arc<rustls::ClientConfig>) -> Result<tonic::transport::Channel, String> {
+fn endpoint_of(endpoint: &str) -> Result<tonic::transport::Endpoint, String> {
     let hostport = endpoint
         .trim()
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/');
     let uri = format!("http://{hostport}");
-    let ep = tonic::transport::Endpoint::from_shared(uri.clone()).map_err(|e| format!("{uri}: {e}"))?;
-    let connector = tower::service_fn(move |uri: tonic::transport::Uri| {
+    tonic::transport::Endpoint::from_shared(uri.clone()).map_err(|e| format!("{uri}: {e}"))
+}
+
+/// A tonic channel to `endpoint` (`host:port`, or a URI), over TLS with
+/// `config`, checking the server name [`SERVER_NAME`]. Lazy: it connects
+/// on first use.
+pub fn channel(endpoint: &str, config: Arc<rustls::ClientConfig>) -> Result<tonic::transport::Channel, String> {
+    Ok(endpoint_of(endpoint)?.connect_with_connector_lazy(connector(config)))
+}
+
+/// Connect to a control server now: over TLS when this process has
+/// control TLS ([`global`]), plaintext otherwise. `timeout` bounds the
+/// connect and every call on the channel.
+pub async fn connect(endpoint: &str, timeout: Option<std::time::Duration>) -> Result<tonic::transport::Channel, String> {
+    let mut ep = endpoint_of(endpoint)?;
+    if let Some(t) = timeout {
+        ep = ep.connect_timeout(t).timeout(t);
+    }
+    let connected = match global() {
+        None => ep.connect().await,
+        Some(tls) => match timeout {
+            Some(t) => tokio::time::timeout(t, ep.connect_with_connector(connector(tls.client.clone())))
+                .await
+                .map_err(|_| format!("connect {endpoint}: timed out"))?,
+            None => ep.connect_with_connector(connector(tls.client.clone())).await,
+        },
+    };
+    connected.map_err(|e| format!("connect {endpoint}{}: {e}", if global().is_some() { " (TLS)" } else { "" }))
+}
+
+/// The listener a control server serves on: TLS connections from
+/// [`incoming`] when this process has control TLS ([`global`]), `None`
+/// for plaintext (the caller then serves `addr` as before).
+pub async fn bind_incoming(
+    addr: SocketAddr,
+) -> Result<Option<tokio_stream::wrappers::ReceiverStream<Result<TlsConn<tokio_rustls::server::TlsStream<TcpStream>>, std::io::Error>>>, String> {
+    let Some(tls) = global() else {
+        return Ok(None);
+    };
+    let listener = TcpListener::bind(addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
+    tracing::info!("🔒 control TLS on {addr} (server name {SERVER_NAME})");
+    Ok(Some(incoming(listener, tls.server.clone())))
+}
+
+fn connector(
+    config: Arc<rustls::ClientConfig>,
+) -> impl tower::Service<
+    tonic::transport::Uri,
+    Response = TlsConn<tokio_rustls::client::TlsStream<TcpStream>>,
+    Error = std::io::Error,
+    Future = impl std::future::Future<Output = std::io::Result<TlsConn<tokio_rustls::client::TlsStream<TcpStream>>>> + Send,
+> + Clone
+       + Send
+       + 'static {
+    tower::service_fn(move |uri: tonic::transport::Uri| {
         let config = config.clone();
         async move {
             let host = uri.host().unwrap_or_default().trim_start_matches('[').trim_end_matches(']').to_string();
@@ -224,8 +274,7 @@ pub fn channel(endpoint: &str, config: Arc<rustls::ClientConfig>) -> Result<toni
             let tls = tokio_rustls::TlsConnector::from(config).connect(name, tcp).await?;
             Ok::<_, std::io::Error>(TlsConn { inner: tls, remote: None })
         }
-    });
-    Ok(ep.connect_with_connector_lazy(connector))
+    })
 }
 
 #[cfg(test)]

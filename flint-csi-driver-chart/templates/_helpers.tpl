@@ -337,6 +337,31 @@ pnfs.kerberos.attachedNodesOnly is on.
 {{- if and (include "flint-csi-driver-chart.pnfsKrb5DataServers" .) (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" .) -}}true{{- end -}}
 {{- end }}
 
+{{/*
+TLS on the pNFS control path (pnfs.controlTls, Phase 5): "true", else empty.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsControlTls" -}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled (.Values.pnfs.controlTls).enabled -}}true{{- end -}}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsControlTlsEnv" -}}
+- name: FLINT_PNFS_CONTROL_TLS_DIR
+  value: /etc/flint-pnfs-control-tls
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsControlTlsMount" -}}
+- name: pnfs-control-tls
+  mountPath: /etc/flint-pnfs-control-tls
+  readOnly: true
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsControlTlsVolume" -}}
+- name: pnfs-control-tls
+  secret:
+    secretName: {{ .Values.pnfs.controlTls.existingSecret | default "flint-pnfs-control-tls" }}
+    defaultMode: 0444
+{{- end }}
+
 {{- define "flint-csi-driver-chart.pnfsKrb5DataServers" -}}
 {{- if and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).dataServers -}}true{{- end -}}
 {{- end }}
