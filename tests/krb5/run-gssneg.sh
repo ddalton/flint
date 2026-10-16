@@ -276,7 +276,10 @@ listening 20562; leg $? "N5d: server survived"
 
 # The log is the oracle, and tracing buffers it: counting while the
 # server runs raced the flush and read clean on a run whose log did hold
-# the line. Stop it first.
+# the line. Stop it first -- after unmounting: a client whose server is
+# already dead hangs in DESTROY_SESSION at umount (seen 2026-10-16, the
+# exit trap's `umount -f` stuck for 16 minutes).
+sudo umount -f "$MNT" 2>/dev/null
 sudo kill "$P3" 2>/dev/null; sleep 3
 OUTSIDE=$(grep -c "outside window" /tmp/n3.log 2>/dev/null || true); OUTSIDE=${OUTSIDE:-0}
 echo "    server refused $OUTSIDE call(s) as 'outside window'"
