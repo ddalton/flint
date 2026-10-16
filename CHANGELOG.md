@@ -14,6 +14,19 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS Kerberos: each volume only to the nodes it is attached to**
+  (2026-10-16; plan Phase 2). With `pnfs.kerberos.enabled`, the new
+  `pnfs.kerberos.attachedNodesOnly` (default `true`; needs `minSec`) makes
+  each MDS shard watch the pNFS PersistentVolumes and their
+  VolumeAttachments: only attached nodes' machine principals make clients
+  and sessions, and a node reaches only the volumes attached to it. A
+  PUTFH or RESTOREFH into another volume, and a LOOKUP, OPEN by name,
+  CREATE, REMOVE, RENAME or LINK of another volume's name, answer
+  NFS4ERR_ACCESS; a detach revokes at the node's next call. The MDS runs
+  as ServiceAccount `flint-pnfs-mds` with a read-only ClusterRole on
+  persistentvolumes, volumeattachments and nodes. Before, every node with
+  a machine key reached every pNFS volume of a shard. The MDS refuses to
+  start with `FLINT_NFS_ATTACHED_NODES_ONLY` in standalone (hub) mode.
 - **pNFS volumes can mount with Kerberos; the MDS does it, the data
   servers not yet** (2026-10-16). `pnfs.kerberos.enabled` (off by
   default; needs the in-chart MDS and krb5-operator) gives each MDS shard

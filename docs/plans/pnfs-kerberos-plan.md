@@ -144,6 +144,19 @@ before enabling. Size ~600 lines, 3–5 days.
 
 ## Phase 2: attached nodes only, per volume, on the MDS
 
+**Built** (`nfs::node_authz::{VolumeNodes, watch_pnfs}`, the dispatcher's
+`unattached_volume_refusal` and the PUTFH/RESTOREFH checks; chart
+`pnfs.kerberos.attachedNodesOnly`, default on). As built, it differs from
+the sketch below in three ways: the name operations (LOOKUP, OPEN by name,
+CREATE, REMOVE, RENAME, LINK) are checked *before* they run, against the
+name when the directory is the export root, so nothing is created or
+removed at the root for another volume; the watch keeps every shard's
+pNFS volumes (PVs are not filtered by `mds-ip`, which is a Service IP the
+MDS does not know), so the node set is the union over all shards; root
+READDIR is not filtered. Tested in `tests-pnfs-krb5/` (another node's
+volume refused, a detach revokes).
+
+
 - `node_authz::global()` on the MDS holds the **union** of nodes attached
   to any pNFS volume of this shard, so the existing session gate
   (`dispatcher.rs:1044-1048`, `:5051-5096`) works unchanged (the kernel
