@@ -251,7 +251,16 @@ Kerberos and leaves the rest of the file alone.
 - **`nfs-utils` and `rpc.gssd`:** the node needs `nfs-utils` (`nfs-common`
   on Debian and Ubuntu) and `rpc.gssd`. The `rpc-gssd` unit only starts
   when `/etc/krb5.keytab` exists, so start or restart it once the
-  KerberosNodeKeytab is Ready.
+  KerberosNodeKeytab is Ready. With krb5-operator 0.4 or later the node
+  agent can do it: `nfs.kerberos.nodeKeytab.restartServices: [rpc-gssd]`
+  has it start the unit once the keys are in and restart it when they
+  change. Off by default, because the agent then mounts the host's
+  systemd socket (`/run/systemd/private`) and could start any unit.
+  Nodes must run systemd.
+- **krb5-operator 0.4 or later is recommended:** each node's keys are in a
+  Secret of its own that only that node's agent mounts, so root on one
+  node cannot read another node's keys (0.3 kept every node's keys in
+  one Secret that every agent mounted).
 - **Kernel modules:** the kernel needs `auth_rpcgss` and `rpcsec_gss_krb5`.
 
 ## What Kerberos gives here

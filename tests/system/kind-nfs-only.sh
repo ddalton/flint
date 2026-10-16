@@ -34,7 +34,7 @@
 #      KIND_NODE_IMAGE (kindest/node:v1.34.0, kind v0.30.0's default)
 #      TESTS (tests-nfs-only; e.g. tests-nfs-only/rwo-pvc-migration)
 #      HELM_EXTRA (extra helm flags, e.g. "--set nfs.verbose=true")
-#      KRB5 (0; 1 = the Kerberos suite)  KRB5_OPERATOR_VERSION (0.3.0)
+#      KRB5 (0; 1 = the Kerberos suite)  KRB5_OPERATOR_VERSION (0.4.0)
 # Uses a PRIVATE kubeconfig: never touches ~/.kube/config.
 set -euo pipefail
 
@@ -48,7 +48,7 @@ BUILD="${BUILD:-1}"
 KEEP="${KEEP:-0}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.34.0}"
 KRB5="${KRB5:-0}"
-KRB5_OPERATOR_VERSION="${KRB5_OPERATOR_VERSION:-0.3.0}"
+KRB5_OPERATOR_VERSION="${KRB5_OPERATOR_VERSION:-0.4.0}"
 IMAGE="localhost:${REG_PORT}/dilipdalton/flint-driver:${TAG}"
 export KUBECONFIG="${KUBECONFIG_PRIVATE:-$(mktemp -d)/kubeconfig}"
 
@@ -160,6 +160,7 @@ if [ "$KRB5" = 1 ]; then
   HELM_EXTRA="${HELM_EXTRA:-} --set nfs.kerberos.enabled=true --set nfs.kerberos.realm=FLINT.TEST
     --set nfs.kerberos.realmRef=flint
     --set nfs.kerberos.nodeKeytab.tolerations[0].operator=Exists
+    --set nfs.kerberos.nodeKeytab.restartServices[0]=rpc-gssd
     --set nfs.kerberos.idmap[0].principal=bob@FLINT.TEST --set nfs.kerberos.idmap[0].uid=2000
     --set nfs.kerberos.idmap[0].gid=2000"
 fi
@@ -201,12 +202,13 @@ if [ "$KRB5" = 1 ]; then
     --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
   kubectl wait kerberosnodekeytab --all --timeout=5m \
     --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
-  # rpc-gssd's unit starts only once /etc/krb5.keytab exists.
+  # rpc-gssd's unit starts only once /etc/krb5.keytab exists: the node
+  # agents start it (nfs.kerberos.nodeKeytab.restartServices), not us.
   for n in $(kind get nodes --name "$CLUSTER"); do
     docker exec "$n" klist -k /etc/krb5.keytab
-    docker exec "$n" systemctl restart rpc-gssd
+    for i in $(seq 30); do docker exec "$n" systemctl is-active -q rpc-gssd && break; sleep 2; done
     docker exec "$n" systemctl is-active rpc-gssd ||
-      { docker exec "$n" journalctl -u rpc-gssd --no-pager | tail -20; fail "rpc-gssd is not running on $n"; }
+      { docker exec "$n" journalctl -u rpc-gssd --no-pager | tail -20; fail "the node agent did not start rpc-gssd on $n"; }
   done
 fi
 

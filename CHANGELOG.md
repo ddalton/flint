@@ -14,6 +14,18 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Kerberos nodes: krb5-operator 0.4.0, and the node agent can start
+  `rpc.gssd`** (2026-10-16). krb5-operator 0.4.0 gives each node its keys
+  in a Secret of its own that only that node's agent mounts, so root on
+  one node can no longer read every node's keys (0.3 kept them all in one
+  Secret every agent mounted). The kind suite now installs 0.4.0. New
+  value `nfs.kerberos.nodeKeytab.restartServices` (e.g. `[rpc-gssd]`,
+  needs 0.4.0): the agent starts the unit once the keys are in and
+  restarts it when they change, since nfs-utils' `rpc-gssd` runs only
+  once `/etc/krb5.keytab` exists. Off by default: the agent then mounts
+  the host's systemd socket. The kind suite sets it instead of restarting
+  `rpc-gssd` by hand.
+
 - **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).
   Every NFS server pod used to mount the one shared keytab
   (`nfs/flint-nfs.<ns>.svc.<domain>`), so anyone who got into one server

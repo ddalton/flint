@@ -56,6 +56,10 @@ spec:
   {{- with $k.nodeKeytab.krb5ConfPath }}
   krb5ConfPath: {{ . }}
   {{- end }}
+  {{- with $k.nodeKeytab.restartServices }}
+  restartServices:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   deletionPolicy: {{ $k.deletionPolicy }}
 {{- end }}
 ---
