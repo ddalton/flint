@@ -208,6 +208,12 @@ emit RequestAfterCarry Spec TypeOK AK1 $A1
 AR="Paths={p1,p2} Free={} Writers={A} MaxTouches=1 MaxBarriers=3 MaxRemovals=2 MaxUI=0 MaxAges=0"
 emit AckRename Spec "$AINV" "$APROPS" $AR
 emit CarrierCitesAny Spec TypeOK AK1 $AR
+# Table 3 (2026-10-16, found by the proof's candidate check): the UI deletes a
+# path, a narrow uncites it, a touch lands before the narrow's second half
+# unlinks the leftover.  Two removals, one rescope.
+RR="Paths={p1,p2} Free={} Writers={A} MaxTouches=1 MaxBarriers=2 MaxRemovals=2 MaxUI=0 MaxAges=0 Scopes={{p1},{p1,p2}} MaxRescopes=1"
+emit AckRescopeRename Spec "$AINV" "$APROPS" $RR
+emit TouchDeclaresLeftover Spec TypeOK AK1 $RR
 emit FoldClobbers Spec TypeOK,AK3 "" $A1
 emit StampIndependent Spec TypeOK,AK4 "" $A1
 emit ProbeAckOk Spec ProbeAckOk "" $A1

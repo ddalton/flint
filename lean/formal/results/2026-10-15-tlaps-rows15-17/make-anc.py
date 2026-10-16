@@ -591,12 +591,19 @@ rep_span('RPullSync(s) ==\n', '(* The boundary verbs\' answer (row 15; `sentinel
 rep_span("(* The boundary verbs' answer (row 15; `sentinel.rs`).", '(* The retire age (M1) and a reader of the document.',
     "(* The boundary verbs' answer (row 15; `sentinel.rs`).                     *)\n"
     '\n'
+    "\\* A narrow's leftover (LeanP1.tla, verbatim; FINDINGS Table 3, 2026-10-16).\n"
+    'RescopeLeftover(s, p) ==\n'
+    '  /\\ w[s].sStage = "mid" /\\ RescopeUnciteFirst\n'
+    '  /\\ p \\in w[s].sDrop \\ w[s].sKeep /\\ w[s].local[p] # Nil\n'
+    '  /\\ \\/ ~UnlinkChecksBytes\n'
+    '     \\/ w[s].sHeld[p] # Nil /\\ Content(w[s].local[p]) = Content(w[s].sHeld[p])\n'
     "\\* A request's parts (LeanP1.tla: `Touch`'s LET).\n"
     'TouchN(s) == w[s].nt + 1\n'
     'TouchFresh(s) == w[s].pend.id = 0\n'
     'TouchNs(s) == (IF TouchFresh(s) THEN {} ELSE w[s].pend.nonces) \\cup {TouchN(s)}\n'
     'TouchKept(s) == IF Cardinality(TouchNs(s)) > MaxNonces THEN TouchNs(s) \\ {Oldest(TouchNs(s))} ELSE TouchNs(s)\n'
-    'TouchDirty(s) == {p \\in Paths : w[s].local[p] # w[s].baseline[p] /\\ Content(w[s].local[p]) # Content(doc[p])}\n'
+    'TouchDirty(s) == {p \\in Paths : /\\ w[s].local[p] # w[s].baseline[p] /\\ Content(w[s].local[p]) # Content(doc[p])\n'
+    '                                 /\\ ~RescopeLeftover(s, p)}\n'
     + rec('TouchW', 's', {
         'nt': 'TouchN(s)',
         'pend': '[id |-> IF TouchFresh(s) THEN TouchN(s) ELSE w[s].pend.id, fold |-> TouchN(s), nonces |-> TouchKept(s)]',

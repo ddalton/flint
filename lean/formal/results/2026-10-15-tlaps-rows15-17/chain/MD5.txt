@@ -1,9 +1,9 @@
-10166345 LeanP1Anc.tla
+9c5501de LeanP1Anc.tla
 3c9cf818 LeanP1ProofL1.tla
 d682a472 LeanP1ProofM0.tla
 452a6d0b LeanP1ProofM1.tla
 299cf64d LeanP1ProofM10.tla
-07fe86d7 LeanP1ProofM11.tla
+6609f8e8 LeanP1ProofM11.tla
 1224f319 LeanP1ProofM2.tla
 8afb451a LeanP1ProofM3.tla
 c4695954 LeanP1ProofM4.tla

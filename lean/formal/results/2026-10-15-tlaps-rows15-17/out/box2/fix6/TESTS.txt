@@ -1,0 +1,14 @@
+Touch_AK1 M10 246-252: [INFO]: All 6 obligations proved.
+Touch_M1 M1 1533-1588: [INFO]: All 92 obligations proved.
+Touch_TypeOK M0 1585-1616: [INFO]: All 74 obligations proved.
+Touch_M2 M2 2450-2531: [INFO]: All 149 obligations proved.
+Touch_M4 M4 487-501: [INFO]: All 25 obligations proved.
+Touch_M5 M5A 802-820: [INFO]: All 33 obligations proved.
+Touch_M3 M3 1276-1318: [INFO]: All 68 obligations proved.
+Touch_C M5C 1743-1763: [INFO]: All 47 obligations proved.
+Touch_M6 M6 530-533: [INFO]: All 4 obligations proved.
+Touch_D M5D 754-759: [INFO]: All 7 obligations proved.
+Touch_AK M7 337-347: [INFO]: All 15 obligations proved.
+Touch_NR1Act M8 286-296: [INFO]: All 11 obligations proved.
+Touch_DPAct M9 284-294: [INFO]: All 11 obligations proved.
+TESTSDONE

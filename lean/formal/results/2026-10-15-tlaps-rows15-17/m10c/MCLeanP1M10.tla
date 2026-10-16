@@ -51,6 +51,8 @@ Cased == \A s \in Writers, p \in Paths :
            w[s].pc = "cased" /\ Carries(s) /\ Decl(s, p) /\ w[s].decl[p] # Nil =>
              \/ w[s].car.id = w[s].pend.id /\ CarForm(s, p, w[s].car)
              \/ Content(w[s].inst[p]) = Content(w[s].decl[p])
+             \* withheld: the barrier end names it (wd = gone; M10C1/C2, two writers)
+             \/ p \in w[s].gone
 \* (B') the bound's withheld paths are this barrier's gone (Finish), the bound's
 \* document a function on the paths.
 BoundDoc == \A s \in Writers : w[s].bound.doc \in [Paths -> Opt(Handles)]

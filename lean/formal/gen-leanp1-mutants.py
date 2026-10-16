@@ -28,6 +28,9 @@ loudly rather than producing a mutant that mutates nothing.
   CarrierCitesAny      L-137: a carried upload is named only when the document
                        stops citing its path, not when it cites other bytes there
                        (a UI delete, then a rename onto the path): AK1.
+  TouchDeclaresLeftover  (Table 3, 2026-10-16) a touch declares a narrow's
+                       leftover (a mid-rescope uncited file the second half
+                       unlinks), after a UI delete there: AK1.
   FoldClobbers         settle-before-consume: a touch replaces the pending
                        record instead of folding into it: AK3.
   StampIndependent     the ack's clock chosen apart from the bucket's stamp: AK4.
@@ -72,6 +75,9 @@ M = {
   'CarrierCitesAny': [
     ("                                  /\\ \\/ d[p] = Nil\n                                     \\/ c.pub[p] # Nil /\\ Content(d[p]) # Content(c.pub[p])}",
      "                                  /\\ d[p] = Nil}")],
+  'TouchDeclaresLeftover': [
+    ("Content(doc[p])\n                                 /\\ ~RescopeLeftover(s, p)}",
+     "Content(doc[p])}")],
   'FoldClobbers': [
     ("         ns == (IF fresh THEN {} ELSE W.pend.nonces) \\cup {n}\n", "         ns == {n}\n")],
   'StampIndependent': [

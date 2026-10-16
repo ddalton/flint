@@ -18,15 +18,40 @@ PROVED on the final text (chain/, MD5.txt; every file is the one its record run 
   (shard-ranges.py, run-shards.sh); on the 8-core box at most 4 shards (8 at once
   starve Z3 and give false timeouts).
 
-OPEN: AK1 part 2 -- BoundOK an invariant (gen-m11.py -> chain/LeanP1ProofM11.tla;
-AK1-PLAN.txt).  Proved so far (194 + 89): A1BrokenKeep, A1NoTree, the five gateway
-steps, A1Keep (a writer step that keeps AK1's fields).  The invariant A1IAK1 is
-MCLeanP1M10's candidate set (m10c/):
-  holds: one path (M10A, 388,025, complete); two paths to d25+ (M10B); AckRename's
-  bounds to d33, 1.29B (EC2).
-  BREAKS: CPub3 at d6 in the rescope-rename world (../2026-10-15-ack-ec2b/out/c/
-  M10AckRescopeRename2.out) -- a rescope makes a declared path clean another way.
-  NEXT: read that trace, correct CPub3, re-check (box); two-writer worlds M10C1/C2
-  running on the box (m10c2.sh); then the remaining step lemmas: tree steps (fetches),
-  Scan, Install, Touch, the barrier ends (UncitedCatches), the live-shrinking steps
-  (Sweep, Reap, Collect: SurfacedDecl), Init, Next, THEOREM Spec => AK1.
+MODEL FIX 2026-10-16 (user-approved; FINDINGS Table 3): Touch no longer declares
+a narrow's leftover (RescopeLeftover).  LeanP1.tla 6d9cbe2a, proof copy LeanP1Anc.tla
+9c5501de (make-anc span re-pinned; the rewrite carries the new operator).  AK1 had
+broken at depth 9 in the rescope-rename world (out/box2/m10c/AK1R.out).  Checked:
+  - mutant TouchDeclaresLeftover FIRES AK1 d9, 340,274 (out/box2/mut1/M.out);
+  - fixed model: AK1 clean to d17, 45,836,337 distinct, STOPPED for the box shutdown
+    (out/box2/m10c/AK1R2.out) -- NOT complete;
+  - every Touch lemma of M0-M10 re-proved on the new copy: 13 lemmas, 542 obligations
+    (out/box2/fix6/TESTS.txt).  Every other module text is unchanged.
+  Gate rows added: LeanP1AckRescopeRename HOLDS, LeanP1TouchDeclaresLeftover AK1.
+  NOT YET RUN: the gate row AckRescopeRename to completion (all invariants), and the
+  tie on a rescope+touch world (AckRescope) for the new pair.
+
+OPEN: AK1 part 2 -- BoundOK an invariant (gen-m11.py -> chain/LeanP1ProofM11.tla,
+the CURRENT text in the scratchpad build; AK1-PLAN.txt has the per-class design).
+  PROVED (box): A1BrokenKeep, A1NoTree, 5 gateway steps, A1Keep (283 obligations);
+    Claim/Verify/RPullRead/Honor/HonorReader via A1Keep: run in progress at shutdown
+    (77 proved, 0 failed when last seen).
+  WRITTEN, PARSES, NOT YET PROVED: A1Reset, Restart, Fence (both branches),
+    RescopeBegin, A1KeepF, Depose, UploadFirst (Upload's first arm), Sweep, A1Quiet
+    (Age, RLoad), A1Per/A1PerAll/A1PerAllP/A1Frame/A1ContentAll/A1TreePath,
+    A1BoundKeep/A1TreeKeep, Touch, RetireByAck, Scan.
+  NOT YET WRITTEN: Finish (design: Cased's three arms -> A1UncitedCatches / not
+    broken / wd = gone; cId = 0 => pend.id = 0 by Frozen), Skip, PullOnly, Install,
+    Collect, Reap, Edit, Delete, Checkout, Consume, Sync, RescopeFirst, RescopeSecond,
+    RPullSync, UploadCopy; Init; Next; THEOREM Spec => AK1.
+  OPEN QUESTIONS (TLC first, before proving):
+   Q1 Reap has no ~Preserved guard: plan BoundOKL (Broken with SurfacedDecl's live
+      arm dropped) as the conjunct -- check it.
+   Q2 Skip/PullOnly end with bound.doc = doc: a clean declared file under CPub3's
+      fetch arm (baseline carries the declaration, no carrier) is broken if doc
+      moved to an older handle since the fetch.  Needs a fact tying baseline to doc
+      at those ends (Skip's seq = synced; M3's Inv_ShortcutSound?), or CPub3's fetch
+      arm is unreachable there.  The fetch arm IS needed after Finish when the
+      install changed nothing (InstallNothing: no carrier record).
+   Q3 Candidate set on the FIXED model: M10AckRescopeRename2, M10C1, M10C2 not yet
+      re-run (box shut down); M10A, M10B (complete) and AckRename bounds (d33) held.

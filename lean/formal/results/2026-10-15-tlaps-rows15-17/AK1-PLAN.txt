@@ -29,3 +29,45 @@ M7AckRescopeRename2, M7AckRename test BoundOK, DTree, CPub first):
     turns false (the AckWithheldHolds gap).  Watch the M7 worlds' BoundOK.
   Steps that change Honorable: Touch (fold), RetireByAck (pend id 0),
     barrier ends (bound).  HDropped: Install's car (id kept when cId = pend.id).
+
+UPDATE 2026-10-16 ~00:55Z (M11, gen-m11.py)
+  PROVED: A1BrokenKeep, A1NoTree, the 5 gateway steps, A1Keep (194 + 89).
+  RUNNING/CHECKED NEXT: Claim, Verify, RPullRead, Honor, HonorReader via A1Keep.
+  MODEL FIX (approved): Touch no longer declares a narrow's leftover
+  (RescopeLeftover; FINDINGS Table 3 2026-10-16); AK1 had broken at d9 in the
+  rescope-rename world.  Candidates corrected: A1Cased gained `p \in gone`
+  (a withheld upload: Finish puts gone in wd).
+  REMAINING STEP CLASSES:
+   K  (A1Keep-like, pc kept or within the barrier): RescopeBegin, Fence's
+      after-install branch, Upload's first arm (upDone only; live grows).
+   R  (resets: pc -> idle, barrier fields cleared, pend/dset/decl/moved/local/
+      baseline/car/bound/nt/lost kept): Fence's before-install branch, Restart.
+      Frozen/MidBar/Cased vacuous after; BoundOK by the kept fields.
+   2T Depose: two trees, each A1Same + A1PcOK (scanned->claimed; deposed mark):
+      needs A1Keep with the per-tree fact as hypothesis (A1KeepF).
+   N  Age, RLoad: no tree, live kept: A1NoTree (Age/RLoad/Reap have UNCHANGED
+      anc, no Frame: AncUpdate from anc's typing).
+   L  live shrinks: Sweep spares Preserved handles (~Preserved(h)), so every
+      SurfacedDecl's `c[2] \in live` survives: A1BrokenKeep generalised to
+      "live' \supseteq live \cap {c[2] : c \in conflicts}".  Reap has NO such
+      guard (the AckWithheldHolds route).  Plan: strengthen BoundOK to BoundOKL,
+      Broken with SurfacedDecl replaced by "a conflict preserves the declared
+      bytes whose handle is not lost" (it implies BoundOK; it never reads live,
+      so Reap, Sweep, Collect cannot touch it).  Needs: lost growth (Install
+      adds this barrier's gone snaps) never makes an existing conflict's handle
+      lost -- a gone snap was never cited, so no earlier conflict named it.
+      TLC CHECK FIRST (candidate BoundOKL) before proving.
+   T  tree writers: Edit/Delete (moved), Checkout, Consume, Sync, RescopeFirst,
+      RescopeSecond, RPullSync, UploadCopy: DTree for a dirty declared path
+      needs "a fetch never overwrites a dirty path" (ConsumeKeepsLeft,
+      SyncKeepsLeft); CPub3's fetch arm for a path made clean by a fetch.
+   S  Scan: establishes MidBar (uploads = dirty non-Nil, deletes = all absent
+      when carrying, snap = local).
+   I  Install: Cased (InstallCar: pub for uploads \ gone, Nil for deletes,
+      dropped += gone); conflicts/lost grow (BoundOKL as above).
+   E  barrier ends Skip, PullOnly, Finish: BoundOK' via A1UncitedCatches
+      (Finish: Cased gives CarForm or inst carries or gone = wd; Skip:
+      everything clean, so CPub3; PullOnly: no uploads/deletes, so clean).
+   W  Touch: new declaration = dirty paths at local (DTree' by construction);
+      Folds' (fold n > bound.fold); fresh resets.  RetireByAck: pend id 0.
+   Then Init, Next (cases as M10's), THEOREM Spec => AK1 (M10 part 1 + IAK1).

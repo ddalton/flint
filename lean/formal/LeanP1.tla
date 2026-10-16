@@ -899,6 +899,14 @@ RPullSync(s) ==
 \* gateway's request BEFORE it decides what it carries (L-135, found here:
 \* read after, the barrier that published a requested path did not carry
 \* it, and a peer's delete before the honour was answered `ok`).
+\* A narrow's leftover: in the rescope's "mid" stage, a dropped path whose
+\* uncite already ran and whose tree file the second half will unlink (its
+\* `unlink`, RescopeSecond; the code's replay of the intent, `checkout.rs`).
+RescopeLeftover(s, p) ==
+  /\ w[s].sStage = "mid" /\ RescopeUnciteFirst
+  /\ p \in w[s].sDrop \ w[s].sKeep /\ w[s].local[p] # Nil
+  /\ \/ ~UnlinkChecksBytes
+     \/ w[s].sHeld[p] # Nil /\ Content(w[s].local[p]) = Content(w[s].sHeld[p])
 Touch(s) ==
   /\ On(s) /\ w[s].pc = "idle" /\ w[s].nt < MaxTouches
   /\ LET W == w[s]
@@ -912,7 +920,13 @@ Touch(s) ==
          \* an install already published, with step 7 not yet run, is the
          \* published path the contract lets a peer delete, AGENTS.md: the
          \* gate's AckHolds1, after a restart between a CAS and step 7.)
-         dirty == {p \in Paths : W.local[p] # W.baseline[p] /\ Content(W.local[p]) # Content(doc[p])}
+         \* Not a narrow's leftover (FINDINGS Table 3, 2026-10-16): a file
+         \* a mid-rescope uncite left, still holding the held bytes, is
+         \* unlinked by the rescope's second half or by the barrier's replay
+         \* of the intent before its scan (`barrier.rs` step 0); the code
+         \* never declares it.  A path the agent rewrote there is declared.
+         dirty == {p \in Paths : /\ W.local[p] # W.baseline[p] /\ Content(W.local[p]) # Content(doc[p])
+                                 /\ ~RescopeLeftover(s, p)}
      IN w' = [w EXCEPT ![s].nt = n,
                        ![s].pend = [id |-> IF fresh THEN n ELSE W.pend.id, fold |-> n, nonces |-> kept],
                        ![s].cN = @ \cup {n}, ![s].capped = @ \cup (ns \ kept),

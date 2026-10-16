@@ -1,0 +1,11 @@
+tla-mc: building a checker for LeanP1 (cache: /mnt/nvme/leanp1-v6/m10c/cache-ak1r)
+tla-mc: built in 47.1s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.006s
+progress: depth 10, 1176535 generated, 563075 distinct (0 fingerprint spills), 358253 on queue (0 on disk), 12.7s
+progress: depth 11, 3007530 generated, 1378241 distinct (0 fingerprint spills), 815166 on queue (0 on disk), 32.3s
+progress: depth 12, 6926875 generated, 3052573 distinct (0 fingerprint spills), 1674332 on queue (0 on disk), 74.8s
+progress: depth 13, 14480110 generated, 6159581 distinct (0 fingerprint spills), 3107008 on queue (0 on disk), 154.6s
+progress: depth 14, 27617626 generated, 11329319 distinct (0 fingerprint spills), 5169738 on queue (1071178 on disk), 300.4s
+progress: depth 15, 48367769 generated, 19164452 distinct (0 fingerprint spills), 7835133 on queue (3741437 on disk), 526.5s
+progress: depth 16, 78744758 generated, 30378181 distinct (0 fingerprint spills), 11213729 on queue (7133601 on disk), 758.8s
+progress: depth 17, 120947699 generated, 45836337 distinct (0 fingerprint spills), 15458156 on queue (11396972 on disk), 1143.5s

@@ -1906,12 +1906,19 @@ RPullSync(s) ==
 ------------------------------------------------------------------------------
 (* The boundary verbs' answer (row 15; `sentinel.rs`).                     *)
 
+\* A narrow's leftover (LeanP1.tla, verbatim; FINDINGS Table 3, 2026-10-16).
+RescopeLeftover(s, p) ==
+  /\ w[s].sStage = "mid" /\ RescopeUnciteFirst
+  /\ p \in w[s].sDrop \ w[s].sKeep /\ w[s].local[p] # Nil
+  /\ \/ ~UnlinkChecksBytes
+     \/ w[s].sHeld[p] # Nil /\ Content(w[s].local[p]) = Content(w[s].sHeld[p])
 \* A request's parts (LeanP1.tla: `Touch`'s LET).
 TouchN(s) == w[s].nt + 1
 TouchFresh(s) == w[s].pend.id = 0
 TouchNs(s) == (IF TouchFresh(s) THEN {} ELSE w[s].pend.nonces) \cup {TouchN(s)}
 TouchKept(s) == IF Cardinality(TouchNs(s)) > MaxNonces THEN TouchNs(s) \ {Oldest(TouchNs(s))} ELSE TouchNs(s)
-TouchDirty(s) == {p \in Paths : w[s].local[p] # w[s].baseline[p] /\ Content(w[s].local[p]) # Content(doc[p])}
+TouchDirty(s) == {p \in Paths : /\ w[s].local[p] # w[s].baseline[p] /\ Content(w[s].local[p]) # Content(doc[p])
+                                 /\ ~RescopeLeftover(s, p)}
 TouchW(s) ==
   [st |-> w[s].st,
    pc |-> w[s].pc,
