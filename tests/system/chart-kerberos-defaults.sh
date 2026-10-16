@@ -329,7 +329,9 @@ if renders "pNFS control TLS" "${PNFS[@]}"; then
   c="pNFS control TLS"
   check "$c" "a CA and certificate Secret" doc_of Secret flint-pnfs-control-tls
   check "$c" "with ca.crt, tls.crt, tls.key" bash -c "grep -A12 'name: flint-pnfs-control-tls\$' '$TMP/out.yaml' | grep -q 'tls.key:'"
-  for d in "Deployment flint-pnfs-mds" "StatefulSet flint-pnfs-ds" "Deployment flint-csi-controller"; do
+  # The node plugin dials the MDS too (pnfs-block's AttachBlockNode and
+  # BlockSessionUp at NodeStage).
+  for d in "Deployment flint-pnfs-mds" "StatefulSet flint-pnfs-ds" "Deployment flint-csi-controller" "DaemonSet flint-csi-node"; do
     if doc_of $d; then
       got=$(env_of FLINT_PNFS_CONTROL_TLS_DIR "$TMP/doc.yaml")
       [ "$got" = /etc/flint-pnfs-control-tls ] && echo "✓ $c: $d has the TLS dir" || { echo "✗ $c: $d FLINT_PNFS_CONTROL_TLS_DIR is $got"; fails=$((fails + 1)); }

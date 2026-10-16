@@ -323,6 +323,10 @@ flint-nfs-krb5-keytab
 - name: FLINT_PNFS_KRB5_DS
   value: {{ include "flint-csi-driver-chart.pnfsKrb5DsNames" . | quote }}
 {{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+# The node plugin dials the MDS too (pnfs-block): TLS on the control path.
+{{ include "flint-csi-driver-chart.pnfsControlTlsEnv" . }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -420,6 +424,11 @@ headless Service, as krb5-operator's hostPrincipals name it.
 {{- if or (and .Values.nfs.enabled .Values.nfs.kerberos.enabled) (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) }}
 - name: host-etc-hosts
   mountPath: /host/etc/hosts
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+# The node plugin dials the MDS too (pnfs-block: AttachBlockNode,
+# BlockSessionUp at NodeStage): TLS on the control path.
+{{ include "flint-csi-driver-chart.pnfsControlTlsMount" . }}
 {{- end }}
 {{- end }}
 

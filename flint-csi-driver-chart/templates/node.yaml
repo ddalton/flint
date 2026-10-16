@@ -751,4 +751,7 @@ spec:
             path: /etc/hosts
             type: File
         {{- end }}
+        {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+        {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" . | nindent 8 }}
+        {{- end }}
 {{- end }}{{- /* end lite-profile guard */}}
