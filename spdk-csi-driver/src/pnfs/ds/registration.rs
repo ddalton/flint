@@ -105,6 +105,7 @@ impl RegistrationClient {
                 "Not connected to MDS".to_string()
             ))?;
 
+        let sec = sec_posture();
         let request = tonic::Request::new(RegisterRequest {
             device_id: device_id.clone(),
             endpoint,
@@ -115,6 +116,8 @@ impl RegistrationClient {
             protocol_version: 1,
             identity_created_at,
             control_port,
+            kerberos: sec.0,
+            min_sec: sec.1,
         });
 
         match client.register_data_server(request).await {
@@ -218,4 +221,11 @@ impl RegistrationClient {
     }
 }
 
+/// This process's security posture, as RegisterRequest reports it: a
+/// keytab (`KRB5_KTNAME`), and the floor (`FLINT_NFS_MIN_SEC`, validated by
+/// `DataServer::new` before anything registers).
+pub fn sec_posture() -> (bool, String) {
+    let kerberos = std::env::var("KRB5_KTNAME").is_ok_and(|k| !k.trim().is_empty());
+    (kerberos, crate::nfs::sec_policy::active().floor().name().to_string())
+}
 

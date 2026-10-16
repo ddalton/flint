@@ -69,6 +69,25 @@ pub struct DeviceInfo {
     /// its reported control port. None = the DS advertised no control
     /// listener; truncate propagation to it parks files dirty.
     pub control_endpoint: Option<String>,
+
+    /// The DS holds a keytab (RegisterRequest.kerberos).
+    pub kerberos: bool,
+
+    /// The DS's minimum flavor (RegisterRequest.min_sec), "" when it did
+    /// not say.
+    pub min_sec: String,
+}
+
+impl DeviceInfo {
+    /// Whether Kerberos callers may be given layouts naming this DS: it
+    /// serves RPCSEC_GSS and refuses AUTH_SYS (its floor is krb5 or
+    /// stronger), so a client that cannot do GSS with it is refused there
+    /// instead of sending it data unauthenticated.
+    pub fn gss_ready(&self) -> bool {
+        self.kerberos
+            && crate::nfs::sec_policy::SecLevel::parse(&self.min_sec)
+                .is_some_and(|l| l >= crate::nfs::sec_policy::SecLevel::Krb5)
+    }
 }
 
 /// Device status
@@ -357,6 +376,8 @@ impl DeviceInfo {
             active_layouts: 0,
             identity_created_at: 0,
             control_endpoint: None,
+            kerberos: false,
+            min_sec: String::new(),
         }
     }
 
@@ -492,6 +513,22 @@ mod tests {
         assert_eq!(info.available_capacity(), 700);
         assert_eq!(info.utilization_percentage(), 30.0);
     }
-}
 
+    #[test]
+    fn a_data_server_is_gss_ready_with_a_keytab_and_a_floor_that_refuses_auth_sys() {
+        let ds = |kerberos: bool, min_sec: &str| {
+            let mut d = DeviceInfo::new("ds-1".into(), "10.0.0.1:2049".into(), vec![]);
+            d.kerberos = kerberos;
+            d.min_sec = min_sec.into();
+            d.gss_ready()
+        };
+        assert!(ds(true, "krb5i"));
+        assert!(ds(true, "krb5"));
+        assert!(ds(true, "krb5p"));
+        assert!(!ds(true, "none"), "takes the AUTH_SYS downgrade (arm H)");
+        assert!(!ds(true, "sys"));
+        assert!(!ds(false, "krb5i"), "no keytab: GSS refused, nothing to sign with");
+        assert!(!ds(true, ""), "a DS from before the field");
+    }
+}
 

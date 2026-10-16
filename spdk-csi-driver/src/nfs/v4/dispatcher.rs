@@ -3492,6 +3492,30 @@ impl CompoundDispatcher {
             );
             return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
         }
+        // Layouts granted to Kerberos callers, but only while every data
+        // server does Kerberos AND refuses AUTH_SYS. A Linux client that
+        // cannot get a GSS context with a DS sends it the data as AUTH_SYS
+        // (plan, Phase 0 E1); only the DS's floor stops that, and then the
+        // client falls back to the MDS (Phase 3, arm G). A DS without a
+        // keytab or a floor (arm H: a misconfiguration, or a DS from
+        // before the posture was reported) would take the data
+        // unauthenticated, so no Kerberos caller gets a layout while one
+        // is registered.
+        if context.principal.starts_with(b"gss:")
+            && pnfs.layout_class_for(&file_key) != crate::pnfs::mds::layout::LayoutClass::Scsi
+        {
+            let unready = pnfs.gss_unready_data_servers();
+            if !unready.is_empty() {
+                if let Some(m) = &self.f68a {
+                    m.layoutget_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                debug!(
+                    "LAYOUTGET '{}' iomode {}: RPCSEC_GSS caller, but data servers {:?} lack Kerberos or a floor → LAYOUTUNAVAIL",
+                    file_key, iomode, unready
+                );
+                return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
+            }
+        }
 
         // Conflict site 9 (design §5.2, slice 5): a write-capable
         // layout — RW, or ANY, which the client may write under — on a
@@ -8856,10 +8880,16 @@ mod tests {
     /// whether a refusal came from the handler or before it.
     struct GrantingPnfs {
         layoutgets: std::sync::atomic::AtomicUsize,
+        /// What `gss_unready_data_servers` answers.
+        unready: std::sync::Mutex<Vec<String>>,
     }
 
     #[tonic::async_trait]
     impl crate::pnfs::PnfsOperations for GrantingPnfs {
+        fn gss_unready_data_servers(&self) -> Vec<String> {
+            self.unready.lock().unwrap().clone()
+        }
+
         fn layoutget(
             &self,
             args: crate::pnfs::mds::operations::LayoutGetArgs,
@@ -8922,11 +8952,62 @@ mod tests {
     /// too. A GSS LAYOUTCOMMIT, having no layout, is refused and leaves
     /// the size alone.
     #[tokio::test]
+    async fn gss_callers_get_layouts_only_while_every_data_server_refuses_auth_sys() {
+        let t = TempDir::new().unwrap();
+        let export = t.path().canonicalize().unwrap();
+        let pnfs = Arc::new(GrantingPnfs { layoutgets: Default::default(), unready: Default::default() });
+        let d = CompoundDispatcher::new_with_pnfs(
+            Arc::new(FileHandleManager::new(export.clone())),
+            Arc::new(StateManager::new_in_memory("")),
+            Arc::new(LockManager::new()),
+            Some(Arc::clone(&pnfs) as Arc<dyn crate::pnfs::PnfsOperations>),
+        )
+        .with_gss_layouts_withheld(false);
+        std::fs::write(export.join("f"), b"data").unwrap();
+        d.state_mgr.leases.end_grace();
+        let layoutget = || Operation::LayoutGet {
+            signal_layout_avail: false,
+            layout_type: 1,
+            iomode: 2,
+            offset: 0,
+            length: u64::MAX,
+            minlength: 4096,
+            stateid: StateId { seqid: 0, other: [0; 12] },
+            maxcount: 65536,
+        };
+        let get = |principal: &'static [u8]| {
+            let s = d.state_mgr.sessions.create_session(9, 0, 0, 65536, 65536, 16384, 16, 16, 0, None, 1);
+            let mut ctx = CompoundContext::with_principal(1, principal.to_vec());
+            ctx.session_id = Some(s.session_id);
+            ctx.current_fh = Some(d.file_handler.fh_manager().path_to_filehandle(&export.join("f")).unwrap());
+            let op = layoutget();
+            let d = &d;
+            async move { d.dispatch_operation(op, &mut ctx).await }
+        };
+        // Every DS ready: Kerberos callers get layouts.
+        let r = get(b"gss:host/w1@CORP").await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
+        // One DS without Kerberos or a floor: none for Kerberos callers ...
+        *pnfs.unready.lock().unwrap() = vec!["ds-2".into()];
+        let r = get(b"gss:host/w1@CORP").await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)), "{r:?}");
+        let r = get(b"gss:alice@CORP").await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None)), "{r:?}");
+        // ... while AUTH_SYS callers keep theirs.
+        let r = get(b"sys:w1:0").await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
+        // It comes back with the DS.
+        pnfs.unready.lock().unwrap().clear();
+        let r = get(b"gss:host/w1@CORP").await;
+        assert!(matches!(r, OperationResult::LayoutGet(Nfs4Status::Ok, Some(_))), "{r:?}");
+    }
+
+    #[tokio::test]
     async fn gss_callers_get_no_files_layout_when_withheld() {
         let build = |withheld: bool| {
             let t = TempDir::new().unwrap();
             let export = t.path().canonicalize().unwrap();
-            let pnfs = Arc::new(GrantingPnfs { layoutgets: Default::default() });
+            let pnfs = Arc::new(GrantingPnfs { layoutgets: Default::default(), unready: Default::default() });
             let d = CompoundDispatcher::new_with_pnfs(
                 Arc::new(FileHandleManager::new(export.clone())),
                 Arc::new(StateManager::new_in_memory("")),

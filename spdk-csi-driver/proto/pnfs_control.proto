@@ -591,6 +591,16 @@ message RegisterRequest {
   // build or unconfigured) — truncate propagation then parks the file
   // dirty until the listener appears; see the operator runbook.
   uint32 control_port = 9;
+
+  // The DS's security posture (pNFS Kerberos plan, Phase 3): whether it
+  // holds a keytab (RPCSEC_GSS served, KRB5_KTNAME), and its minimum
+  // flavor (FLINT_NFS_MIN_SEC: "none", "sys", "krb5", "krb5i", "krb5p").
+  // The MDS hands Kerberos callers files layouts only while every DS has
+  // a keytab and refuses AUTH_SYS: a Linux client that cannot do GSS with
+  // a DS sends it the I/O as AUTH_SYS, which only the DS's floor stops.
+  // A DS that predates the fields reports false and "": not ready.
+  bool kerberos = 10;
+  string min_sec = 11;
 }
 
 // Registration response from MDS to DS
