@@ -169,17 +169,17 @@ pub enum Mapped {
     Rule(Identity),
     /// The directory has it.
     Directory(Identity),
-    /// Neither: the anonymous identity.
+    /// Neither, or no map and no directory at all: the anonymous
+    /// identity. A Kerberos call never runs without a uid: before, with no
+    /// map, it carried none and the permission check evaluated nothing,
+    /// so a proven principal read and wrote whatever it asked for.
     Anonymous(Identity),
-    /// No map and no directory: the call carries no uid, as before
-    /// [`ENV`] existed.
-    Unmapped,
     /// The directory cannot say now and has nothing cached: refuse.
     Unavailable,
 }
 
 /// Who `principal` is: a rule of `map`, else what `ldap` says, else the
-/// anonymous identity. Only user principals the directory covers are
+/// anonymous identity (with neither configured, [`anon_from_env`]). Only user principals the directory covers are
 /// looked up there; every other principal is a rule or anonymous.
 pub async fn map_principal(
     principal: &str,
@@ -199,7 +199,7 @@ pub async fn map_principal(
     match (map, ldap) {
         (Some(m), _) => Mapped::Anonymous(m.anon.clone()),
         (None, Some(l)) => Mapped::Anonymous(l.anon().clone()),
-        (None, None) => Mapped::Unmapped,
+        (None, None) => Mapped::Anonymous(anon_from_env()),
     }
 }
 
@@ -232,9 +232,8 @@ pub fn admit(
 }
 
 /// The (uid, gid) and groups a COMPOUND runs as: an AUTH_SYS caller's own
-/// (`gss` is `None`), or a Kerberos caller's mapped identity (no uid when
-/// [`Mapped::Unmapped`]). `None` when it cannot be told now: the call is
-/// refused, never run as someone.
+/// (`gss` is `None`), or a Kerberos caller's mapped identity. `None` when
+/// it cannot be told now: the call is refused, never run as someone.
 pub fn compound_identity(
     gss: Option<&Mapped>,
     unix: Option<(u32, u32)>,
@@ -245,7 +244,6 @@ pub fn compound_identity(
         Some(Mapped::Rule(i) | Mapped::Directory(i) | Mapped::Anonymous(i)) => {
             Some((Some((i.uid, i.gid)), i.gids.clone()))
         }
-        Some(Mapped::Unmapped) => Some((None, Vec::new())),
         Some(Mapped::Unavailable) => None,
     }
 }
@@ -389,10 +387,14 @@ mod tests {
             compound_identity(Some(&eve), None, vec![]),
             Some((Some((65534, 65534)), vec![]))
         );
-        // Kerberos without a map: no uid, as before.
+        // Kerberos without a map or a directory: anonymous, never no uid
+        // (no uid meant the permission check evaluated nothing).
         let unmapped = map_principal("alice@FLINT.TEST", None, None).await;
-        assert_eq!(unmapped, Mapped::Unmapped);
-        assert_eq!(compound_identity(Some(&unmapped), None, vec![]), Some((None, vec![])));
+        assert_eq!(unmapped, Mapped::Anonymous(anon_from_env()));
+        assert_eq!(
+            compound_identity(Some(&unmapped), None, vec![]),
+            Some((Some((anon_from_env().uid, anon_from_env().gid)), anon_from_env().gids))
+        );
         // An identity that cannot be told is a refusal, never a uid.
         assert_eq!(compound_identity(Some(&Mapped::Unavailable), None, vec![]), None);
     }

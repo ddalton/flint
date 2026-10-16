@@ -121,7 +121,11 @@ nfs:
   for root and for lease traffic. The server does not squash root, so
   that is root, as an AUTH_SYS root is.
 - **Unmatched principals** are `anonIdentity` (`65534:65534`, nobody),
-  never an unchecked caller. A malformed map makes everyone nobody.
+  never an unchecked caller. A malformed map makes everyone nobody, and so
+  does no map at all (a server run without `FLINT_NFS_GSS_IDMAP` and
+  without a directory, by hand or in a rig). Until 2026-10-16 such a
+  server gave Kerberos calls no uid, and the permission check then
+  evaluated nothing (`tests/krb5/run-authz-gss.sh`).
 - **What a mapped caller gets:** a Kerberos caller is permission-checked
   as its identity and owns what it creates. This is the first identity
   the server can trust. An AUTH_SYS uid is whatever the client claims,

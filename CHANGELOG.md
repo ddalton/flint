@@ -14,6 +14,17 @@ covered by the stability guarantee.
 
 ### Security
 
+- **A Kerberos caller is never unchecked, even with no identity map**
+  (2026-10-16). An NFS server run without `FLINT_NFS_GSS_IDMAP` and
+  without an LDAP directory gave every RPCSEC_GSS call no uid, and the
+  permission check then evaluated nothing, in `enforce` mode too: a
+  principal with a ticket read a 0600 file it did not own, and its writes
+  landed (`tests/krb5/run-authz-gss.sh`, CONFIRMED on 2026-10-16 against
+  main). Such a caller is now the anonymous identity (`FLINT_NFS_GSS_ANON`,
+  nobody by default). The chart always sets the map when
+  `nfs.kerberos.enabled`, so chart installs were not exposed; servers
+  started by hand or by a rig were.
+
 - **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).
   Every NFS server pod used to mount the one shared keytab
   (`nfs/flint-nfs.<ns>.svc.<domain>`), so anyone who got into one server
