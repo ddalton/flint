@@ -28,6 +28,26 @@ covered by the stability guarantee.
   controller a Role for `kerberosprincipals` in the NFS namespace.
   `perVolumeKeys: false` keeps the shared key for every volume.
 
+- **Every Kerberos client must bind its sessions to its machine**
+  (2026-10-16). A client that did not ask for SP4_MACH_CRED (no
+  `rpc.gssd`, a non-Linux client, or one downgraded on purpose) got
+  SP4_NONE, and its session id, in the clear under `krb5i`, could be used
+  by any other allowed principal. With the new
+  `nfs.kerberos.requireMachCred` (`FLINT_NFS_REQUIRE_MACH_CRED`), on by
+  default with `nfs.kerberos.enabled`, the server refuses an EXCHANGE_ID
+  that does not ask for SP4_MACH_CRED with NFS4ERR_ACCESS. The Linux
+  client asks whenever `rpc.gssd` runs, since it then makes its client
+  over `krb5i` whatever the mount's `sec=`, so `krb5`, `krb5i` and
+  `krb5p` mounts keep working. `minSec: ""` with `requireMachCred` on
+  fails to render, since a `sec=sys` mount cannot ask. A value of the
+  variable that is neither true nor false stops the server from starting.
+  **Breaking for Kerberos installs** whose clients do not ask: set
+  `requireMachCred: false` for them. Unit tests and the chart test cover
+  it, and `tests/krb5/run-mach-cred.sh` passes 22/22 against the kernel
+  client (Ubuntu 24.04, kernel 6.8): a `sec=krb5` mount still gets
+  SP4_MACH_CRED, an SP4_NONE client cannot mount (its EXCHANGE_ID is
+  refused), and the knob-off control is served.
+
 - **Kerberos sessions are bound to their machine** (2026-10-16). Under
   `krb5i` a session id crosses the wire in the clear, and any allowed
   principal holding one could use the session from its own connection,

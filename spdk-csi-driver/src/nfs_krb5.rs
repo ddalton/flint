@@ -241,6 +241,9 @@ pub struct ServerSecurity {
     pub attached_nodes_only: Option<String>,
     /// `FLINT_NFS_NODE_DOMAIN`: appended to node hostnames without a dot.
     pub node_domain: Option<String>,
+    /// `FLINT_NFS_REQUIRE_MACH_CRED`: every EXCHANGE_ID must ask for
+    /// SP4_MACH_CRED (`CompoundDispatcher::with_require_mach_cred`).
+    pub require_mach_cred: Option<String>,
     /// The NFS server pods' service account: [`Self::attached_nodes_only`]
     /// reads VolumeAttachments and Nodes.
     pub service_account: Option<String>,
@@ -258,7 +261,9 @@ pub struct ServerSecurity {
 impl ServerSecurity {
     /// From the controller's env (`NFS_KRB5_KEYTAB_SECRET`, `NFS_MIN_SEC`,
     /// `NFS_GSS_PRINCIPALS`, `NFS_GSS_IDMAP`, `NFS_GSS_ANON`,
-    /// `NFS_ENFORCE_PERMISSIONS`, `NFS_ROOT_SQUASH`).
+    /// `NFS_ENFORCE_PERMISSIONS`, `NFS_ROOT_SQUASH`, `NFS_ATTACHED_NODES_ONLY`,
+    /// `NFS_NODE_DOMAIN`, `NFS_REQUIRE_MACH_CRED`,
+    /// `NFS_SERVER_SERVICE_ACCOUNT`).
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
         ServerSecurity {
@@ -271,6 +276,7 @@ impl ServerSecurity {
             root_squash: var("NFS_ROOT_SQUASH"),
             attached_nodes_only: var("NFS_ATTACHED_NODES_ONLY"),
             node_domain: var("NFS_NODE_DOMAIN"),
+            require_mach_cred: var("NFS_REQUIRE_MACH_CRED"),
             service_account: var("NFS_SERVER_SERVICE_ACCOUNT"),
             realm: var("NFS_KRB5_REALM"),
             realm_ref: var("NFS_KRB5_REALM_REF"),
@@ -433,6 +439,11 @@ pub fn server_pod_parts(sec: &ServerSecurity) -> (Vec<EnvVar>, Vec<Volume>, Vec<
     set(&mut env, crate::nfs::gss_idmap::ROOT_SQUASH_ENV, &sec.root_squash);
     set(&mut env, crate::nfs::node_authz::ENV, &sec.attached_nodes_only);
     set(&mut env, crate::nfs::node_authz::DOMAIN_ENV, &sec.node_domain);
+    set(
+        &mut env,
+        crate::nfs::v4::operations::session::REQUIRE_MACH_CRED_ENV,
+        &sec.require_mach_cred,
+    );
     (env, volumes, mounts)
 }
 
@@ -600,6 +611,7 @@ mod tests {
             root_squash: Some("true".into()),
             attached_nodes_only: Some("true".into()),
             node_domain: Some("corp.example".into()),
+            require_mach_cred: Some("true".into()),
             service_account: Some("flint-nfs-server".into()),
             ..Default::default()
         };
@@ -631,6 +643,7 @@ mod tests {
         assert_eq!(get("FLINT_NFS_ROOT_SQUASH").as_deref(), Some("true"));
         assert_eq!(get("FLINT_NFS_ATTACHED_NODES_ONLY").as_deref(), Some("true"));
         assert_eq!(get("FLINT_NFS_NODE_DOMAIN").as_deref(), Some("corp.example"));
+        assert_eq!(get("FLINT_NFS_REQUIRE_MACH_CRED").as_deref(), Some("true"));
         let s = vols[0].secret.as_ref().unwrap();
         assert_eq!(s.secret_name.as_deref(), Some("flint-nfs-krb5-keytab"));
         assert_eq!(

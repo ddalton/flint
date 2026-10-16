@@ -8,15 +8,23 @@
 #   connection with its machine key, and carries on.
 # - A user with a valid ticket who has the session id (as a sniffer under
 #   krb5i would) is refused on its own connection.
-# - Control: the same theft against an SP4_NONE client is not refused by
-#   the binding, so the refusals above are the binding's. The kernel does
-#   its state management over krb5i whenever rpc.gssd runs, whatever the
-#   mount's sec=, so the control stops rpc.gssd and mounts sec=sys.
+# - All of the above with FLINT_NFS_REQUIRE_MACH_CRED on (the chart's
+#   default with Kerberos): the real client asks, so it is not refused.
+# - A sec=krb5 mount (no integrity on the data) still gets SP4_MACH_CRED:
+#   the kernel does its state management over krb5i whenever rpc.gssd
+#   runs, whatever the mount's sec=.
+# - Required: without rpc.gssd the client asks for SP4_NONE (sec=sys),
+#   and its EXCHANGE_ID is refused, so it cannot mount.
+# - Control, the knob off: the same client mounts, and the theft against
+#   its SP4_NONE session is not refused by the binding, so the refusals
+#   above are the binding's and the knob's.
 #
 # Needs the flint-nfs-client VM (setup-kdc.sh, setup-pynfs.sh).
 set -uo pipefail
 PORT=${PORT:-20530}
 CTRL_PORT=${CTRL_PORT:-20531}
+REQ_PORT=${REQ_PORT:-20532}
+NONE_PORT=${NONE_PORT:-20533}
 SRV=flintsrv.flint.test
 BIN=${BIN:-/tmp/flint-nfs-server}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,16 +33,16 @@ leg() { if [ "$1" = 0 ]; then echo "  ok   $2"; ok=$((ok+1)); else echo "  BAD  
 
 # Our servers by pid, never by name (see run-pynfs-gss.sh).
 PIDS=()
-start() { # <port> <export> <log>
+start() { # <port> <export> <log> [VAR=value...]
   sudo mkdir -p "$2/.flint-nfs"
   echo -n "vol-$1" | sudo tee "$2/.flint-nfs/volume-id" >/dev/null
-  sudo env KRB5_KTNAME=/tmp/flint-nfs.keytab FLINT_NFS_GRACE_SECS=5 RUST_LOG=info \
+  sudo env KRB5_KTNAME=/tmp/flint-nfs.keytab FLINT_NFS_GRACE_SECS=5 RUST_LOG=info "${@:4}" \
     "$BIN" --export-path "$2" --volume-id "vol-$1" --bind-addr 0.0.0.0 --port "$1" >>"$3" 2>&1 &
   PIDS+=($!)
   sleep 3
 }
 cleanup() {
-  for m in /mnt/mc /mnt/mc-ctrl; do sudo umount -f "$m" 2>/dev/null; done
+  for m in /mnt/mc /mnt/mc-req /mnt/mc-none /mnt/mc-ctrl; do sudo umount -f "$m" 2>/dev/null; done
   for p in "${PIDS[@]}"; do sudo kill "$p" 2>/dev/null; done
 }
 trap cleanup EXIT
@@ -50,16 +58,18 @@ steal() { # <port> <session hex>
     "$HERE/steal_session.py" "$SRV" "$1" "$2" 2>&1)
 }
 
-sudo rm -rf /srv/mc /srv/mc-ctrl /tmp/mc.log /tmp/mc-ctrl.log
-sudo mkdir -p /mnt/mc /mnt/mc-ctrl
+REQUIRE=FLINT_NFS_REQUIRE_MACH_CRED=true
+sudo rm -rf /srv/mc /srv/mc-req /srv/mc-none /srv/mc-ctrl /tmp/mc.log /tmp/mc-req.log /tmp/mc-none.log /tmp/mc-ctrl.log
+sudo mkdir -p /mnt/mc /mnt/mc-req /mnt/mc-none /mnt/mc-ctrl
 sudo systemctl stop rpc-gssd 2>/dev/null; sudo pkill -x rpc.gssd 2>/dev/null; sleep 1
 sudo sh -c 'rpc.gssd -f > /tmp/gssd-mc.log 2>&1 &'
 sleep 2
 echo flintflint | kinit testuser@FLINT.TEST >/dev/null 2>&1
 klist >/dev/null 2>&1; leg $? "testuser has a ticket (the attacker's own)"
 
-start $PORT /srv/mc /tmp/mc.log
+start $PORT /srv/mc /tmp/mc.log $REQUIRE
 sudo kill -0 "${PIDS[0]}" 2>/dev/null; leg $? "server up on $PORT"
+grep -aq 'SP4_MACH_CRED required' /tmp/mc.log; leg $? "the server requires SP4_MACH_CRED"
 
 echo "--- sec=krb5i mount ---"
 sudo timeout 60 mount -t nfs4 -o vers=4.2,sec=krb5i,port=$PORT "$SRV:/" /mnt/mc
@@ -91,15 +101,33 @@ echo three | sudo tee /mnt/mc/three >/dev/null
 
 echo "--- the server restarts (sessions persist, connections do not) ---"
 sudo kill "${PIDS[0]}"; sleep 1
-start $PORT /srv/mc /tmp/mc.log
+start $PORT /srv/mc /tmp/mc.log $REQUIRE
 before=$(grep -ac 'CONN_NOT_BOUND_TO_SESSION' /tmp/mc.log)
 echo four | sudo timeout 90 tee /mnt/mc/four >/dev/null
 [ "$(sudo timeout 60 cat /mnt/mc/four)" = four ]; leg $? "I/O after the restart"
 grep -aq 'SP4_MACH_CRED' /tmp/mc.log; leg $? "the protection is still in force"
 
-echo "--- control: no rpc.gssd, sec=sys, SP4_NONE ---"
+echo "--- required: sec=krb5 (no integrity on the data) still asks ---"
 sudo umount -f /mnt/mc 2>/dev/null
+start $REQ_PORT /srv/mc-req /tmp/mc-req.log $REQUIRE
+sudo timeout 60 mount -t nfs4 -o vers=4.2,sec=krb5,port=$REQ_PORT "$SRV:/" /mnt/mc-req
+mountpoint -q /mnt/mc-req; leg $? "mounted sec=krb5"
+grep -aq 'is SP4_MACH_CRED, bound to gss:' /tmp/mc-req.log; leg $? "its client was made over krb5i, with SP4_MACH_CRED"
+sudo umount -f /mnt/mc-req 2>/dev/null
+
+# A server of its own: the kernel would reuse a lingering client of the
+# krb5 mount's server, made with SP4_MACH_CRED.
+echo "--- required: no rpc.gssd, sec=sys, SP4_NONE is refused ---"
 sudo pkill -x rpc.gssd; sleep 1
+start $NONE_PORT /srv/mc-none /tmp/mc-none.log $REQUIRE
+if sudo timeout 60 mount -t nfs4 -o vers=4.2,sec=sys,port=$NONE_PORT "$SRV:/" /mnt/mc-none; then
+  sudo umount -f /mnt/mc-none; false
+fi
+leg $? "an SP4_NONE client cannot mount"
+grep -aq 'asked for SP4_NONE, and SP4_MACH_CRED is required' /tmp/mc-none.log; leg $? "its EXCHANGE_ID was refused"
+grep -a 'asked for SP4_NONE' /tmp/mc-none.log | tail -1 | sed 's/^/    /'
+
+echo "--- control, the knob off: no rpc.gssd, sec=sys, SP4_NONE ---"
 start $CTRL_PORT /srv/mc-ctrl /tmp/mc-ctrl.log
 sudo timeout 60 mount -t nfs4 -o vers=4.2,sec=sys,port=$CTRL_PORT "$SRV:/" /mnt/mc-ctrl
 mountpoint -q /mnt/mc-ctrl; leg $? "mounted sec=sys"

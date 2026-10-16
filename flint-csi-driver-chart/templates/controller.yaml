@@ -193,6 +193,11 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.nfs.kerberos.requireMachCred }}
+            # Every NFS client asks for SP4_MACH_CRED, or is refused.
+            - name: NFS_REQUIRE_MACH_CRED
+              value: "true"
+            {{- end }}
             - name: NFS_GSS_ANON
               value: {{ .Values.nfs.kerberos.anonIdentity | quote }}
             {{- with .Values.nfs.kerberos.minSec }}
