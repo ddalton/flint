@@ -260,7 +260,9 @@ Kerberos callers layouts only for DSes that report one.
 - DS PUTFH (`:695-704`) with `FLINT_PNFS_DS_FH_AUTH=enforce`: only v4
   that verifies for the session owner's host; canonicalise to v2 for the
   io handler; refuse v2 and MDS path handles (`io.rs:689-717`); error per
-  E4 (expect BADHANDLE).
+  E4: BADHANDLE (measured 2026-10-16, `tests/krb5/results/pnfs-e4-2026-10-16/`:
+  the client fetches a fresh layout a bounded number of times, then goes
+  through the MDS; no error livelocked).
 - Works without Kerberos (closes "know or guess a file id"); opt-in
   `pnfs.dsAuth.enabled`. Size ~800 lines, 1–1.5 weeks.
 

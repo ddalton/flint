@@ -1,0 +1,68 @@
+== e4 at 8f176f78 21:05:03
+
+=== arm none: DS PUTFH refused with none ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.3 s  read 0.2 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: 
+ds2 refusals: 
+MDS LAYOUTGETs: 2  layoutreturns: 2
+dmesg: 
+
+=== arm badhandle: DS PUTFH refused with badhandle ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.2 s  read 0.3 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: E4 refused so far: 48
+ds2 refusals: E4 refused so far: 49
+MDS LAYOUTGETs: 43  layoutreturns: 0
+dmesg: [13704.937662] NFS: Server wrote zero bytes, expected 1048576.|
+
+=== arm stale: DS PUTFH refused with stale ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.1 s  read 0.3 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: E4 refused so far: 49
+ds2 refusals: E4 refused so far: 48
+MDS LAYOUTGETs: 45  layoutreturns: 0
+dmesg: 
+
+=== arm access: DS PUTFH refused with access ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.1 s  read 0.3 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: E4 refused so far: 49
+ds2 refusals: E4 refused so far: 48
+MDS LAYOUTGETs: 43  layoutreturns: 0
+dmesg: 
+
+=== arm perm: DS PUTFH refused with perm ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.2 s  read 0.2 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: E4 refused so far: 49
+ds2 refusals: E4 refused so far: 48
+MDS LAYOUTGETs: 2  layoutreturns: 2
+dmesg: 
+
+=== arm io: DS PUTFH refused with io ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.1 s  read 0.2 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: E4 refused so far: 8
+ds2 refusals: E4 refused so far: 9
+MDS LAYOUTGETs: 2  layoutreturns: 2
+dmesg: 
+
+=== arm fhexpired: DS PUTFH refused with fhexpired ===
+read-back INTACT
+write rc=0 (124 = timed out)  write+fsync 0.1 s  read 0.3 s
+allocated bytes: DS1 8413184  DS2 8413184  MDS export 16384
+ds1 refusals: E4 refused so far: 49
+ds2 refusals: E4 refused so far: 48
+MDS LAYOUTGETs: 47  layoutreturns: 0
+dmesg: 
+
+=== done ===
+== e4 done 21:10:37
+
