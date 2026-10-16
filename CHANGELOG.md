@@ -27,6 +27,17 @@ covered by the stability guarantee.
   persistentvolumes, volumeattachments and nodes. Before, every node with
   a machine key reached every pNFS volume of a shard. The MDS refuses to
   start with `FLINT_NFS_ATTACHED_NODES_ONLY` in standalone (hub) mode.
+- **A Kerberos caller is never unchecked, even with no identity map**
+  (2026-10-16). An NFS server run without `FLINT_NFS_GSS_IDMAP` and
+  without an LDAP directory gave every RPCSEC_GSS call no uid, and the
+  permission check then evaluated nothing, in `enforce` mode too: a
+  principal with a ticket read a 0600 file it did not own, and its writes
+  landed (`tests/krb5/run-authz-gss.sh`, CONFIRMED on 2026-10-16 against
+  main). Such a caller is now the anonymous identity (`FLINT_NFS_GSS_ANON`,
+  nobody by default). The chart always sets the map when
+  `nfs.kerberos.enabled`, so chart installs were not exposed; servers
+  started by hand or by a rig were.
+
 - **pNFS volumes can mount with Kerberos; the MDS does it, the data
   servers not yet** (2026-10-16). `pnfs.kerberos.enabled` (off by
   default; needs the in-chart MDS and krb5-operator) gives each MDS shard
