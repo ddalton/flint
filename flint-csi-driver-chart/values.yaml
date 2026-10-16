@@ -443,7 +443,14 @@ nfs:
     # VolumeAttachments and Nodes (cluster-wide, read-only). false: every
     # node with an allowed principal reaches every volume.
     attachedNodesOnly: true
-    # Delete or Retain the principals when the release is uninstalled.
+    # Each volume's NFS server gets a principal of its own,
+    # nfs/<volume>.<serverName>, made by the controller (a KerberosPrincipal
+    # per volume in the NFS namespace) and deleted with the volume. One
+    # server's key then opens no other volume. Volumes made before keep the
+    # shared principal. false: every server shares nfs/<serverName>.
+    perVolumeKeys: true
+    # Delete or Retain the principals when the release is uninstalled (or,
+    # per volume, when the volume is deleted).
     deletionPolicy: Delete
     storageClass:
       create: true
