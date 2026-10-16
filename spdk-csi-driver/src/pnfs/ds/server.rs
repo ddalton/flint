@@ -1570,6 +1570,12 @@ pub struct DsControlService {
     data_dir: std::path::PathBuf,
 }
 
+impl DsControlService {
+    pub(crate) fn new(device_id: String, data_dir: std::path::PathBuf) -> Self {
+        Self { device_id, data_dir }
+    }
+}
+
 #[tonic::async_trait]
 impl crate::pnfs::grpc::DsControl for DsControlService {
     async fn truncate_stripe_file(
