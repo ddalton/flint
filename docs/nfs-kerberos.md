@@ -55,6 +55,7 @@ mount carries no node identity, so every one would be refused anyway.
 | `minSec` | `FLINT_NFS_MIN_SEC` for every NFS server. `krb5i` (the default) refuses `sec=sys` mounts. |
 | `allowedPrincipals` | `FLINT_NFS_GSS_PRINCIPALS`: who may establish a GSS context. The default is the nodes' machine principals (`host/*@<realm>`, `nfs/*@<realm>`) plus every principal `idmap` names. |
 | `idmap`, `machineIdentity`, `anonIdentity` | `FLINT_NFS_GSS_IDMAP` and `FLINT_NFS_GSS_ANON`: which uid, gid and groups a Kerberos caller is. |
+| `ldap` | `FLINT_NFS_GSS_LDAP_*` (off by default): users' identities from an LDAP directory ([below](#identities-from-a-directory)). |
 | `nfs.enforcePermissions` | `FLINT_NFS_ENFORCE_PERMISSIONS` for every NFS server: `enforce`, `warn` or `off`. The default is `enforce` with Kerberos on, and the server's `warn` with it off. |
 | `attachedNodesOnly` | `FLINT_NFS_ATTACHED_NODES_ONLY` (default `true`), and the servers' read-only service account. |
 
@@ -89,6 +90,10 @@ The list names principals, so it is only as good as control over who can
 create them. Anyone allowed to make a `KerberosPrincipal` in the realm can
 make a `host/whatever` principal. Keep the realm's `allowedNamespaces` to
 trusted namespaces (the default, `Same`, allows only the realm's own).
+
+With a directory (`nfs.kerberos.ldap`), a user principal the directory
+has may also connect, whether the list names it or not
+([below](#identities-from-a-directory)).
 
 ## Who a caller is
 
@@ -186,9 +191,92 @@ The Linux kernel asks whenever `rpc.gssd` is running, since it then does
 its state management over `krb5i`, whatever the mount's `sec=`. Without
 `rpc.gssd` it uses AUTH_SYS, which the default floor refuses.
 
-Not done yet:
-- reading identities from a directory (LDAP or SSSD, as idmapd does) in
-  place of the explicit list;
+## Identities from a directory
+
+`idmap` names a few principals. For everyone else, `nfs.kerberos.ldap`
+looks users up in an LDAP directory with RFC 2307 attributes, as idmapd
+or SSSD do for knfsd. Each NFS server does the lookup itself and caches
+the answers.
+
+```yaml
+nfs:
+  kerberos:
+    ldap:
+      enabled: true
+      url: ldaps://ldap.corp.example
+      userBase: ou=People,dc=corp,dc=example
+      groupBase: ou=Groups,dc=corp,dc=example
+      bindDN: cn=flint-nfs,ou=Services,dc=corp,dc=example
+      bindPasswordSecret: {name: flint-ldap-bind, key: password}
+      ca: {configMap: corp-ca, key: ca.crt}
+```
+
+The bind password Secret and the CA ConfigMap (or Secret) must be in the
+NFS namespace. The servers read the password from the Secret, so it is
+never in a pod spec or in the controller's env.
+
+- **Order:** an `idmap` rule wins, the machine principals included (they
+  are `idmap` rules, `machineIdentity`). Otherwise the directory decides,
+  and a principal it does not have is `anonIdentity`, as before.
+- **Who is looked up:** only user principals (`name@REALM`, one
+  component) of `realms` (default: `realm`). `host/`, `nfs/` and other
+  service principals never are.
+- **Matching:** `alice@CORP.EXAMPLE` is the entry with `uid=alice` that
+  matches `userFilter` (default `(objectClass=posixAccount)`). With
+  `principalAttribute: krbPrincipalName`, it is the entry whose
+  `krbPrincipalName` is `alice@CORP.EXAMPLE` (FreeIPA, or a KDC with an LDAP
+  backend). The entry must name the principal exactly. LDAP compares
+  `uid` without case and Kerberos with it, so `Alice@CORP.EXAMPLE` is not
+  `alice`. Two matching entries are refused, never guessed between.
+- **The identity:** `uidNumber` and `gidNumber`, plus the `gidNumber` of
+  every `posixGroup` under `groupBase` that lists the user by `memberUid`
+  (with `groupMembership: member`, by its DN, as RFC 2307bis does).
+- **Never root:** an entry with `uidNumber` or `gidNumber` 0 is refused,
+  and a group with gid 0 is left out, unless `allowRoot: true`.
+  `nfs.rootSquash` still applies after that.
+- **Who may connect:** a user the directory has may connect, even when
+  `allowedPrincipals` does not name it. A user it does not have is decided
+  by the list, as before. To admit fewer users, narrow `userFilter`, for
+  example to a group's members
+  (`(&(objectClass=posixAccount)(memberOf=cn=nfs,ou=Groups,dc=corp,dc=example))`).
+- **Caching:** a user found is cached for `cacheTTL` (300 s), and a user
+  not found for `negativeCacheTTL` (60 s). The principal is looked up
+  when its context is established (RPCSEC_GSS_INIT), so the context's
+  calls normally hit the cache.
+- **When the directory is down:** a cached user keeps working until its
+  TTL runs out. Anyone else is refused, never made anonymous. A new
+  context is refused at RPCSEC_GSS_INIT. A call on an existing context
+  whose user's TTL has run out gets `RPCSEC_GSS_CREDPROBLEM`, so the client
+  re-establishes the context, and that is refused until the directory
+  answers. Machine principals are `idmap` rules, so the nodes keep
+  working.
+- **Slow directories:** a lookup, including its wait for a slot, takes at
+  most `timeout` (5 s), and at most `maxConcurrent` (4) run at once in
+  each server. A lookup that times out counts as the directory being down.
+- **Transport:** `ldaps://`, or `ldap://` upgraded with StartTLS, with the
+  server's certificate checked against `ca` (or the image's system roots).
+  `insecure: true` allows plain `ldap://`, which sends the bind password
+  in the clear. Use it only in test rigs.
+- **Malformed settings** (on the server, e.g. a bad URL) refuse every user
+  the `idmap` does not name, rather than failing open. The chart refuses
+  to render a missing `url` or `userBase`, a `bindDN` without its Secret,
+  and both a CA ConfigMap and a CA Secret.
+
+**What changes about "who may connect".** Without a directory, the
+allowlist is a short list of names, and its strength is control over who
+can create those principals in the realm. With one, the set of admitted
+names is every user in the directory (narrowed by `userFilter`). The name
+is still the link between a ticket and an identity: whoever can create
+the principal `alice@CORP.EXAMPLE` in the KDC is alice, uid and all. So
+the realm must be one whose user principals belong to the directory's
+users. Keep the KerberosRealm's `allowedNamespaces` to trusted namespaces,
+as before, but note that a namespace allowed to create a principal named
+after a directory user can now become that user. Before, it could only
+become `anonIdentity`. With `principalAttribute: krbPrincipalName`, the
+directory names each user's principal itself, which is the stronger
+binding when the KDC and the directory are the same system. Machine
+principals do not change: they are still `idmap` rules, and the directory
+never makes root.
 
 ## Why the hosts entry
 
@@ -238,7 +326,16 @@ pNFS volumes are not covered.
 
 - **Chart defaults:** `tests/system/chart-kerberos-defaults.sh` renders
   the chart with Kerberos off, on, and with each opt-out, and checks the
-  servers' settings (`helm` only; CI runs it).
+  servers' settings, including the directory's (the password only ever a
+  Secret reference) and the settings it refuses to render (`helm` only;
+  CI runs it).
+- **Directory, not yet in kind:** the kind suite has no LDAP server yet.
+  The plan is an OpenLDAP pod in `tests-nfs-krb5/` with a `posixAccount`
+  carol (3000:3000) in a `posixGroup`, a principal carol with a ticket on
+  a node, and these checks: carol connects without being in the
+  allowlist, a file she creates is owned by 3000:3000, a principal the
+  directory lacks is refused, and with the directory scaled to zero a
+  new principal is refused while carol works until her TTL runs out.
 - **Session binding:** unit tests in `dispatcher.rs` (`mach_cred`) and,
   against the real kernel client in the VM rig,
   `tests/krb5/run-mach-cred.sh` (connection killed, server restarted,
@@ -246,7 +343,11 @@ pNFS volumes are not covered.
   control).
 - **Unit tests:** `nfs_krb5.rs` covers flavor detection, `/proc/mounts`
   parsing, the hosts file rewritten in place and only our lines, and the
-  server pod's keytab and floor.
+  server pod's keytab, floor and directory settings (the bind password as
+  a Secret reference). `gss_ldap.rs` covers the RFC 2307 parsing, exact
+  matching, root refusal, caching, the outage and timeout behaviour, and
+  bounded concurrency, against an in-memory directory. `gss_idmap.rs`
+  covers the order (`idmap`, directory, anonymous) and who may connect.
 - **kind:** `KRB5=1 tests/system/kind-nfs-only.sh` uses kind nodes with
   `rpc.gssd`, krb5-operator, and `tests-nfs-krb5/`. There, an RWX volume
   mounts with `sec=krb5i` on two nodes and the pods share files, while a

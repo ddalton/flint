@@ -434,6 +434,60 @@ nfs:
     # Who a principal no rule names is ("uid:gid"): nobody, never an
     # unchecked caller.
     anonIdentity: "65534:65534"
+    # Who a Kerberos USER is, from an LDAP directory (RFC 2307), when no
+    # idmap rule names it: its uidNumber, gidNumber and the posixGroups
+    # that list it, cached (docs/nfs-kerberos.md, "Identities from a
+    # directory"). A user the directory has may also connect, whatever
+    # allowedPrincipals says. Machine principals keep machineIdentity, and
+    # the directory never makes root.
+    ldap:
+      enabled: false
+      # ldaps://host[:port], or ldap://host[:port] upgraded with StartTLS.
+      url: ""
+      # ldap:// with NO TLS: lookups and the bind password in the clear.
+      # Test rigs only.
+      insecure: false
+      # The realms whose users are looked up (default: [realm]).
+      realms: []
+      # Where users and groups are, e.g. ou=People,dc=corp,dc=example
+      # (';' separates several). groupBase defaults to userBase.
+      userBase: ""
+      groupBase: ""
+      # Which entries are users. Narrow it to narrow who may connect, e.g.
+      # (&(objectClass=posixAccount)(memberOf=cn=nfs,ou=Groups,dc=corp,dc=example)).
+      userFilter: "(objectClass=posixAccount)"
+      # "": uid is the principal's name (alice@REALM is uid=alice). Or an
+      # attribute holding the whole principal, e.g. krbPrincipalName
+      # (FreeIPA, or a KDC with an LDAP backend).
+      principalAttribute: ""
+      # memberUid (RFC 2307), member (RFC 2307bis, the user's DN), both
+      # ("memberUid,member"), or none.
+      groupMembership: memberUid
+      # The DN to bind as ("" binds anonymously), and the Secret in the NFS
+      # namespace holding its password. The servers read the password
+      # from the Secret; it is never in a pod spec.
+      bindDN: ""
+      bindPasswordSecret:
+        name: ""
+        key: password
+      # The CA the directory's certificate must chain to: a ConfigMap or a
+      # Secret in the NFS namespace ("" for both: the image's system roots).
+      ca:
+        configMap: ""
+        secret: ""
+        key: ca.crt
+      # Seconds an answer is cached: a user found, a user not found. With
+      # the directory down, a cached user keeps working until its TTL runs
+      # out; anyone else is refused, never made anonymous.
+      cacheTTL: 300
+      negativeCacheTTL: 60
+      # Seconds a lookup may take (queueing included), and how many run at
+      # once in each NFS server.
+      timeout: 5
+      maxConcurrent: 4
+      # Let the directory make uid 0 or gid 0 (refused by default;
+      # nfs.rootSquash still applies).
+      allowRoot: false
     # Each volume's NFS server serves only the nodes the volume is attached
     # to (its VolumeAttachments), by their machine principals: only they
     # make NFS clients and sessions, a user's calls ride an attached node's

@@ -14,6 +14,27 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Kerberos users' identities can come from LDAP** (2026-10-16).
+  `FLINT_NFS_GSS_IDMAP` maps the principals it names, and everyone else was
+  nobody and refused by the allowlist. With `nfs.kerberos.ldap` (off by
+  default), each NFS server looks user principals up in an LDAP directory
+  (RFC 2307: `uid` or `krbPrincipalName`, `uidNumber`, `gidNumber`,
+  `posixGroup` `memberUid` or `member`), over `ldaps://` or StartTLS with
+  rustls, and caches the answers (300 s for a user found, 60 s for one not
+  found). An `idmap` rule still wins, so machine principals keep
+  `machineIdentity`. A user the directory has may connect without being
+  in `allowedPrincipals`. The directory fails closed. It never makes uid
+  or gid 0 (unless `allowRoot`), it refuses two entries for one principal,
+  and the entry must name the principal exactly, since LDAP compares
+  `uid` without case and Kerberos with it. When the directory is
+  unreachable or slow (a 5 s timeout, 4 lookups at once per server), a
+  cached user keeps working until its TTL runs out and anyone else is
+  refused, never made anonymous. A call whose cached identity has
+  expired gets `RPCSEC_GSS_CREDPROBLEM`. The bind password reaches the
+  servers as a Secret reference only. New dependency: `ldap3` 0.12
+  (rustls on aws-lc-rs, no OpenSSL). `chart-kerberos-defaults.sh` checks
+  the chart side; there is no kind leg yet (docs/nfs-kerberos.md, "Tests").
+
 - **Kerberos sessions are bound to their machine** (2026-10-16). Under
   `krb5i` a session id crosses the wire in the clear, and any allowed
   principal holding one could use the session from its own connection,

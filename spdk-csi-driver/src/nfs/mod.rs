@@ -33,6 +33,7 @@ pub mod rpcsec_gss;   // RPCSEC_GSS authentication (Kerberos support)
 pub mod gss_idmap;
 pub mod node_authz;  // only the nodes a volume is attached to (FLINT_NFS_ATTACHED_NODES_ONLY)  // Kerberos principal -> unix identity (FLINT_NFS_GSS_IDMAP)
 pub mod gss_principals;  // which principals may establish a GSS context (FLINT_NFS_GSS_PRINCIPALS)
+pub mod gss_ldap;     // Kerberos principal -> unix identity from LDAP, RFC 2307, cached (FLINT_NFS_GSS_LDAP_URL)
 pub mod sec_policy;   // Minimum security flavor floor (FLINT_NFS_MIN_SEC)
 pub mod export_access; // Per-network export access: `access[].network` + `permissions` (ro/rw), decided once per connection
 pub mod pipeline;     // Per-connection RPC pipelining (RFC 8881 §2.10.6)
