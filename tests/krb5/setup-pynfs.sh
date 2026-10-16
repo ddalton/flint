@@ -44,7 +44,9 @@ SHIM
 # shells out with os.system -- so sub-build failures are INVISIBLE. Run a
 # subdir build directly if you need to see an error.
 cd /opt/pynfs
-sudo /opt/pynfs/.venv/bin/python setup.py build >/dev/null
+# TRAP: those os.system sub-builds run `python` from PATH, not the venv:
+# without the venv first they use the system python, which has no ply.
+sudo env PATH=/opt/pynfs/.venv/bin:"$PATH" python setup.py build >/dev/null
 
 # The gate testserver.py itself checks: AuthGss must be in the table.
 PYTHONPATH=/opt/pynfs /opt/pynfs/.venv/bin/python -c "

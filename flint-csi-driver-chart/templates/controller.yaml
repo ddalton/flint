@@ -193,8 +193,17 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.nfs.kerberos.requireMachCred }}
+            # Every NFS client asks for SP4_MACH_CRED, or is refused.
+            - name: NFS_REQUIRE_MACH_CRED
+              value: "true"
+            {{- end }}
             - name: NFS_GSS_ANON
               value: {{ .Values.nfs.kerberos.anonIdentity | quote }}
+            {{- with include "flint-csi-driver-chart.nfsKrb5LdapEnv" . }}
+            # Who a Kerberos user is, from LDAP (nfs.kerberos.ldap).
+            {{- . | trim | nindent 12 }}
+            {{- end }}
             {{- with .Values.nfs.kerberos.minSec }}
             - name: NFS_MIN_SEC
               value: {{ . | quote }}

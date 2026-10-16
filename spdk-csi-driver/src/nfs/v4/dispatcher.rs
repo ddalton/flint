@@ -108,6 +108,12 @@ pub struct CompoundDispatcher {
     /// scan walks every lease, once per operation, across every client
     /// node it fronts.
     reap_on_compound: bool,
+
+    /// Refuse an EXCHANGE_ID that does not ask for SP4_MACH_CRED
+    /// (`FLINT_NFS_REQUIRE_MACH_CRED`, chart `nfs.kerberos.requireMachCred`).
+    /// Without it such a client gets SP4_NONE, and its session ids, in the
+    /// clear under krb5i, work for any allowed principal on any connection.
+    require_mach_cred: bool,
 }
 
 /// One pnfs_scsi_layout4 extent as encoded on the wire (RFC 8154
@@ -153,6 +159,17 @@ impl CompoundDispatcher {
 
     pub fn reaps_on_compound(&self) -> bool {
         self.reap_on_compound
+    }
+
+    /// Make every client ask for SP4_MACH_CRED: an EXCHANGE_ID with
+    /// SP4_NONE gets NFS4ERR_ACCESS (see the EXCHANGE_ID arm of
+    /// `dispatch_operation_inner`). SP4_MACH_CRED is granted only under
+    /// krb5i or krb5p, so with this on every client is made under
+    /// integrity, by a principal that then alone may bind connections to
+    /// its sessions.
+    pub fn with_require_mach_cred(mut self, on: bool) -> Self {
+        self.require_mach_cred = on;
+        self
     }
 
     /// Whether this dispatcher refuses mutating operations (F70).
@@ -222,6 +239,7 @@ impl CompoundDispatcher {
             read_only: false,
             access: Default::default(),
             reap_on_compound: true,
+            require_mach_cred: false,
         };
         // The grant path's callback_ready (rule 7) and the MDS
         // posture refusal both live on StateManager; hand it the
@@ -1050,6 +1068,34 @@ impl CompoundDispatcher {
         match operation {
             // Session operations (NFSv4.1)
             Operation::ExchangeId { clientowner, flags, state_protect, sp4_must_allow, impl_id } => {
+                // FLINT_NFS_REQUIRE_MACH_CRED: no SP4_NONE clients. An
+                // SP4_NONE session is bound to whatever connection uses it
+                // first (RFC 8881 §2.10.3.1), so its id, seen on the wire,
+                // is the session. The Linux client asks for SP4_MACH_CRED
+                // whenever rpc.gssd runs; one that does not (no gssd, a
+                // downgraded or another client) is refused here. One that
+                // asks without integrity gets INVAL from the handler, falls
+                // back to SP4_NONE, and is refused then. SP4_SSV keeps its
+                // own answer (ENCR_ALG_UNSUPP).
+                //
+                // NFS4ERR_ACCESS: RFC 8881 has no error for "state
+                // protection required" (§15.2 lists neither ACCESS nor
+                // PERM for EXCHANGE_ID; §18.35.5 uses PERM for an
+                // unauthorized principal's update). ACCESS is what this
+                // server already answers an EXCHANGE_ID it will not serve
+                // (an unattached node, `unattached_refusal`), and the Linux
+                // client fails the mount with it. INVAL would be wrong: to a
+                // client that asked for SP4_MACH_CRED it means "try
+                // SP4_NONE".
+                if self.require_mach_cred && state_protect == 0 {
+                    warn!(
+                        "EXCHANGE_ID refused: {} asked for SP4_NONE, and SP4_MACH_CRED is required \
+                         ({})",
+                        String::from_utf8_lossy(&context.principal),
+                        crate::nfs::v4::operations::session::REQUIRE_MACH_CRED_ENV,
+                    );
+                    return OperationResult::ExchangeId(Nfs4Status::Access, None);
+                }
                 // Parse impl_id into ClientImplId struct
                 // impl_id is optional client implementation details (domain, name, date)
                 // For now, we leave it as None since it's purely informational
@@ -9197,6 +9243,91 @@ mod tests {
             // The node itself may destroy its client.
             let r = call(&d, vec![Operation::DestroyClientId(cid)], NODE, &a, true).await;
             assert_eq!(r.status, Nfs4Status::Ok);
+        }
+
+        // ── FLINT_NFS_REQUIRE_MACH_CRED: no SP4_NONE clients ──
+        //
+        // A client that does not ask for SP4_MACH_CRED gets SP4_NONE, and
+        // its session id is then the session. With the knob on it is
+        // refused instead, so every session is bound to its machine.
+
+        #[tokio::test]
+        async fn required_an_sp4_none_exchange_id_is_refused_and_makes_no_client() {
+            let (d, _t) = create_test_dispatcher();
+            let d = d.with_require_mach_cred(true);
+            let c = conn().await;
+
+            // A node without rpc.gssd's state management over krb5i, or a
+            // client that never asks: under krb5i, plain krb5, AUTH_SYS.
+            for (who, krb5i) in [(NODE, true), (NODE, false), (b"".as_slice(), false)] {
+                let r = call(&d, vec![exchange_id(0)], who, &c, krb5i).await;
+                assert!(
+                    matches!(&r.results[0], OperationResult::ExchangeId(Nfs4Status::Access, None)),
+                    "SP4_NONE from {:?} (krb5i {krb5i}): {:?}",
+                    String::from_utf8_lossy(who),
+                    r.results[0]
+                );
+            }
+            assert_eq!(d.state_mgr.clients.client_count(), 0, "a refused EXCHANGE_ID records nothing");
+
+            // Asking for it without integrity is INVAL, as before; the
+            // client's fallback, SP4_NONE, is the refusal above.
+            let r = call(&d, vec![exchange_id(1)], NODE, &c, false).await;
+            assert_eq!(r.status, Nfs4Status::Inval);
+
+            // SP4_SSV keeps its own answer.
+            let r = call(&d, vec![exchange_id(2)], NODE, &c, true).await;
+            assert_eq!(r.status, Nfs4Status::EncrAlgUnsupp);
+        }
+
+        #[tokio::test]
+        async fn required_sp4_mach_cred_under_krb5i_is_granted_and_mounts() {
+            let (d, _t) = create_test_dispatcher();
+            let d = d.with_require_mach_cred(true);
+            let (a, b) = (conn().await, conn().await);
+
+            // The Linux client: EXCHANGE_ID, CREATE_SESSION, a user's
+            // calls on the node's connection, a reconnect that binds (the
+            // binding is SP4_MACH_CRED's: it was granted).
+            let (_cid, sid) = mount(&d, &a, 1).await;
+            assert_eq!(call(&d, vec![sequence(sid, 1)], BOB, &a, true).await.status, Nfs4Status::Ok);
+            assert_eq!(call(&d, vec![sequence(sid, 2)], NODE, &b, true).await.status, Nfs4Status::ConnNotBoundToSession);
+            assert_eq!(call(&d, vec![bind(sid)], NODE, &b, true).await.status, Nfs4Status::Ok);
+            assert_eq!(call(&d, vec![sequence(sid, 2)], NODE, &b, true).await.status, Nfs4Status::Ok);
+        }
+
+        #[tokio::test]
+        async fn not_required_an_sp4_none_exchange_id_is_served() {
+            // The control: the same calls with the knob off (the default).
+            let (d, _t) = create_test_dispatcher();
+            let c = conn().await;
+            for (who, krb5i) in [(NODE, true), (NODE, false), (b"".as_slice(), false)] {
+                let r = call(&d, vec![exchange_id(0)], who, &c, krb5i).await;
+                assert!(
+                    matches!(&r.results[0], OperationResult::ExchangeId(Nfs4Status::Ok, Some(x)) if x.mach_cred.is_none()),
+                    "SP4_NONE from {:?} (krb5i {krb5i}): {:?}",
+                    String::from_utf8_lossy(who),
+                    r.results[0]
+                );
+            }
+            let (d, _t) = create_test_dispatcher();
+            let (_cid, sid) = mount(&d, &c, 0).await;
+            assert_eq!(call(&d, vec![sequence(sid, 1)], NODE, &c, true).await.status, Nfs4Status::Ok);
+        }
+
+        #[test]
+        fn the_knob_is_on_off_or_an_error() {
+            use crate::nfs::v4::operations::session::parse_require_mach_cred as parse;
+            for off in [None, Some(""), Some("false"), Some("0"), Some(" Off "), Some("no")] {
+                assert_eq!(parse(off), Ok(false), "{off:?}");
+            }
+            for on in [Some("true"), Some("1"), Some("TRUE"), Some(" yes"), Some("on")] {
+                assert_eq!(parse(on), Ok(true), "{on:?}");
+            }
+            for typo in ["ture", "enabled", "2"] {
+                let e = parse(Some(typo)).unwrap_err();
+                assert!(e.contains("FLINT_NFS_REQUIRE_MACH_CRED"), "a typo is not off: {e}");
+            }
         }
     }
 }

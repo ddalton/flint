@@ -381,7 +381,13 @@ impl RpcSecGssManager {
         }
 
         let allowed = PrincipalAllowlist::from_env();
+        // Set up (and log) the directory lookup now, not at the first INIT.
+        let ldap = crate::nfs::gss_ldap::LdapIdmap::global();
         match (&keytab, &allowed) {
+            (Some(_), Some(a)) if ldap.is_some() => info!(
+                "🔐 RPCSEC_GSS principals allowed: {}, and the directory's users",
+                a
+            ),
             (Some(_), Some(a)) => info!("🔐 RPCSEC_GSS principals allowed: {}", a),
             (Some(_), None) => warn!(
                 "⚠️  {} is not set: EVERY principal of the realm with a ticket for this \
@@ -481,15 +487,19 @@ impl RpcSecGssManager {
         // this map by one entry per RPC.
         let (context, gss_token) = if let Some(ref keytab) = self.keytab {
             match KerberosContext::accept_token_with_skew(keytab, init_token, krb5_clock_skew()) {
-                Ok((krb_ctx, _)) if self.allowed.as_ref().is_some_and(|a| !a.permits(&krb_ctx.client_principal)) => {
-                    warn!(
-                        "❌ RPCSEC_GSS_INIT refused: {} is not in {}",
-                        krb_ctx.client_principal,
-                        crate::nfs::gss_principals::ENV
-                    );
-                    return Self::init_failure(handle);
-                }
                 Ok((krb_ctx, ap_rep)) => {
+                    // Who may connect: the allowlist, or the directory
+                    // (FLINT_NFS_GSS_LDAP_URL) for its users. Mapping here
+                    // also warms the cache the context's calls read.
+                    let mapped = crate::nfs::gss_idmap::map_global(&krb_ctx.client_principal).await;
+                    if let Err(why) = crate::nfs::gss_idmap::admit(
+                        &krb_ctx.client_principal,
+                        self.allowed.as_ref(),
+                        &mapped,
+                    ) {
+                        warn!("❌ RPCSEC_GSS_INIT refused: {}", why);
+                        return Self::init_failure(handle);
+                    }
                     info!("✅ Kerberos context established (Pure Rust): client={}", krb_ctx.client_principal);
                     (GssContext::with_kerberos(handle.clone(), cred.service, krb_ctx), ap_rep)
                 }
