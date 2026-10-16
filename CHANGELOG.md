@@ -29,9 +29,10 @@ covered by the stability guarantee.
   variable that is neither true nor false stops the server from starting.
   **Breaking for Kerberos installs** whose clients do not ask: set
   `requireMachCred: false` for them. Unit tests and the chart test cover
-  it; `tests/krb5/run-mach-cred.sh` has new legs (a `sec=krb5` mount
-  still gets SP4_MACH_CRED, an SP4_NONE client cannot mount, and a
-  knob-off control) that have not been run against the kernel client yet.
+  it, and `tests/krb5/run-mach-cred.sh` passes 22/22 against the kernel
+  client (Ubuntu 24.04, kernel 6.8): a `sec=krb5` mount still gets
+  SP4_MACH_CRED, an SP4_NONE client cannot mount (its EXCHANGE_ID is
+  refused), and the knob-off control is served.
 
 - **Kerberos sessions are bound to their machine** (2026-10-16). Under
   `krb5i` a session id crosses the wire in the clear, and any allowed
