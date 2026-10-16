@@ -107,7 +107,7 @@ spec:
               { echo "FAIL: $n has no hosts line '$ip $want'"; docker exec "$n" cat /etc/hosts; exit 1; }
           done
           echo PASS
-  - name: krb5i-data-stays-on-the-mds
+  - name: krb5i-data-is-striped-on-the-data-servers
     try:
     - script:
         timeout: 4m
@@ -117,57 +117,65 @@ spec:
           dss=$(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}')
           [ "$(echo $dss | wc -w)" = 2 ] || { echo "FAIL: DS pods '$dss'"; exit 1; }
           for d in $dss; do eval "before_$(echo $d | tr - _)=$(ds_bytes $d)"; done
-          # 8 MiB, eight 1 MiB stripes: under AUTH_SYS they would land on
-          # both data servers (tests-pnfs-only/pnfs-sys).
+          # Each data server holds its own key, nfs/<pod>.flint-pnfs-ds-headless...
+          for d in $dss; do
+            want="nfs/$d.flint-pnfs-ds-headless.flint-system.svc.cluster.local@FLINT.TEST"
+            kubectl -n flint-system get secret flint-pnfs-ds-krb5 -o jsonpath="{.data.$d\.keytab}" | base64 -d > /tmp/ds.keytab.$$
+            node=$(kubectl -n "$NAMESPACE" get pod pnfs-a -o jsonpath='{.spec.nodeName}')
+            docker exec -i "$node" sh -c 'cat > /tmp/ds.keytab && klist -k /tmp/ds.keytab; rm -f /tmp/ds.keytab' < /tmp/ds.keytab.$$ > /tmp/dsklist.$$
+            rm -f /tmp/ds.keytab.$$
+            grep -q "$want" /tmp/dsklist.$$ || { echo "FAIL: $d's keytab lacks $want"; cat /tmp/dsklist.$$; exit 1; }
+            if grep '@FLINT.TEST' /tmp/dsklist.$$ | grep -v "$want" | grep -q .; then
+              echo "FAIL: $d's keytab holds other principals"; cat /tmp/dsklist.$$; exit 1
+            fi
+          done
+          # 8 MiB, eight 1 MiB stripes, under krb5i.
           kubectl -n "$NAMESPACE" exec pnfs-a -- dd if=/dev/urandom of=/data/big bs=1048576 count=8 conv=fsync
           sum_a=$(kubectl -n "$NAMESPACE" exec pnfs-a -- md5sum /data/big | cut -d' ' -f1)
           sum_b=$(kubectl -n "$NAMESPACE" exec pnfs-b -- md5sum /data/big | cut -d' ' -f1)
           [ "$sum_a" = "$sum_b" ] || { echo "FAIL: pnfs-b reads $sum_b, pnfs-a wrote $sum_a"; exit 1; }
-          # The bytes are in the MDS's export, allocated (not a sparse stub).
+          # The bytes are on both data servers ...
+          for d in $dss; do
+            b=$(eval echo "\$before_$(echo $d | tr - _)"); a=$(ds_bytes $d)
+            echo "$d: /data $b -> $a bytes"
+            [ $((a - b)) -ge 2097152 ] || { echo "FAIL: $d grew by $((a - b)) bytes: the data did not stripe there"; exit 1; }
+          done
+          # ... and the MDS keeps a sparse stub.
           mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
           f=$(kubectl -n flint-system exec "$mds" -c mds -- find /data/exports -type f -name big)
-          [ "$(echo "$f" | wc -l)" = 1 ] && [ -n "$f" ] || { echo "FAIL: the MDS has '$f'"; exit 1; }
           size=$(kubectl -n flint-system exec "$mds" -c mds -- stat -c %s "$f")
           alloc=$(kubectl -n flint-system exec "$mds" -c mds -- du -s --block-size=1 "$f" | cut -f1)
           echo "MDS $f: size $size, allocated $alloc"
           [ "$size" = 8388608 ] || { echo "FAIL: size $size"; exit 1; }
-          [ "$alloc" -ge 8388608 ] || { echo "FAIL: the MDS file is sparse ($alloc bytes allocated): its data is elsewhere"; exit 1; }
-          # And not on the data servers.
+          [ "$alloc" -lt 1048576 ] || { echo "FAIL: the MDS holds the data ($alloc bytes allocated)"; exit 1; }
+          # Under Kerberos, at the data servers: every data call was
+          # RPCSEC_GSS, and none came as AUTH_SYS (the floor refuses those).
           for d in $dss; do
-            b=$(eval echo "\$before_$(echo $d | tr - _)"); a=$(ds_bytes $d)
-            echo "$d: /data $b -> $a bytes"
-            [ $((a - b)) -lt 1048576 ] || { echo "FAIL: $d grew by $((a - b)) bytes"; exit 1; }
-          done
-          # The MDS says so: layouts withheld at startup, and its F68a meter
-          # (one line per 30 s) counts refused LAYOUTGETs and data it served.
-          logs() { kubectl -n flint-system logs "$mds" -c mds --tail=-1; }
-          logs | grep -F 'layouts withheld from Kerberos (RPCSEC_GSS) callers' ||
-            { echo "FAIL: the MDS did not say it withholds layouts"; logs | grep -F 'Security:'; exit 1; }
-          logs | grep -F 'layouts for Kerberos callers WITHHELD'
-          for i in $(seq 40); do
-            m=$(logs | grep -F 'F68a' || true)
-            if echo "$m" | grep -qE 'served r [0-9]+op/[0-9]+MiB w [1-9][0-9]*op/' &&
-                echo "$m" | grep -qE 'layoutget \+[0-9]+/-[1-9]'; then
-              echo "$m"
-              # No layout was granted to anyone: the only client that
-              # could take one (sec=sys) is refused by the floor.
-              if echo "$m" | grep -qE 'layoutget \+[1-9]'; then
-                echo "FAIL: the MDS granted a layout"; exit 1
-              fi
-              echo PASS; exit 0
+            l=$(kubectl -n flint-system logs "$d" -c ds --tail=-1)
+            echo "$l" | grep -F 'Security: floor krb5i; Kerberos on' ||
+              { echo "FAIL: $d did not start with Kerberos and the krb5i floor"; echo "$l" | grep -F Security; exit 1; }
+            n=$(echo "$l" | grep -cF 'RPCSEC_GSS_DATA' || true)
+            echo "$d: $n RPCSEC_GSS_DATA calls"
+            [ "$n" -gt 0 ] || { echo "FAIL: no Kerberos calls reached $d"; exit 1; }
+            if echo "$l" | grep -F 'Refusing sec=sys'; then
+              echo "FAIL: a client sent $d AUTH_SYS calls"; exit 1
             fi
-            sleep 3
           done
-          echo "FAIL: no F68a lines with MDS-served writes and refused LAYOUTGETs"
-          logs | grep -F F68a | tail -10; exit 1
+          kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F 'layouts for Kerberos callers granted'
+          echo PASS
     catch:
     - script:
         content: |
           for d in $(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}'); do
             echo "== $d"; kubectl -n flint-system exec "$d" -c ds -- sh -c 'find /data -type f | head -20; du -s --block-size=1 /data'
+            kubectl -n flint-system logs "$d" -c ds --tail=-1 | grep -aE 'Security|GSS|Refusing|refused|❌' | tail -20
+          done
+          for p in pnfs-a pnfs-b; do
+            n=$(kubectl -n "$NAMESPACE" get pod "$p" -o jsonpath='{.spec.nodeName}')
+            echo "== $n hosts"; docker exec "$n" grep -E 'flint-(nfs|pnfs-ds)-krb5' /etc/hosts
+            docker exec "$n" sh -c 'journalctl -u rpc-gssd --no-pager | tail -15'
           done
           mds=$(kubectl -n flint-system get pod -l app=flint-pnfs-mds -o jsonpath='{.items[0].metadata.name}')
-          kubectl -n flint-system exec "$mds" -c mds -- sh -c 'find /data/exports | head -20'
           kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -aE 'F68a|Security|withheld|LAYOUT' | tail -20
   - name: sys-refused-by-the-floor
     try:
