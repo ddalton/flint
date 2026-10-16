@@ -201,7 +201,11 @@ if [ "$KRB5" = 1 ]; then
     --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
   kubectl wait kerberosnodekeytab --all --timeout=5m \
     --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
-  # rpc-gssd's unit starts only once /etc/krb5.keytab exists.
+  # rpc-gssd's unit starts only once /etc/krb5.keytab exists. When an
+  # operator release has KerberosNodeKeytab.spec.restartServices
+  # (krb5-operator PR #14), pass restartServices: [rpc-gssd] through the
+  # chart's KerberosNodeKeytab (templates/nfs-kerberos.yaml), bump
+  # KRB5_OPERATOR_VERSION, and keep only the is-active check here.
   for n in $(kind get nodes --name "$CLUSTER"); do
     docker exec "$n" klist -k /etc/krb5.keytab
     docker exec "$n" systemctl restart rpc-gssd
