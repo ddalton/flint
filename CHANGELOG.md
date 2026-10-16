@@ -332,7 +332,10 @@ covered by the stability guarantee.
   the attach/detach controller never detached it, so the VolumeAttachment
   outlived its last pod, every time. A shard-pinned handle is now
   classified as pNFS directly (as ControllerUnpublish and DeleteVolume
-  already did), and the PV reads strip the pin. Found by the pNFS Kerberos
+  already did), and the PV reads strip the pin. And a PV the API cannot
+  read is no longer taken for "not pNFS" (which sent the volume to the
+  SPDK teardown): NodeUnstage answers UNAVAILABLE and kubelet retries; only
+  a PV that does not exist reads as not pNFS. Found by the pNFS Kerberos
   Phase 2 kind step, whose revocation rides on the detach.
 - **A created file's owner, as the client first sees it** (2026-10-15).
   OPEN(create) and CREATE stamp the caller's uid and gid with a chown, but

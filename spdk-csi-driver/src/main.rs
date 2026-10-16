@@ -4321,8 +4321,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // pNFS volumes own no SPDK objects either — same unmount-only
         // unstage. NodeUnstage is context-free, so classification reads
         // the PV's volumeAttributes (pnfs.chert.us/* keys).
+        //
+        // A PV the API cannot read is UNKNOWN, not "not pNFS": answering
+        // false sent the volume to the SPDK teardown. Retryable instead;
+        // kubelet re-drives NodeUnstage. A PV that does not exist reads
+        // false, for the block path's own fallbacks.
+        let unknown = |e: String| {
+            tonic::Status::unavailable(format!("classifying {actual_volume_id} for unstage: {e}"))
+        };
         let is_pnfs = pnfs_handle
-            || (!is_shared_nfs_consumer && self.driver.pv_is_pnfs(&actual_volume_id).await);
+            || (!is_shared_nfs_consumer
+                && self.driver.pv_is_pnfs(&actual_volume_id).await.map_err(unknown)?);
         // nfs-only (emptyDir) volumes are NFS-served whatever their access
         // mode — an RWO claim resolves to the Block role above — and own
         // no SPDK object. Through the block path their unstage reached the
@@ -4332,7 +4341,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         // 2026-10-02).
         let is_emptydir_nfs = !is_shared_nfs_consumer
             && !is_pnfs
-            && self.driver.pv_is_nfs_emptydir(&actual_volume_id).await;
+            && self.driver.pv_is_nfs_emptydir(&actual_volume_id).await.map_err(unknown)?;
 
         if is_shared_nfs_consumer || is_pnfs || is_emptydir_nfs {
             if is_pnfs {
