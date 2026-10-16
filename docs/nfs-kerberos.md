@@ -232,7 +232,181 @@ workload, such as postgres, before turning Kerberos on.
 `krb5p` cannot be a floor (see `tests/krb5/README.md`), but a client can
 mount with `sec=krb5p` over the `krb5i` floor.
 
-pNFS volumes are not covered.
+pNFS volumes are not covered ([below](#pnfs)).
+
+## pNFS
+
+None of the above protects a pNFS volume today. The MDS shares most of
+the code, but nothing turns it on, and the data servers do no RPC
+authentication at all. Rust paths are under `spdk-csi-driver/src/`, chart
+templates under `flint-csi-driver-chart/templates/`, as of this commit.
+
+### What the MDS already shares
+
+The MDS serves NFS through the same function as the RWX server,
+`nfs::server_v4::serve_tcp` (`pnfs/mds/server.rs:1855-1862`, calling
+`nfs/server_v4.rs:381`), with a `CompoundDispatcher`
+(`pnfs/mds/server.rs:389-390`) and its own `RpcSecGssManager`
+(`pnfs/mds/server.rs:638-639`). So the per-call machinery is the same:
+
+| Protection | In the shared path | What the MDS lacks |
+|---|---|---|
+| Floor | `serve_tcp` checks `sec_policy::active()` for AUTH_SYS/NONE (`nfs/server_v4.rs:789-798`) and GSS calls (`:1107-1121`). | `FLINT_NFS_MIN_SEC` is not set on the MDS (`pnfs-mds.yaml:273-308` has no Kerberos env). The MDS never calls `SecPolicy::validate_env()` (only `NfsServer::new` does, `nfs/server_v4.rs:177`), so a bad value does not stop it starting. `active()` still fails closed to `krb5p` (`nfs/sec_policy.rs:210-221`). |
+| Keytab | `RpcSecGssManager::new(KRB5_KTNAME)`. | No `KRB5_KTNAME`, no principal, no keytab mount. With no keytab every `RPCSEC_GSS_INIT` is refused (`nfs/rpcsec_gss.rs:376`), so a `sec=krb5*` pNFS mount fails at the MDS today. The mount options let one ask for it (`pnfs_csi.rs:1588-1607`; the default is `sec=sys`, `:1591`). |
+| Allowlist | Loaded inside `RpcSecGssManager::new` (`nfs/rpcsec_gss.rs:383`), enforced at INIT (`:484`). | Env only. |
+| idmap, root squash | `serve_tcp` (`nfs/server_v4.rs:881-891`). | Env only. |
+| mach_cred | In the dispatcher (`nfs/v4/dispatcher.rs:1105`, `:1176-1190`, `:1256`), so the MDS gets it once a `krb5i` EXCHANGE_ID reaches it. | Nothing. |
+| Attached nodes only | The check is in the dispatcher (`nfs/v4/dispatcher.rs:1044-1048`). | The watch that fills the node set is spawned only by `nfs_main.rs:219-226`, never by `nfs_mds_main.rs`. With the env set, the MDS would refuse every node forever. The set is also per PersistentVolume, and one MDS (per shard) serves every pNFS volume, each as a directory of one export at one ClusterIP (`main.rs:4574-4577`). It would have to become a per-filehandle check (at PUTFH, against the volume the handle is in), not a per-client one. |
+| Hosts entry | `nfs_krb5::prepare_node_mount` is called only on the RWX path (`main.rs:4687`). The pNFS mount (`main.rs:4593-4599`) does not call it. | `rpc.gssd` could not name the MDS. |
+| Per-volume keys | Not on main yet (flint PR #15, open). | Not applicable as such. `rpc.gssd` picks the principal from the server's address, and every pNFS volume shares the MDS ClusterIP. At most there is one key per MDS shard. |
+
+**The MDS is wiring, not new protocol.** It needs a `KerberosPrincipal`,
+the keytab and the same env (`nfs_krb5::server_pod_parts`) in
+`pnfs-mds.yaml`, `SecPolicy::validate_env()` at MDS startup, a hosts
+entry for the MDS ClusterIP before the pNFS mount, and an attached-nodes
+check that works per volume.
+
+### The data servers: no RPC authentication
+
+The DS has its own minimal NFS loop (`pnfs/ds/server.rs:231-361`), not
+`serve_tcp`.
+
+- **The credential is never read.** `dispatch_minimal_nfs` checks only
+  program and version (`pnfs/ds/server.rs:333-361`). There is no
+  RPCSEC_GSS: a GSS NULL (context INIT) gets a plain success with no
+  `rpc_gss_init_res`, and every reply carries an AUTH_NONE verifier
+  (`pnfs/ds/server.rs:1693-1696`). AUTH_NONE, AUTH_SYS and a GSS
+  credential are all served alike. `docs/pnfs-operator-runbook.md`
+  ("Trust model") says so: the trust boundary is the network.
+- **SECINFO_NO_NAME advertises `krb5`** (service none) that the DS
+  cannot do (`pnfs/ds/server.rs:791-811`).
+- **No stateid check.** The DS decodes the stateid and drops it
+  (`let _stateid`, `pnfs/ds/server.rs:707`). The DS test pins this on
+  purpose (`pnfs/ds/server.rs:2060-2078`): a `[PUTFH, READ]` compound
+  with AUTH_NULL, no SEQUENCE and a stateid the DS never saw returns the
+  data (`:2157-2170`).
+- **The filehandle is not authenticated.** A pNFS DS handle is a version
+  byte, instance id, file id and stripe index, with no MAC
+  (`nfs/v4/filehandle_pnfs.rs:37-57`).
+- **No state protection.** The DS answers SP4_NONE whatever the client
+  asks for (`pnfs/ds/server.rs:438-439`, `:513-514`).
+
+Today a peer that can reach a DS on 2049 and knows or guesses a file id
+can read and write the stripe. Only the NetworkPolicy
+(`pnfs.networkPolicy`, **off by default**, `values.yaml:647-648`) limits
+who can reach it.
+
+What a Linux client would do with a `sec=krb5i` pNFS mount: for a files
+layout the kernel opens DS connections with the MDS mount's auth flavor,
+so it would ask `rpc.gssd` for a context with each DS. That would fail
+against this DS. The client would then mark the device unavailable and
+send I/O through the MDS. This is expected from the kernel source, **not
+measured**: data would likely still flow, but through the MDS, so pNFS
+would be quietly off. The MDS can proxy READs from the DSes
+(F66, `pnfs/ds/server.rs:1496-1497`), and whether every write path works this way
+is unknown.
+
+For the DS to carry the same protections, it needs:
+
+1. **RPCSEC_GSS in the DS loop**, with the floor: either move the DS onto
+   `serve_tcp`'s GSS layer (`handle_rpcsec_gss_call`, `nfs/server_v4.rs:1052`)
+   or embed `RpcSecGssManager`. The DS's splice fast path assumes
+   `rpc_gss_svc_none` (`pnfs/ds/io.rs:469-476`). Under `krb5i` the READ
+   reply needs a MIC over the payload, and under `krb5p` it must be
+   sealed, so splice turns off, as it does on the RWX lane.
+2. **A principal per DS.** The client names the DS from the address in
+   GETDEVICEINFO: a per-DS Service name (`pnfs-ds.yaml:202-203`,
+   `FLINT_DS_ADVERTISE_ADDR`), resolved by the MDS to a ClusterIP
+   (`pnfs/protocol.rs:687-696`, `endpoint_to_uaddr`). Multipath DSes add more names
+   (`FLINT_DS_EXTRA_ADVERTISE_ADDRS`). `rpc.gssd` reverse-resolves each IP
+   on the node, so every node needs a hosts line for every DS address,
+   multipath ones too, *before* the kernel's first LAYOUTGET. That set
+   changes as DSes register, so the node plugin would have to learn it
+   from the MDS. Each DS would need `nfs/<ds-name>` in its own keytab. One
+   shared name for all DSes would be simpler, but a single DS pod's key
+   would then pass for every DS.
+3. **Authorization, not only authentication.** With Kerberos the DS
+   would know which node is calling, but still not whether that node
+   holds a layout for the file. The allowlist and attached-nodes-only
+   (restricted to machine principals and the volume's nodes) can bound
+   that. Real per-file authorization needs the DS to check the layout
+   stateid or the filehandle, through a MAC the MDS mints and the DS
+   verifies, or a stateid table the MDS pushes. The pin test above says
+   that work must also accept the delegation stateids the MDS mints.
+4. **idmap does not matter on the DS** as long as it does no permission
+   checks: it trusts the MDS's layout grant. A user's I/O does reach the
+   DS with the user's own ticket, so the allowlist must admit users there
+   as on the MDS.
+5. **mach_cred on the DS**, if the floor is `krb5i`. Otherwise a sniffed
+   DS session id can be used from another connection, as before
+   SP4_MACH_CRED on the RWX server.
+
+### The MDS to DS control path
+
+The control path is tonic gRPC over **plain TCP**, with no TLS. That
+covers the MDS's `MdsControl` on 50051 (`pnfs/mds/server.rs:1824-1826`),
+the DS's `DsControl` (`pnfs/ds/server.rs:1353-1358`) and the DS
+registration client (`pnfs/ds/registration.rs:41-58`). Authentication is
+an optional shared Bearer token, `FLINT_PNFS_CONTROL_TOKEN`, checked by
+an interceptor (`pnfs/mds/server.rs:1794-1820`, `pnfs/grpc.rs:84-96`). It
+is on by default (`values.yaml:632-633`) and is one random secret for
+every party (`pnfs-security.yaml`). Since nothing encrypts the
+connection, anyone who can see pod traffic can read the token and then
+register a DS, so that new files stripe onto it. Kerberos does not touch
+this path. Fixing it means mTLS (a per-DS identity, with the MDS
+checking it against the device id at registration) or at least TLS. It
+is separate from Kerberos, but without it Kerberos on 2049 can be
+bypassed by registering a rogue DS.
+
+### Layouts
+
+- **Files layout** (`LAYOUT4_NFSV4_1_FILES`) is the only NFS layout
+  served. `FS_LAYOUT_TYPES` advertises FILES or SCSI
+  (`nfs/v4/operations/fileops.rs:1209-1224`), and no `ff_layout4` body is
+  generated (`:1199`). FlexFiles is accepted only on LAYOUTRETURN
+  (`nfs/v4/dispatcher.rs:4225`, `pnfs/mds/operations/mod.rs:584`). A
+  files layout carries device ids and filehandles, and no credential.
+  Its security is entirely the DS's.
+- **FlexFiles**, if it were adopted, carries `ffds_user`/`ffds_group`
+  per mirror (RFC 8435 §5.1). In the loosely coupled model the client
+  sends those as synthetic AUTH_SYS credentials to the DS, which is
+  incompatible with a Kerberos floor on the DS. Only tightly coupled
+  storage, where the client uses its own RPCSEC_GSS credential and the
+  DS knows the MDS's stateids, fits. So FlexFiles is no shortcut here.
+- **GETDEVICEINFO** carries universal addresses (IPv4 and port), not
+  names (`pnfs/protocol.rs:687-696`, `endpoint_to_uaddr`). That is why the node needs the
+  hosts lines in item 2 above. Kerberos service principals are DNS names.
+- **SCSI layout (`pnfs-block`)** data goes over NVMe-oF, not NFS, so
+  Kerberos does not apply. That path is guarded by the per-subsystem
+  host-NQN allow-list (`docs/pnfs-operator-runbook.md`, "Port 4420").
+
+### Bottom line
+
+Work items, in order of how much they buy:
+
+1. **MDS, configuration only:** principal, keytab and Kerberos env in
+   `pnfs-mds.yaml`; `validate_env()` at MDS startup; the hosts entry for
+   the MDS ClusterIP on the pNFS mount path; a pNFS StorageClass with
+   `sec=krb5i`. This gives the floor, allowlist, idmap and mach_cred for
+   metadata. The data would still fall back to the MDS (expected, not
+   measured).
+2. **Attached-nodes-only on the MDS:** a per-volume check at
+   PUTFH/LAYOUTGET, fed by every pNFS PV's VolumeAttachments, in place of
+   the per-server client gate.
+3. **DS Kerberos:** a GSS layer and floor in the DS loop, `nfs/<ds>`
+   keys per DS, and hosts lines for every DS address, multipath included,
+   kept current from the MDS. Splice is off under `krb5i`/`krb5p`.
+4. **DS authorization:** verify the layout stateid or a MAC'd filehandle
+   on the DS, with the delegation-stateid caveat. Without this, item 3
+   authenticates nodes but does not bind I/O to layouts.
+5. **Control path:** TLS or mTLS on 50051 and the DS control port, with
+   a per-DS identity checked at registration.
+6. **Per-volume keys:** not meaningful for pNFS (one address per MDS
+   shard). Per-shard and per-DS keys are what the protocol allows.
+
+Until 1 to 5 exist, the only protection for pNFS data is the network:
+turn on `pnfs.networkPolicy` (`docs/pnfs-operator-runbook.md`, "Trust
+model").
 
 ## Tests
 
@@ -258,3 +432,95 @@ pNFS volumes are not covered.
   reads the volume. With permissions enforced, bob (mapped to 2000:2000)
   creates a file that root sees owned by 2000:2000, and is denied root's
   0600 file. CI runs it after the nfs-only suite.
+
+## Tested on
+
+Only two kinds of host have run this:
+
+- **kind, Debian-based nodes.** `KRB5=1 tests/system/kind-nfs-only.sh`
+  builds `tests/system/krb5/kind-node.Dockerfile`: `kindest/node:v1.34.0`
+  (`kind-nfs-only.sh:49`) plus `nfs-common` and `krb5-user` from apt.
+  CI runs it on `ubuntu-latest` (`.github/workflows/system-chainsaw.yml:63`,
+  `:123-131`). A kind node uses the host's kernel, so the client kernel
+  is the runner's (or Docker Desktop's VM's), and systemd runs inside the
+  node container.
+- **Lima, Ubuntu 24.04 aarch64** (`tests/krb5/results/authz-gss-2026-09-05.log:61`),
+  for every drill in `tests/krb5/` (`setup-mount.sh`, `run-mach-cred.sh`,
+  ...): kernel 6.8, `nfs-utils` 2.6.4, MIT KDC.
+
+Nothing has run on RHEL, Fedora, Rocky, Alma, SUSE, Amazon Linux,
+Bottlerocket, Flatcar, Talos, COS or any SELinux-enforcing host. Below is
+what we know or expect to differ. **None of it is measured.**
+
+### Restarting `rpc-gssd`
+
+The `rpc-gssd` unit starts only when `/etc/krb5.keytab` exists, so a
+node that boots before its KerberosNodeKeytab is Ready has no `rpc.gssd`
+until someone starts it. The kind suite does that by hand after the
+"Kerberos keys" step (`tests/system/kind-nfs-only.sh:199-210`,
+`systemctl restart rpc-gssd` at `:207`). A krb5-operator change that
+optionally restarts host services after installing keys is in progress
+in ddalton/krb5-operator, stacked on its PR #12. It is not released. flint
+pins `KRB5_OPERATOR_VERSION=0.3.0` (`kind-nfs-only.sh:51`), so the suite
+keeps the manual restart until a release has it.
+
+**Non-systemd hosts** (OpenRC, runit, or hosts with no init you can
+reach) have no `rpc-gssd` unit to restart. `rpc.gssd` has to be started
+however that host starts it, once the keytab is there. Minimal,
+immutable OSes may not ship `rpc.gssd` at all. Without it the kernel
+does no Kerberos, and the default floor refuses the mount.
+
+### SELinux (RHEL, Fedora, and others, enforcing)
+
+Two components write host files:
+
+- **`/etc/hosts`, by the node plugin.** The `flint-csi-driver` container
+  in `flint-csi-node` is `privileged: true` (`flint-csi-driver-chart/templates/node.yaml:154`,
+  `:443`, `:639`, per profile). It mounts the host's `/etc/hosts` as a
+  single-file `hostPath` (`node.yaml:749-752`, at `/host/etc/hosts`,
+  `_helpers.tpl:203-208`). A privileged container runs as `spc_t`
+  (unconfined), so the write should be allowed. A `container_t` process
+  could not write `net_conf_t`. The plugin **writes the file in place**:
+  `flock`, truncate, write, `fsync` on the same inode (`nfs_krb5.rs:94-121`),
+  because a bind-mounted file cannot be renamed over. The file keeps its
+  `net_conf_t` label (expected; not checked on an SELinux host).
+- **`/etc/krb5.keytab` (and the `krb5.conf` drop-in), by krb5-operator's
+  node agent.** In 0.3.0 the agent is not privileged. It runs as root
+  with every capability dropped and SELinux type `spc_t`
+  (krb5-operator `src/node.rs:316-326`), and mounts the host's directory
+  (`/etc`), not the file. It **replaces the file by rename**: it writes
+  `.krb5.keytab.krb5-operator.tmp` beside it and renames it over the old
+  one (`src/agent.rs:77-97`). A new file takes its label from policy for
+  the creating domain, the directory and the *new file's name*. The
+  temporary file's name matches no named type transition for
+  `krb5.keytab`, so it is expected to get the directory's `etc_t`, and the
+  rename keeps that. The result is `/etc/krb5.keytab` labeled `etc_t`
+  where policy expects `krb5_keytab_t`. We expect `rpc.gssd` (`gssd_t`)
+  can still read `etc_t`, so this is more likely a keytab other confined
+  domains can read (the file's mode, 0600 root, still holds) than a
+  broken mount. A confined reader whose policy allows only
+  `krb5_keytab_t` would be refused, though, and `restorecon` or an
+  autorelabel would silently change the label later. Neither is
+  verified. Run `restorecon -v /etc/krb5.keytab` after the agent writes
+  it. The fix in the operator is to label the temporary file
+  (`setfscreatecon` to `krb5_keytab_t`, or the label of the file it
+  replaces) or to rewrite the file in place when it exists.
+
+### gssproxy (RHEL, Fedora)
+
+- **Server side: does not apply.** On these distros knfsd's
+  `rpc.svcgssd` is replaced by gssproxy (`use-gss-proxy`). flint's NFS
+  server is a userspace process with its own keytab, not knfsd, so
+  nothing on the host serves its contexts.
+- **Client side: may apply.** The client still uses `rpc.gssd`, which on
+  these distros can be told to get credentials from gssproxy
+  (`GSS_USE_PROXY=yes` in `/etc/sysconfig/nfs` on older releases,
+  `[gssd] use-gss-proxy=1` in `/etc/nfs.conf`). gssproxy's `nfs-client`
+  service then reads its own configuration
+  (`/etc/gssproxy/24-nfs-client.conf`: `mechs = krb5`, a client keytab
+  that is usually `/etc/krb5.keytab`). After the keytab changes,
+  gssproxy, not only `rpc-gssd`, may need a restart or reload to see it.
+  The krb5-operator restart work above restarts `rpc-gssd`. This comes
+  from the nfs-utils and gssproxy documentation, not from a test. Whether
+  `use-gss-proxy` is on by default for `rpc.gssd`, and whether gssproxy
+  rereads a replaced keytab by itself, are unknown here.
