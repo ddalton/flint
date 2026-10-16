@@ -794,6 +794,12 @@ impl DataServer {
                 opcode::PUTFH => {
                     // Store current filehandle
                     match decoder.decode_filehandle() {
+                        // E4 SCRATCH (not for merging): refuse every
+                        // filehandle with FLINT_E4_REFUSE's status.
+                        Ok(_) if e4_refusal().is_some() => {
+                            E4_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            (e4_refusal().unwrap(), Bytes::new())
+                        }
                         Ok(fh) => {
                             current_fh = Some(fh.data);
                             (Nfs4Status::Ok, Bytes::new())
@@ -2321,6 +2327,31 @@ mod deleg_stateid_pin_tests {
         assert_ne!(read2, Nfs4Status::Ok, "a garbage fh must not read OK");
     }
 }
+
+/// E4 scratch: FLINT_E4_REFUSE=badhandle|stale|access|perm|io|fhexpired.
+fn e4_refusal() -> Option<Nfs4Status> {
+    static S: std::sync::OnceLock<Option<Nfs4Status>> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        let v = std::env::var("FLINT_E4_REFUSE").ok()?;
+        let st = match v.as_str() {
+            "badhandle" => Nfs4Status::BadHandle,
+            "stale" => Nfs4Status::Stale,
+            "access" => Nfs4Status::Access,
+            "perm" => Nfs4Status::Perm,
+            "io" => Nfs4Status::Io,
+            "fhexpired" => Nfs4Status::FhExpired,
+            _ => return None,
+        };
+        tracing::warn!("E4 SCRATCH: every PUTFH refused with {:?}", st);
+        // A line a minute: how many were refused (the livelock signal).
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            tracing::warn!("E4 refused so far: {}", E4_COUNT.load(std::sync::atomic::Ordering::Relaxed));
+        });
+        Some(st)
+    })
+}
+static E4_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Kerberos on the data server (pNFS Kerberos plan, Phase 3): what the DS
 /// answers before and around the GSS front end. The front end itself is
