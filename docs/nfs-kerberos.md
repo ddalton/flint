@@ -458,11 +458,20 @@ The `rpc-gssd` unit starts only when `/etc/krb5.keytab` exists, so a
 node that boots before its KerberosNodeKeytab is Ready has no `rpc.gssd`
 until someone starts it. The kind suite does that by hand after the
 "Kerberos keys" step (`tests/system/kind-nfs-only.sh:199-210`,
-`systemctl restart rpc-gssd` at `:207`). A krb5-operator change that
-optionally restarts host services after installing keys is in progress
-in ddalton/krb5-operator, stacked on its PR #12. It is not released. flint
-pins `KRB5_OPERATOR_VERSION=0.3.0` (`kind-nfs-only.sh:51`), so the suite
-keeps the manual restart until a release has it.
+`systemctl restart rpc-gssd` at `:207`). `systemctl try-restart` would
+not do: it restarts only a running unit, and this one never started.
+
+[krb5-operator PR #14](https://github.com/ddalton/krb5-operator/pull/14)
+(stacked on its PR #12; not merged, not built, not released) adds
+`KerberosNodeKeytab.spec.restartServices: [rpc-gssd]`, off by default.
+The node agent asks the host's systemd to start each unit when the agent
+starts, and to restart it whenever the agent rewrites the keytab. It uses
+systemd's private socket (`/run/systemd/private`, hostPath type `Socket`),
+so it needs no `hostPID`, no capabilities and no `privileged`. Its README
+also gives a host path unit (`PathChanged=/etc/krb5.keytab`) for clusters
+that would rather not grant that. flint pins
+`KRB5_OPERATOR_VERSION=0.3.0` (`kind-nfs-only.sh:51`), so the suite
+keeps the manual restart until an operator release has the field.
 
 **Non-systemd hosts** (OpenRC, runit, or hosts with no init you can
 reach) have no `rpc-gssd` unit to restart. `rpc.gssd` has to be started
@@ -520,7 +529,8 @@ Two components write host files:
   (`/etc/gssproxy/24-nfs-client.conf`: `mechs = krb5`, a client keytab
   that is usually `/etc/krb5.keytab`). After the keytab changes,
   gssproxy, not only `rpc-gssd`, may need a restart or reload to see it.
-  The krb5-operator restart work above restarts `rpc-gssd`. This comes
+  With krb5-operator's `restartServices` (above), name `gssproxy` as
+  well as `rpc-gssd`. This comes
   from the nfs-utils and gssproxy documentation, not from a test. Whether
   `use-gss-proxy` is on by default for `rpc.gssd`, and whether gssproxy
   rereads a replaced keytab by itself, are unknown here.
