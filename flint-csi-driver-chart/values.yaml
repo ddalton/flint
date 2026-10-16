@@ -372,7 +372,8 @@ nfs:
   #
   # Secure by default: enabled, every RWX volume is Kerberos only (minSec
   # krb5i), served only to the nodes it is attached to
-  # (attachedNodesOnly), with permissions enforced (nfs.enforcePermissions).
+  # (attachedNodesOnly), each client's sessions bound to its machine
+  # (requireMachCred), with permissions enforced (nfs.enforcePermissions).
   # Each can be relaxed explicitly; see docs/nfs-kerberos.md.
   #
   # - Every NFS server answers to ONE principal, nfs/<serverName>: the
@@ -407,7 +408,8 @@ nfs:
     # FLINT_NFS_MIN_SEC for every NFS server: "krb5i" (the default) or
     # "krb5" refuses sec=sys mounts of every RWX volume. "" for no floor,
     # which also needs attachedNodesOnly: false (a sec=sys mount has no
-    # node identity to admit).
+    # node identity to admit) and requireMachCred: false (it cannot ask
+    # for SP4_MACH_CRED).
     minSec: krb5i
     # Who may connect with Kerberos (FLINT_NFS_GSS_PRINCIPALS): patterns
     # <component>[/<component>...]@<REALM>, '*' within a component. A
@@ -443,6 +445,17 @@ nfs:
     # VolumeAttachments and Nodes (cluster-wide, read-only). false: every
     # node with an allowed principal reaches every volume.
     attachedNodesOnly: true
+    # Every NFS client must ask for SP4_MACH_CRED state protection
+    # (FLINT_NFS_REQUIRE_MACH_CRED): its sessions are then bound to the
+    # machine principal that made it, and a session id seen on the wire
+    # (krb5i signs, it does not hide) is no use to anyone else. A client
+    # that does not ask (SP4_NONE: no rpc.gssd, or a non-Linux client) is
+    # refused (NFS4ERR_ACCESS). The Linux client asks whenever rpc.gssd
+    # runs: it makes its client over krb5i, whatever the mount's sec=. Needs
+    # minSec (a sec=sys mount cannot ask). false: SP4_NONE clients are
+    # served, and their session ids can be reused by another allowed
+    # principal.
+    requireMachCred: true
     # Delete or Retain the principals when the release is uninstalled.
     deletionPolicy: Delete
     storageClass:

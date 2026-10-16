@@ -29,8 +29,9 @@ Turning Kerberos on turns on everything that makes it hold:
 
 | Setting | Default with Kerberos | What it does | To relax it |
 |---|---|---|---|
-| `nfs.kerberos.minSec` | `krb5i` | Every RWX volume refuses `sec=sys` mounts. | `minSec: ""` (needs `attachedNodesOnly: false` too) |
+| `nfs.kerberos.minSec` | `krb5i` | Every RWX volume refuses `sec=sys` mounts. | `minSec: ""` (needs `attachedNodesOnly: false` and `requireMachCred: false` too) |
 | `nfs.kerberos.attachedNodesOnly` | `true` | A volume's server serves only the nodes it is attached to ([below](#only-the-nodes-a-volume-is-attached-to)). | `attachedNodesOnly: false` |
+| `nfs.kerberos.requireMachCred` | `true` | Every client's sessions are bound to the machine that made it ([below](#sessions-are-bound-to-their-machine)). | `requireMachCred: false` |
 | `nfs.enforcePermissions` | `enforce` | POSIX permissions deny, checked against each caller's mapped identity. | `warn` (log only) or `off` |
 
 Without these, Kerberos would only protect the wire. A `sec=sys` mount
@@ -42,8 +43,9 @@ server, so a StorageClass that mounts with `sec=sys` stops mounting once
 Kerberos is on. Move those volumes to `sec=krb5i` classes first, or keep
 Kerberos off until you can.
 
-`minSec: ""` with `attachedNodesOnly` on fails to render: a `sec=sys`
-mount carries no node identity, so every one would be refused anyway.
+`minSec: ""` with `attachedNodesOnly` or `requireMachCred` on fails to
+render: a `sec=sys` mount carries no node identity and cannot ask for
+SP4_MACH_CRED, so every one would be refused anyway.
 
 ## What the chart sets up
 
@@ -57,6 +59,7 @@ mount carries no node identity, so every one would be refused anyway.
 | `idmap`, `machineIdentity`, `anonIdentity` | `FLINT_NFS_GSS_IDMAP` and `FLINT_NFS_GSS_ANON`: which uid, gid and groups a Kerberos caller is. |
 | `nfs.enforcePermissions` | `FLINT_NFS_ENFORCE_PERMISSIONS` for every NFS server: `enforce`, `warn` or `off`. The default is `enforce` with Kerberos on, and the server's `warn` with it off. |
 | `attachedNodesOnly` | `FLINT_NFS_ATTACHED_NODES_ONLY` (default `true`), and the servers' read-only service account. |
+| `requireMachCred` | `FLINT_NFS_REQUIRE_MACH_CRED` (default `true`): an EXCHANGE_ID that does not ask for SP4_MACH_CRED is refused. A value other than true or false stops the server. |
 
 ## Who may connect
 
@@ -157,7 +160,8 @@ Every RWX mount must then be Kerberos.
 Session ids are random, but under `krb5i` they cross the wire in the
 clear. So the server binds each Kerberos client's sessions to the machine
 that made them, using SP4_MACH_CRED state protection (RFC 8881 §18.35), as
-knfsd does. The Linux client asks for it on every `krb5i` or `krb5p` mount.
+knfsd does. The Linux client asks for it whenever `rpc.gssd` runs, and
+by default the server refuses a client that does not ask.
 
 - **Granted only under integrity:** the server grants SP4_MACH_CRED only to
   an EXCHANGE_ID sent with `krb5i` or `krb5p`. Over AUTH_SYS or plain
@@ -181,10 +185,30 @@ A user rides the node's session on the node's connection, which is how
 the kernel sends every user's calls. Root on the node holds the machine
 key, so it can do anything the node can.
 
-A client that does not ask for SP4_MACH_CRED is not protected this way.
-The Linux kernel asks whenever `rpc.gssd` is running, since it then does
-its state management over `krb5i`, whatever the mount's `sec=`. Without
-`rpc.gssd` it uses AUTH_SYS, which the default floor refuses.
+**Every client must ask** (`nfs.kerberos.requireMachCred: true`, the
+default with Kerberos). A client that does not ask for SP4_MACH_CRED
+would get SP4_NONE, and an SP4_NONE session is bound to whatever
+connection uses it first, so its id, seen on the wire, would be the
+session. With `requireMachCred` the server refuses such an EXCHANGE_ID
+with NFS4ERR_ACCESS, as it refuses a node the volume is not attached to,
+and the client cannot mount. That covers a node without `rpc.gssd`, a
+client that does not implement SP4_MACH_CRED, and one downgraded on
+purpose. A client that asks without integrity gets NFS4ERR_INVAL, falls
+back to SP4_NONE, and is refused then.
+
+The Linux kernel asks whenever `rpc.gssd` is running, since it then makes
+its client and does its state management over `krb5i`, whatever the
+mount's `sec=`. So with `requireMachCred`:
+
+| `minSec` | Mounts that work (with `rpc.gssd`) | Notes |
+|---|---|---|
+| `krb5i` (default) | `sec=krb5i`, `sec=krb5p` | The recommended floor: the data is signed too. |
+| `krb5` | also `sec=krb5` | The client is still made over `krb5i` and bound to its machine; only the data calls go unsigned. |
+| `""` | | Does not render: a `sec=sys` mount cannot ask. |
+
+A non-Linux client must ask for SP4_MACH_CRED, over `krb5i` or `krb5p`,
+or be served by an install with `requireMachCred: false`, where its
+sessions are not bound.
 
 Not done yet:
 - reading identities from a directory (LDAP or SSSD, as idmapd does) in
@@ -242,8 +266,9 @@ pNFS volumes are not covered.
 - **Session binding:** unit tests in `dispatcher.rs` (`mach_cred`) and,
   against the real kernel client in the VM rig,
   `tests/krb5/run-mach-cred.sh` (connection killed, server restarted,
-  session id stolen by a user with a valid ticket, and an SP4_NONE
-  control).
+  session id stolen by a user with a valid ticket, all with
+  `FLINT_NFS_REQUIRE_MACH_CRED` on; a `sec=krb5` mount still bound; an
+  SP4_NONE client refused; and a knob-off SP4_NONE control).
 - **Unit tests:** `nfs_krb5.rs` covers flavor detection, `/proc/mounts`
   parsing, the hosts file rewritten in place and only our lines, and the
   server pod's keytab and floor.

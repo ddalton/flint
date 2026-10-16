@@ -10,6 +10,9 @@
 {{- if and $k.attachedNodesOnly (not $k.minSec) }}
 {{- fail "nfs.kerberos.minSec is empty but attachedNodesOnly is on: a sec=sys mount has no node identity, so every one would be refused. Keep minSec (krb5i), or set attachedNodesOnly=false as well" }}
 {{- end }}
+{{- if and $k.requireMachCred (not $k.minSec) }}
+{{- fail "nfs.kerberos.minSec is empty but requireMachCred is on: a sec=sys mount cannot ask for SP4_MACH_CRED, so every one would be refused. Keep minSec (krb5i), or set requireMachCred=false as well" }}
+{{- end }}
 # Kerberos for RWX NFS volumes (values nfs.kerberos). The NFS servers'
 # principal: every server pod mounts this keytab.
 apiVersion: krb5.ddalton.dev/v1alpha1

@@ -36,7 +36,7 @@ cross-build with
 | `run-secfloor.sh` | `FLINT_NFS_MIN_SEC` actually refuses | 12 ok, 0 bad |
 | `run-pynfs-gss.sh` | the conformance suite over GSS; takes test codes (EID9, CSID1) or `all` | 175/23/68 on every flavor — `results/` |
 | `run-gssneg.sh` | **the negative legs** — wrong service key, unknown context handle, wire replay, stale MIC, and whether a keyless peer can move the replay window | 27 ok, 0 bad — `results/gssneg-2026-08-28.log` |
-| `run-mach-cred.sh` | **sessions bound to their machine** (SP4_MACH_CRED): a `krb5i` mount negotiates it, survives a killed connection and a server restart by binding the new connection, and a user with a valid ticket and the session id (`steal_session.py`, pynfs) is refused; the SP4_NONE control is not | 17 ok, 0 bad — `results/mach-cred-2026-10-16.log` |
+| `run-mach-cred.sh` | **sessions bound to their machine** (SP4_MACH_CRED): a `krb5i` mount negotiates it, survives a killed connection and a server restart by binding the new connection, and a user with a valid ticket and the session id (`steal_session.py`, pynfs) is refused, all with `FLINT_NFS_REQUIRE_MACH_CRED` on; a `sec=krb5` mount still gets it; with the knob on an SP4_NONE client (no `rpc.gssd`) cannot mount; the knob-off SP4_NONE control is not refused | 17 ok, 0 bad before the knob (`results/mach-cred-2026-10-16.log`); the knob's legs not run yet |
 | `run-authz-gss.sh` | **does a Kerberos identity carry any rights?** — ENFORCE mode, one uid, two mounts differing only in `sec=`: sys is denied, krb5p is not | 14 ok, 0 bad, **CONFIRMED** — `results/authz-gss-2026-09-05.log` |
 
 ## Traps, each of which cost a run
