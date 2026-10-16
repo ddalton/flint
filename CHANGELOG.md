@@ -344,6 +344,22 @@ covered by the stability guarantee.
   failed at both the retained list and the next batch's snapshot before
   the fix.
 
+### Documentation
+
+- **Kerberos and pNFS, and where Kerberos has been tested**
+  (2026-10-16). `docs/nfs-kerberos.md` gains a "pNFS" section. The MDS
+  shares the RWX server's RPC and GSS layer, so the floor, allowlist,
+  idmap and SP4_MACH_CRED need only configuration there; the chart sets
+  none of it today. The data servers do no RPC authentication: they
+  ignore the credential and the stateid, and the trust boundary is the
+  network (`pnfs.networkPolicy`, off by default). The MDS-DS gRPC control
+  path is plain TCP with a shared Bearer token. The section ends with
+  the work list. A new "Tested on" section says Kerberos has run only on
+  kind (Debian-based nodes) and an Ubuntu 24.04 Lima VM, and what is
+  expected to differ under SELinux (krb5-operator renames the keytab
+  into place, so it is likely labeled `etc_t`), gssproxy and non-systemd
+  hosts. Docs only, nothing new was run.
+
 ## [1.58.0] - 2026-10-05
 
 A hardening release for the S3 CSI driver and its broker, after a gap
