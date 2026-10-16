@@ -246,6 +246,16 @@ Kerberos callers layouts only for DSes that report one.
 
 ## Phase 4: the DS checks the layout (MAC'd filehandle)
 
+**Built** (2026-10-16, `pnfs::ds_fh`): as below, but version **5** (4 is the
+MDS's own kernel handles, `fh_kernel::FH_V4_VERSION`, which the DS also
+parses), the node from the LAYOUTGET session's client principal on the MDS
+and the DS session's client principal on the DS, keys from env
+(`FLINT_PNFS_FH_KEY`, `FLINT_PNFS_FH_KEY_PREVIOUS`) fed by Secret
+`flint-pnfs-fh-key`, and chart `pnfs.dsAuth` plus `pnfs.kerberos.dsAuth`
+(on by default with Kerberos). A signed handle must verify whatever the
+mode; `enforce` refuses unsigned ones. Error: BADHANDLE (E4).
+
+
 - **MAC'd filehandle, not a pushed stateid table:** a files-layout client
   sends the open/lock/delegation stateid to the DS (RFC 8881 §13.9.1), so
   a table would mirror every OPEN to every DS; delegation stateids are

@@ -502,6 +502,26 @@ marker (`# flint-pnfs-ds-krb5`), before every `sec=krb5*` pNFS mount
 (`FLINT_PNFS_KRB5_DS`). The MDS then hands Kerberos callers layouts
 (`FLINT_PNFS_LAYOUTS_FOR_GSS=true`).
 
+**Signed data server filehandles** (`pnfs.dsAuth`; on with pNFS Kerberos
+through `pnfs.kerberos.dsAuth`; Phase 4). A files layout tells the client
+which handle to send each DS. These used to be `file_id` and stripe, in
+the clear: anyone who reached a DS and knew or guessed a file id read and
+wrote its stripes. The MDS now signs each one,
+`5 | key_id | file_id | stripe | HMAC-SHA256(key, … ‖ node)[..16]`, where
+`node` is the machine host of the session that asked for the layout (empty
+without Kerberos), and the DSes serve only handles that verify for the
+caller's own session (`FLINT_PNFS_DS_FH_AUTH=enforce`). Another node's
+layout, a guessed file id, or a handle from a key since rotated away gets
+NFS4ERR_BADHANDLE; the client then asks for a fresh layout, and failing
+that does its I/O through the MDS (measured, `tests/krb5/results/pnfs-e4-2026-10-16/`).
+A legacy pin (a file without a file id) can carry only the MDS's own handle,
+so it gets no layout. The key is Secret `flint-pnfs-fh-key` (key
+`current`, `<id>:<64 hex>`, generated once). To rotate: copy `current` to
+`previous`, put a new key with a new id in `current`, restart the DSes,
+then the MDS; once the clients' layouts are fresh, drop `previous`. It
+works without Kerberos as well (`pnfs.dsAuth.enabled`), where it stops a
+guessed file id but binds no node.
+
 **Without the data servers: no layouts for Kerberos callers.** Measured
 (plan, "Phase 0 results"):
 a Linux client with a `sec=krb5i` mount that cannot get a GSS context with
@@ -521,15 +541,12 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
 
 **What it does not protect yet.**
 
-- **A DS checks the caller, not the layout.** With `attachedNodesOnly`
-  a DS serves only nodes attached to SOME pNFS volume (it watches the same
-  PVs and VolumeAttachments as the MDS, through ServiceAccount
-  `flint-pnfs-ds`: clients and sessions from those nodes' machine keys, a
-  session dropped when its node detaches from everything). But it does not
-  know which volume a stripe belongs to: such a node, or an allowed user on
-  it, can read or write any stripe file it can name, and a layout granted
-  before a detach keeps working while the node has another pNFS volume.
-  The plan's Phase 4 (a MAC'd DS filehandle) closes this.
+- **A layout granted before a detach keeps working.** The DS checks that
+  a handle came from the MDS for the caller's node (below), not that the
+  node is still attached: a node keeps its layouts until it returns them.
+  With `attachedNodesOnly` the DS still drops a node attached to no pNFS
+  volume at all (it watches the same PVs and VolumeAttachments as the MDS,
+  through ServiceAccount `flint-pnfs-ds`).
 - **DS sessions are not bound to the machine.** The DS answers SP4_NONE
   to an SP4_MACH_CRED request (Phase 3b).
 - **The control path** between the MDS and the DSes (gRPC: registration,
