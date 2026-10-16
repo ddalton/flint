@@ -538,7 +538,10 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
   to an SP4_MACH_CRED request (Phase 3b).
 - **The control path** between the MDS and the DSes (gRPC: registration,
   heartbeats, the F66 relay of a client's I/O to a file the MDS cannot
-  layout, truncates) has no TLS (Phase 5); keep `pnfs.networkPolicy` on.
+  layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), but who the
+  CLIENT is still rests on the shared control token: any holder of it can
+  register a DS. Per-pod identities (Phase 5b) close that; keep
+  `pnfs.networkPolicy` on.
 - **Files written under Phase 1 stay on the MDS.** A file a Kerberos client
   wrote while the DSes did no Kerberos (`dataServers: false`) lives in the
   MDS's export, and the F67 guard never pins a file that already has bytes:
@@ -667,6 +670,9 @@ For the DS to carry the same protections, it needs:
    SP4_MACH_CRED on the RWX server.
 
 #### The MDS to DS control path
+
+*Since Phase 5a this is TLS 1.3 by default (`pnfs.controlTls`): the
+analysis below is of the plaintext path as it was.*
 
 The control path is tonic gRPC over **plain TCP**, with no TLS. That
 covers the MDS's `MdsControl` on 50051 (`pnfs/mds/server.rs:1824-1826`),

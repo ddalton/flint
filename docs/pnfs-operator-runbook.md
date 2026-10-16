@@ -31,7 +31,17 @@ and the chart ships two layers to make that boundary real:
    50051 can register itself as a data server and new files will
    stripe onto it — data exfiltration by registration. The MDS logs a
    loud boot warning when the token is off.
-2. **NetworkPolicies** (`pnfs.networkPolicy`, default OFF — enable in
+2. **TLS on the control path** (`pnfs.controlTls`, default ON with the
+   in-chart server): the MDS's gRPC (50051) and every DS's DsControl
+   speak TLS 1.3, and every client checks the server certificate (one
+   chart-generated CA, one certificate for the name `flint-pnfs-control`,
+   Secret `flint-pnfs-control-tls`, kept across upgrades; or
+   `controlTls.existingSecret`). The control token no longer crosses the
+   network in the clear. A bad TLS directory stops the MDS, the DS and
+   the CSI controller at startup rather than falling back to plaintext.
+   Rotation: replace the Secret (same CA, or a new CA with every pod
+   restarted together); a split CA leaves the fleet unable to talk.
+3. **NetworkPolicies** (`pnfs.networkPolicy`, default OFF — enable in
    production): 2049 on MDS+DS admits only `nodeCIDRs` (NFS mounts
    originate from the NODE kernel via kubelet, never from pod IPs —
    which also means hostNetwork pods share the node's network

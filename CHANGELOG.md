@@ -14,6 +14,15 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS: TLS on the control path** (2026-10-16; plan Phase 5a). The
+  MDS's gRPC (data server registration, heartbeats, the CSI controller's
+  volume calls) and each data server's DsControl (truncates, the MDS's
+  relay of a client's I/O) were plaintext: the shared control token
+  crossed the network in the clear, and anyone who read it could register
+  a data server and attract stripe writes. They now speak TLS 1.3 by
+  default (`pnfs.controlTls`): one chart-generated CA and certificate
+  (Secret `flint-pnfs-control-tls`, kept across upgrades), checked by every
+  client. A bad `FLINT_PNFS_CONTROL_TLS_DIR` stops the process at startup.
 - **pNFS Kerberos: no layouts for Kerberos callers while a data server
   would take AUTH_SYS** (2026-10-16). A Linux client that cannot get a GSS
   context with a data server sends it the data as AUTH_SYS; only the data
