@@ -14,6 +14,19 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS Kerberos: each volume only to the nodes it is attached to**
+  (2026-10-16; plan Phase 2). With `pnfs.kerberos.enabled`, the new
+  `pnfs.kerberos.attachedNodesOnly` (default `true`; needs `minSec`) makes
+  each MDS shard watch the pNFS PersistentVolumes and their
+  VolumeAttachments: only attached nodes' machine principals make clients
+  and sessions, and a node reaches only the volumes attached to it. A
+  PUTFH or RESTOREFH into another volume, and a LOOKUP, OPEN by name,
+  CREATE, REMOVE, RENAME or LINK of another volume's name, answer
+  NFS4ERR_ACCESS; a detach revokes at the node's next call. The MDS runs
+  as ServiceAccount `flint-pnfs-mds` with a read-only ClusterRole on
+  persistentvolumes, volumeattachments and nodes. Before, every node with
+  a machine key reached every pNFS volume of a shard. The MDS refuses to
+  start with `FLINT_NFS_ATTACHED_NODES_ONLY` in standalone (hub) mode.
 - **A Kerberos caller is never unchecked, even with no identity map**
   (2026-10-16). An NFS server run without `FLINT_NFS_GSS_IDMAP` and
   without an LDAP directory gave every RPCSEC_GSS call no uid, and the
@@ -310,6 +323,26 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **pNFS volumes never detached from a node without SPDK** (2026-10-16).
+  NodeUnstageVolume read the PV by the volume handle, but a pNFS handle
+  carries the shard pin (`<pv>~m<shard>`) and the PV's name does not, so
+  every read 404'd and the volume took the block path: the SPDK teardown
+  failed (no `spdk.sock` on an nfs-only node) and kubelet retried
+  NodeUnstage forever. The volume stayed in the node's `volumesInUse`, and
+  the attach/detach controller never detached it, so the VolumeAttachment
+  outlived its last pod, every time. A shard-pinned handle is now
+  classified as pNFS directly (as ControllerUnpublish and DeleteVolume
+  already did), and the PV reads strip the pin. And a PV the API cannot
+  read is no longer taken for "not pNFS" (which sent the volume to the
+  SPDK teardown): NodeUnstage answers UNAVAILABLE and kubelet retries; only
+  a PV that does not exist reads as not pNFS. The same holds for the
+  access-mode lookup before it: when the API could not read the PV (not
+  when the PV is gone), NodeUnstage fell back to sniffing the staging path,
+  which reads every shared RWX/ROX consumer as block, and the block path's
+  SPDK teardown is the one that detached live raid legs and deleted the
+  NFS server's backing export (2026-06-12, 2026-07-03). It now retries
+  instead; a deleted PV still takes the fallback. Found by the pNFS
+  Kerberos Phase 2 kind step, whose revocation rides on the detach.
 - **A created file's owner, as the client first sees it** (2026-10-15).
   OPEN(create) and CREATE stamp the caller's uid and gid with a chown, but
   did not bump the change counter, which is what invalidates the stat

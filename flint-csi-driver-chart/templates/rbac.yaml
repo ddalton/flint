@@ -154,6 +154,16 @@ roleRef:
   name: flint-csi-node
   apiGroup: rbac.authorization.k8s.io
 
+{{- if and (.Values.pnfs.server).enabled (or ((((.Values.pnfs.server).mds).blockExport).witness).enabled (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" .)) }}
+---
+# The MDS's identity: the composition witness's Role (below) and
+# pnfs.kerberos.attachedNodesOnly's ClusterRole (pnfs-kerberos.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flint-pnfs-mds
+  namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if and (.Values.pnfs.server).enabled ((((.Values.pnfs.server).mds).blockExport).witness).enabled }}
 ---
 # ── THE COMPOSITION WITNESS ──────────────────────────────────────────
@@ -168,13 +178,6 @@ roleRef:
 # release's volumes and nothing else, so it needs no cluster-scoped
 # reach — and a Role that cannot leave the namespace cannot become an
 # accidental cluster-wide credential.
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: flint-pnfs-mds
-  namespace: {{ .Release.Namespace }}
-
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

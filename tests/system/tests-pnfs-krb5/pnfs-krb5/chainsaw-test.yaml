@@ -14,6 +14,8 @@ spec:
     servers (layouts withheld from Kerberos callers); a sec=sys pNFS mount
     is refused by the MDS's krb5i floor; a user principal not in the
     allowlist (alice) is refused while the node's machine principal is not.
+    Phase 2 (attached nodes only, the chart's default): a node reaches only
+    the volumes attached to it, and loses one when it is detached.
   steps:
   - name: volumes-and-pods
     try:
@@ -251,3 +253,123 @@ spec:
           kubectl -n flint-system delete kerberosprincipal pnfs-krb5-alice --ignore-not-found
           node=$(kubectl -n "$NAMESPACE" get pod pnfs-a -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
             docker exec "$node" rm -f /tmp/alice.keytab /tmp/krb5cc_1000 || true
+  - name: a-node-reaches-only-the-volumes-attached-to-it
+    try:
+    - script:
+        timeout: 6m
+        content: |
+          set -eu
+          na=$(kubectl -n "$NAMESPACE" get pod pnfs-a -o jsonpath='{.spec.nodeName}')
+          nb=$(kubectl -n "$NAMESPACE" get pod pnfs-b -o jsonpath='{.spec.nodeName}')
+          # A second Kerberos volume, used only on pnfs-a's node.
+          cat <<YAML | kubectl -n "$NAMESPACE" apply -f -
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: solo-pvc
+          spec:
+            accessModes: [ReadWriteMany]
+            resources:
+              requests:
+                storage: 1Gi
+            storageClassName: flint-pnfs-krb5
+          ---
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: pnfs-c
+          spec:
+            terminationGracePeriodSeconds: 1
+            nodeSelector:
+              kubernetes.io/hostname: $na
+            containers:
+            - name: c
+              image: busybox
+              command: [sh, -c, "echo from-c > /data/c && sleep 3600"]
+              volumeMounts:
+              - name: data
+                mountPath: /data
+            volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: solo-pvc
+          YAML
+          kubectl -n "$NAMESPACE" wait pod/pnfs-c --for=condition=Ready --timeout=3m
+          [ "$(kubectl -n "$NAMESPACE" exec pnfs-c -- cat /data/c)" = from-c ]
+          pv=$(kubectl -n "$NAMESPACE" get pvc solo-pvc -o jsonpath='{.spec.volumeName}')
+          vol=$(kubectl get pv "$pv" -o go-template='{{index .spec.csi.volumeAttributes "pnfs.chert.us/volume-file"}}')
+          ip=$(kubectl get pv "$pv" -o go-template='{{index .spec.csi.volumeAttributes "pnfs.chert.us/mds-ip"}}')
+          echo "solo-pvc: PV $pv, volume $vol at $ip, attached to $na only"
+          mds_log() { kubectl -n flint-system logs -l app=flint-pnfs-mds -c mds --tail=-1; }
+          mds_log | grep -aF 'pNFS volume(s), attached' | tail -2
+          # pnfs-b's node mounts the same MDS (krb5-pvc) and holds a
+          # session there, but solo-pvc is not attached to it.
+          docker exec "$nb" mkdir -p /mnt/rogue
+          if docker exec "$nb" timeout 90 mount -t nfs4 -o vers=4.2,sec=krb5i "$ip:/$vol" /mnt/rogue; then
+            docker exec "$nb" ls /mnt/rogue || true
+            docker exec "$nb" umount -f /mnt/rogue || true
+            echo "FAIL: $nb mounted $vol, which is not attached to it"; exit 1
+          fi
+          refused() { mds_log | grep -aE "(LOOKUP \"$vol\"|PUTFH) refused: volume $vol is not attached to the node of this session"; }
+          for i in $(seq 30); do refused && break; sleep 2; done
+          refused >/dev/null || { echo "FAIL: the MDS did not refuse $vol to $nb"; mds_log | grep -aE 'refused|attached' | tail -20; exit 1; }
+          # Its own volume still works there, and solo-pvc on pnfs-a's node.
+          [ "$(kubectl -n "$NAMESPACE" exec pnfs-b -- cat /data/a)" = from-a ]
+          [ "$(kubectl -n "$NAMESPACE" exec pnfs-c -- cat /data/c)" = from-c ]
+          # Detach: pnfs-a's node loses solo-pvc, and keeps krb5-pvc.
+          # In the order Kubernetes does it: kubelet unmounts (NodeUnpublish,
+          # NodeUnstage) and drops the volume from the node's volumesInUse;
+          # only then does the attach/detach controller delete the
+          # VolumeAttachment. On a Ready node nothing times out, so a stuck
+          # unstage holds the attachment forever: name the stuck layer.
+          kubectl -n "$NAMESPACE" delete pod pnfs-c --grace-period=1
+          in_use() { kubectl get node "$na" -o jsonpath='{range .status.volumesInUse[*]}{@}{"\n"}{end}' | grep -q "\^$pv~m"; }
+          for i in $(seq 60); do in_use || break; sleep 2; done
+          if in_use; then
+            echo "FAIL: kubelet on $na still has $pv in use: NodeUnstage did not finish"
+            docker exec "$na" sh -c 'journalctl -u kubelet --no-pager | grep -E "UnmountDevice|$pv" | tail -5' || true
+            exit 1
+          fi
+          attached() { kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName}{"\n"}{end}' | grep -qx "$pv"; }
+          for i in $(seq 60); do attached || break; sleep 2; done
+          if attached; then
+            echo "FAIL: $pv left $na's volumesInUse but is still attached"
+            kubectl get volumeattachments -o wide | grep "$pv"; exit 1
+          fi
+          # The node may still MOUNT it: both volumes are directories of
+          # one export, so the kernel shares one superblock between them,
+          # and solo-pvc's directory is still in that superblock's dentry
+          # cache from pnfs-c, which needs no LOOKUP. Reading its data does
+          # (OPEN, PUTFH), and that is what the detach must refuse.
+          before=$(mds_log | grep -acE "refused: volume $vol is not attached" || true)
+          docker exec "$na" mkdir -p /mnt/rogue
+          ok=0
+          for i in $(seq 15); do
+            docker exec "$na" timeout 90 mount -t nfs4 -o vers=4.2,sec=krb5i "$ip:/$vol" /mnt/rogue 2>/dev/null || { ok=1; break; }
+            if docker exec "$na" timeout 30 cat /mnt/rogue/c 2>/dev/null; then
+              # The watch may not have seen the detach yet: try again.
+              docker exec "$na" umount -f /mnt/rogue || true
+              sleep 2; continue
+            fi
+            docker exec "$na" umount -f /mnt/rogue || true
+            ok=1; break
+          done
+          [ "$ok" = 1 ] || { echo "FAIL: $na still reads $vol after the detach"; exit 1; }
+          after=$(mds_log | grep -acE "refused: volume $vol is not attached" || true)
+          [ "$after" -gt "$before" ] || { echo "FAIL: $na was refused $vol, but not by the MDS's gate"; exit 1; }
+          mds_log | grep -aE "refused: volume $vol is not attached" | tail -2
+          [ "$(kubectl -n "$NAMESPACE" exec pnfs-a -- cat /data/b)" = from-b ]
+          echo PASS
+    catch:
+    - script:
+        content: |
+          kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName} {.spec.nodeName} attached={.status.attached}{"\n"}{end}'
+          kubectl -n flint-system logs -l app=flint-pnfs-mds -c mds --tail=-1 | grep -aE 'refused|attached|ATTACHED_NODES|Kubernetes API|PersistentVolumes' | tail -30
+    finally:
+    - script:
+        content: |
+          for p in pnfs-a pnfs-b; do
+            n=$(kubectl -n "$NAMESPACE" get pod "$p" -o jsonpath='{.spec.nodeName}' 2>/dev/null) &&
+              docker exec "$n" sh -c 'umount -f /mnt/rogue 2>/dev/null; true' || true
+          done
+          kubectl -n "$NAMESPACE" delete pod pnfs-c --ignore-not-found --grace-period=1

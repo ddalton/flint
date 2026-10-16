@@ -1610,46 +1610,47 @@ impl SpdkCsiDriver {
             .unwrap_or_default())
     }
 
-    /// Whether the PV backing `volume_id` is a pNFS volume (tagged with
-    /// pnfs.chert.us/* volumeAttributes at create time). Used by the
-    /// context-free node RPCs (NodeUnstage) to classify without a
-    /// volume_context. Any API failure reads as `false`: the caller
-    /// falls through to the block-volume path, which has its own
-    /// PV-read fallbacks.
-    pub async fn pv_is_pnfs(&self, volume_id: &str) -> bool {
+    /// The CSI volumeAttributes of the PV behind `volume_id`: `Ok(None)`
+    /// when no such PV exists (a 404), `Err` when the API could not say
+    /// (unreachable, 5xx, forbidden, timeout).
+    async fn pv_volume_attributes(
+        &self,
+        volume_id: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>, String> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::Api;
         let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        let pv_name = crate::identity::storage_id_of_handle(volume_id);
-        match pvs.get(pv_name).await {
-            Ok(pv) => pv
-                .spec
-                .as_ref()
-                .and_then(|s| s.csi.as_ref())
-                .and_then(|csi| csi.volume_attributes.as_ref())
-                .map(|attrs| crate::snapshot::snapshot_csi::is_pnfs_volume_attrs(attrs))
-                .unwrap_or(false),
-            Err(_) => false,
+        let pv_name = pv_name_of_handle(volume_id);
+        match pvs.get_opt(pv_name).await {
+            Ok(pv) => Ok(pv.map(|pv| {
+                pv.spec
+                    .and_then(|s| s.csi)
+                    .and_then(|csi| csi.volume_attributes)
+                    .unwrap_or_default()
+            })),
+            Err(e) => Err(format!("reading PersistentVolume {pv_name}: {e}")),
         }
     }
 
+    /// Whether the PV backing `volume_id` is a pNFS volume (tagged with
+    /// pnfs.chert.us/* volumeAttributes at create time). Used by the
+    /// context-free node RPCs (NodeUnstage) to classify without a
+    /// volume_context. An absent PV is `Ok(false)`: the caller falls
+    /// through to the block-volume path, which has its own fallbacks for a
+    /// PV deleted mid-teardown. Any other failure is `Err`, never `false`:
+    /// "not pNFS" sends the volume to the SPDK teardown, and an unreadable
+    /// PV says nothing about the volume.
+    pub async fn pv_is_pnfs(&self, volume_id: &str) -> Result<bool, String> {
+        classify_pv(
+            self.pv_volume_attributes(volume_id).await,
+            crate::snapshot::snapshot_csi::is_pnfs_volume_attrs,
+        )
+    }
+
     /// Is the PV behind `volume_id` an nfs-only (emptyDir-backed) volume?
-    /// Same read as [`Self::pv_is_pnfs`]; unreadable/absent PV ⇒ false.
-    pub async fn pv_is_nfs_emptydir(&self, volume_id: &str) -> bool {
-        use k8s_openapi::api::core::v1::PersistentVolume;
-        use kube::Api;
-        let pvs: Api<PersistentVolume> = Api::all(self.kube_client.clone());
-        let pv_name = crate::identity::storage_id_of_handle(volume_id);
-        match pvs.get(pv_name).await {
-            Ok(pv) => pv
-                .spec
-                .as_ref()
-                .and_then(|s| s.csi.as_ref())
-                .and_then(|csi| csi.volume_attributes.as_ref())
-                .map(crate::rwx_nfs::is_emptydir_backend)
-                .unwrap_or(false),
-            Err(_) => false,
-        }
+    /// As [`Self::pv_is_pnfs`]: absent PV ⇒ `Ok(false)`, unreadable ⇒ `Err`.
+    pub async fn pv_is_nfs_emptydir(&self, volume_id: &str) -> Result<bool, String> {
+        classify_pv(self.pv_volume_attributes(volume_id).await, crate::rwx_nfs::is_emptydir_backend)
     }
 
     /// The `pnfs.chert.us/layout` volumeAttribute of the PV whose
@@ -4123,3 +4124,43 @@ mod placement_tests {
         );
     }
 }
+
+/// The PV name behind a volume handle: the storage id without the
+/// `nfs-server-` prefix (`identity::storage_id_of_handle`) and without a
+/// pNFS shard pin (`~m<shard>`), which handles carry and PV names do not.
+pub(crate) fn pv_name_of_handle(volume_id: &str) -> &str {
+    let id = crate::identity::storage_id_of_handle(volume_id);
+    crate::pnfs_csi::parse_shard_suffix(id).map(|(bare, _)| bare).unwrap_or(id)
+}
+
+/// A PV classification from [`SpdkCsiDriver::pv_volume_attributes`]'s answer:
+/// `is` of the attributes, `false` for an absent PV, the error otherwise.
+fn classify_pv(
+    attrs: Result<Option<std::collections::BTreeMap<String, String>>, String>,
+    is: impl Fn(&std::collections::BTreeMap<String, String>) -> bool,
+) -> Result<bool, String> {
+    attrs.map(|a| a.as_ref().is_some_and(is))
+}
+
+#[cfg(test)]
+mod pv_name_of_handle_tests {
+    #[test]
+    fn a_pnfs_handle_names_its_pv_without_the_shard_pin() {
+        assert_eq!(super::pv_name_of_handle("pvc-1234~m0"), "pvc-1234");
+        assert_eq!(super::pv_name_of_handle("pvc-1234~m12"), "pvc-1234");
+        assert_eq!(super::pv_name_of_handle("pvc-1234"), "pvc-1234");
+        assert_eq!(super::pv_name_of_handle("pvc-1234~mx"), "pvc-1234~mx", "not a shard pin");
+    }
+
+    #[test]
+    fn an_unreadable_pv_is_unknown_not_false() {
+        use std::collections::BTreeMap;
+        let pnfs = |a: &BTreeMap<String, String>| a.contains_key("pnfs.chert.us/mds-ip");
+        let attrs = BTreeMap::from([("pnfs.chert.us/mds-ip".to_string(), "10.0.0.1".to_string())]);
+        assert_eq!(super::classify_pv(Ok(Some(attrs)), pnfs), Ok(true));
+        assert_eq!(super::classify_pv(Ok(Some(BTreeMap::new())), pnfs), Ok(false));
+        assert_eq!(super::classify_pv(Ok(None), pnfs), Ok(false), "no PV: the block path's fallbacks");
+        assert!(super::classify_pv(Err("API down".into()), pnfs).is_err(), "never a legal false");
+    }
+}
+

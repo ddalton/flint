@@ -13,6 +13,8 @@ Phase 1 of docs/plans/pnfs-kerberos-plan.md: the MDS does Kerberos.
 - The nodes' keys (KerberosNodeKeytab), unless nfs-kerberos.yaml renders
   them already (RWX Kerberos on): one object, never two.
 - A StorageClass like pnfs-storageclass.yaml's, mounting with sec=<sec>.
+- attachedNodesOnly (Phase 2): the MDS's service account (rbac.yaml makes
+  it) reads PersistentVolumes, VolumeAttachments and Nodes.
 
 The realm, allowlist, idmap, directory and node keys are nfs.kerberos's.
 */}}
@@ -30,6 +32,9 @@ The realm, allowlist, idmap, directory and node keys are nfs.kerberos's.
 {{- end }}
 {{- if and $pk.requireMachCred (not $pk.minSec) }}
 {{- fail "pnfs.kerberos.minSec is empty but requireMachCred is on: a sec=sys mount cannot ask for SP4_MACH_CRED, so every one would be refused. Keep minSec (krb5i), or set pnfs.kerberos.requireMachCred=false as well" }}
+{{- end }}
+{{- if and $pk.attachedNodesOnly (not $pk.minSec) }}
+{{- fail "pnfs.kerberos.minSec is empty but attachedNodesOnly is on: a sec=sys mount has no node identity, so every one would be refused. Keep minSec (krb5i), or set pnfs.kerberos.attachedNodesOnly=false as well" }}
 {{- end }}
 {{- $count := int (.Values.pnfs.server.mds.count | default 1) }}
 {{- range $i := until $count }}
@@ -51,6 +56,40 @@ spec:
   - nfs/flint-pnfs-mds-{{ $i }}.{{ include "flint-csi-driver-chart.pnfsKrb5NameBase" $ }}@{{ $realm }}
   secretName: flint-pnfs-mds-{{ $i }}-krb5
   deletionPolicy: {{ $k.deletionPolicy }}
+{{- end }}
+{{- if $pk.attachedNodesOnly }}
+---
+# Each volume only to the nodes it is attached to: the MDS reads which
+# pNFS PersistentVolumes exist, where they are attached, and the nodes'
+# hostnames.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-pnfs-mds
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+rules:
+- apiGroups: [storage.k8s.io]
+  resources: [volumeattachments]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [persistentvolumes, nodes]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-pnfs-mds
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-pnfs-mds
+subjects:
+- kind: ServiceAccount
+  name: flint-pnfs-mds
+  namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- if and $k.nodeKeytab.create (not (include "flint-csi-driver-chart.krb5NodeKeytabByRwx" .)) }}
 ---

@@ -2,9 +2,7 @@
 # servers from nfs_krb5::server_pod_parts (spdk-csi-driver/src/nfs_krb5.rs,
 # test server_env_names_match_the_chart_helper), the pNFS MDS from the
 # chart's flint-csi-driver-chart.krb5ServerEnv (_helpers.tpl; checked by
-# tests/system/chart-kerberos-defaults.sh). Every optional setting on, the
-# attached-nodes-only pair (FLINT_NFS_ATTACHED_NODES_ONLY,
-# FLINT_NFS_NODE_DOMAIN) left out: the MDS does not have it yet.
+# tests/system/chart-kerberos-defaults.sh). Every optional setting on.
 KRB5_KTNAME
 FLINT_NFS_GSS_PRINCIPALS
 FLINT_NFS_GSS_IDMAP
@@ -13,6 +11,8 @@ FLINT_NFS_MIN_SEC
 FLINT_NFS_ENFORCE_PERMISSIONS
 FLINT_NFS_ROOT_SQUASH
 FLINT_NFS_REQUIRE_MACH_CRED
+FLINT_NFS_ATTACHED_NODES_ONLY
+FLINT_NFS_NODE_DOMAIN
 FLINT_NFS_GSS_LDAP_URL
 FLINT_NFS_GSS_LDAP_INSECURE
 FLINT_NFS_GSS_LDAP_REALMS

@@ -416,8 +416,9 @@ parameters, `mountOptions: [sec=krb5i]`). It needs the in-chart MDS
 (`pnfs.server.enabled`) and krb5-operator, as above.
 
 **Settings.** `pnfs.kerberos` has its own `minSec` (`krb5i`),
-`requireMachCred` (`true`), `enforcePermissions` (`enforce`) and
-`storageClass`, with the same meaning and render guards as RWX. Everything
+`requireMachCred` (`true`), `enforcePermissions` (`enforce`),
+`attachedNodesOnly` (`true`) and `storageClass`, with the same meaning and
+render guards as RWX. Everything
 else is `nfs.kerberos`'s: `realm`, `realmRef`, `realmNamespace`,
 `clusterDomain`, `allowedPrincipals`, `idmap`, `machineIdentity`,
 `anonIdentity`, `ldap`, `nodeKeytab`, `deletionPolicy`, and
@@ -432,12 +433,49 @@ and an LDAP bind password Secret and CA must be there too.
 | ControllerPublishVolume | Puts the volume's shard name in the publish context (`nfs.chert.us/krb5-server-name`): shard from the volume id's `~m<i>` suffix, none being shard 0. |
 | node plugin | Before a `sec=krb5*` pNFS mount, maps the PV's MDS IP to that name in `/etc/hosts`, so `rpc.gssd` asks for the shard's principal. Without a name it refuses the mount; it never falls back to the RWX servers' name. Shard 0 has the same name whether the PV carries its per-shard Service's IP or the legacy `flint-pnfs-mds` alias's. |
 | `KerberosNodeKeytab` | The nodes' keys, as for RWX; rendered once when both are on. |
+| ServiceAccount `flint-pnfs-mds` | With `attachedNodesOnly`: the MDS reads PersistentVolumes, VolumeAttachments and Nodes (a read-only ClusterRole). |
 
 **What it protects.** Every pNFS call from a Kerberos mount is
 authenticated and signed (`krb5i`) or sealed (`krb5p`), metadata and data:
 the floor refuses `sec=sys` mounts, the allowlist decides who connects, a
 caller is its `idmap`/directory identity with permissions enforced, and
 sessions are bound to their machine (SP4_MACH_CRED).
+
+**Only the nodes a volume is attached to** (`pnfs.kerberos.attachedNodesOnly`,
+the default; Phase 2). One MDS shard serves every pNFS volume it holds, each
+a top-level name in its export (the PV's `pnfs.chert.us/volume-file`), so
+the RWX servers' per-server check is not enough here. The MDS watches the
+pNFS PersistentVolumes and their VolumeAttachments and keeps, per volume,
+the nodes it is attached to, by their machine principals' hostnames:
+
+- **Clients and sessions,** as for RWX: only a node attached to some pNFS
+  volume makes an NFS client or session, and a node attached to none
+  loses its sessions at its next call.
+- **Per volume:** a PUTFH or RESTOREFH into a volume, and a LOOKUP, OPEN by
+  name, CREATE, REMOVE, RENAME or LINK of a name in the export root or in a
+  volume, are refused with NFS4ERR_ACCESS unless the session's node is
+  attached to that volume. The export root itself is open to every
+  attached node (it is what a mount starts from), but every name in it is
+  a volume and only that volume's nodes reach it; a name that is no pNFS
+  volume reaches nobody. A user's calls ride their node's session and
+  reach what the node does. LAYOUTGET, READ and WRITE need a filehandle
+  first, so they are covered.
+- **A detach** takes effect at the node's next call into the volume: its
+  reads, writes and opens there fail with EACCES (the MDS logs `refused:
+  volume <v> is not attached to the node of this session`), while its
+  other volumes keep working. A fresh mount of the volume may still
+  succeed when the node has another volume of the same MDS mounted: the
+  kernel shares one superblock per export and walks the path from its
+  dentry cache, without a LOOKUP. Nothing under it can be read.
+- **The detach itself** happens only after kubelet has unmounted the
+  volume on that node (NodeUnpublish, NodeUnstage); on a Ready node
+  Kubernetes never times that out. A pod's volume therefore stays
+  reachable from its node until its last pod there is gone and unmounted.
+- Until the first lists arrive, every node and volume is refused. With
+  several shards, the node set is the union over every shard's volumes,
+  and each shard only ever looks up its own.
+- READDIR of the export root still lists every volume's name to an
+  attached node (names only; nothing under them).
 
 **No layouts for Kerberos callers.** Measured (plan, "Phase 0 results"):
 a Linux client with a `sec=krb5i` mount that cannot get a GSS context with
@@ -468,10 +506,9 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
   data Kerberos clients write. Files written before, under AUTH_SYS, stay
   on the DSes, and the MDS relays a Kerberos client's I/O to them (F66),
   over the unauthenticated MDS-to-DS control path.
-- **No attached-nodes-only on the MDS.** Every node with an allowed
-  machine principal reaches every pNFS volume of a shard (the MDS has no
-  attachment watcher yet; Phase 2). `nfs.kerberos.attachedNodesOnly` does
-  not apply to it.
+- **Layouts outlive a detach.** A layout granted before a detach (only
+  to AUTH_SYS callers, which the floor refuses) keeps working at the DSes,
+  which check nothing (Phase 4).
 - **The DSes and the control path** have no Kerberos and no TLS
   (Phases 3 to 5). Something that reaches a DS on 2049 is still served
   without a credential; keep `pnfs.networkPolicy` on.
@@ -682,8 +719,11 @@ model").
 - **pNFS:** `chart-kerberos-defaults.sh` also renders `pnfs.kerberos`
   (off: no change; on: a principal and keytab per shard, the server env
   by the names in `tests/system/krb5-server-env-names.txt`, which a unit
-  test also holds `server_pod_parts` to, no attached-nodes-only, the
-  StorageClass, one node keytab; and the guards). Unit tests: the
+  test also holds `server_pod_parts` to, attached-nodes-only with the
+  MDS's service account and read-only ClusterRole, the StorageClass, one
+  node keytab; and the guards). `node_authz` unit tests: a volume admits
+  only its own nodes, before the first list none, and the fold from PVs
+  and VolumeAttachments. Unit tests: the
   dispatcher's `gss_callers_get_no_files_layout_when_withheld`,
   `pnfs::mds::krb5` (the MDS env, refusals to start) and `nfs_krb5`
   (the shard name, the strict hosts entry). In the VM rig,
@@ -731,7 +771,12 @@ model").
   IP to it; 8 MiB written under `krb5i` are allocated in the MDS's export
   and not on the DSes, with the MDS's F68a meter counting refused
   LAYOUTGETs and no grants; a `sec=sys` pNFS mount is refused by the
-  `krb5i` floor; alice is refused by the allowlist. `PNFS=1` alone runs
+  `krb5i` floor; alice is refused by the allowlist; a second volume used
+  only on one node cannot be mounted from the other (which holds a session
+  for the first volume), the MDS logging the refusal, and after its pod is
+  deleted, the volume leaves the node's `volumesInUse` and is detached, and
+  the first node can no longer read it (the MDS refusing it), while both
+  keep the first volume. `PNFS=1` alone runs
   `tests-pnfs-only/`, the AUTH_SYS control: the same write is striped on
   both DSes and the MDS keeps a sparse stub. Not in CI yet.
 

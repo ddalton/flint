@@ -336,6 +336,14 @@ not RWX Kerberos (nfs.kerberos.enabled) is on.
 {{- end }}
 
 {{/*
+pnfs.kerberos.attachedNodesOnly in effect: the MDS watches attachments and
+needs its service account.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsAttachedNodesOnly" -}}
+{{- if and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).attachedNodesOnly -}}true{{- end -}}
+{{- end }}
+
+{{/*
 The DNS suffix of the MDS shard Services (pnfs-mds.yaml), under which each
 shard's Kerberos name is flint-pnfs-mds-<shard>.<this>. The controller's
 PNFS_KRB5_MDS_NAME_BASE; the principals in pnfs-kerberos.yaml.
