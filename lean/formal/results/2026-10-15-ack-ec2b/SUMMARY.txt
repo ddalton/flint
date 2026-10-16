@@ -1,0 +1,20 @@
+EC2 2026-10-15 23:28Z-00:14Z (second run): c7i.48xlarge spot us-west-1c, 90-min cap.
+Model LeanP1.tla 664f994c; proof copy LeanP1Anc.tla 10166345.  ONE script (in/run.sh).
+TORN DOWN 00:20Z, zero set verified (4 regions; bucket and inline policy gone).
+
+PROOFS (final text = ../2026-10-15-tlaps-rows15-17/chain; 65 shards, ~10 min; out/p):
+  M0 2566, M2 5427, M5D 1316, M6 878 obligations -- ALL PROVED, 0 failed.
+  (M0 shard 1, lines 1-136, is definitions only: "All 0 obligation proved".)
+
+TIE (out/tie): ScopeHolds 8,284,768 / DeposeHolds 18,691,838 / AckCap 31,916,163 /
+  ResHolds 88,776,330 distinct -- all EXACT (generated too).  With the first run's
+  ReaderHolds, DeposeNoAgeHolds, FetchHolds: ALL SEVEN TIE WORLDS EXACT.
+
+AK1 PART 2 CANDIDATES (MCLeanP1M10; out/c):
+  M10AckRename (AckRename bounds): clean to d33, 1,288,865,375 distinct (15-min cap).
+  M10AckRescopeRename2: CPub3 VIOLATED at d6 (5,490 states) -- a rescope makes a
+    declared path clean another way; trace in out/c/M10AckRescopeRename2.out.
+
+Incident: 23:41-23:51Z the tie's `run & run & wait` blocked on the script's own
+background sync/monitor loops (bare `wait` waits for every child); unblocked over
+SSM by stopping those two loops and syncing from outside.

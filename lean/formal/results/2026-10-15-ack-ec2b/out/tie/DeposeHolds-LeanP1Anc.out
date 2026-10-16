@@ -1,0 +1,12 @@
+tla-mc: building a checker for LeanP1Anc (cache: /work/tie/cache-DeposeHolds-LeanP1Anc)
+tla-mc: built in 65.5s
+tla-mc: LeanP1Anc (32 variables, 0 symmetry permutations), 96 workers, generated engine; loaded in 0.007s
+progress: depth 25, 36752962 generated, 10403649 distinct (0 fingerprint spills), 1430631 on queue (0 on disk), 10.8s
+progress: depth 34, 70253673 generated, 18668298 distinct (0 fingerprint spills), 96254 on queue (0 on disk), 21.0s
+Model checking completed. No error has been found.
+70433167 states generated, 18691838 distinct states found. Depth 36. Checked in 21.195s (881893 distinct/s).
+
+real	1m26.747s
+user	33m22.146s
+sys	0m9.781s
+rc=0 23:53:11Z

@@ -1,0 +1,56 @@
+START 2026-10-15T21:32:02Z 192 cpus; LeanP1.tla 664f994c; LeanP1Anc.tla 10166345
+PROOF L1 2026-10-15T21:32:10Z proved 10 failed 2 WALL 7.55 s MAXRSS 301180 kB rc 0
+PROOF M5B 2026-10-15T21:34:30Z proved 63 failed 0 WALL 147.49 s MAXRSS 1881844 kB rc 0
+RUNNER1 stopped (pid 6410
+6412
+6413
+6447
+6452
+6457
+6462
+6467
+6472
+6477
+6482
+6487
+6506
+6513
+6529) 2026-10-15T21:38:48Z: TLC moves to runner2 at 192 workers
+RUNNER2 2026-10-15T21:38:48Z waiting for the proofs
+PROOF M5B 2026-10-15T21:39:14Z proved 63 failed 0 [INFO]: All 214 obligations proved. WALL 147.49 s MAXRSS 1881844 kB rc 0
+PROOF M4 2026-10-15T21:39:44Z proved 419 failed 0 [INFO]: All 1070 obligations proved. WALL 441.02 s MAXRSS 4288624 kB rc 0
+PROOF M8 2026-10-15T21:44:14Z proved 204 failed 0 [INFO]: All 523 obligations proved. WALL 710.81 s MAXRSS 2681112 kB rc 0
+PROOF M9 2026-10-15T21:46:14Z proved 210 failed 0 [INFO]: All 533 obligations proved. WALL 833.76 s MAXRSS 2735900 kB rc 0
+PROOF M7 2026-10-15T21:47:14Z proved 237 failed 5 [ERROR]: 5/625 obligations failed. WALL 904.72 s MAXRSS 2468380 kB rc 0
+PROOF M5A 2026-10-15T21:53:44Z proved 559 failed 0 [INFO]: All 1566 obligations proved. WALL 1279.13 s MAXRSS 8277528 kB rc 0
+PROOF M1 2026-10-15T21:59:15Z proved 950 failed 0 [INFO]: All 3115 obligations proved. WALL 1612.96 s MAXRSS 9662392 kB rc 0
+RUNNER2 stopped (pid 10922) 2026-10-15T22:03:21Z
+RUNNER3 2026-10-15T22:03:21Z TLC now at 184 workers; 6 tlapm still proving
+GATE LeanP1CarrierCitesAny rc=0 2026-10-15T22:04:07Z LeanP1CarrierCitesAny              OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 69100004 states generated, 27793450 distinct states found. Depth 16 | 46s
+RUNNER4 2026-10-15T22:04:41Z runner3 stopped (pid 19411); its world LeanP1AckRename (pid 22686) runs on
+PROOF M6 2026-10-15T22:12:46Z proved 315 failed 1 [ERROR]: 1/872 obligations failed. WALL 2427.93 s MAXRSS 8288160 kB rc 0
+PROOF M3 2026-10-15T22:14:16Z proved 797 failed 0 [INFO]: All 2663 obligations proved. WALL 2506.02 s MAXRSS 10712952 kB rc 0
+PROOF M5D 2026-10-15T22:17:46Z proved 473 failed 1 [ERROR]: 1/1305 obligations failed. WALL 2722.80 s MAXRSS 12237180 kB rc 0
+PROOF M2 2026-10-15T22:22:17Z proved 1401 failed 9 [ERROR]: 9/5353 obligations failed. WALL 2987.01 s MAXRSS 15512272 kB rc 0
+GATE LeanP1AckRename (runner3) 2026-10-15T22:23:12Z LeanP1AckRename                    OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 3871503811 states generated, 1370410221 distinct states found. Depth 38 | 1137s
+START LeanP1AckSync 2026-10-15T22:23:12Z workers 184
+PROOF M0 2026-10-15T22:38:18Z proved 695 failed 7 [ERROR]: 7/2544 obligations failed. WALL 3973.49 s MAXRSS 7541976 kB rc 0
+DIRECT LeanP1AckSync 2026-10-15T22:48:30Z  progress: depth 28, 6089624624 generated, 2076971914 distinct
+START LeanP1AckFetch 2026-10-15T22:48:30Z workers 184
+STOPPED tlapm 6516 LeanP1ProofM5C 2026-10-15T22:59:19Z: superseded by the box run of the fixed text (user: models on 192)
+PROOF M5C 2026-10-15T22:59:49Z proved 1214 failed 4 @!!type:obligationsnumber WALL 5238.34 s MAXRSS 24918252 kB rc 0
+DIRECT LeanP1AckFetch 2026-10-15T23:12:35Z No error has been found 2291573593 distinct states found. Depth 42  progress: depth 41, 6688626788 generated, 2291545369 distinct
+START LeanP1AckRescope 2026-10-15T23:12:35Z workers 192
+DIRECT LeanP1AckRescope 2026-10-15T23:13:18Z No error has been found 19042504 distinct states found. Depth 30  progress: depth 26, 45857263 generated, 16976083 distinct
+START LeanP1AckRescopeSync 2026-10-15T23:13:18Z workers 192
+DIRECT LeanP1AckRescopeSync 2026-10-15T23:14:07Z No error has been found 27778807 distinct states found. Depth 31  progress: depth 23, 45956045 generated, 17514633 distinct
+START M7AckRescopeRename2 2026-10-15T23:14:07Z workers 192
+DIRECT M7AckRescopeRename2 2026-10-15T23:14:36Z is violated 4067 distinct states found. Depth 5  
+START M7AckRename 2026-10-15T23:14:36Z workers 192
+DIRECT M7AckRename 2026-10-15T23:15:05Z is violated 1706 distinct states found. Depth 5  
+TLC DONE 2026-10-15T23:15:05Z
+DONE 2026-10-15T23:15:05Z
+TIE START 2026-10-15T23:15:12Z (runner4 pid  stopped)
+TIE ReaderHolds EXACT | orig: 3101946 states generated, 838613 distinct states found No error has been found | anc: 3101946 states generated, 838613 distinct states found No error has been found
+TIE DeposeNoAgeHolds EXACT | orig: 9630092 states generated, 2725409 distinct states found No error has been found | anc: 9630092 states generated, 2725409 distinct states found No error has been found
+TIE FetchHolds EXACT | orig: 11552518 states generated, 3524707 distinct states found No error has been found | anc: 11552518 states generated, 3524707 distinct states found No error has been found

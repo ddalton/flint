@@ -1,0 +1,14 @@
+START 2026-10-15T23:30:06Z 192 cpus; LeanP1.tla 664f994c; LeanP1Anc.tla 10166345
+PROOFS launched 2026-10-15T23:30:07Z: 65 shards
+PROOF M2 2026-10-15T23:40:09Z obligations 5427 failed 0 not-done -
+PROOF M0 2026-10-15T23:40:09Z obligations 2566 failed 0 not-done M0-S1.out
+PROOF M5D 2026-10-15T23:40:09Z obligations 1316 failed 0 not-done -
+PROOF M6 2026-10-15T23:40:09Z obligations 878 failed 0 not-done -
+FIX 2026-10-15T23:51:44Z: run.sh was blocked in wait on its own sync/monitor loops after the ScopeHolds pair; loops stopped, sync restarted outside
+TIE ScopeHolds EXACT | orig: 25826396 states generated, 8284768 distinct states found No error has been found | anc: 25826396 states generated, 8284768 distinct states found No error has been found
+TIE DeposeHolds EXACT | orig: 70433167 states generated, 18691838 distinct states found No error has been found | anc: 70433167 states generated, 18691838 distinct states found No error has been found
+TIE AckCap EXACT | orig: 90634552 states generated, 31916163 distinct states found No error has been found | anc: 90634552 states generated, 31916163 distinct states found No error has been found
+TIE ResHolds EXACT | orig: 311381738 states generated, 88776330 distinct states found No error has been found | anc: 311381738 states generated, 88776330 distinct states found No error has been found
+CAND M10AckRename 2026-10-16T00:12:57Z  progress: depth 33, 3568648397 generated, 1288865375 distinct
+CAND M10AckRescopeRename2 2026-10-16T00:13:27Z Invariant CPub3 is violated 5490 distinct states found. Depth 6  
+DONE 2026-10-16T00:13:27Z

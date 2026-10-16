@@ -1,0 +1,15 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-15 23:30:07 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 1 136 --cleanfp --method smt --stretch 12 --threads 1 -k LeanP1ProofM0.tla
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:0
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM0.tlaps/LeanP1ProofM0.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM0.tlaps/fingerprints" *)
+File "./LeanP1ProofM0.tla", line 1, character 1 to line 1906, character 78:
+[INFO]: All 0 obligation proved.
+WALL 1.82 s MAXRSS 101572 kB rc 0

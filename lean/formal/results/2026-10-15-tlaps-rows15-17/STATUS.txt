@@ -1,51 +1,32 @@
-TLAPS for rows 15-17 (ack, restart, deposal): STATE AT PAUSE, 2026-10-15 ~01:00Z
-(user: "prepare to record and pause for the day"; Linux box shut down after this)
+TLAPS for rows 15-17 (ack, restart, deposal): STATE 2026-10-16 ~00:30Z
 
-MODEL: lean/formal/LeanP1.tla 7da806af (uncommitted).  Since the EC2 gate's final
-4be149ab only the declared types of two ghost fields changed (stamps: a clock or
-"none"; lost: a handle or Nil) -- no transition, no state count.
+MODEL: lean/formal/LeanP1.tla 664f994c (L-137 fixed: the carrier records what it
+published, `pub`; Uncited names a carried path whose bytes the document no longer
+holds).  Proof copy LeanP1Anc.tla 10166345 (make-anc.py v4, span md5s pinned).
 
-1. make-anc.py v4 (this dir) -- DONE.  v3 (results/2026-10-06-tlaps-typeok) was
-   dropping the rows 15-17 edits silently: it replaces whole action spans with
-   hand-written text and checked only the anchors, so Install/Finish/Consume/...
-   lost their new fields and RPullSync's span swallowed the whole new section
-   (Touch, Honor, HonorReader, RetireByAck, Depose, Fence).  v4: 48 fields, every
-   edited span rewritten, the six new actions as explicit records (Depose writes
-   two trees), and every rewritten span's ORIGINAL text pinned (span-md5.txt):
-   a changed span stops the generator until its rewrite is reviewed and
-   RECORD_SPANS=1 re-pins it.  LeanP1Anc.tla here: ac0bca63 (from 7da806af).
+THE TIE: all seven worlds EXACT (generated and distinct) on the pair --
+  ReaderHolds 838,613 / DeposeNoAgeHolds 2,725,409 / FetchHolds 3,524,707 /
+  ScopeHolds 8,284,768 / DeposeHolds 18,691,838 / AckCap 31,916,163 /
+  ResHolds 88,776,330  (../2026-10-15-ack-ec2/out/tie, ../2026-10-15-ack-ec2b/out/tie).
 
-2. THE TIE (out/tie/, run-tie.sh; box /mnt/nvme/leanp1-anc4): distinct AND generated
-   counts equal on LeanP1.tla and LeanP1Anc.tla under the gate's cfgs.  Run on the
-   4be149ab pair (Anc 47fccb1e):
-     ReaderHolds 838,613 / DeposeNoAgeHolds 2,725,409 / FetchHolds 3,524,707 /
-     ScopeHolds 8,284,768 / DeposeHolds 18,691,838 -- all EXACT.
-     AckCap and ResHolds NOT finished (stopped for the pause).
-   OWED: re-run all seven on the final pair (7da806af / ac0bca63) -- ~1.5 h on the box.
+PROVED on the final text (chain/, MD5.txt; every file is the one its record run checked):
+  M0 2566   M1 3115   M2 5427   M3 2663   M4 1070   M5A 1566   M5B 214
+  M5C 4345  M5D 1316  M6 878    M7 725 (AK3, AK4)    M8 523 (NR1)
+  M9 533 (DP1, DP2)   L1 27 (liveness)   M10 426 (AK1 from BoundOK, UncitedCatches)
+  Logs: ../2026-10-15-ack-ec2/out/p, ../2026-10-15-ack-ec2b/out/p, out/box.
+  Method: tlapm's front end is single-threaded -> shard each module by line range
+  (shard-ranges.py, run-shards.sh); on the 8-core box at most 4 shards (8 at once
+  starve Z3 and give false timeouts).
 
-3. M0 (gen-m0.py; first run out/m0-run1, STOPPED at 318 proved, 6 failed, all
-   TIMEOUTS at the 60 s limit, box loaded by the tie):
-     148      WriterFields <1>4 (10 new field types out of the 48-field Writer)
-     640, 747 the BARRIER_END fact (Skip, PullOnly), phrased through the record
-     641, 748 Skip's / PullOnly's record membership
-     857      Install's record membership
-   FIX NEXT: split WriterFields' new block into 2-3-conjunct steps; state the
-   barrier-end facts on the expressions (not `SkipW(s).car`), without WriterFields;
-   drop WriterFields from membership goals where DEF Writer already gives w[s]'s
-   fields; then run M0 alone on a quiet box (--stretch 24 if still near the limit).
-   Note the regex in gen-m0.py also appended the field-type DEFs to `<1>0. w[s] \in
-   Writer BY ... DEF TypeOK` (harmless).
-
-4. NEXT AFTER M0: M1 (results/2026-10-07-tlaps-m1/gen-proof.py chained):
-   Inv_OneHolder restated in two conjuncts; a new invariant D: a deposed writer is in
-   its commit section and is not the holder (Claim needs ~deposed: D gives it);
-   HolderWrite needs R.deposed; steps that move the lease: Claim, Finish (releases
-   only its own), Restart, Depose (holder' = t, the old holder deposed).  Then M2-M6,
-   M5C/M5D/M6/L1 (hand-written modules), then M7 (AK1/AK3/AK4), M8 (NR1), M9 (DP1, DP2).
-
-5. THE PRE-ROWS-15 FULL RECORD (box /mnt/nvme/leanp1-full, copied to
-   results/2026-10-14-tlaps-full-record/out): FULLDONE; every module proved but 8
-   TIMEOUTS (M0: 591, 975, 1081, 1152; M5C: 423, 429, 440, 604), none a failed step.
-   The box was carrying ten ORPHANED Z3 workers (5-10 h old) from earlier runs at
-   the time: tlapm does not kill a Z3 that times out.  Killed 2026-10-15.  TRAP:
-   after any tlapm run, `pgrep -x z3` and kill the leftovers by PID.
+OPEN: AK1 part 2 -- BoundOK an invariant (gen-m11.py -> chain/LeanP1ProofM11.tla;
+AK1-PLAN.txt).  Proved so far (194 + 89): A1BrokenKeep, A1NoTree, the five gateway
+steps, A1Keep (a writer step that keeps AK1's fields).  The invariant A1IAK1 is
+MCLeanP1M10's candidate set (m10c/):
+  holds: one path (M10A, 388,025, complete); two paths to d25+ (M10B); AckRename's
+  bounds to d33, 1.29B (EC2).
+  BREAKS: CPub3 at d6 in the rescope-rename world (../2026-10-15-ack-ec2b/out/c/
+  M10AckRescopeRename2.out) -- a rescope makes a declared path clean another way.
+  NEXT: read that trace, correct CPub3, re-check (box); two-writer worlds M10C1/C2
+  running on the box (m10c2.sh); then the remaining step lemmas: tree steps (fetches),
+  Scan, Install, Touch, the barrier ends (UncitedCatches), the live-shrinking steps
+  (Sweep, Reap, Collect: SurfacedDecl), Init, Next, THEOREM Spec => AK1.

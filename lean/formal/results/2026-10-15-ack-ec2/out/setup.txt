@@ -1,0 +1,16 @@
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root       968G  3.5G  965G   1% /
+NAME         MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+loop0          7:0    0 28.4M  1 loop /snap/amazon-ssm-agent/13349
+loop1          7:1    0   74M  1 loop /snap/core22/2955
+loop2          7:2    0 44.7M  1 loop /snap/snapd/28254
+loop3          7:3    0 61.3M  1 loop /snap/aws-cli/2312
+nvme0n1      259:0    0 1000G  0 disk 
+├─nvme0n1p1  259:1    0  999G  0 part /
+├─nvme0n1p14 259:2    0    4M  0 part 
+├─nvme0n1p15 259:3    0  106M  0 part /boot/efi
+└─nvme0n1p16 259:4    0  913M  0 part /boot
+192
+               total        used        free      shared  buff/cache   available
+Mem:             371           4         367           0           2         367
+Swap:              0           0           0

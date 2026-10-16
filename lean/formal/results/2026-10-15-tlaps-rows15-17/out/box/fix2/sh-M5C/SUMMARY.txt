@@ -1,0 +1,7 @@
+MODULE M5C 2026-10-15T23:01:01Z 4 shards
+SHARD 1 lines 1-572: [INFO]: All 903 obligations proved. WALL 951.98 s MAXRSS 7621460 kB rc 0
+SHARD 2 lines 573-1106: [INFO]: All 990 obligations proved. WALL 1497.66 s MAXRSS 5532324 kB rc 0
+SHARD 3 lines 1107-1696: [INFO]: All 1364 obligations proved. WALL 1581.45 s MAXRSS 9498920 kB rc 0
+SHARD 4 lines 1697-2263: [INFO]: All 1088 obligations proved. WALL 1725.13 s MAXRSS 6606740 kB rc 0
+failed: 0
+SHARDSDONE

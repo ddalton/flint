@@ -1,0 +1,19 @@
+tla-mc: building a checker for LeanP1Anc (cache: /work/tie/cache-ResHolds-LeanP1Anc)
+tla-mc: built in 67.4s
+tla-mc: LeanP1Anc (32 variables, 0 symmetry permutations), 96 workers, generated engine; loaded in 0.009s
+progress: depth 18, 26337308 generated, 8491770 distinct (0 fingerprint spills), 2632735 on queue (0 on disk), 10.5s
+progress: depth 20, 51013295 generated, 16185035 distinct (0 fingerprint spills), 4261752 on queue (0 on disk), 21.0s
+progress: depth 22, 86803543 generated, 27151497 distinct (0 fingerprint spills), 5874445 on queue (0 on disk), 37.0s
+progress: depth 24, 132347908 generated, 40997186 distinct (0 fingerprint spills), 7245388 on queue (0 on disk), 57.2s
+progress: depth 25, 158132290 generated, 48642236 distinct (0 fingerprint spills), 7645050 on queue (0 on disk), 68.3s
+progress: depth 26, 184712444 generated, 56294610 distinct (0 fingerprint spills), 7652374 on queue (0 on disk), 79.4s
+progress: depth 28, 234897172 generated, 69995055 distinct (0 fingerprint spills), 6475390 on queue (0 on disk), 98.1s
+progress: depth 30, 274090582 generated, 80170081 distinct (0 fingerprint spills), 4605763 on queue (0 on disk), 113.0s
+progress: depth 33, 305743084 generated, 87770554 distinct (0 fingerprint spills), 1493564 on queue (0 on disk), 125.8s
+Model checking completed. No error has been found.
+311381738 states generated, 88776330 distinct states found. Depth 39. Checked in 128.409s (691355 distinct/s).
+
+real	3m15.965s
+user	201m54.990s
+sys	0m59.399s
+rc=0 23:57:55Z

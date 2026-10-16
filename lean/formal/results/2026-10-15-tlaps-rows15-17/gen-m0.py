@@ -4,8 +4,104 @@ new steps; copied from results/2026-10-06-tlaps-typeok/gen-proof.py.)
 Emit lean/formal/LeanP1Proof.tla (M0: Spec => []TypeOK) with one uniform
 lemma shape per step: hidden facts cited where needed, never the whole
 invariant expanded into a step's hypotheses."""
-import sys
+import sys, os, re
 OUT = sys.argv[1]
+def _split_top(s, sep=','):
+    out, d, cur, i = [], 0, '', 0
+    while i < len(s):
+        if s.startswith('<<', i): d += 1; cur += '<<'; i += 2; continue
+        if s.startswith('>>', i): d -= 1; cur += '>>'; i += 2; continue
+        c = s[i]
+        if c in '([{': d += 1
+        if c in ')]}': d -= 1
+        if d == 0 and c == sep: out.append(cur); cur = ''; i += 1; continue
+        cur += c; i += 1
+    out.append(cur); return out
+_anc = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'LeanP1Anc.tla')).read()
+_m = re.search(r'^Writer ==\n(.*?)\n(?=\S)', _anc, re.S | re.M)
+_wtext = re.sub(r'[ \t]*\\\*[^\n]*', '', _m.group(1)).strip()
+WRITERT = 'WriterT ==\n' + re.sub(r'[ \t]*\\\*[^\n]*', '', _m.group(1))
+WRITERT = '\n'.join(l for l in WRITERT.split('\n') if l.strip())
+for _f, _ty in [('pend', 'PendT'), ('ack', 'AckT'), ('car', 'CarT'), ('bound', 'BoundT')]:
+    _n = len(re.findall(r'\b%s : \[' % _f, WRITERT)); assert _n == 1, (_f, _n)
+    _i = WRITERT.index(_f + ' : ['); _d = 0
+    for _j in range(_i + len(_f) + 3, len(WRITERT)):
+        _d += {'[': 1, ']': -1}.get(WRITERT[_j], 0)
+        if _d == 0: break
+    WRITERT = WRITERT[:_i] + _f + ' : ' + _ty + WRITERT[_j + 1:]
+# Each Writer field's type, as WriterT names it.
+FTYPE = {}
+for _kv in _split_top(WRITERT[WRITERT.index('[') + 1:WRITERT.rindex(']')]):
+    _k, _, _v = _kv.partition(' : ')
+    FTYPE[_k.strip()] = ' '.join(_v.split())
+
+def RECOP(rec):
+    """A record `rec` (`XW(args)`) whose changed fields are IF expressions or other
+    terms: tlapm lifts a field's IF out of the record, so a 48-field membership with
+    k of them is 2^k records (2026-10-15: Skip, PullOnly, Finish, Install timed out
+    even alone).  `XRec(args, v...)` is the record with each changed field a
+    parameter; `XRecType` its membership from the parameters' types (fast: no IF);
+    the step proves each changed field's type, then the membership is an instance.
+    Returns (definitions + lemma, [(field, value, type)], instance term)."""
+    name = rec.split('(')[0]; args = rec[len(name) + 1:-1]
+    m = re.search(r'^' + re.escape(rec) + r' ==\n(.*?)\n(?=\S)', _anc, re.S | re.M)
+    body = m.group(1).strip()
+    assert body.startswith('[') and body.endswith(']'), rec
+    parts = _split_top(body[1:-1])
+    fields = []
+    for part in parts:
+        k, _, v = part.partition('|->')
+        fields.append((k.strip(), ' '.join(v.split())))
+    assert [f for f, _ in fields] == list(FTYPE), (rec, [f for f, _ in fields][:5])
+    # A constant field stays literal in XRec (XRecType types it at no cost):
+    # the instance's parameters are the state-dependent fields only (Finish
+    # with all 21 changed fields as parameters ran past 60 s, 2026-10-15).
+    CONST = re.compile(r'^("[a-z-]+"|\{\}|FALSE|TRUE|\d+|\[p \\in Paths \|-> Nil\])$')
+    ch = [(f, v) for f, v in fields if v != f'w[s].{f}' and not CONST.match(v)]
+    kept = {f: v for f, v in fields if v != f'w[s].{f}' and CONST.match(v)}
+    pn = {f: 'v' + f[0].upper() + f[1:] for f, _ in ch}
+    opn = name[:-1] + 'Rec'
+    sig = f'{opn}(' + ', '.join([args] + [pn[f] for f, _ in ch]) + ')'
+    lines = [f'   {f} |-> ' + (pn[f] if f in pn else kept.get(f, f'w[s].{f}')) for f, _ in fields]
+    d = f'{sig} ==\n  [' + ',\n'.join(lines).lstrip() + ']\n'
+    asm = ''.join(f', NEW {pn[f]} \\in {FTYPE[f]}' for f, _ in ch)
+    d += f'LEMMA {opn}Type ==\n  ASSUME NEW s \\in Writers, w[s] \\in Writer{asm}\n  PROVE  {sig} \\in Writer\nBY WriterFields, WriterTEq DEF {opn}, WriterT, Opt\n\n'
+    inst = f'{opn}({args}, ' + ', '.join(v for _, v in ch) + ')'
+    return d, [(f, v, FTYPE[f]) for f, v in ch], inst, opn
+
+def RECMEM(rec, n, facts, cites, prefix=None, memlabel=None):
+    """The membership of `rec` at step <1>n via RECOP: one step per changed field
+    (a barrier-end fact when one states it), then the instance and the equality.
+    A field whose value has an IF is NAMED first (a proof-local DEFINE, opaque
+    until expanded): the instance then has no IF to lift (2026-10-15: Finish's,
+    with five, ran past 60 s).  Returns (text, next n, the membership's step, defs)."""
+    d, ch, inst, opn = RECOP(rec)
+    st = ''; mine = []; args = []; names = []
+    for f, v, ty in ch:
+        nm = None
+        if 'IF ' in v:
+            nm = 'f' + opn[:-3] + f[0].upper() + f[1:]
+            st += f'<1> DEFINE {nm} == {v}\n'; names.append(nm)
+        a = nm or v; args.append(a)
+        hit = [c for (txt, _), c in zip(facts, cites) if txt.startswith(f'({v}) \\in')]
+        lab = f'<1>{prefix}{n}' if prefix else f'<1>{n}'
+        dn = f', {nm}' if nm else ''
+        if re.search(r'\bNo(Pend|Ack|Car)\b', v):   # the empty record and its type
+            dn += ', NoPend, NoAck, NoCar, PendT, AckT, CarT'
+        if hit:
+            if not nm:
+                mine.append(hit[0]); continue
+            st += f'{lab}. {nm} \\in {ty} BY {hit[0]} DEF {nm}\n'
+        else:
+            need = '<1>0, <1>d, WriterFields' if ('w[s]' in v or 'doc' in v or 'seq' in v) else '<1>d'
+            st += f'{lab}. ({a}) \\in {ty}\n  BY {need}, {", ".join(cites) + ", " if cites else ""}ShippedShape DEF Opt, Shipped{dn}\n'
+        mine.append(lab); n += 1
+    inst = f'{opn}(' + ', '.join([rec[len(rec.split("(")[0]) + 1:-1]] + args) + ')'
+    lab = f'<1>{prefix}{n}' if prefix else f'<1>{n}'
+    st += f'{lab}. {inst} \\in Writer\n  BY ' + ', '.join(['<1>0'] + mine + [f'{opn}Type']) + '\n'; a = lab; n += 1
+    lab = memlabel or f'<1>{n}'
+    st += f'{lab}. {rec} \\in Writer BY {a} DEF {rec.split("(")[0]}, {opn}{"".join(", " + x for x in names)}\n'; mem = n; n += 1
+    return st, n, mem, d
 
 HEADER = r'''---------------------------- MODULE LeanP1Proof ------------------------------
 (* The TLAPS proof module for the lean protocol (docs/plans/
@@ -72,9 +168,16 @@ PendT == [id : Nat, fold : Nat, nonces : SUBSET Nat]
 AckT == [st : {"none", "ok", "partial", "refused-read-only"}, nonces : SUBSET Nat, seq : Nat,
          src : Clocks \cup {"none"}, dropped : SUBSET Paths, inst : BOOLEAN]
 CarT == [id : Nat, paths : SUBSET Paths, deletes : SUBSET Paths,
-         dropped : SUBSET Paths, uncited : SUBSET Paths]
+         dropped : SUBSET Paths, uncited : SUBSET Paths, pub : [Paths -> Opt(Handles)]]
 BoundT == [id : Nat, fold : Nat, doc : [Paths -> Opt(Handles)], seq : Nat,
            wd : SUBSET Paths, inst : BOOLEAN, clk : Clocks \cup {"none"}]
+
+\* `Writer` with those four types NAMED: a record goal over WriterT checks
+\* `pend \in PendT` as one atom, not seven nested fields (run 1: three of
+\* the barrier ends' memberships timed out expanding them).
+@@WRITERT@@
+LEMMA WriterTEq == Writer = WriterT
+BY DEF Writer, WriterT, PendT, AckT, CarT, BoundT
 
 ------------------------------------------------------------------------------
 (* The inductive invariant for TypeOK.                                      *)
@@ -151,10 +254,12 @@ LEMMA WriterFields ==
       /\ W.unlinked \subseteq Paths
       /\ W.memo \in Nat /\ W.rnow \in Nat
   BY DEF Writer
+\* Through WriterT, the nested types as atoms (runs 1 and 2: `W.pend \in PendT
+\* BY DEF Writer, PendT` alone ran past 60 s).
 <1>4. /\ W.nt \in Nat /\ W.pend \in PendT /\ W.ack \in AckT /\ W.car \in CarT
       /\ W.cId \in Nat /\ W.cFold \in Nat /\ W.clk \in Clocks \cup {"none"}
       /\ W.iseq \in Nat /\ W.instd \in BOOLEAN /\ W.bound \in BoundT
-  BY DEF Writer, PendT, AckT, CarT, BoundT
+  BY WriterTEq DEF WriterT
 <1>5. /\ W.cN \subseteq Nat /\ W.aN \subseteq Nat /\ W.capped \subseteq Nat
       /\ W.dset \subseteq Paths /\ W.decl \in [Paths -> Opt(Handles)] /\ W.dMint \in [Paths -> Nat]
       /\ W.moved \subseteq Paths /\ W.stamps \subseteq Nat \X (Clocks \cup {"none"})
@@ -421,11 +526,12 @@ UNCH_ALL_BUT_W = '''UNCHANGED <<live, minted, doc, seq, tomb, base, acked, confl
                      nextGen, ui, reqs, barriers, restarts, syncs, regressed, rescopes, fails, upped, copies, orig>>'''
 
 def step(name, sig, binders, pick, rec, rec_defs, other_primed, unch, unch_defs, facts, reads, reads_defs,
-         minted_grows=False, extra_typeok=''):
+         minted_grows=False, extra_typeok='', wt=False):
     """One writer step.  pick: ('PICK x \\in S :', [conjuncts before w']) or None.
     facts: list of (text, by) steps proved before the membership (cited there and in TypeOK').
     reads: the record's local/uploads/snap facts for Minted'."""
     base = sig.split('(')[0]
+    wt = wt or name in ('Skip', 'PullOnly', 'Finish', 'RetireByAck')   # through RECOP
     st = f'''LEMMA {name}_TypeOK ==
   ASSUME IndTypeOK, NEW s \\in Writers{binders}, {sig}, Frame
   PROVE  IndTypeOK'
@@ -447,12 +553,20 @@ def step(name, sig, binders, pick, rec, rec_defs, other_primed, unch, unch_defs,
     n = 3; cites = []; cites1 = []
     for fact in facts:
         text, by = fact[0], fact[1]
-        st += f'<1>{n}. {text}\n  BY {by}\n'; cites.append(f'<1>{n}')
+        st += f'<1>{n}. {text}\n' + (by[1:] if by.startswith('\n') else f'  BY {by}\n'); cites.append(f'<1>{n}')
         if len(fact) > 2 and fact[2]: cites1.append(f'<1>{n}')
         n += 1
     c = ', '.join(cites)
     cc = (c + ', ') if c else ''
-    st += f'<1>{n}. {rec} \\in Writer BY <1>0, <1>d, {cc}WriterFields DEF {rec_defs}, PendT, AckT, CarT, BoundT\n'; mem = n; n += 1
+    if wt:   # the record through its RECOP (no IF field in the membership goal)
+        _t, n, mem, _d = RECMEM(rec, n, facts, cites)
+        st += _t
+        st = _d + st
+    else:
+        if rec.split('(')[0] in ('RescopeBeginW', 'RescopeFirstW', 'RPullSyncW'):   # not TouchW: its new pend needs PendT expanded (box 10-15: 100%)   # EC2 10-15: timed out (100%) expanding the nested types; WriterT keeps them atoms
+            st += f'<1>{n}. {rec} \\in Writer BY <1>0, <1>d, {cc}WriterFields, WriterTEq DEF {rec_defs.replace("Writer,", "WriterT,")}\n'; mem = n; n += 1
+        else:
+            st += f'<1>{n}. {rec} \\in Writer BY <1>0, <1>d, {cc}WriterFields DEF {rec_defs}, PendT, AckT, CarT, BoundT\n'; mem = n; n += 1
     st += f'<1>{n}. w\' \\in [Writers -> Writer] /\\ \\A t \\in Writers : w\'[t] = IF t = s THEN {rec} ELSE w[t]\n  BY <1>a, <1>1, <1>{mem}, WriteOne\n'; wt = n; n += 1
     st += f'<1>{n}. FrameOK BY <1>a, <1>1, <1>2, <1>{wt}, FrameTypeOK DEF TypeOK\n'; fr = n; n += 1
     st += f'<1>{n}. TypeOK\' BY <1>a, <1>1, <1>2, {cc}<1>{wt}, <1>{fr} DEF TypeOK, FrameOK{extra_typeok}\n'; tk = n; n += 1
@@ -475,9 +589,18 @@ def reads_unchanged(rec, rdefs):
              f'\\A q \\in {rec}.uploads : {rec}.snap[q] \\in minted\''), f'{rdefs}, Minted, Opt')
 
 def BARRIER_END(rec, d, q, wd, b, dfact='<1>d', extra=''):
-    """The facts a barrier's end needs: the carrier recomputed and the bound written."""
-    return [(f'/\\ {rec}.car \\in CarT /\\ {rec}.bound \\in BoundT',
-             f'<1>0, {dfact}{extra}, WriterFields, CarUncitedType, BoundType DEF {rec.split("(")[0]}')]
+    """The facts a barrier's end needs: the carrier recomputed and the bound written,
+    each stated on the field's own expression (run 1: through `{rec}.car`, which
+    expands the 48-field record, two of these timed out)."""
+    return [(f'(IF w[s].car.id # 0 THEN CarUncited(w[s].car, {d}) ELSE w[s].car) \\in CarT',
+             f'<1>0, {dfact}{extra}, CarUncitedType'),
+            # Directly, BoundT expanded (the BoundType instance ran past 60 s: 2026-10-15).
+            (f'(IF w[s].cId # 0 THEN [id |-> w[s].cId, fold |-> w[s].cFold, doc |-> {d}, seq |-> {q}, '
+             f'wd |-> {wd}, inst |-> {b}, clk |-> w[s].clk] ELSE w[s].bound) \\in BoundT',
+             '\n  <2>1. /\\ w[s].cId \\in Nat /\\ w[s].cFold \\in Nat /\\ w[s].clk \\in Clocks \\cup {"none"} /\\ w[s].bound \\in BoundT\n'
+             '        /\\ w[s].inst \\in [Paths -> Opt(Handles)] /\\ w[s].iseq \\in Nat /\\ w[s].gone \\subseteq Paths /\\ w[s].instd \\in BOOLEAN\n'
+             '    BY <1>0, WriterFields\n'
+             f'  <2>. QED BY <2>1, {dfact} DEF BoundT\n')]
 
 BODY = ''
 BODY += '------------------------------------------------------------------------------\n(* The agent.                                                               *)\n\n'
@@ -732,7 +855,8 @@ BODY += step('Claim', 'Claim(s)', '', None, 'ClaimW(s)', 'ClaimW, Writer',
              ', aux', [], *reads_unchanged('ClaimW(s)', 'ClaimW'))
 BODY += step('Verify', 'Verify(s)', '', None, 'VerifyW(s)', 'VerifyW, Writer',
              '', UNCH_ALL_BUT_W, ', bucket, aux', [], *reads_unchanged('VerifyW(s)', 'VerifyW'))
-BODY += r'''LEMMA Install_TypeOK ==
+_im_t, _, _, _im_d = RECMEM('InstallW(s)', 1, [], ['<1>3', '<1>4', '<1>4a'], prefix='m', memlabel='<1>6')
+BODY += _im_d + r'''LEMMA Install_TypeOK ==
   ASSUME IndTypeOK, NEW s \in Writers, Install(s), Frame
   PROVE  IndTypeOK'
 <1>a. TypeOK BY DEF IndTypeOK
@@ -763,14 +887,31 @@ BODY += r'''LEMMA Install_TypeOK ==
 <1>5. conflicts' \subseteq Paths \X Opt(Handles)
   BY <1>a, <1>0, <1>1, WriterFields DEF TypeOK, InstallMine, InstallContested, InstallDelOverridden, InstallDelOver, DeletedAt, Opt
 <1>4a. InstallCar(s) \in CarT
-  BY <1>0, <1>3, WriterFields DEF InstallCar, InstallCar0, CarT
-<1>4b. /\ InstallW(s).car \in CarT
-       /\ InstallW(s).stamps \subseteq Nat \X (Clocks \cup {"none"})
-       /\ InstallW(s).lost \subseteq Opt(Handles)
-       /\ InstallW(s).iseq \in Nat /\ InstallW(s).instd \in BOOLEAN
-  BY <1>0, <1>d, <1>4a, WriterFields DEF InstallW
-<1>6. InstallW(s) \in Writer BY <1>0, <1>d, <1>3, <1>4, <1>4b, WriterFields DEF InstallW, Writer, Opt, PendT, AckT, CarT, BoundT
-<1>7. w' \in [Writers -> Writer] /\ \A t \in Writers : w'[t] = IF t = s THEN InstallW(s) ELSE w[t]
+  \* L-137's `pub` is an IF over the paths: name it, type it alone.
+  <2> DEFINE C0 == InstallCar0(s)
+             cPub == [p \in Paths |-> IF p \in w[s].uploads \ w[s].gone THEN w[s].snap[p]
+                                      ELSE IF p \in w[s].uploads \cup w[s].deletes THEN Nil
+                                      ELSE C0.pub[p]]
+  <2>1. C0 \in CarT
+    <3>1. w[s].car \in CarT /\ w[s].cId \in Nat BY <1>0, WriterFields
+    <3>2. [id |-> w[s].cId, paths |-> {}, deletes |-> {}, dropped |-> {}, uncited |-> {},
+           pub |-> [p \in Paths |-> Nil]] \in CarT
+      BY <3>1 DEF CarT, Opt
+    <3> QED BY <3>1, <3>2 DEF InstallCar0
+  <2>2. /\ w[s].uploads \subseteq Paths /\ w[s].deletes \subseteq Paths /\ w[s].gone \subseteq Paths
+        /\ w[s].snap \in [Paths -> Opt(Handles)]
+    BY <1>0, WriterFields
+  <2>3. C0.pub \in [Paths -> Opt(Handles)] BY <2>1 DEF CarT
+  <2>4. cPub \in [Paths -> Opt(Handles)]
+    <3> SUFFICES ASSUME NEW p \in Paths PROVE cPub[p] \in Opt(Handles) OBVIOUS
+    <3> QED BY <2>2, <2>3 DEF Opt
+  <2>5. InstallCar(s) = [id |-> C0.id, paths |-> C0.paths \cup w[s].uploads \cup w[s].deletes,
+                         deletes |-> (C0.deletes \ w[s].uploads) \cup w[s].deletes,
+                         dropped |-> C0.dropped \cup w[s].gone \cup {p \in w[s].deletes : InstallInst(s)[p] # Nil},
+                         uncited |-> C0.uncited, pub |-> cPub]
+    BY DEF InstallCar
+  <2> QED BY <2>1, <2>2, <2>4, <2>5 DEF CarT
+@@INSTALLMEM@@<1>7. w' \in [Writers -> Writer] /\ \A t \in Writers : w'[t] = IF t = s THEN InstallW(s) ELSE w[t]
   BY <1>a, <1>1, <1>6, WriteOne
 <1>8. tomb' \in [Paths -> Opt(Handles)] BY <1>a, <1>1, <1>3 DEF TypeOK, Opt
 <1>9. FrameOK BY <1>a, <1>1, <1>3, <1>7, FrameTypeOK DEF TypeOK
@@ -834,7 +975,7 @@ BODY += step('Finish', 'Finish(s)', '', None, 'FinishW(s)', 'FinishW, Writer, Op
              '      /\\ holder\' = IF holder = s THEN "none" ELSE holder\n',
              '''UNCHANGED <<live, minted, doc, seq, tomb, base, acked, conflicts, gw, mv, udel,
                      nextGen, ui, reqs, barriers, restarts, syncs, regressed, rescopes, fails, upped, copies, orig>>''',
-             ', aux', BARRIER_END('FinishW(s)', 'w[s].inst', 'w[s].iseq', 'w[s].gone', 'w[s].instd'),
+             ', aux', BARRIER_END('FinishW(s)', 'w[s].inst', 'w[s].iseq', 'w[s].gone', 'w[s].instd', extra=', WriterFields'),
              ('\\A q \\in Paths : FinishW(s).local[q] \\in Opt(minted\')', '\\A q \\in FinishW(s).uploads : FinishW(s).snap[q] \\in minted\''), 'FinishW, Minted, Opt')
 BODY += '------------------------------------------------------------------------------\n(* The restart and the sync.                                                *)\n\n'
 BODY += step('Restart', 'Restart(s)', '', None, 'RestartW(s)', 'RestartW, Writer, Opt',
@@ -1099,6 +1240,10 @@ def flatten_unchanged(text):
             names += [x.strip() for x in GROUPS.get(n, n).split(',')]
         return ' /\\ '.join(f"{n}' = {n}" for n in names)
     return re.sub(r'UNCHANGED <<([^>]*)>>', sub, text)
+assert BODY.count('@@INSTALLMEM@@') == 1
+BODY = BODY.replace('@@INSTALLMEM@@', _im_t)
+assert HEADER.count('@@WRITERT@@') == 1
+HEADER = HEADER.replace('@@WRITERT@@', WRITERT)
 cut = HEADER.index('(* Init.')
 open(OUT, 'w').write(HEADER + BODY + TAIL)   # flatten_unchanged kept for the record: it did not help (run 9)
 print('written', OUT)

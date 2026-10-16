@@ -1,0 +1,208 @@
+tla-mc: building a checker for MCLeanP1M7 (cache: /work/cache-d)
+tla-mc: built in 29.1s
+tla-mc: MCLeanP1M7 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.005s
+State 1:
+/\ live = {<<p1, 1>>, <<p2, 1>>}
+/\ minted = {<<p1, 1>>, <<p2, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>)
+/\ seq = 1
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 0
+/\ barriers = 0
+/\ w = (A :> [pend |-> [id |-> 0, nonces |-> {}, fold |-> 0], ack |-> [nonces |-> {}, inst |-> FALSE, seq |-> 0, dropped |-> {}, st |-> "none", src |-> "none"], aN |-> {}, pc |-> "idle", instd |-> FALSE, iseq |-> 0, clk |-> "none", stamps |-> {}, bound |-> [id |-> 0, clk |-> "none", inst |-> FALSE, seq |-> 0, fold |-> 0, wd |-> {}, doc |-> (p1 :> Nil @@ p2 :> Nil)], inst |-> (p1 :> Nil @@ p2 :> Nil), deposed |-> FALSE, car |-> [id |-> 0, dropped |-> {}, uncited |-> {}, paths |-> {}, deletes |-> {}, pub |-> (p1 :> Nil @@ p2 :> Nil)], dset |-> {}, moved |-> {}, local |-> (p1 :> Nil @@ p2 :> Nil), baseline |-> (p1 :> Nil @@ p2 :> Nil), decl |-> (p1 :> Nil @@ p2 :> Nil), deletes |-> {}, st |-> "off", integrated |-> {}, uploads |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {}, scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0, nt |-> 0, cId |-> 0, cFold |-> 0, cN |-> {}, capped |-> {}, dMint |-> (p1 :> 0 @@ p2 :> 0), lost |-> {}, nd |-> 0])
+/\ took = (A :> (p1 :> {} @@ p2 :> {}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>, <<p2, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+State 2:
+/\ live = {<<p1, 1>>, <<p2, 1>>}
+/\ minted = {<<p1, 1>>, <<p2, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>)
+/\ seq = 1
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 0
+/\ barriers = 0
+/\ w = (A :> [pend |-> [id |-> 0, nonces |-> {}, fold |-> 0], ack |-> [nonces |-> {}, inst |-> FALSE, seq |-> 0, dropped |-> {}, st |-> "none", src |-> "none"], aN |-> {}, pc |-> "idle", instd |-> FALSE, iseq |-> 0, clk |-> "none", stamps |-> {}, bound |-> [id |-> 0, clk |-> "none", inst |-> FALSE, seq |-> 0, fold |-> 0, wd |-> {}, doc |-> (p1 :> Nil @@ p2 :> Nil)], inst |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), deposed |-> FALSE, car |-> [id |-> 0, dropped |-> {}, uncited |-> {}, paths |-> {}, deletes |-> {}, pub |-> (p1 :> Nil @@ p2 :> Nil)], dset |-> {}, moved |-> {}, local |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), baseline |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), decl |-> (p1 :> Nil @@ p2 :> Nil), deletes |-> {}, st |-> "on", integrated |-> {1}, uploads |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 1, derived |-> 1, skipped |-> {}, scope |-> {p1, p2}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0, nt |-> 0, cId |-> 0, cFold |-> 0, cN |-> {}, capped |-> {}, dMint |-> (p1 :> 0 @@ p2 :> 0), lost |-> {}, nd |-> 0])
+/\ took = (A :> (p1 :> {1} @@ p2 :> {1}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>, <<p2, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+State 3:
+/\ live = {<<p1, 1>>, <<p2, 1>>}
+/\ minted = {<<p1, 1>>, <<p2, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>)
+/\ seq = 1
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 0
+/\ barriers = 0
+/\ w = (A :> [pend |-> [id |-> 0, nonces |-> {}, fold |-> 0], ack |-> [nonces |-> {}, inst |-> FALSE, seq |-> 0, dropped |-> {}, st |-> "none", src |-> "none"], aN |-> {}, pc |-> "idle", instd |-> FALSE, iseq |-> 0, clk |-> "none", stamps |-> {}, bound |-> [id |-> 0, clk |-> "none", inst |-> FALSE, seq |-> 0, fold |-> 0, wd |-> {}, doc |-> (p1 :> Nil @@ p2 :> Nil)], inst |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), deposed |-> FALSE, car |-> [id |-> 0, dropped |-> {}, uncited |-> {}, paths |-> {}, deletes |-> {}, pub |-> (p1 :> Nil @@ p2 :> Nil)], dset |-> {}, moved |-> {}, local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil), baseline |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), decl |-> (p1 :> Nil @@ p2 :> Nil), deletes |-> {}, st |-> "on", integrated |-> {1}, uploads |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 1, derived |-> 1, skipped |-> {}, scope |-> {p1, p2}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0, nt |-> 0, cId |-> 0, cFold |-> 0, cN |-> {}, capped |-> {}, dMint |-> (p1 :> 0 @@ p2 :> 0), lost |-> {}, nd |-> 0])
+/\ took = (A :> (p1 :> {1} @@ p2 :> {1}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>, <<p2, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+State 4:
+/\ live = {<<p1, 1>>, <<p2, 1>>}
+/\ minted = {<<p1, 1>>, <<p2, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>)
+/\ seq = 1
+/\ tomb = (p1 :> Nil @@ p2 :> Nil)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 0
+/\ barriers = 0
+/\ w = (A :> [pend |-> [id |-> 1, nonces |-> {1}, fold |-> 1], ack |-> [nonces |-> {}, inst |-> FALSE, seq |-> 0, dropped |-> {}, st |-> "none", src |-> "none"], aN |-> {}, pc |-> "idle", instd |-> FALSE, iseq |-> 0, clk |-> "none", stamps |-> {}, bound |-> [id |-> 0, clk |-> "none", inst |-> FALSE, seq |-> 0, fold |-> 0, wd |-> {}, doc |-> (p1 :> Nil @@ p2 :> Nil)], inst |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), deposed |-> FALSE, car |-> [id |-> 0, dropped |-> {}, uncited |-> {}, paths |-> {}, deletes |-> {}, pub |-> (p1 :> Nil @@ p2 :> Nil)], dset |-> {p2}, moved |-> {}, local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil), baseline |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), decl |-> (p1 :> Nil @@ p2 :> Nil), deletes |-> {}, st |-> "on", integrated |-> {1}, uploads |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 1, derived |-> 1, skipped |-> {}, scope |-> {p1, p2}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0, nt |-> 1, cId |-> 0, cFold |-> 0, cN |-> {1}, capped |-> {}, dMint |-> (p1 :> 0 @@ p2 :> 2), lost |-> {}, nd |-> 0])
+/\ took = (A :> (p1 :> {1} @@ p2 :> {1}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>, <<p2, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+State 5:
+/\ live = {<<p1, 1>>, <<p2, 1>>}
+/\ minted = {<<p1, 1>>, <<p2, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ seq = 2
+/\ tomb = (p1 :> Nil @@ p2 :> <<p2, 1>>)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 1
+/\ barriers = 0
+/\ w = (A :> [pend |-> [id |-> 1, nonces |-> {1}, fold |-> 1], ack |-> [nonces |-> {}, inst |-> FALSE, seq |-> 0, dropped |-> {}, st |-> "none", src |-> "none"], aN |-> {}, pc |-> "idle", instd |-> FALSE, iseq |-> 0, clk |-> "none", stamps |-> {}, bound |-> [id |-> 0, clk |-> "none", inst |-> FALSE, seq |-> 0, fold |-> 0, wd |-> {}, doc |-> (p1 :> Nil @@ p2 :> Nil)], inst |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), deposed |-> FALSE, car |-> [id |-> 0, dropped |-> {}, uncited |-> {}, paths |-> {}, deletes |-> {}, pub |-> (p1 :> Nil @@ p2 :> Nil)], dset |-> {p2}, moved |-> {}, local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil), baseline |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), decl |-> (p1 :> Nil @@ p2 :> Nil), deletes |-> {}, st |-> "on", integrated |-> {1}, uploads |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 1, derived |-> 1, skipped |-> {}, scope |-> {p1, p2}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0, nt |-> 1, cId |-> 0, cFold |-> 0, cN |-> {1}, capped |-> {}, dMint |-> (p1 :> 0 @@ p2 :> 2), lost |-> {}, nd |-> 0])
+/\ took = (A :> (p1 :> {1} @@ p2 :> {1}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {<<p2, <<p2, 1>>>>}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>, <<p2, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {<<p2, 1>>}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+State 6:
+/\ live = {<<p1, 1>>, <<p2, 1>>}
+/\ minted = {<<p1, 1>>, <<p2, 1>>}
+/\ doc = (p1 :> <<p1, 1>> @@ p2 :> Nil)
+/\ seq = 2
+/\ tomb = (p1 :> Nil @@ p2 :> <<p2, 1>>)
+/\ base = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ acked = {}
+/\ conflicts = {}
+/\ holder = "none"
+/\ nextGen = 2
+/\ ui = 0
+/\ reqs = 1
+/\ barriers = 0
+/\ w = (A :> [pend |-> [id |-> 1, nonces |-> {1}, fold |-> 1], ack |-> [nonces |-> {}, inst |-> FALSE, seq |-> 0, dropped |-> {}, st |-> "none", src |-> "none"], aN |-> {}, pc |-> "consumed", instd |-> FALSE, iseq |-> 0, clk |-> "sentinel", stamps |-> {}, bound |-> [id |-> 0, clk |-> "none", inst |-> FALSE, seq |-> 0, fold |-> 0, wd |-> {}, doc |-> (p1 :> Nil @@ p2 :> Nil)], inst |-> (p1 :> <<p1, 1>> @@ p2 :> <<p2, 1>>), deposed |-> FALSE, car |-> [id |-> 0, dropped |-> {}, uncited |-> {}, paths |-> {}, deletes |-> {}, pub |-> (p1 :> Nil @@ p2 :> Nil)], dset |-> {p2}, moved |-> {}, local |-> (p1 :> <<p1, 1>> @@ p2 :> Nil), baseline |-> (p1 :> <<p1, 1>> @@ p2 :> Nil), decl |-> (p1 :> Nil @@ p2 :> Nil), deletes |-> {}, st |-> "on", integrated |-> {1}, uploads |-> {}, snap |-> (p1 :> Nil @@ p2 :> Nil), upDone |-> {}, gone |-> {}, verified |-> FALSE, retire |-> {}, collected |-> FALSE, adv |-> FALSE, synced |-> 2, derived |-> 2, skipped |-> {}, scope |-> {p1, p2}, sStage |-> "none", sTgt |-> {}, sDrop |-> {}, sKeep |-> {}, sHeld |-> (p1 :> Nil @@ p2 :> Nil), unlinked |-> {}, memo |-> 0, rnow |-> 0, nt |-> 1, cId |-> 1, cFold |-> 1, cN |-> {1}, capped |-> {}, dMint |-> (p1 :> 0 @@ p2 :> 2), lost |-> {}, nd |-> 0])
+/\ took = (A :> (p1 :> {1} @@ p2 :> {1}))
+/\ gw = (p1 :> Nil @@ p2 :> Nil)
+/\ mv = Nil
+/\ udel = {<<p2, <<p2, 1>>>>}
+/\ restarts = 0
+/\ syncs = 0
+/\ regressed = FALSE
+/\ rescopes = 0
+/\ fails = 0
+/\ upped = {<<p1, 1>>, <<p2, 1>>}
+/\ copies = 0
+/\ orig = (<<p1, 1>> :> Nil @@ <<p1, 2>> :> Nil @@ <<p1, 3>> :> Nil @@ <<p1, 4>> :> Nil @@ <<p2, 1>> :> Nil @@ <<p2, 2>> :> Nil @@ <<p2, 3>> :> Nil @@ <<p2, 4>> :> Nil)
+/\ retiring = {<<p2, 1>>}
+/\ aged = {}
+/\ ages = 0
+/\ rdoc = (p1 :> Nil @@ p2 :> Nil)
+/\ rlag = TRUE
+
+Error: Invariant CPub is violated.
+6908 states generated, 4067 distinct states found. Depth 5. Checked in 0.102s (39872 distinct/s).
+
+real	0m29.172s
+user	0m28.560s
+sys	0m1.356s
+rc=12 23:14:36Z

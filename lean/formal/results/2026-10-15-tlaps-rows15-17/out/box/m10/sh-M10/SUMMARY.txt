@@ -1,0 +1,6 @@
+MODULE M10 2026-10-15T23:21:54Z 3 shards
+SHARD 1 lines 1-133: [INFO]: All 77 obligations proved. WALL 58.23 s MAXRSS 656768 kB rc 0
+SHARD 2 lines 134-259: [INFO]: All 108 obligations proved. WALL 220.75 s MAXRSS 880156 kB rc 0
+SHARD 3 lines 260-396: [INFO]: All 241 obligations proved. WALL 161.52 s MAXRSS 938756 kB rc 0
+failed: 0
+SHARDSDONE

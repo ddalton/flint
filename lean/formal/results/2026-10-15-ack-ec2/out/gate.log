@@ -1,0 +1,4 @@
+LeanP1CarrierCitesAny              OK-FIRES     exp=AK1                          | Error: Action property AK1 is violated by the last step ab | 69100004 states generated, 27793450 distinct states found. Depth 16 | 46s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -
+LeanP1AckRename                    OK-HOLDS     exp=HOLDS                        | No error has been found                                    | 3871503811 states generated, 1370410221 distinct states found. Depth 38 | 1137s
+leanp1 gate: 1 world(s) run, 1 as expected, 0 not: -

@@ -1,0 +1,16 @@
+RescopeBegin_TypeOK M0 1408-1440: [INFO]: All 68 obligations proved.
+RescopeFirst_TypeOK M0 1441-1470: [INFO]: All 69 obligations proved.
+RPullSync_TypeOK M0 1542-1584: [INFO]: All 90 obligations proved.
+Touch_TypeOK M0 1585-1616: [ERROR]: 1/75 obligations failed.
+Install_TypeOK M0 1080-1177: [INFO]: All 185 obligations proved.
+Restart_M2 M2 1883-1968: [ERROR]: 1/157 obligations failed.
+Finish_M2 M2 1794-1882: [ERROR]: 1/157 obligations failed.
+Touch_M2 M2 2450-2530: [ERROR]: 1/147 obligations failed.
+Honor_M2 M2 2531-2611: [ERROR]: 1/147 obligations failed.
+Depose_M2 M2 2778-2824: [INFO]: All 82 obligations proved.
+HonorReader_M2 M2 2612-2692: [ERROR]: 1/147 obligations failed.
+Init_D M5D 821-833: [INFO]: All 19 obligations proved.
+RetireByAck_M2 M2 2693-2777: [ERROR]: 1/147 obligations failed.
+Depose_M6 M6 546-568: [INFO]: All 30 obligations proved.
+Fence_M2 M2 2825-2968: [ERROR]: 2/273 obligations failed.
+TESTSDONE

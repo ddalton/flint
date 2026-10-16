@@ -1,0 +1,20 @@
+tla-mc: building a checker for LeanP1 (cache: /work/cache-d)
+tla-mc: built in 29.8s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 184 workers, generated engine; loaded in 0.005s
+progress: depth 17, 94889057 generated, 35961674 distinct (0 fingerprint spills), 15782688 on queue (0 on disk), 16.2s
+progress: depth 18, 163405710 generated, 60998207 distinct (0 fingerprint spills), 25036533 on queue (0 on disk), 28.2s
+progress: depth 19, 269216518 generated, 99681463 distinct (0 fingerprint spills), 38683256 on queue (0 on disk), 46.9s
+progress: depth 20, 430171111 generated, 159257246 distinct (0 fingerprint spills), 59575783 on queue (0 on disk), 75.9s
+progress: depth 21, 674530059 generated, 250513010 distinct (0 fingerprint spills), 91255764 on queue (0 on disk), 120.0s
+progress: depth 22, 1038567441 generated, 385087655 distinct (0 fingerprint spills), 134574645 on queue (37216309 on disk), 186.6s
+progress: depth 23, 1551957558 generated, 569184153 distinct (0 fingerprint spills), 184096498 on queue (87195122 on disk), 290.8s
+progress: depth 24, 2219034844 generated, 798826145 distinct (0 fingerprint spills), 229641992 on queue (133226504 on disk), 426.3s
+progress: depth 25, 3016807378 generated, 1063535363 distinct (0 fingerprint spills), 264709218 on queue (168671330 on disk), 587.3s
+progress: depth 26, 3920657296 generated, 1358561628 distinct (0 fingerprint spills), 295026265 on queue (199412825 on disk), 767.9s
+progress: depth 27, 4935528423 generated, 1692760272 distinct (1024 fingerprint spills), 334198644 on queue (239088756 on disk), 991.2s
+progress: depth 28, 6089624624 generated, 2076971914 distinct (1024 fingerprint spills), 384211642 on queue (289553338 on disk), 1343.4s
+
+real	25m1.645s
+user	3603m10.645s
+sys	152m10.311s
+rc=124 22:48:14Z

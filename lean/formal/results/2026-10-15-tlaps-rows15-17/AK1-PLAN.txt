@@ -1,0 +1,31 @@
+AK1 PROOF PLAN (2026-10-15 ~22:45Z).  Module LeanP1ProofM10.tla (gen-m10.py).
+
+PART 1 (written; box run queued, m10/sh-M10):
+  AK1 is [][AK1Step]_vars.  Only Honor writes an ok/partial ack (HonorReader:
+  refused-read-only; every other step keeps the ack: one-field projections).
+  Honor's guard = Honorable(s), its dropped = HonorDr(s) = HDropped(s).
+  THEOREM AK1FromBoundOK == Spec /\ []BoundOK => AK1.
+  LEMMA UncitedCatches (L-137's heart): CarForm(s,p,c) /\ Broken(s,p,d)
+    => p \in c.dropped \cup Uncited(c,d).
+
+PART 2: BoundOK inductive.  Candidate conjuncts (MCLeanP1M7.tla; EC2 worlds
+M7AckRescopeRename2, M7AckRename test BoundOK, DTree, CPub first):
+  (B) BoundOK.
+  (D) DTree: Decl(s,p) /\ local # baseline => Content(local) = Content(decl).
+  (C) CPub:  Decl(s,p) /\ local = baseline => car.id = pend.id /\ CarForm(s,p,car).
+  Expected extra conjuncts (to add, then TLC-check before proving):
+  (F) folds: pend.fold <= nt, bound.fold <= nt, cFold <= pend.fold (a Touch
+      makes Honorable false until the next barrier end).
+  (M) mid-barrier, pc \in {scanned, claimed, cased}, cId = pend.id # 0,
+      cFold = pend.fold: a dirty Decl path is in uploads \cup deletes with
+      snap = local; at "cased" every Decl path is CarForm in car (InstallCar
+      sets pub for uploads \ gone, deletes; dropped gets gone).
+  Barrier ends: Finish's bound.doc = inst and car.uncited = Uncited(car, inst):
+    every Decl path CarForm => UncitedCatches => Broken ones in HDropped.
+    Skip/PullOnly (doc, no install): every Decl path clean => (C) => same.
+  Between barrier end and honour: bound.doc fixed; Broken can change only via
+    moved (shrinks), conflicts (Install: grows), live / lost (SurfacedDecl's
+    `c[2] \in live \/ c[2] \notin lost`) -- THE RISK: a SurfacedDecl that
+    turns false (the AckWithheldHolds gap).  Watch the M7 worlds' BoundOK.
+  Steps that change Honorable: Touch (fold), RetireByAck (pend id 0),
+    barrier ends (bound).  HDropped: Install's car (id kept when cId = pend.id).

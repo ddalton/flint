@@ -1,0 +1,31 @@
+EC2 2026-10-15 21:30-23:20Z: c7i.48xlarge spot us-west-1c (192 vCPU, x86 for tlapm).
+Model LeanP1.tla 664f994c (L-137 fixed); proof copy LeanP1Anc.tla 10166345.
+TORN DOWN 23:25Z, zero set verified (4 regions; bucket and inline policy gone).
+
+THE WORLDS (compiled tla-mc 0.1.2, one at a time; out/g, out/d):
+  CarrierCitesAny (L-137 mutant)  FIRES AK1   d16, 27,793,450 distinct, 46 s      (must fire: OK)
+  AckRename (L-137's world)       HOLDS       d38, 1,370,410,221 distinct, 1102 s  (complete)
+  AckSync                         bounded     clean to d28, 2,076,971,914 distinct (25-min cap)
+  AckFetch                        HOLDS       d42, 2,291,573,593 distinct, 1414 s  (complete)
+  AckRescope                      HOLDS       d30, 19,042,504 distinct            (complete)
+  AckRescopeSync                  HOLDS       d31, 27,778,807 distinct            (complete)
+  M7AckRescopeRename2, M7AckRename  CPub violated d5: the candidate was too strong
+     (a fetch can make a declared path clean; a declared delete is never broken).
+     The box's MCLeanP1M10 (results/2026-10-15-tlaps-rows15-17/m10c) has the corrected set.
+
+THE PROOFS (all 14 modules at once, then superseded where noted; out/p):
+  PROVED here: M1 3115, M3 2663, M4 1070, M5A 1566, M5B 214, M8 523 (NR1), M9 533 (DP1/DP2).
+  Timeouts only (fixed in the generators, proved on the box): M0, M2, M5C, M5D, M6, M7.
+  L1's 2 "failures": the runner forced --method smt; L1 needs PTL (proved on the box, 27/27).
+  tlapm's front end is single-threaded: every tlapm at 100% of ONE core, zero Z3
+  running -> sharding by line range (run-shards.sh) is the parallelism.
+
+THE TIE (out/tie): ReaderHolds, DeposeNoAgeHolds, FetchHolds EXACT (generated and distinct).
+  ScopeHolds, DeposeHolds, AckCap, ResHolds, AckRename NOT RUN: the instance shut
+  itself down at ~23:20Z.  Cause (mine): EC2's last tlapm was stopped at 22:59Z, so
+  runner4, at TLC DONE, found no tlapm left and ran `shutdown -h +5` before tie.sh
+  (which waited for that same marker) could stop it.
+
+Runner history (in/): runner.sh -> runner2 (192 after proofs) -> runner3 (184 now)
+-> runner4 (192 when no tlapm) -> tie.sh; sync2.sh restarted the sync after a
+`pgrep -f` matched runner.sh's forked subshells and killed them.

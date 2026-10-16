@@ -1,0 +1,10 @@
+tla-mc: building a checker for LeanP1 (cache: /work/tie/cache-ScopeHolds-LeanP1)
+tla-mc: built in 31.3s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 96 workers, generated engine; loaded in 0.006s
+Model checking completed. No error has been found.
+25826396 states generated, 8284768 distinct states found. Depth 30. Checked in 7.453s (1111541 distinct/s).
+
+real	0m38.799s
+user	11m14.866s
+sys	0m3.676s
+rc=0 23:40:48Z

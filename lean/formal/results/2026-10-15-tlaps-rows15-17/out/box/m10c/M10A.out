@@ -1,0 +1,10 @@
+tla-mc: building a checker for MCLeanP1M10 (cache: /mnt/nvme/leanp1-v6/m10c/cache-M10A)
+tla-mc: built in 29.1s
+tla-mc: MCLeanP1M10 (31 variables, 0 symmetry permutations), 2 workers, generated engine; loaded in 0.009s
+Model checking completed. No error has been found.
+1019576 states generated, 388025 distinct states found. Depth 27. Checked in 9.473s (40960 distinct/s).
+
+real	0m38.559s
+user	0m47.075s
+sys	0m0.562s
+rc=0 23:17:39Z
