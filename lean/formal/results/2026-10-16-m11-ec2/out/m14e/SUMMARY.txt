@@ -1,0 +1,13 @@
+DEADLINE
+A4TouchMem: 1 proved 0 failed / 4 WALL 2110.26 s rc 0 0 err
+Finish_A4: 30 proved 0 failed / 80 WALL 423.24 s rc 0 0 err
+HonorReader_A4: 9 proved 1 failed / 20 WALL 289.21 s rc 0 0 err
+Honor_A4: 9 proved 1 failed / 20 WALL 295.75 s rc 0 0 err
+PullOnly_A4: 10 proved 0 failed / 20 WALL 291.57 s rc 0 0 err
+RescopeSecond_A4: 32 proved 0 failed / 98 WALL 470.47 s rc 0 0 err
+Restart_A4: 15 proved 0 failed / 32 WALL 329.00 s rc 0 0 err
+Scan_A4: 26 proved 0 failed / 66 WALL 328.55 s rc 0 0 err
+Skip_A4: 9 proved 1 failed / 20 WALL 294.70 s rc 0 0 err
+Touch_A4: 26 proved 0 failed / 145 WALL 2109.70 s rc 0 0 err
+Upload_A4: 76 proved 0 failed / 229 WALL 901.67 s rc 0 0 err
+DONE 21:12:31Z

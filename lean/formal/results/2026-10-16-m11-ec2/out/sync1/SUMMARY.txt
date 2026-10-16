@@ -1,0 +1,3 @@
+RPullSync_A1: 66 proved 1 failed / 222 WALL 631.48 s rc 0 0 err
+Sync_A1: 66 proved 1 failed / 222 WALL 604.67 s rc 0 0 err
+DONE 22:35:45Z

@@ -1,0 +1,7 @@
+dbfeb6820e4a04ce919d7441c527cd6f  LeanP1.tla
+tla-mc: building a checker for MCLeanP1M10 (cache: /work/cache-N3)
+tla-mc: built in 40.6s
+tla-mc: MCLeanP1M10 (31 variables, 0 symmetry permutations), 30 workers, generated engine; loaded in 0.007s
+progress: depth 11, 13735493 generated, 5808419 distinct (0 fingerprint spills), 3708401 on queue (0 on disk), 10.2s
+progress: depth 12, 35688456 generated, 14521983 distinct (0 fingerprint spills), 8713564 on queue (0 on disk), 29.1s
+progress: depth 13, 84349149 generated, 33200871 distinct (0 fingerprint spills), 18678888 on queue (0 on disk), 84.6s

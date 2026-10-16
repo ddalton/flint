@@ -31,6 +31,12 @@ loudly rather than producing a mutant that mutates nothing.
   TouchDeclaresLeftover  (Table 3, 2026-10-16) a touch declares a narrow's
                        leftover (a mid-rescope uncited file the second half
                        unlinks), after a UI delete there: AK1.
+  TouchDeclaresRestartLeftover  (Table 3, 2026-10-16) the same after a restart
+                       mid-narrow (the stage back at "saved"): AK1.
+  TouchDeclaresRenamed (Table 3, 2026-10-16) a touch after a restart between
+                       a CAS and step 7 declares a published file the UI
+                       renamed away; renamed back, converged, then deleted
+                       by the UI, the honour says ok: AK1.
   FoldClobbers         settle-before-consume: a touch replaces the pending
                        record instead of folding into it: AK3.
   StampIndependent     the ack's clock chosen apart from the bucket's stamp: AK4.
@@ -76,8 +82,12 @@ M = {
     ("                                  /\\ \\/ d[p] = Nil\n                                     \\/ c.pub[p] # Nil /\\ Content(d[p]) # Content(c.pub[p])}",
      "                                  /\\ d[p] = Nil}")],
   'TouchDeclaresLeftover': [
-    ("Content(doc[p])\n                                 /\\ ~RescopeLeftover(s, p)}",
-     "Content(doc[p])}")],
+    ("Content(W.local[p])\n                                 /\\ ~RescopeLeftover(s, p)}",
+     "Content(W.local[p])}")],
+  'TouchDeclaresRestartLeftover': [
+    ('     \\/ w[s].sStage = "saved" /\\ w[s].baseline[p] = Nil /\\ w[s].sHeld[p] # Nil\n', '')],
+  'TouchDeclaresRenamed': [
+    ("\n                                 /\\ W.local[p] # Nil => \\A q \\in Paths : Content(doc[q]) # Content(W.local[p])", '')],
   'FoldClobbers': [
     ("         ns == (IF fresh THEN {} ELSE W.pend.nonces) \\cup {n}\n", "         ns == {n}\n")],
   'StampIndependent': [

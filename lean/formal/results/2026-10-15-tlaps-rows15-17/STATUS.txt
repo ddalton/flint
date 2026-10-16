@@ -39,6 +39,13 @@ the CURRENT text in the scratchpad build; AK1-PLAN.txt has the per-class design)
     checked out/box2/M11-K2.tla). These five lemmas and A1Keep are verbatim in
     chain/LeanP1ProofM11.tla; that file's A1BrokenKeep/A1NoTree carry the newer,
     weaker live hypothesis and the K2 file the older one.
+  CORRECTION 2026-10-16 ~14:10Z: A1Keep's record proof (box m11/K.out, lines
+    216-277, 89 obligations) checked the text BEFORE A1Cased gained its withheld
+    arm (`p \in w[s].gone`); A1Same never kept gone, so the current A1Keep is NOT
+    proved (likely unprovable as written).  The K2 lemmas are proved relative to
+    A1Keep's statement only.  Fix (gen-m11.py): A1PcOK also keeps gone when a
+    step stays at "cased" (Fence after, Depose's holder, Collect keep it).
+    Everything that uses A1Keep/A1KeepF must be re-proved.
   WRITTEN, PARSES, NOT YET PROVED: A1Reset, Restart, Fence (both branches),
     RescopeBegin, A1KeepF, Depose, UploadFirst (Upload's first arm), Sweep, A1Quiet
     (Age, RLoad), A1Per/A1PerAll/A1PerAllP/A1Frame/A1ContentAll/A1TreePath,
@@ -58,3 +65,283 @@ the CURRENT text in the scratchpad build; AK1-PLAN.txt has the per-class design)
       install changed nothing (InstallNothing: no carrier record).
    Q3 Candidate set on the FIXED model: M10AckRescopeRename2, M10C1, M10C2 not yet
       re-run (box shut down); M10A, M10B (complete) and AckRename bounds (d33) held.
+
+UPDATE 2026-10-16 ~14:20Z (box) -- M11 continued; candidates (m10c/MCLeanP1M10.tla)
+  TLC (tla-mc, fixed model; box m10d/m10g):
+    NM10A / UM10A (1 writer, 1 path) COMPLETE, 388,025 states: every candidate holds --
+      MidSnap, CFetch, LostUncited, GoneDead, LostDead, UpDoneUpped, LostUpped,
+      UpsDone, DelBase, GoneUnconf (+ the M10 set).
+    NM10C1 (2 writers, age+reap): first run broke ConfSafe at d18 -- BY DESIGN (a
+      withheld upload swept before the install is a dead, lost conflict;
+      SurfacedDecl's second arm is false for it), ConfSafe dropped.  Rerun with
+      MidSnap/CFetch/LostUncited/GoneDead/LostDead: CLEAN TO DEPTH 21 (68.3M
+      distinct), STOPPED -- its disk queue would fill the box (30 GB RAM).
+    NOT RUN (need the 192-core box): C1/C2 complete, AckRescopeRename2, M10B, the
+      Install facts with two writers (UM10C1), and a rescope+UI world (RUI.cfg) for
+      the restated conjuncts DTree4/CPub4/Cased4.
+  PROOF FINDINGS:
+    - A1ContentAll was FALSE as stated (Content(w[u].local[q])' primes w: the new
+      content of the NEW handle).  Restated per field: kept field => kept content.
+    - A1Keep's record proof predates Cased's gone arm (see CORRECTION above).
+    - Rescope (fork): DTree breaks mid-rescope (a fetched-over declared file a
+      narrow drops: RescopeFirst uncites it, dirty, not the declared bytes) and
+      CPub3 breaks at RescopeSecond (a fetch-arm path unlinked to Nil while doc
+      keeps the declared bytes).  Neither breaks AK1.  Restatement (candidates
+      DTree4/CPub4/Cased4): DTree spares RescopeLeftover; CPub's fetch arm becomes
+      ~Broken(s, p, doc) (= CFetch); Cased's install arm ~Broken(s, p, inst).
+      Cost: every doc-changing step (gateway, a peer's Install) needs the
+      Prop_NoSilentRevert argument for ~Broken(s, p, doc).
+    - Next gives Reap UNCHANGED anc, not Frame: ReapQ_A1.
+  WRITTEN (gen-m11.py, parses): Finish, Collect, Edit/Delete (A1Move), UploadCopy,
+    ReapQ, Checkout, RescopeFirst/Second (one OMITTED step each), Init_A1, Next_A1,
+    A1Step, THEOREM A1Inductive (Spec /\ []A1LostDead => []A1IAK1), AK1FromLostDead.
+    MidBar strengthened (MidSnap).  OMITTED: Consume, Sync, RPullSync, Install,
+    Skip, PullOnly, the two rescope steps.  M12 (side invariants: A1LostDead etc.)
+    being written (gen-m12.py).
+  PROOF RUN (box m11c, 2 shards): in progress.
+
+UPDATE 2026-10-16 ~15:10Z (box) -- m11c STOPPED (it proved a superseded M11 text:
+  the old DTree/CPub3/Cased arms, no A1DocCar).  Its 6 failures were all 60 s
+  TIMEOUTS, none refuted: Touch pend record (967), A1Per s (997), Finish/Collect
+  unfolds (1218, 1356: no `bucket, aux`, so orig' = orig was out of reach) and
+  FinishW.bound (1248, nested record).  gen-m11.py fixed: `DEF Finish/Collect,
+  bucket, aux`; <1>fd split by CASE cId.  Touch's two steps were rewritten in the
+  new text anyway.
+  TLC (m10g, tla-mc): UM/VM/WM/XM/YM10A COMPLETE 388,025; VUI/WUI/XUI/YUI COMPLETE
+  1,983,541 -- all hold, incl. CPubCar, DocCar, Cased5, DTree4, CPub4, Cased4 and
+  the M12 helpers (S*).  YB (two writers) clean to depth 26 (99.3M distinct), RUNNING.
+  PROOF RUN m11d: current text (md5 bb4b8403..., 2,956 obligations, parses), chain
+  M0-M10/Anc = chain/ md5s; run-shards.sh M11 3 1 -> m11d/sh-M11/SUMMARY.txt.
+  A1DocCar CENSUS (15:20Z): the new conjunct had NO A1DocCar' step anywhere in M11,
+    so m11d's QEDs that unfold A1IAK1 will fail on it.  Added (gen-m11.py, `<1>dc`):
+    A1Keep, A1KeepF (A1Same keeps decl/car/pend/dset/moved; doc' = doc; doc's
+    content kept, A1ContentStep) and A1Reset (same, A1Kept).  Checking: box m11k.
+    Through them: Claim, Verify, RPullRead, Honor, HonorReader, RescopeBegin,
+    UploadFirst, Collect, Restart, Depose.  STILL NEED A DocCar STEP: Fence, Touch,
+    RetireByAck, Scan, Finish, UploadCopy, A1Move (Edit, Delete), A1NoTree (Sweep,
+    A1Quiet, ReapQ, GPut) + the 9 OMITTED steps.
+    GATEWAY GAP: A1NoTree now ASSUMES doc' = doc, but GCas, GDelete and GRename
+    write doc -- their QEDs cannot close by A1NoTree.  Each needs the real DocCar
+    argument (a new doc handle with a declared file's bytes is in carrier form:
+    the Prop_NoSilentRevert cost foreseen above).  GDelete writes Nil: vacuous.
+  m11k (15:45Z): A1Keep 107/107 (39 proved + 68 trivial, 329 s), A1Reset 131/131
+    (48+83, 403 s), A1KeepF 103/103 (37+66, 322 s); 0 failed, rc 0 each.  Text md5
+    219e7ad9... (gen-m11.py with <1>dc).  The 14:10Z CORRECTION is CLOSED for these
+    three: A1Keep holds with Cased's gone arm (A1PcOK keeps gone) AND A1DocCar.
+    Trap: a first <1>dc wrote Content(doc'[q])' (a prime under a prime) -- tlapm does
+    not reject it, it ASSERTS in e_levels.ml:502 and drops the rest of the range
+    (rc 3, obligations left "to be proved", no "failed").  Prime whole unprimed
+    expressions.  The callers' A1PcOK (gone kept at "cased") is checked by m11d.
+  16:20Z: m11d STOPPED (user OK) -- its 45 failures: 37 "internal timeout" on one-line
+    record steps = BOX OVERLOAD (load 21.9/8 cores: another session's kind + chainsaw
+    + cargo test, plus z3 children tlapm left running 30-42 min past their 60 s);
+    8 real: the DocCar QEDs (A1NoTree, gateways, A1Keep) and A1Move 1503/1516.
+  CENSUS CORRECTED: DocCar is a conjunct of A1TreePath/A1Per already, so the per-path
+    lemmas needed the FACTS, not a new step: A1DocContent (new, after A1ContentStep:
+    doc'[q] = doc[q] => content kept); Touch's dirty case uses TouchDirty's
+    Content(local) # Content(doc); <1>dk added to Scan, Finish, A1Move, UploadCopy;
+    A1NoTree <1>dc.  Fence goes by A1Reset/A1Keep; RetireByAck: ~A1Decl', vacuous.
+    Checking: box m11e (md5 b2d822f4..., 10 ranges, 2 lanes).
+  GATEWAY: ZRS (m10g; YB + MaxSyncs 1 + MaxTouches 2) RUNNING -- the rename-back
+    question.  Candidates GwDecl, DocCarAny written in m10c/MCLeanP1M10.tla (local).
+    YB COMPLETE: 109,345,585 distinct, depth 30, all hold.
+  17:00Z OMITTED steps WRITTEN (gen-m11.py, not yet all proved):
+    Skip_A1, PullOnly_A1 (barrier ends binding doc: a broken declared file is in
+      carrier form (Skip: all clean; PullOnly: MidBar with no ups/dels) and the
+      document lacks its bytes, so Uncited(car, doc) names it -- UncitedCatches);
+    Consume_A1 (cheap + full branch as one record R; a converged declared file is
+      in carrier form by DTree + DocCar -- what DocCar is for);
+    Sync_A1, RPullSync_A1 (owed = clean paths only; old CPub3).
+    A1TreeKeep's QED lacked A1DocContent: added, PROVED 10/10.
+    m11e so far (all complete, 0 failed): DocContent 8/8, GPut 46/46, A1NoTree 59/59,
+      Sweep+A1Quiet 19/19.  m11f (TreeKeep, Consume, Skip, PullOnly) running.
+  STILL OMITTED, and why:
+    Install_A1 -- doc' = inst changes EVERY writer's DocCar (s's snaps become
+      document handles: the same cross-party question as GCas/GRename), and lost
+      grows (gone's snaps) so A1BrokenKeep's no-new-lost hypothesis fails: BoundOK
+      needs GoneUnconf (M12).  s's own Cased/DocCar follow the MCLeanP1M10 Cased5
+      note (clean: carrier kept; upload: InstallCar publishes snap; gone: dropped).
+    RescopeFirst <3>2 -- likely closes on the restated DTree (leftover exempt) once
+      RescopeFirstDd \subseteq A1LeftSet' at "mid" is shown.
+    RescopeSecond <3>2 -- an unlinked declared FILE is clean' and CPub3' needs its
+      carrier form, which no conjunct carries through "mid" (the path is a dirty
+      exempt leftover there).  Needs a conjunct (leftover keeps carrier form?) and
+      the RUI world (rescope + UI, never run) with CPubCar/DocCar/DTree4.
+  ZRS STOPPED 16:29Z by DISK, NOT A VERDICT: "queue file: No space left on device" at
+    depth 18, 104,867,124 distinct, no violation.  CAUSE: another session's cargo
+    builds filled /mnt/nvme to 99% 16:20-16:30Z (it says so; since freed to ~86 GB);
+    ZRS's queue (17M states on disk at d18) was writing then.  No tlapm log (m11e,
+    m11f) shows ENOSPC.  Rerun ZRS on EC2 or on the box once it has room.
+  RescopeFirst <3>2 WRITTEN: the uncited paths ARE A1LeftSet' (= sDrop \ KeepSet at
+    "mid"), so DTree' spares them; not in KeepSet = uncited already or clean, so
+    clean' means clean before: old CPub3.  No new invariant.  <3>1 gained the
+    leftover facts (none at "saved") and <1>dk.
+  17:45Z INSTALL WRITTEN (s's own part complete; 2 steps OMITTED):
+    Side facts named in M11: A1UpsDone, A1DelBase, A1GoneUnconf (MCLeanP1M10's
+    UpsDone/DelBase/GoneUnconf); A1Side == A1LostDead /\ those.  Install_A1, Next_A1,
+    A1Step take A1Side; THEOREM A1Inductive == Spec /\ []A1Side => []A1IAK1;
+    AK1FromLostDead RENAMED AK1FromSide.  M12 must prove A1Side (it lists the seven).
+    A1BrokenKeepL: A1BrokenKeep with lost allowed to grow by handles no conflict names.
+    Install: <1>cf (declared file not withheld -> carrier form after: clean = old CPub3
+    with the carrier kept at p (UDR + M2 + DelBase: not an upload/delete); dirty =
+    MidBar upload done (A1UpsDone, Mine), InstallCar publishes its snap, or nothing
+    changed and doc holds it -> DocCar); <1>cg (withheld: dropped).  Cased, CPub3,
+    DocCar, MidBar, DTree, typing for s; BoundOK for s via A1BrokenKeepL + GoneUnconf.
+    OMITTED: <1>o (other trees: their DocCar after doc' = inst -- the GCas question)
+    and <1>cm (the new conflicts are minted; DeletedAt).
+    Fixes from m11e/m11f: Scan (A1LeftSet fact, doc' = doc to A1TreeKeep); Touch's
+    not-dirty case split per conjunct; Consume's PICK through the IF; CarForm' steps
+    in Consume/Sync/RPullSync cite the kept carrier.
+    m11e: Scan 2/144 and Touch 1/170 failed (timeouts, fixed above).  m11f: Consume
+    2/211 failed (fixed above).  M11 parses: 4,547 obligations.
+    Box: /mnt/nvme 748 GB free (another session cleared old runs, user's request).
+    Running: m11g (9 ranges, 3 lanes), ZRS rerun (3 workers; ZRS-diskfull.out kept).
+  18:10Z Install <1>cm (the new conflicts minted) WRITTEN + PROVED 52/52 (18 + 34
+    trivial, 224 s, box m11h): withheld snaps (Mine: gone \subseteq uploads, Minted),
+    document versions, DeletedAt (tomb or s's baseline).  Needs tombstones minted:
+    A1TombUpped (MCLeanP1M10 STombUpped) ADDED to A1Side; M2's Fresh gives upped
+    \subseteq minted.  M12's A1Side is now FIVE facts: A1LostDead, A1UpsDone,
+    A1DelBase, A1GoneUnconf, A1TombUpped.  First try failed 2 (index sets not shown
+    \subseteq Paths: TreeTy).  Install's only OMITTED step left: <1>o (other trees).
+  18:40Z GDelete_A1 + GRenameFinish_A1 WRITTEN.  A1NoTree's doc' = doc weakened to
+    "\A q : doc'[q] = doc[q] \/ doc'[q] = Nil" (only its DocCar step read doc; a cleared
+    path makes DocCar's antecedent false).  GDelete: through it.  GRenameFinish:
+    VACUOUS (IndTypeOK: mv = Nil; RenameAtomic shipped).  Checking: box m11i (A1NoTree
+    and every caller).  A1BrokenKeepL PROVED 56/56 (m11g).
+  RescopeSecond unlink, the fact it needs: candidate CPubLeft (CPub3's antecedent
+    "clean OR p \in sDrop \ sKeep at mid") VIOLATED, RUL d6 (m10h/RUL-cpubleft-violated.out):
+    narrow drops p2, uncite, the agent EDITS p2 mid-rescope (no record: not moved),
+    Touch declares it (its bytes are not sHeld, so not RescopeLeftover) -- declared,
+    dropped, no carrier.  Not an AK1 break: the unlink takes only a path whose bytes
+    are still sHeld (RescopeUnlink).  Restated: CPubLeft2 (arm = RescopeLeftover, the
+    unlink's own guard).  RUL + RUL2 (one sync, two touches) rerunning, m10h.
+  19:05Z GATEWAY DocCar WRITTEN (GCas_A1, GRename_A1), relative to two NEW side facts:
+    A1GwDecl  -- a save in flight does not carry a declared file's bytes at its path
+                 (Content(decl_u[p]) # Content(gw[p])); GCas: DocCar's antecedent false.
+    A1DocCarAny -- DocCar at EVERY document path k (doc[k] with a declared file's bytes
+                 => carrier form); GRename: doc'[q] = doc[p], instance k = p.
+    Both in A1Side (now SEVEN facts for M12).  A1DocCarAt(q) = DocCar at one path;
+    A1NoTree takes "\A q : doc'[q] = doc[q] \/ doc'[q] = Nil \/ A1DocCarAt(q)'".
+    The side block (A1LostDead .. A1Side) moved up, beside A1IAK1 (gateway lemmas use it).
+    GRename's ELSE branch excluded by IndC' (mv' = Nil).
+    NOT YET TLC-CHECKED: GwDecl (restated to the content form at p) and DocCarAny --
+    world ZG (ZRS + MaxUI 1), m10h, 1 worker.  If DocCarAny is false the GRename case
+    needs another argument (M12 cannot prove a false fact).
+    m11i (previous text: A1NoTree kept-or-cleared) PROVED: A1NoTree 61/61, GDelete 12/12,
+    GRenameFinish 3/3.  m11j (gateway block + every A1NoTree caller) running.
+  19:25Z M12 STARTED ON ITS PROOF: gen-m12.py was structurally complete (A2Side = the
+    seven facts + nine helpers; A2Keep/A2Keep1/A2Quiet/A2Out/A2ToClaimed; every step;
+    Next_A2, A2Step, THEOREM A2Inv == Spec => []A2Side), never parsed or run.  Added:
+    LEMMA A2ToA1 (A2Side => A1LostDead, A1UpsDone, A1DelBase, A1GoneUnconf, A1TombUpped)
+    and THEOREM AK1FromGateway == Spec /\ [](A1GwDecl /\ A1DocCarAny) => AK1 (the two
+    gateway facts are not in M12).  PARSES: 1,650 obligations.  First proof run: box
+    m12a, run-shards M12 2 1 (ranges 1-589, 590-1191).  BOX LOAD 34.7/8 cores at start
+    (16 tlapm + the other session): expect overload timeouts; the real verdict wants EC2.
+  20:30Z (17:30Z UTC-adjusted: box clock) EC2 RUN LIVE: i-09f7e4f4b1fbb2614 (memory
+    project_ec2_m11_2026_10_16).  ALL box jobs STOPPED (user: covered by EC2): m11e-j,
+    m12a, ZRS, ZG, RUL, RUL2 -- their logs kept.  Box verdicts before the stop: RUL
+    (CPubLeft2) clean to d12 (9.7M distinct); ZG clean to d11 (3.6M); m11g only
+    A1BrokenKeepL 56/56 finished.
+  ===== 17:55Z UTC  A1DocCar IS FALSE (EC2 TLC) =====
+    ZGR (ZG + 1 restart): DocCarAny VIOLATED d12 (21.7M distinct, 16 s):
+      Install publishes p2=<<p2,2>>; UI renames p2 -> p1; Restart (barrier dropped,
+      baseline old); Touch declares p2 = <<p2,2>> (doc[p2] Nil, so TouchDirty passes):
+      the document holds declared bytes (at p1) with no carrier.  DeclPriv (=> DocCarAny)
+      is false too.
+    ZGR3 (MaxRemovals 3): A1DocCar ITSELF VIOLATED d13 (79.4M distinct): rename back.
+    ZGR3b (no DocCar/CPubCar): BoundOK, CPub4, CFetch, DTree4, Cased4, Cased5, CPub3,
+      MidBar, Folds, Frozen clean to d14 (162.7M distinct), 20-min cap.
+    => this morning's restatement (CPub3 carrier-only + DocCar) is WRONG; the fetch arm
+       must come back (CPub4: carrier \/ ~Broken(s, p, doc); Cased4: \/ ~Broken(inst)).
+    OPEN: can a UI delete of such a fetch-arm path then break CPub4 -- and AK1?  The
+      path: rename away, restart, re-declare, rename back, converge, GDelete; then a
+      Skip binds bound.doc[p] = Nil with no carrier: an `ok` ack for an absent file.
+      Worlds AKXB (BoundOK only) and AKXC (CPub4 only), EC2, 48 workers, 40-min cap.
+    EC2 proof phase (old text 1c476af1/d450926d): M11 4,647/4,679 (31 timeouts, 1
+      FALSE: Init_A1's QED, line 3169); M12 1,645/1,650 (5 timeouts, fixed: fix1b).
+  18:15Z M11 timeout fixes (invariant-independent), text 0db0be14, EC2 fix2:
+    Finish/Skip/PullOnly bound stated per field (not the nested record); RescopeFirst
+    <1>1 + aux; RPullSync <1>g from R5 (pulling => sStage # mid); Sync/RPullSync <1>R
+    a DEFINE, not a PICK; Install <1>tp (uploads/deletes \subseteq Paths, gone \subseteq
+    uploads) for <1>db/<1>gu, <1>hc per handle; UploadCopy <1>cc/<1>c0/<2>3 (R1: no
+    leftover in a barrier)/<2>4 (c # Nil); Next_A1 QED + DEF Frame.
+    LEFT for the restatement: A1NoTree, GCas, GRename, A1Frame, Finish/A1Move/UploadCopy
+    per-path QEDs (all DocCar), Init_A1 (refuted: its QED lacks a DocCar step).
+    RESTART FINDING: RestartW sends a rescope at "mid" to "saved" (sKeep := {}), so
+    A1LeftSet changes and A1Reset's A1Kept is FALSE for it (Restart 727 is not a
+    timeout).  DTree4's exemption (mid only) may break across a restart: worlds RULR
+    (BoundOK, DTree5, DTree4, CPub4, CPubLeft2) and RULR5 (BoundOK, DTree5, CPub4,
+    Cased4) on EC2.  DTree5: exempt a dropped uncited path while sStage \in {saved, mid}.
+
+======================================================================
+2026-10-16 EVENING (EC2 i-09f7e4f4b1fbb2614, results s3://flint-tlc-m11-20261016/out)
+MODEL FIX x2 (FINDINGS Table 3, the restart rows; the code was right):
+  (1) RescopeLeftover gains the restart arm: after a restart mid-narrow (stage
+      "saved", sKeep cleared) a dropped, uncited file with its held entry is
+      still the leftover; Touch no longer declares it.  Found: BoundOK d10
+      (m10c/RULRB.cfg; CPubLeft2 d7 RULR, CPub4 d8 RULR5).
+  (2) Touch's dirty skips a file whose bytes the document holds at ANY path
+      (an install published it, the UI renamed it away, restart before step 7).
+      Found: BoundOK d17, 263,802,506 distinct (m10c/AKXB.cfg); the same trace
+      broke CPub4 (AKXC d15) and DocCarAny/A1DocCar (ZGR d12, ZGR3 d13).
+  LeanP1.tla dbfeb682, LeanP1Anc.tla 4a0408ef (make-anc span re-pinned).
+  Gate: AckRescopeRestart, AckRenameRestart (HOLDS), TouchDeclaresRestartLeftover
+  (FIRES AK1, out/g), TouchDeclaresRenamed (= the pre-fix model: AKXB fired).
+  Fixed model, every M11 fact (N1-N6: BoundOK DTree4 CPubCar DocCar Cased5
+  DocCarAny GwDecl DeclPriv CPubLeft2 MidBar Folds Frozen): N3r (rescope+restart)
+  clean to d14 (30-min cap); N6 (two writers + restart) clean to d19; N2 (AKXB
+  world) clean to d16 -- NOT past the old d17 violation (cap): RERUN.
+M11 RESTATED (gen-m11.py): A1DocCar and A1DeclPriv KEPT (true again with fix 2).
+  A1LeftSet by handle with the restart arm; new conjunct A1CPubL (a declared file
+  the narrow left is in carrier form); A1Side += A1KeepCited, A1HeldSame (M13).
+  RescopeSecond <3>2 WRITTEN (no OMITTED left); RescopeFirst, Restart, Sync,
+  RPullSync, Touch, Edit/Delete (A1Moved), Finish/UploadCopy/Install/Consume
+  carry the new arm.  Round 3 (whole module) + round 4 (6 fixed lemmas) running.
+M12: the AK1 theorem moved to M13.  M13 (gen-m13.py, NEW): A3Side = A1KeepCited
+  /\ A1HeldSame /\ A3HeldMinted inductive; THEOREM AK1FromPriv (Spec /\
+  []A1DeclPriv => AK1).
+OPEN: A1DeclPriv's inductive proof (M14).  Plan: (a) doc / (b) gw / (c) peer
+  uploads.  (c) from (a) + DTree + DirtyApart (two trees never both hold, as an
+  unpublished dirty file or upload, bytes the document holds nowhere); (b) from
+  GwLocal (a save in flight is held by no tree).  TLC: m10c N6D, D2D running.
+19:45Z  Round 5 (whole M11, 28 shards): 4 timeouts -- RescopeBegin <2>ls
+  (rewritten: both leftover sets empty), Touch <1>td (TouchDirtyMem, out of
+  the big context), A1Move / UploadCopy (QEDs split per A1TreePath conjunct;
+  A1Moved gains upDone; a SUFFICES had a mis-indented disjunct -- realigned).
+  M13 (9 shards): 3 -- Upload_A3 orig'[Nil] (case split), Checkout_A3 (bucket).
+  Box: 43 orphaned z3 from killed tlapm ate the CPU ("internal timeout" on
+  trivial steps); killed.
+M14 WRITTEN (gen-m14.py, 1,850 lines): A4Inv = A1DeclPriv /\ A4DU (DirtyUnique)
+  /\ A4Gw (a save is an original no handle copies and no declaration names)
+  /\ A4DB (a barrier's delete: baseline set, file not it).  Every action;
+  Install via Cased' (a carrying install that changed the document leaves no
+  declared file of s private: a withheld one is in the carrier's dropped set);
+  gateway via A4Gate.  THEOREM A4Joint (Spec => [](A1IAK1 /\ A4Inv), jointly
+  with M11) and THEOREM AK1Holds (Spec => AK1).  Checking: m14b (54 lemmas).
+  TLC: g2 (AckRescopeRestart, AckRenameRestart HOLDS rows; N2 past d17).
+  Box cap EXTENDED to ~22:02Z.
+
+2026-10-16 22:47Z  AK1 PART 2 COMPLETE: THEOREM AK1Holds == Spec => AK1 (M14), on the
+FIXED model.  Final texts in final/ (md5.txt): LeanP1Anc 44ce1543, M11 4a618f32,
+M12 c9b4df15, M13 f2f7fe05, M14 786befc3.
+  full2 (133 jobs: all of M11-M14 + the 29 M0-M10 lemmas that read Touch or
+    RescopeLeftover, the only two definitions the model fixes changed): 131 clean;
+    the other 2 (Sync_A1, RPullSync_A1) closed in sZenon (final set equality BY Zenon).
+    Every run's md5.txt quotes Anc 44ce1543.  The rest of M0-M10 never expands the
+    changed definitions (proved earlier, pushed 6a8da98e).
+  LeanP1Anc ALIGNMENT BUG (make-anc.py, fixed): TouchDirty's continuation bullets sat
+    one column right of the first, so with fix (2)'s "=>" line the set parsed as
+    {p : (dirty /\ ... /\ local # Nil) => (\A q : ... /\ ~RescopeLeftover)} -- every
+    clean path.  LeanP1.tla (TLC) was aligned: the TLC results stand.  Both models
+    scanned: no other off-by-one bullet.  (Consume_A1's statement has one; it proved
+    as written -- a proved obligation is sound either way.)
+  RUN-HYGIENE FINDINGS: (a) the lem2/lem3 launcher overlaid M11-M14 on /work/proof,
+    whose Anc was the PRE-fix 9c5501de -- every M13/M14/"final" result before full2 was
+    against the old model and is superseded; (b) an "orphan z3" sweep killed live z3
+    (z3's parent is sh, grandparent tlapm); (c) tlapm read the ranges file on stdin
+    (launcher skipped 35 lemmas) -- fixed with </dev/null.
+  TLC: N2 (AKXB world, fixed model) clean to d18 / 398,780,720 distinct, past the old
+    d17 violation (263.8M); AckRescopeRestart clean d19 / 231.6M, AckRenameRestart d17 /
+    217.0M (caps, not complete); N6U, D2U (DirtyUnique) clean to d19 / d21 (caps).
+  EC2 i-09f7e4f4b1fbb2614 TORN DOWN 22:50Z; zero set verified (us-east-1/2, us-west-1/2);
+    outputs in results/2026-10-16-m11-ec2/out.  NOTHING COMMITTED.

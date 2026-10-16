@@ -1,0 +1,13 @@
+tla-mc: building a checker for MCLeanP1M10 (cache: /work/cache-RUL2)
+tla-mc: built in 35.5s
+tla-mc: MCLeanP1M10 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.006s
+progress: depth 12, 40223121 generated, 19006974 distinct (0 fingerprint spills), 12006934 on queue (0 on disk), 11.2s
+progress: depth 13, 103099507 generated, 47504496 distinct (0 fingerprint spills), 28497522 on queue (0 on disk), 26.4s
+progress: depth 14, 242375814 generated, 108620164 distinct (0 fingerprint spills), 61115668 on queue (0 on disk), 54.1s
+progress: depth 15, 520061908 generated, 225825955 distinct (0 fingerprint spills), 117205791 on queue (0 on disk), 112.4s
+Terminated
+
+real	6m41.136s
+user	557m20.976s
+sys	13m57.990s
+rc=143 18:08:23Z

@@ -1,6 +1,6 @@
 # md5 of each LeanP1.tla span make-anc.py rewrites; re-pin (RECORD_SPANS=1)
 # only after reviewing the rewrite against the changed span.
-3c3a559f1f3ff538a0d08c1585f19fa1 (* The boundary verbs' answer (row 15; `sentinel.rs`).
+c27a4281edf6a30f158d9b97f8ae9a15 (* The boundary verbs' answer (row 15; `sentinel.rs`).
 5237c42ecd0022da6b17f8cd7791ef1d Checkout(s) ==
 9e6eaae925f2e6f4f19703943b46e5de Claim(s) ==
 98746eb03cf11b5a84417a575c0198b7 Collect(s) ==

@@ -1,0 +1,4 @@
+35c00c4dc505872223fe87a846cbf39f  LeanP1.tla
+tla-mc: building a checker for LeanP1 (cache: /work/cache-gTouchDeclaresRenamed)
+tla-mc: built in 68.5s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 24 workers, generated engine; loaded in 0.012s

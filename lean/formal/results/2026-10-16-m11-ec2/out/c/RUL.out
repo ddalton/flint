@@ -1,0 +1,9 @@
+tla-mc: building a checker for MCLeanP1M10 (cache: /work/cache-RUL)
+tla-mc: built in 66.2s
+tla-mc: MCLeanP1M10 (31 variables, 0 symmetry permutations), 192 workers, generated engine; loaded in 0.011s
+Terminated
+
+real	1m6.946s
+user	1m6.230s
+sys	0m2.343s
+rc=143 18:09:36Z

@@ -1,0 +1,16 @@
+A19: 55 proved 2 failed / 193 WALL 688.33 s rc 0 0 err
+A22: 55 proved 2 failed / 193 WALL 682.07 s rc 0 0 err
+A24: 64 proved 0 failed / 207 WALL 805.06 s rc 0 0 err
+B11: 72 proved 0 failed / 198 WALL 853.26 s rc 0 0 err
+B5: 50 proved 0 failed / 105 WALL 993.76 s rc 0 0 err
+B7: 52 proved 0 failed / 109 WALL 849.52 s rc 0 0 err
+C1: 35 proved 0 failed / 86 WALL 213.31 s rc 0 0 err
+C9: 77 proved 1 failed / 265 WALL 548.12 s rc 0 0 err
+D_Checkout_A4: 17 proved 0 failed / 46 WALL 284.49 s rc 0 0 err
+D_Depose_A4: 14 proved 0 failed / 37 WALL 177.15 s rc 0 0 err
+D_Honor_A4: 11 proved 0 failed / 22 WALL 254.41 s rc 0 0 err
+D_Init_A4: 10 proved 0 failed / 20 WALL 144.12 s rc 0 0 err
+D_PullOnly_A4: 10 proved 0 failed / 20 WALL 268.89 s rc 0 0 err
+D_Restart_A4: 15 proved 0 failed / 32 WALL 290.38 s rc 0 0 err
+D_Upload_A4: 76 proved 0 failed / 229 WALL 846.46 s rc 0 0 err
+DONE 21:37:29Z

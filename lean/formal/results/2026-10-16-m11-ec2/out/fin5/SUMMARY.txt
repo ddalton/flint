@@ -1,0 +1,4 @@
+Next_A3: 42 proved 0 failed / 156 WALL 228.85 s rc 0 0 err
+RPullSync_A1: 10 proved 1 failed / 220 WALL 173.64 s rc 0 0 err
+Sync_A1: 11 proved 1 failed / 220 WALL 193.95 s rc 0 0 err
+DONE 21:38:14Z

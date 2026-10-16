@@ -1,0 +1,11 @@
+START 2026-10-16T17:16:15Z 192 cpus; M11 1c476af1 M12 d450926d Anc 9c5501de
+PROOFS launched 2026-10-16T17:16:16Z: 52 shards
+PROOF M11 2026-10-16T17:39:21Z obligations 4679 proved 1598 trivial 3049 failed 32 errors 0 unaccounted -
+  FAILS M11: 241:timeout 280:timeout 283:timeout 307:timeout 316:timeout 319:timeout 727:timeout 1100:timeout 1509:timeout 1560:timeout 1569:timeout 1568:timeout 1738:timeout 1854:timeout 1855:timeout 1911:timeout 1912:timeout 1966:timeout 1955:timeout 1960:timeout 2196:timeout 2281:timeout 2475:timeout 2512:timeout 2530:timeout 2625:timeout 2626:timeout 2684:timeout 2950:timeout 3057:timeout 3169:false 3225:timeout
+PROOF M12 2026-10-16T17:39:21Z obligations 1650 proved 636 trivial 1009 failed 5 errors 0 unaccounted -
+  FAILS M12: 862:timeout 880:timeout 891:timeout 917:timeout 1027:timeout
+CAND ZG 2026-10-16T18:01:21Z  progress: depth 19, 1666308877 generated, 660255025 distinct
+CAND ZRS 2026-10-16T18:01:42Z  
+CAND RUL2 2026-10-16T18:08:29Z  progress: depth 15, 520061908 generated, 225825955 distinct
+CAND RUL 2026-10-16T18:09:36Z  
+DONE 2026-10-16T18:09:36Z (no shutdown: the cap or a manual teardown)

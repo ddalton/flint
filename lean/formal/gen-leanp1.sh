@@ -214,6 +214,16 @@ emit CarrierCitesAny Spec TypeOK AK1 $AR
 RR="Paths={p1,p2} Free={} Writers={A} MaxTouches=1 MaxBarriers=2 MaxRemovals=2 MaxUI=0 MaxAges=0 Scopes={{p1},{p1,p2}} MaxRescopes=1"
 emit AckRescopeRename Spec "$AINV" "$APROPS" $RR
 emit TouchDeclaresLeftover Spec TypeOK AK1 $RR
+# Table 3, the restart rows (2026-10-16, found by the proof's candidate
+# checks on EC2): the same narrow with a restart mid-narrow (the stage back at
+# "saved"); and an install's published file the UI renames away before a
+# restart ahead of step 7, renamed back, converged onto, then deleted by the UI.
+RRR="$RR MaxRestarts=1"
+emit AckRescopeRestart Spec "$AINV" "$APROPS" $RRR
+emit TouchDeclaresRestartLeftover Spec TypeOK AK1 $RRR
+AKX="Paths={p1,p2} Free={} Writers={A} MaxTouches=1 MaxBarriers=3 MaxRemovals=4 MaxUI=0 MaxAges=0 MaxRestarts=1"
+emit AckRenameRestart Spec "$AINV" "$APROPS" $AKX
+emit TouchDeclaresRenamed Spec TypeOK AK1 $AKX
 emit FoldClobbers Spec TypeOK,AK3 "" $A1
 emit StampIndependent Spec TypeOK,AK4 "" $A1
 emit ProbeAckOk Spec ProbeAckOk "" $A1

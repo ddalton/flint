@@ -1,0 +1,81 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 21:53:38 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 530 533 --cleanfp --method smt --stretch 24 --threads 1 -k LeanP1ProofM6
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:532:10:532:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:532:13:532:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:532:19:532:28
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:531:77:531:79
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:4
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:532:10:532:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.1 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:532:13:532:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:532:19:532:28
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:531:77:531:79
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM6.tlaps/LeanP1ProofM6.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM6.tlaps/fingerprints" *)
+File "./LeanP1ProofM6.tla", line 1, character 1 to line 651, character 78:
+[INFO]: All 4 obligations proved.
+WALL 85.41 s rc 0
