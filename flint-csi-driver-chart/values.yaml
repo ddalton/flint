@@ -445,6 +445,12 @@ nfs:
     # VolumeAttachments and Nodes (cluster-wide, read-only). false: every
     # node with an allowed principal reaches every volume.
     attachedNodesOnly: true
+    # Each volume's NFS server gets a principal of its own,
+    # nfs/<volume>.<serverName>, made by the controller (a KerberosPrincipal
+    # per volume in the NFS namespace) and deleted with the volume. One
+    # server's key then opens no other volume. Volumes made before keep the
+    # shared principal. false: every server shares nfs/<serverName>.
+    perVolumeKeys: true
     # Every NFS client must ask for SP4_MACH_CRED state protection
     # (FLINT_NFS_REQUIRE_MACH_CRED): its sessions are then bound to the
     # machine principal that made it, and a session id seen on the wire
@@ -456,7 +462,8 @@ nfs:
     # served, and their session ids can be reused by another allowed
     # principal.
     requireMachCred: true
-    # Delete or Retain the principals when the release is uninstalled.
+    # Delete or Retain the principals when the release is uninstalled (or,
+    # per volume, when the volume is deleted).
     deletionPolicy: Delete
     storageClass:
       create: true

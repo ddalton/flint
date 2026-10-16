@@ -6,15 +6,18 @@ metadata:
 spec:
   description: >-
     An RWX volume of the flint-krb5 class mounts with sec=krb5i on two
-    nodes (their rpc.gssd with keys from krb5-operator, the server's
-    nfs/flint-nfs.flint-system.svc.cluster.local key, the node's hosts
-    entry for the server's ClusterIP), and the pods share files; a sec=sys
+    nodes (their rpc.gssd with keys from krb5-operator, the server's own
+    nfs/<pv>.flint-nfs.flint-system.svc.cluster.local key, the node's hosts
+    entry for the server's ClusterIP), and the pods share files; the
+    volume's server holds that key alone, and the shared key is not in
+    it; a sec=sys
     mount is refused by the servers' krb5i floor; a user principal with a
     real ticket (alice, uid 1000 on a node) is refused by the servers'
     principal allowlist, while the node's machine principal is not; bob,
     mapped to 2000:2000, owns what he creates and is denied a file only
     root may read; a node the volume is not attached to, with its own
-    valid machine key, is refused.
+    valid machine key, is refused; deleting the volume deletes its
+    principal.
   steps:
   - name: volumes-and-pods
     try:
@@ -63,6 +66,33 @@ spec:
             sleep 2
           done
           echo "FAIL: a=$a b=$b"; exit 1
+  - name: the-volume-server-has-a-key-of-its-own
+    try:
+    - script:
+        content: |
+          set -eu
+          pv=$(kubectl -n "$NAMESPACE" get pvc krb5-pvc -o jsonpath='{.spec.volumeName}')
+          want="$pv.flint-nfs.flint-system.svc.cluster.local"
+          name=$(kubectl -n flint-system get pod "flint-nfs-$pv" -o jsonpath='{.metadata.annotations.chert\.us/krb5-server-name}')
+          [ "$name" = "$want" ] || { echo "FAIL: server name '$name', want $want"; exit 1; }
+          secrets=$(kubectl -n flint-system get pod "flint-nfs-$pv" -o jsonpath='{range .spec.volumes[*]}{.secret.secretName}{" "}{end}')
+          case " $secrets " in *" flint-nfs-krb5-$pv "*) ;; *) echo "FAIL: server mounts '$secrets'"; exit 1 ;; esac
+          case " $secrets " in *" flint-nfs-krb5-keytab "*) echo "FAIL: server mounts the shared keytab"; exit 1 ;; esac
+          kubectl -n flint-system get kerberosprincipal "flint-nfs-$pv" \
+            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' | grep -qx True
+          # The keytab holds the volume's principal and nothing else.
+          node=$(kubectl -n "$NAMESPACE" get pod krb5-a -o jsonpath='{.spec.nodeName}')
+          kubectl -n flint-system get secret "flint-nfs-krb5-$pv" -o jsonpath='{.data.krb5\.keytab}' |
+            base64 -d | docker exec -i "$node" sh -c 'cat > /tmp/vol.keytab && klist -k /tmp/vol.keytab; rm -f /tmp/vol.keytab' > /tmp/klist.$$
+          cat /tmp/klist.$$
+          grep -q "nfs/$want@FLINT.TEST" /tmp/klist.$$ || { echo "FAIL: no nfs/$want"; exit 1; }
+          if grep '@FLINT.TEST' /tmp/klist.$$ | grep -v "nfs/$want@FLINT.TEST" | grep -q .; then
+            echo "FAIL: the volume's keytab holds other principals"; exit 1
+          fi
+          # The node maps the server's IP to that name.
+          ip=$(kubectl -n flint-system get svc "flint-nfs-$pv" -o jsonpath='{.spec.clusterIP}')
+          docker exec "$node" grep -E "^$ip $want # flint-nfs-krb5$" /etc/hosts
+          echo PASS
   - name: sys-refused-by-the-floor
     try:
     - script:
@@ -202,8 +232,10 @@ spec:
             echo "FAIL: the volume is attached to $cp"; exit 1
           fi
           ip=$(kubectl -n flint-system get svc "flint-nfs-$pv" -o jsonpath='{.spec.clusterIP}')
-          # What the node plugin would write before a Kerberos mount.
-          docker exec "$cp" sh -c "echo '$ip flint-nfs.flint-system.svc.cluster.local # rogue-test' >> /etc/hosts && mkdir -p /mnt/rogue"
+          # What the node plugin would write before a Kerberos mount: the
+          # volume's own server name, so the ticket is one the server can
+          # read and only the attachments refuse it.
+          docker exec "$cp" sh -c "echo '$ip $pv.flint-nfs.flint-system.svc.cluster.local # rogue-test' >> /etc/hosts && mkdir -p /mnt/rogue"
           if docker exec "$cp" timeout 90 mount -t nfs4 -o vers=4.2,sec=krb5i "$ip:/" /mnt/rogue; then
             docker exec "$cp" umount -f /mnt/rogue || true
             echo "FAIL: $cp mounted a volume not attached to it"; exit 1
@@ -224,3 +256,15 @@ spec:
         content: |
           cp=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].metadata.name}')
           docker exec "$cp" sh -c "umount -f /mnt/rogue 2>/dev/null; grep -v '# rogue-test' /etc/hosts > /tmp/h && cat /tmp/h > /etc/hosts" || true
+  - name: deleting-the-volume-deletes-its-principal
+    try:
+    - script:
+        timeout: 4m
+        content: |
+          set -eu
+          pv=$(kubectl -n "$NAMESPACE" get pvc krb5-pvc -o jsonpath='{.spec.volumeName}')
+          kubectl -n "$NAMESPACE" delete pod krb5-a krb5-b --wait=true
+          kubectl -n "$NAMESPACE" delete pvc krb5-pvc --wait=true
+          kubectl wait pv "$pv" --for=delete --timeout=2m || true
+          kubectl -n flint-system wait kerberosprincipal "flint-nfs-$pv" --for=delete --timeout=2m
+          echo PASS

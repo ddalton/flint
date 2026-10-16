@@ -13,8 +13,9 @@
 {{- if and $k.requireMachCred (not $k.minSec) }}
 {{- fail "nfs.kerberos.minSec is empty but requireMachCred is on: a sec=sys mount cannot ask for SP4_MACH_CRED, so every one would be refused. Keep minSec (krb5i), or set requireMachCred=false as well" }}
 {{- end }}
-# Kerberos for RWX NFS volumes (values nfs.kerberos). The NFS servers'
-# principal: every server pod mounts this keytab.
+# Kerberos for RWX NFS volumes (values nfs.kerberos). The shared server
+# principal: the servers of volumes made before perVolumeKeys (or with it
+# off) mount this keytab.
 apiVersion: krb5.ddalton.dev/v1alpha1
 kind: KerberosPrincipal
 metadata:
@@ -60,6 +61,38 @@ spec:
   {{- end }}
   deletionPolicy: {{ $k.deletionPolicy }}
 {{- end }}
+---
+# Each volume's NFS server has a principal of its own (perVolumeKeys): the
+# controller makes a KerberosPrincipal per volume, here, and deletes it
+# with the volume. Kept with perVolumeKeys off, so the volumes made while
+# it was on still lose their principals when they are deleted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-nfs-volume-keys
+  namespace: {{ include "flint-csi-driver-chart.nfsNamespace" . }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+rules:
+- apiGroups: [krb5.ddalton.dev]
+  resources: [kerberosprincipals]
+  verbs: [get, create, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-nfs-volume-keys
+  namespace: {{ include "flint-csi-driver-chart.nfsNamespace" . }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-nfs-volume-keys
+subjects:
+- kind: ServiceAccount
+  name: flint-csi-controller
+  namespace: {{ .Release.Namespace }}
 {{- if $k.attachedNodesOnly }}
 ---
 # Attached-nodes-only NFS servers (nfs.kerberos.attachedNodesOnly) read

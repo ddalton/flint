@@ -14,6 +14,20 @@ covered by the stability guarantee.
 
 ### Security
 
+- **Each NFS volume's server has a Kerberos key of its own** (2026-10-16).
+  Every NFS server pod used to mount the one shared keytab
+  (`nfs/flint-nfs.<ns>.svc.<domain>`), so anyone who got into one server
+  pod could read the tickets nodes present to every other volume's server
+  and pass for any of them. With `nfs.kerberos.perVolumeKeys` (default
+  `true`), the controller creates a `KerberosPrincipal` for each new
+  volume, `nfs/<volume>.<shared server name>`, whose keytab Secret only
+  that volume's server mounts. The node maps the volume's ClusterIP to
+  that name in `/etc/hosts` (it gets the name in the publish context).
+  Deleting the volume deletes its principal. Volumes made before keep the
+  shared principal until they are recreated. The chart gives the
+  controller a Role for `kerberosprincipals` in the NFS namespace.
+  `perVolumeKeys: false` keeps the shared key for every volume.
+
 - **Every Kerberos client must bind its sessions to its machine**
   (2026-10-16). A client that did not ask for SP4_MACH_CRED (no
   `rpc.gssd`, a non-Linux client, or one downgraded on purpose) got
@@ -175,6 +189,11 @@ covered by the stability guarantee.
   until fixed. Neither is fixed in this entry.
 
 ### Changed
+
+- **krb5 1.0.0** (2026-10-16), the Kerberos acceptor's crate, up from
+  0.12.1. Its API is settled for 1.0: the raw crypto modules are private
+  and its errors and option structs are `#[non_exhaustive]`. The NFS
+  server uses none of what changed, so nothing else moves.
 
 - **NFS Kerberos: the acceptor is the `krb5` crate (0.2)** (2026-10-13).
   `nfs/kerberos.rs` and `nfs/krb/` moved to the standalone `krb5` crate;

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The chart's Kerberos defaults (docs/nfs-kerberos.md, "Secure by default"):
 # nfs.kerberos.enabled alone gives every NFS server the krb5i floor,
-# enforced permissions, attached-nodes-only and required SP4_MACH_CRED;
-# each relaxes only when set explicitly; Kerberos off changes nothing.
+# enforced permissions, attached-nodes-only and required SP4_MACH_CRED,
+# and each new volume a server principal of its own; each relaxes only
+# when set explicitly; Kerberos off changes nothing.
 #
 # helm only, no cluster. Runs in CI before the kind suites.
 #
@@ -52,6 +53,26 @@ if renders "Kerberos on" "${KRB5[@]}"; then
     echo "✓ Kerberos on: the servers may read VolumeAttachments"
   else
     echo "✗ Kerberos on: no RBAC for VolumeAttachments"; fails=$((fails + 1))
+  fi
+fi
+
+if renders "Kerberos on" "${KRB5[@]}"; then
+  expect "Kerberos on" NFS_KRB5_REALM CORP.EXAMPLE
+  expect "Kerberos on" NFS_KRB5_SERVER_NAME flint-nfs.flint-system.svc.cluster.local
+  if grep -q 'kerberosprincipals' "$TMP/out.yaml"; then
+    echo "✓ Kerberos on: the controller may make each volume's principal"
+  else
+    echo "✗ Kerberos on: no RBAC for per-volume KerberosPrincipals"; fails=$((fails + 1))
+  fi
+fi
+
+if renders "perVolumeKeys=false" "${KRB5[@]}" --set nfs.kerberos.perVolumeKeys=false; then
+  expect "perVolumeKeys=false" NFS_KRB5_REALM -
+  expect "perVolumeKeys=false" NFS_KRB5_KEYTAB_SECRET flint-nfs-krb5-keytab
+  if grep -q 'kerberosprincipals' "$TMP/out.yaml"; then
+    echo "✓ perVolumeKeys=false: the controller may still delete earlier volumes' principals"
+  else
+    echo "✗ perVolumeKeys=false: no RBAC to delete earlier volumes' principals"; fails=$((fails + 1))
   fi
 fi
 
