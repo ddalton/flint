@@ -279,6 +279,16 @@ mode; `enforce` refuses unsigned ones. Error: BADHANDLE (E4).
 
 ## Phase 5: TLS and identities on MDS↔DS gRPC
 
+**5a built** (2026-10-16, `pnfs::control_tls`): the E5 spike settled
+(tonic 0.10 under tokio-rustls 0.26: `serve_with_incoming` with a stream
+of handshakes run in tasks of their own, `connect_with_connector`), TLS
+1.3 on the MDS's gRPC, every DS's DsControl, the DS registration client,
+the MDS's DsControl clients and the CSI controller's client; chart
+`pnfs.controlTls` (default on), Secret `flint-pnfs-control-tls` from
+`genCA`/`genSignedCert`, kept with `lookup`. **5b not built:** the
+pod-bound token identities and TokenReview.
+
+
 - No cert-manager, no per-pod certs: chart `genCA` + `genSignedCert`, kept
   with `lookup` (Secret `flint-pnfs-control-tls`, `existingSecret`
   override). One MDS cert (all shard SANs), one shared DS server cert;

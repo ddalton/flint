@@ -647,14 +647,10 @@ impl PnfsCsi {
     /// rationale on the struct doc-comment. The client attaches
     /// FLINT_PNFS_CONTROL_TOKEN when configured.
     async fn dial(&self) -> Result<crate::pnfs::grpc::AuthedMdsControlClient, PnfsError> {
-        let ep = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
-            .map_err(|e| PnfsError::BadEndpoint(format!("{}: {}", self.endpoint, e)))?
-            .connect_timeout(self.timeout)
-            .timeout(self.timeout);
-        let channel = ep
-            .connect()
+        // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
+        let channel = crate::pnfs::control_tls::connect(&self.endpoint, Some(self.timeout))
             .await
-            .map_err(|e| PnfsError::Transport(format!("connect {}: {}", self.endpoint, e)))?;
+            .map_err(PnfsError::Transport)?;
         Ok(crate::pnfs::grpc::authed_mds_control_client(channel))
     }
 

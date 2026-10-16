@@ -1140,9 +1140,8 @@ async fn ds_truncate_one(
             } else {
                 format!("http://{}", endpoint)
             };
-            let ep = tonic::transport::Channel::from_shared(uri)
-                .map_err(|e| format!("bad DS control endpoint '{}': {}", endpoint, e))?;
-            let channel = tokio::time::timeout(DIAL_TIMEOUT, ep.connect())
+            // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
+            let channel = tokio::time::timeout(DIAL_TIMEOUT, crate::pnfs::control_tls::connect(&uri, None))
                 .await
                 .map_err(|_| format!("dial {} timed out", endpoint))?
                 .map_err(|e| format!("dial {}: {}", endpoint, e))?;
@@ -1264,9 +1263,8 @@ async fn dial_control_client(
     } else {
         format!("http://{}", endpoint)
     };
-    let ep = tonic::transport::Channel::from_shared(uri)
-        .map_err(|e| format!("bad DS control endpoint '{}': {}", endpoint, e))?;
-    let channel = tokio::time::timeout(DIAL_TIMEOUT, ep.connect())
+    // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
+    let channel = tokio::time::timeout(DIAL_TIMEOUT, crate::pnfs::control_tls::connect(&uri, None))
         .await
         .map_err(|_| format!("dial {} timed out", endpoint))?
         .map_err(|e| format!("dial {}: {}", endpoint, e))?;

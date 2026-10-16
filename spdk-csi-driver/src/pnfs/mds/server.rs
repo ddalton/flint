@@ -1853,11 +1853,14 @@ impl MetadataServer {
 
             info!("🔧 Starting MDS gRPC control server on {}", grpc_addr);
 
-            match tonic::transport::Server::builder()
-                .add_service(svc)
-                .serve(grpc_addr)
-                .await
-            {
+            let router = tonic::transport::Server::builder().add_service(svc);
+            // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
+            let served = match crate::pnfs::control_tls::bind_incoming(grpc_addr).await {
+                Ok(Some(incoming)) => router.serve_with_incoming(incoming).await.map_err(|e| e.to_string()),
+                Ok(None) => router.serve(grpc_addr).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+            match served {
                 Ok(_) => {
                     info!("gRPC control server stopped");
                 }

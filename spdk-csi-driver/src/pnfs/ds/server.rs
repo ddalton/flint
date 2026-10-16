@@ -1508,13 +1508,18 @@ impl DataServer {
         };
         info!("🎛️ DsControl gRPC listener on {}", addr);
         tokio::spawn(async move {
-            let server = tonic::transport::Server::builder()
+            let router = tonic::transport::Server::builder()
                 .add_service(tonic::service::interceptor::InterceptedService::new(
                     crate::pnfs::grpc::DsControlServer::new(svc),
                     crate::pnfs::grpc::check_control_token,
-                ))
-                .serve(addr);
-            if let Err(e) = server.await {
+                ));
+            // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
+            let served = match crate::pnfs::control_tls::bind_incoming(addr).await {
+                Ok(Some(incoming)) => router.serve_with_incoming(incoming).await.map_err(|e| e.to_string()),
+                Ok(None) => router.serve(addr).await.map_err(|e| e.to_string()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = served {
                 error!("❌ DsControl listener died: {}", e);
             }
         });
@@ -1603,6 +1608,12 @@ impl DataServer {
 pub struct DsControlService {
     device_id: String,
     data_dir: std::path::PathBuf,
+}
+
+impl DsControlService {
+    pub(crate) fn new(device_id: String, data_dir: std::path::PathBuf) -> Self {
+        Self { device_id, data_dir }
+    }
 }
 
 #[tonic::async_trait]

@@ -323,6 +323,10 @@ flint-nfs-krb5-keytab
 - name: FLINT_PNFS_KRB5_DS
   value: {{ include "flint-csi-driver-chart.pnfsKrb5DsNames" . | quote }}
 {{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+# The node plugin dials the MDS too (pnfs-block): TLS on the control path.
+{{ include "flint-csi-driver-chart.pnfsControlTlsEnv" . }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -368,6 +372,31 @@ for a data server the enforcement.
 {{- end }}
 {{- end }}
 
+{{/*
+TLS on the pNFS control path (pnfs.controlTls, Phase 5): "true", else empty.
+*/}}
+{{- define "flint-csi-driver-chart.pnfsControlTls" -}}
+{{- if and .Values.pnfs.enabled .Values.pnfs.server.enabled (.Values.pnfs.controlTls).enabled -}}true{{- end -}}
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsControlTlsEnv" -}}
+- name: FLINT_PNFS_CONTROL_TLS_DIR
+  value: /etc/flint-pnfs-control-tls
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsControlTlsMount" -}}
+- name: pnfs-control-tls
+  mountPath: /etc/flint-pnfs-control-tls
+  readOnly: true
+{{- end }}
+
+{{- define "flint-csi-driver-chart.pnfsControlTlsVolume" -}}
+- name: pnfs-control-tls
+  secret:
+    secretName: {{ .Values.pnfs.controlTls.existingSecret | default "flint-pnfs-control-tls" }}
+    defaultMode: 0444
+{{- end }}
+
 {{- define "flint-csi-driver-chart.pnfsKrb5DataServers" -}}
 {{- if and (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) (.Values.pnfs.kerberos).dataServers -}}true{{- end -}}
 {{- end }}
@@ -395,6 +424,11 @@ headless Service, as krb5-operator's hostPrincipals name it.
 {{- if or (and .Values.nfs.enabled .Values.nfs.kerberos.enabled) (include "flint-csi-driver-chart.pnfsKrb5Enabled" .) }}
 - name: host-etc-hosts
   mountPath: /host/etc/hosts
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+# The node plugin dials the MDS too (pnfs-block: AttachBlockNode,
+# BlockSessionUp at NodeStage): TLS on the control path.
+{{ include "flint-csi-driver-chart.pnfsControlTlsMount" . }}
 {{- end }}
 {{- end }}
 

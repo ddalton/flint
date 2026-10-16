@@ -153,6 +153,12 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
 
     // Create and start DS
     info!("⚙️  Initializing Data Server...");
+    // TLS on the control path (FLINT_PNFS_CONTROL_TLS_DIR, Phase 5): a bad
+    // directory refuses to start rather than falling back to plaintext.
+    if let Err(e) = spdk_csi_driver::pnfs::control_tls::init_from_env() {
+        error!("❌ Control TLS refused: {}", e);
+        return Err(e.into());
+    }
     let ds = spdk_csi_driver::pnfs::ds::DataServer::new(ds_config)?;
 
     info!("🚀 Starting Data Server...");

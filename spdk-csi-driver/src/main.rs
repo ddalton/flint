@@ -504,6 +504,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // before this change. The Arc lets the same handle feed both
     // controller (CreateVolume / DeleteVolume) and node
     // (NodePublishVolume) services.
+    // TLS to the MDS (FLINT_PNFS_CONTROL_TLS_DIR, Phase 5): a bad directory
+    // refuses to start rather than falling back to plaintext.
+    if let Err(e) = spdk_csi_driver::pnfs::control_tls::init_from_env() {
+        eprintln!("❌ [pNFS] control TLS refused: {e}");
+        return Err(e.into());
+    }
     let pnfs_csi: Option<Arc<spdk_csi_driver::pnfs_csi::PnfsShards>> =
         spdk_csi_driver::pnfs_csi::PnfsShards::from_env().map(Arc::new);
     if let Some(p) = &pnfs_csi {

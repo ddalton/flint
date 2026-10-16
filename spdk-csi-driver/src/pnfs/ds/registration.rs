@@ -13,7 +13,6 @@
 use crate::pnfs::Result;
 use crate::pnfs::grpc::{RegisterRequest, HeartbeatRequest, UnregisterRequest, HealthStatus, Instruction};
 use std::time::Duration;
-use tonic::transport::Channel;
 use tracing::{debug, error, info, warn};
 
 /// MDS registration client (gRPC-based)
@@ -53,10 +52,8 @@ impl RegistrationClient {
 
         info!("Connecting to MDS gRPC service at {}", endpoint);
 
-        let channel = Channel::from_shared(endpoint.clone())
-            .map_err(|e| crate::pnfs::Error::Registration(format!("bad MDS endpoint: {}", e)))?
-            .connect()
-            .await;
+        // TLS when FLINT_PNFS_CONTROL_TLS_DIR is set (Phase 5).
+        let channel = crate::pnfs::control_tls::connect(&endpoint, None).await;
         match channel {
             Ok(channel) => {
                 info!("✅ Connected to MDS gRPC service");

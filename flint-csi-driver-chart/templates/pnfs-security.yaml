@@ -58,6 +58,34 @@ data:
   current: {{ printf "1:%s" (sha256sum (randAlphaNum 64)) | b64enc }}
   {{- end }}
 {{- end }}
+{{- if and (include "flint-csi-driver-chart.pnfsControlTls" .) (not .Values.pnfs.controlTls.existingSecret) }}
+{{- $secretName := "flint-pnfs-control-tls" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+---
+# TLS on the pNFS control path (pnfs.controlTls, Phase 5): a CA and one
+# certificate for flint-pnfs-control. Generated once, kept on upgrades: a
+# new CA mid-roll would split the fleet into two that cannot talk.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: flint-pnfs
+type: Opaque
+data:
+  {{- if and $existing $existing.data (index $existing.data "tls.crt") }}
+  ca.crt: {{ index $existing.data "ca.crt" }}
+  tls.crt: {{ index $existing.data "tls.crt" }}
+  tls.key: {{ index $existing.data "tls.key" }}
+  {{- else }}
+  {{- $ca := genCA "flint-pnfs-control-ca" 3650 }}
+  {{- $cert := genSignedCert "flint-pnfs-control" nil (list "flint-pnfs-control") 3650 $ca }}
+  ca.crt: {{ $ca.Cert | b64enc }}
+  tls.crt: {{ $cert.Cert | b64enc }}
+  tls.key: {{ $cert.Key | b64enc }}
+  {{- end }}
+{{- end }}
 {{- if and .Values.pnfs.server.enabled .Values.pnfs.networkPolicy.enabled }}
 ---
 # NFS data ports: MDS + DS 2049 from node CIDRs only. Kernel NFS

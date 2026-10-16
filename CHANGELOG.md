@@ -14,6 +14,15 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS: TLS on the control path** (2026-10-16; plan Phase 5a). The
+  MDS's gRPC (data server registration, heartbeats, the CSI controller's
+  volume calls) and each data server's DsControl (truncates, the MDS's
+  relay of a client's I/O) were plaintext: the shared control token
+  crossed the network in the clear, and anyone who read it could register
+  a data server and attract stripe writes. They now speak TLS 1.3 by
+  default (`pnfs.controlTls`): one chart-generated CA and certificate
+  (Secret `flint-pnfs-control-tls`, kept across upgrades), checked by every
+  client. A bad `FLINT_PNFS_CONTROL_TLS_DIR` stops the process at startup.
 - **pNFS: signed data server filehandles** (2026-10-16; plan Phase 4).
   The data server handles in a files layout were `file_id` and stripe in
   the clear, so whoever reached a data server and knew or guessed a file

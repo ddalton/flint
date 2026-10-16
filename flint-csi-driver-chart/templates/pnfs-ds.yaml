@@ -237,6 +237,10 @@ spec:
             # enforcement.
             {{- include "flint-csi-driver-chart.pnfsDsFhEnv" (dict "root" . "ds" true) | nindent 12 }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+            # TLS on the control path (pnfs.controlTls).
+            {{- include "flint-csi-driver-chart.pnfsControlTlsEnv" . | nindent 12 }}
+            {{- end }}
             {{- if .Values.pnfs.controlToken.enabled }}
             # Attached to registration/heartbeat gRPC — see
             # templates/pnfs-security.yaml.
@@ -273,11 +277,17 @@ spec:
             # pod's (hostPrincipals). A rekey needs a restart.
             {{- include "flint-csi-driver-chart.krb5ServerMounts" (dict "root" . "keytabSubPathExpr" "$(POD_NAME).keytab") | nindent 12 }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+            {{- include "flint-csi-driver-chart.pnfsControlTlsMount" . | nindent 12 }}
+            {{- end }}
           {{- with .Values.pnfs.server.dataServers.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
       volumes:
+        {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
+        {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" . | nindent 8 }}
+        {{- end }}
         - name: config
           configMap:
             name: flint-pnfs-ds-config

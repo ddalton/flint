@@ -175,6 +175,12 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
     // resolve to "off". An operator who set a floor asked for it, and
     // starting anyway would serve every sec=sys client while they
     // believed otherwise. Exits non-zero.
+    // TLS on the control path (FLINT_PNFS_CONTROL_TLS_DIR, Phase 5): a bad
+    // directory refuses to start rather than falling back to plaintext.
+    if let Err(e) = spdk_csi_driver::pnfs::control_tls::init_from_env() {
+        error!("❌ Control TLS refused: {}", e);
+        return Err(e.into());
+    }
     let sec_env = match spdk_csi_driver::pnfs::mds::krb5::MdsSecEnv::from_env() {
         Ok(e) => e,
         Err(e) => {
