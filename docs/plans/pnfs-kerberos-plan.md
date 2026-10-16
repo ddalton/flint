@@ -183,6 +183,22 @@ volume refused, a detach revokes).
 
 ## Phase 3: Kerberos on the data servers
 
+**Built** (2026-10-16): `nfs::gss_front` (the shared front end; `serve_tcp`
+is a caller), the DS on it (`pnfs/ds/server.rs`: refuse GSS without a
+keytab, the floor for every other flavor, splice off under GSS, framing by
+`gss_front::frame_reply`, SECINFO_NO_NAME from the floor, EXCHANGE_ID
+decoding `state_protect4_a` and the whole `impl_id`, the RPC principal
+recorded), the chart (`pnfs.kerberos.dataServers`, default on:
+`hostPrincipals` keys, per-pod keytab mounts, the DS server env, the MDS's
+`FLINT_PNFS_LAYOUTS_FOR_GSS`), and the node's DS hosts lines
+(`nfs_krb5::prepare_pnfs_ds_hosts`, resolving the Services through the
+cluster DNS rather than listing them, so the node needs no new RBAC).
+Kind: 8 MiB under `krb5i` striped on both DSes, all their calls GSS.
+**Not built yet:** the DS union gate (attached nodes only at the DS; the
+DS has no watcher), and the VM legs (E1 against a refusing DS, krb5p,
+multipath, the lima byte-identical guard).
+
+
 - **Share the GSS code:** extract `gss_front` from
   `handle_rpcsec_gss_call` (`nfs/server_v4.rs:1052-1180`: INIT,
   CONTINUE_INIT, DESTROY, DATA validate/floor/verifier/sequence/unseal),
