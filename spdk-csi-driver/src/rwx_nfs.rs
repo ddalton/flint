@@ -433,8 +433,16 @@ pub async fn create_nfs_server_pod(
     };
     
     // Build NFS server pod
-    // Kerberos (chart nfs.kerberos): the servers' keytab and sec floor.
-    let (krb5_env, krb5_volumes, krb5_mounts) = crate::nfs_krb5::server_pod_parts(&config.security);
+    // Kerberos (chart nfs.kerberos): the volume's own server principal
+    // (asked of krb5-operator; the pod waits for its Secret), and the
+    // security env.
+    let (security, krb5_name) = config.security.for_volume(volume_id, volume_context);
+    if krb5_name.is_some() {
+        crate::nfs_krb5::ensure_volume_principal(&kube_client, &config.namespace, &security, volume_id)
+            .await
+            .map_err(Status::unavailable)?;
+    }
+    let (krb5_env, krb5_volumes, krb5_mounts) = crate::nfs_krb5::server_pod_parts(&security);
     let pod = Pod {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(pod_name.clone()),
@@ -447,7 +455,9 @@ pub async fn create_nfs_server_pod(
             annotations: Some([
                 ("chert.us/volume-id".to_string(), volume_id.to_string()),
                 ("chert.us/replica-nodes".to_string(), replica_nodes.join(","))
-            ].into_iter().collect()),
+            ].into_iter().chain(krb5_name.iter().map(|n| {
+                (crate::nfs_krb5::SERVER_NAME_ANNOTATION.to_string(), n.clone())
+            })).collect()),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -861,6 +871,15 @@ pub async fn wait_for_nfs_pod_ready(
 /// # Safety
 /// - Only deletes resources with label chert.us/volume-id=<volume_id>
 /// - Safe to call even if resources don't exist
+/// The Kerberos server name the volume's NFS server pod has its key for
+/// (`None`: no pod, or one with the shared principal).
+pub async fn nfs_pod_krb5_server_name(kube_client: Client, volume_id: &str) -> Option<String> {
+    let config = NfsConfig::from_env()?;
+    let pods: Api<Pod> = Api::namespaced(kube_client, &config.namespace);
+    let pod = pods.get_opt(&format!("flint-nfs-{}", volume_id)).await.ok()??;
+    pod.metadata.annotations?.remove(crate::nfs_krb5::SERVER_NAME_ANNOTATION)
+}
+
 pub async fn delete_nfs_server_pod(
     kube_client: Client,
     volume_id: &str,
@@ -940,6 +959,15 @@ pub async fn delete_nfs_server_pod(
                  teardown; its initiator may reconnect-loop until ctrl_loss_tmo",
                 pod_name
             );
+        }
+    }
+
+    // The volume's server principal goes with it (whether or not new
+    // volumes still get one: absent is done).
+    if config.security.keytab_secret.is_some() {
+        match crate::nfs_krb5::delete_volume_principal(&kube_client, &config.namespace, volume_id).await {
+            Ok(()) => eprintln!("✅ [NFS] Kerberos principal of {} deleted", volume_id),
+            Err(e) => eprintln!("⚠️  [NFS] {e}"),
         }
     }
 

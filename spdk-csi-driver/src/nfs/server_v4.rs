@@ -152,6 +152,11 @@ impl NfsServer {
         // `bring_up` so this front-end and `MetadataServer` cannot drift.
         let lock_mgr = LockManager::bring_up(state_mgr.backend(), state_lost).await;
 
+        // FLINT_NFS_REQUIRE_MACH_CRED: a typo refuses to start, as the
+        // floor below does, rather than serving SP4_NONE clients.
+        let require_mach_cred = crate::nfs::v4::operations::session::require_mach_cred_from_env()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
         // Create COMPOUND dispatcher (creates handlers internally)
         // F70: the read-only bit the CSI controller sent us (`--read-only`
         // for a ROX volume) reaches the dispatcher here. Before 2026-09-28
@@ -159,8 +164,15 @@ impl NfsServer {
         // export was read-write to any client that did not mount `ro`.
         let dispatcher = Arc::new(
             CompoundDispatcher::new(fh_mgr, state_mgr.clone(), lock_mgr.clone())
-                .with_read_only(config.read_only),
+                .with_read_only(config.read_only)
+                .with_require_mach_cred(require_mach_cred),
         );
+        if require_mach_cred {
+            info!(
+                "🔒 SP4_MACH_CRED required: an EXCHANGE_ID that does not ask for it \
+                 (SP4_NONE) gets NFS4ERR_ACCESS, so every session is bound to its machine"
+            );
+        }
         if config.read_only {
             info!(
                 "🔒 export is READ-ONLY (ROX): every mutating operation answers \

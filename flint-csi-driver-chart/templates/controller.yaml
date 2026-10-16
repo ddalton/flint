@@ -166,6 +166,19 @@ spec:
             # Kerberos (nfs.kerberos): the servers' keytab, nfs/<serverName>.
             - name: NFS_KRB5_KEYTAB_SECRET
               value: {{ include "flint-csi-driver-chart.nfsKrb5KeytabSecret" . | quote }}
+            {{- if .Values.nfs.kerberos.perVolumeKeys }}
+            # A principal of its own for each new volume's server.
+            - name: NFS_KRB5_REALM
+              value: {{ .Values.nfs.kerberos.realm | quote }}
+            - name: NFS_KRB5_REALM_REF
+              value: {{ .Values.nfs.kerberos.realmRef | quote }}
+            - name: NFS_KRB5_REALM_NAMESPACE
+              value: {{ .Values.nfs.kerberos.realmNamespace | default .Release.Namespace | quote }}
+            - name: NFS_KRB5_SERVER_NAME
+              value: {{ include "flint-csi-driver-chart.nfsKrb5ServerName" . | quote }}
+            - name: NFS_KRB5_DELETION_POLICY
+              value: {{ .Values.nfs.kerberos.deletionPolicy | quote }}
+            {{- end }}
             - name: NFS_GSS_PRINCIPALS
               value: {{ include "flint-csi-driver-chart.nfsKrb5Principals" . | quote }}
             - name: NFS_GSS_IDMAP
@@ -179,6 +192,11 @@ spec:
             - name: NFS_NODE_DOMAIN
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.nfs.kerberos.requireMachCred }}
+            # Every NFS client asks for SP4_MACH_CRED, or is refused.
+            - name: NFS_REQUIRE_MACH_CRED
+              value: "true"
             {{- end }}
             - name: NFS_GSS_ANON
               value: {{ .Values.nfs.kerberos.anonIdentity | quote }}

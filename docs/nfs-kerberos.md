@@ -29,9 +29,11 @@ Turning Kerberos on turns on everything that makes it hold:
 
 | Setting | Default with Kerberos | What it does | To relax it |
 |---|---|---|---|
-| `nfs.kerberos.minSec` | `krb5i` | Every RWX volume refuses `sec=sys` mounts. | `minSec: ""` (needs `attachedNodesOnly: false` too) |
+| `nfs.kerberos.minSec` | `krb5i` | Every RWX volume refuses `sec=sys` mounts. | `minSec: ""` (needs `attachedNodesOnly: false` and `requireMachCred: false` too) |
 | `nfs.kerberos.attachedNodesOnly` | `true` | A volume's server serves only the nodes it is attached to ([below](#only-the-nodes-a-volume-is-attached-to)). | `attachedNodesOnly: false` |
+| `nfs.kerberos.requireMachCred` | `true` | Every client's sessions are bound to the machine that made it ([below](#sessions-are-bound-to-their-machine)). | `requireMachCred: false` |
 | `nfs.enforcePermissions` | `enforce` | POSIX permissions deny, checked against each caller's mapped identity. | `warn` (log only) or `off` |
+| `nfs.kerberos.perVolumeKeys` | `true` | Each new volume's server has a principal of its own ([below](#each-volume-has-its-own-server-key)). | `perVolumeKeys: false` |
 
 Without these, Kerberos would only protect the wire. A `sec=sys` mount
 would still claim any uid, any node with a machine key would reach every
@@ -42,22 +44,25 @@ server, so a StorageClass that mounts with `sec=sys` stops mounting once
 Kerberos is on. Move those volumes to `sec=krb5i` classes first, or keep
 Kerberos off until you can.
 
-`minSec: ""` with `attachedNodesOnly` on fails to render: a `sec=sys`
-mount carries no node identity, so every one would be refused anyway.
+`minSec: ""` with `attachedNodesOnly` or `requireMachCred` on fails to
+render: a `sec=sys` mount carries no node identity and cannot ask for
+SP4_MACH_CRED, so every one would be refused anyway.
 
 ## What the chart sets up
 
 | Piece | What it is |
 |---|---|
-| `KerberosPrincipal flint-nfs-server` | `nfs/flint-nfs.<nfs namespace>.svc.<clusterDomain>`, the one principal every NFS server pod uses. Its keytab is in Secret `flint-nfs-krb5-keytab`, which each server pod mounts (`KRB5_KTNAME`). |
+| `KerberosPrincipal flint-nfs-server` | `nfs/flint-nfs.<nfs namespace>.svc.<clusterDomain>`, the shared server principal. Its keytab is in Secret `flint-nfs-krb5-keytab`. Only servers of volumes made with `perVolumeKeys` off (or before it existed) mount it. |
+| `KerberosPrincipal flint-nfs-<volume>` | Made by the controller for each new volume (`perVolumeKeys`): `nfs/<volume>.<shared server name>`, keytab in Secret `flint-nfs-krb5-<volume>`, which only that volume's server pod mounts (`KRB5_KTNAME`). Deleted with the volume. The chart gives the controller a Role for these in the NFS namespace. |
 | `KerberosNodeKeytab <release>-nfs-clients` | `host/` and `nfs/<node>` for every selected node, installed into `/etc/krb5.keytab` by the operator's DaemonSet, along with the realm's `krb5.conf`. That `krb5.conf` maps `.svc.<clusterDomain>` to the realm, which `rpc.gssd` needs in order to pick the server's realm. |
-| node plugin | Before a `sec=krb5*` mount, writes `<volume ClusterIP> <server name>` into the node's `/etc/hosts`. |
+| node plugin | Before a `sec=krb5*` mount, writes `<volume ClusterIP> <that volume's server name>` into the node's `/etc/hosts`. |
 | `minSec` | `FLINT_NFS_MIN_SEC` for every NFS server. `krb5i` (the default) refuses `sec=sys` mounts. |
 | `allowedPrincipals` | `FLINT_NFS_GSS_PRINCIPALS`: who may establish a GSS context. The default is the nodes' machine principals (`host/*@<realm>`, `nfs/*@<realm>`) plus every principal `idmap` names. |
 | `idmap`, `machineIdentity`, `anonIdentity` | `FLINT_NFS_GSS_IDMAP` and `FLINT_NFS_GSS_ANON`: which uid, gid and groups a Kerberos caller is. |
 | `ldap` | `FLINT_NFS_GSS_LDAP_*` (off by default): users' identities from an LDAP directory ([below](#identities-from-a-directory)). |
 | `nfs.enforcePermissions` | `FLINT_NFS_ENFORCE_PERMISSIONS` for every NFS server: `enforce`, `warn` or `off`. The default is `enforce` with Kerberos on, and the server's `warn` with it off. |
 | `attachedNodesOnly` | `FLINT_NFS_ATTACHED_NODES_ONLY` (default `true`), and the servers' read-only service account. |
+| `requireMachCred` | `FLINT_NFS_REQUIRE_MACH_CRED` (default `true`): an EXCHANGE_ID that does not ask for SP4_MACH_CRED is refused. A value other than true or false stops the server. |
 
 ## Who may connect
 
@@ -162,7 +167,8 @@ Every RWX mount must then be Kerberos.
 Session ids are random, but under `krb5i` they cross the wire in the
 clear. So the server binds each Kerberos client's sessions to the machine
 that made them, using SP4_MACH_CRED state protection (RFC 8881 §18.35), as
-knfsd does. The Linux client asks for it on every `krb5i` or `krb5p` mount.
+knfsd does. The Linux client asks for it whenever `rpc.gssd` runs, and
+by default the server refuses a client that does not ask.
 
 - **Granted only under integrity:** the server grants SP4_MACH_CRED only to
   an EXCHANGE_ID sent with `krb5i` or `krb5p`. Over AUTH_SYS or plain
@@ -186,10 +192,30 @@ A user rides the node's session on the node's connection, which is how
 the kernel sends every user's calls. Root on the node holds the machine
 key, so it can do anything the node can.
 
-A client that does not ask for SP4_MACH_CRED is not protected this way.
-The Linux kernel asks whenever `rpc.gssd` is running, since it then does
-its state management over `krb5i`, whatever the mount's `sec=`. Without
-`rpc.gssd` it uses AUTH_SYS, which the default floor refuses.
+**Every client must ask** (`nfs.kerberos.requireMachCred: true`, the
+default with Kerberos). A client that does not ask for SP4_MACH_CRED
+would get SP4_NONE, and an SP4_NONE session is bound to whatever
+connection uses it first, so its id, seen on the wire, would be the
+session. With `requireMachCred` the server refuses such an EXCHANGE_ID
+with NFS4ERR_ACCESS, as it refuses a node the volume is not attached to,
+and the client cannot mount. That covers a node without `rpc.gssd`, a
+client that does not implement SP4_MACH_CRED, and one downgraded on
+purpose. A client that asks without integrity gets NFS4ERR_INVAL, falls
+back to SP4_NONE, and is refused then.
+
+The Linux kernel asks whenever `rpc.gssd` is running, since it then makes
+its client and does its state management over `krb5i`, whatever the
+mount's `sec=`. So with `requireMachCred`:
+
+| `minSec` | Mounts that work (with `rpc.gssd`) | Notes |
+|---|---|---|
+| `krb5i` (default) | `sec=krb5i`, `sec=krb5p` | The recommended floor: the data is signed too. |
+| `krb5` | also `sec=krb5` | The client is still made over `krb5i` and bound to its machine; only the data calls go unsigned. |
+| `""` | | Does not render: a `sec=sys` mount cannot ask. |
+
+A non-Linux client must ask for SP4_MACH_CRED, over `krb5i` or `krb5p`,
+or be served by an install with `requireMachCred: false`, where its
+sessions are not bound.
 
 ## Identities from a directory
 
@@ -278,6 +304,41 @@ binding when the KDC and the directory are the same system. Machine
 principals do not change: they are still `idmap` rules, and the directory
 never makes root.
 
+## Each volume has its own server key
+
+With one shared server principal, every NFS server pod holds the same
+key. Anyone who gets into one server pod could then decrypt the tickets
+nodes present to every other volume's server, and pass for any of them.
+So by default (`perVolumeKeys: true`) each new volume's server gets a
+principal of its own:
+
+- **Its name:** `nfs/<volume>.<shared server name>@<realm>`, for example
+  `nfs/pvc-0a1b….flint-nfs.flint-system.svc.cluster.local`. A volume id
+  that is not a DNS label is replaced by `v-<16 hex digits>` of its
+  SHA-256. The name stays under `.svc.<clusterDomain>`, which the nodes'
+  `krb5.conf` already maps to the realm.
+- **Its key:** the controller creates `KerberosPrincipal flint-nfs-<volume>`
+  before it starts the volume's server pod. krb5-operator writes the
+  keytab to Secret `flint-nfs-krb5-<volume>`, and the pod waits for it.
+  That pod mounts this Secret only, not the shared keytab.
+- **The node's side:** the server pod carries the name in its
+  `chert.us/krb5-server-name` annotation. ControllerPublishVolume passes
+  it to the node (`nfs.chert.us/krb5-server-name`), and the node maps the
+  volume's ClusterIP to it in `/etc/hosts`, so `rpc.gssd` asks for that
+  principal.
+- **Deletion:** deleting the volume deletes its `KerberosPrincipal`, and
+  krb5-operator removes it from the KDC unless `deletionPolicy: Retain`.
+  This happens whether or not `perVolumeKeys` is still on.
+- **Existing volumes:** CreateVolume marks a new volume
+  (`nfs.chert.us/krb5-volume-key` in its volume context). Volumes made
+  before keep the shared principal, even when their server pod is
+  recreated, since their nodes may still hold tickets for it. Recreate a
+  volume to move it to its own key.
+
+Root on a node that mounts the volume still holds tickets for the
+server. A per-volume key limits what a broken server pod gives away; it
+does not protect against a node.
+
 ## Why the hosts entry
 
 A node mounts a volume by its Service's ClusterIP. `rpc.gssd`, on the node,
@@ -292,8 +353,8 @@ real `rpc.gssd` (nfs-utils 2.6.4):
 - **With `<ip> <name>` in `/etc/hosts`:** it works. `gssd` reverse-resolves
   the IP to the name and asks for `nfs/<name>`.
 
-Every volume's IP maps to the same name, so one server principal serves
-every volume. The node plugin owns the lines that end in
+Each volume's IP maps to its own server's name (or, for volumes with the
+shared principal, to the shared name). The node plugin owns the lines that end in
 `# flint-nfs-krb5`. It drops the lines of volumes no longer mounted with
 Kerberos and leaves the rest of the file alone.
 
@@ -339,12 +400,15 @@ pNFS volumes are not covered.
 - **Session binding:** unit tests in `dispatcher.rs` (`mach_cred`) and,
   against the real kernel client in the VM rig,
   `tests/krb5/run-mach-cred.sh` (connection killed, server restarted,
-  session id stolen by a user with a valid ticket, and an SP4_NONE
-  control).
+  session id stolen by a user with a valid ticket, all with
+  `FLINT_NFS_REQUIRE_MACH_CRED` on; a `sec=krb5` mount still bound; an
+  SP4_NONE client refused; and a knob-off SP4_NONE control).
 - **Unit tests:** `nfs_krb5.rs` covers flavor detection, `/proc/mounts`
-  parsing, the hosts file rewritten in place and only our lines, and the
-  server pod's keytab, floor and directory settings (the bind password as
-  a Secret reference). `gss_ldap.rs` covers the RFC 2307 parsing, exact
+  parsing, the hosts file rewritten in place and only our lines (each IP
+  with its own name), the server pod's keytab, floor and directory
+  settings (the bind password as a Secret reference), the per-volume
+  server name, and which volumes get a principal of their own.
+  `gss_ldap.rs` covers the RFC 2307 parsing, exact
   matching, root refusal, caching, the outage and timeout behaviour, and
   bounded concurrency, against an in-memory directory. `gss_idmap.rs`
   covers the order (`idmap`, directory, anonymous) and who may connect.
@@ -358,4 +422,7 @@ pNFS volumes are not covered.
   the allowlist, while root on that node (the machine principal) still
   reads the volume. With permissions enforced, bob (mapped to 2000:2000)
   creates a file that root sees owned by 2000:2000, and is denied root's
-  0600 file. CI runs it after the nfs-only suite.
+  0600 file. The volume's server holds only its own
+  `nfs/<pv>.flint-nfs.…` key, the node maps its ClusterIP to that name,
+  and deleting the volume deletes its `KerberosPrincipal`. CI runs it
+  after the nfs-only suite.
