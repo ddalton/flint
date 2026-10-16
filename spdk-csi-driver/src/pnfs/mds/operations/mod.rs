@@ -2636,6 +2636,10 @@ impl crate::pnfs::PnfsOperations for PnfsOperationHandler {
         self.layout_manager.layout_class_for(file_key)
     }
 
+    fn gss_unready_data_servers(&self) -> Vec<String> {
+        self.layout_manager.gss_unready_data_servers()
+    }
+
     fn extent_backend(&self) -> Option<std::sync::Arc<dyn crate::state_backend::StateBackend>> {
         Some(self.layout_manager.state_backend())
     }

@@ -394,6 +394,16 @@ impl MdsControl for MdsControlService {
         device_info.capacity = req.capacity;
         device_info.used = req.used;
         device_info.identity_created_at = req.identity_created_at;
+        device_info.kerberos = req.kerberos;
+        device_info.min_sec = req.min_sec.clone();
+        if !device_info.gss_ready() {
+            info!(
+                "🔓 DS {}: Kerberos {}, floor {:?}: while it is registered, Kerberos callers get no files layouts (their I/O goes through the MDS)",
+                req.device_id,
+                if req.kerberos { "on" } else { "off" },
+                req.min_sec
+            );
+        }
 
         // DsControl endpoint: an operator override wins (the MDS may
         // reach the DS on a different host than clients do — lima
@@ -3035,6 +3045,8 @@ mod create_volume_tests {
             protocol_version: 1,
             identity_created_at: 0,
             control_port: 0,
+            kerberos: false,
+            min_sec: String::new(),
         };
 
         let r = s
@@ -3129,6 +3141,8 @@ mod create_volume_tests {
             protocol_version: 1,
             identity_created_at: 0,
             control_port: 21491,
+            kerberos: false,
+            min_sec: String::new(),
         };
 
         let r = s

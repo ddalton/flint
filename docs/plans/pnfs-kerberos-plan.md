@@ -202,8 +202,9 @@ stripe under GSS; **E1 against a refusing DS: the client falls back to the
 MDS** (its data then reaches the DSes over the F66 relay, Phase 5's path);
 a DS with Kerberos but no floor takes the client's AUTH_SYS downgrade, which
 the chart cannot render (one switch sets floor, keytab and the MDS's grant).
-Follow-up: the DS reports its floor at registration, and the MDS grants
-Kerberos callers layouts only for DSes that report one.
+Built since: the DS reports a keytab and its floor at registration, and
+the MDS grants Kerberos callers layouts only while every registered DS has
+both (arm H then keeps every byte on the MDS).
 
 
 - **Share the GSS code:** extract `gss_front` from
@@ -270,7 +271,9 @@ mode; `enforce` refuses unsigned ones. Error: BADHANDLE (E4).
 - DS PUTFH (`:695-704`) with `FLINT_PNFS_DS_FH_AUTH=enforce`: only v4
   that verifies for the session owner's host; canonicalise to v2 for the
   io handler; refuse v2 and MDS path handles (`io.rs:689-717`); error per
-  E4 (expect BADHANDLE).
+  E4: BADHANDLE (measured 2026-10-16, `tests/krb5/results/pnfs-e4-2026-10-16/`:
+  the client fetches a fresh layout a bounded number of times, then goes
+  through the MDS; no error livelocked).
 - Works without Kerberos (closes "know or guess a file id"); opt-in
   `pnfs.dsAuth.enabled`. Size ~800 lines, 1–1.5 weeks.
 
