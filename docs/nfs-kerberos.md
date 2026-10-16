@@ -363,7 +363,16 @@ Kerberos and leaves the rest of the file alone.
 - **`nfs-utils` and `rpc.gssd`:** the node needs `nfs-utils` (`nfs-common`
   on Debian and Ubuntu) and `rpc.gssd`. The `rpc-gssd` unit only starts
   when `/etc/krb5.keytab` exists, so start or restart it once the
-  KerberosNodeKeytab is Ready.
+  KerberosNodeKeytab is Ready. With krb5-operator 0.4 or later the node
+  agent can do it: `nfs.kerberos.nodeKeytab.restartServices: [rpc-gssd]`
+  has it start the unit once the keys are in and restart it when they
+  change. Off by default, because the agent then mounts the host's
+  systemd socket (`/run/systemd/private`) and could start any unit.
+  Nodes must run systemd.
+- **krb5-operator 0.4 or later is recommended:** each node's keys are in a
+  Secret of its own that only that node's agent mounts, so root on one
+  node cannot read another node's keys (0.3 kept every node's keys in
+  one Secret that every agent mounted).
 - **Kernel modules:** the kernel needs `auth_rpcgss` and `rpcsec_gss_krb5`.
 
 ## What Kerberos gives here
@@ -624,22 +633,19 @@ what we know or expect to differ. **None of it is measured.**
 
 The `rpc-gssd` unit starts only when `/etc/krb5.keytab` exists, so a
 node that boots before its KerberosNodeKeytab is Ready has no `rpc.gssd`
-until someone starts it. The kind suite does that by hand after the
-"Kerberos keys" step (`tests/system/kind-nfs-only.sh:199-210`,
-`systemctl restart rpc-gssd` at `:207`). `systemctl try-restart` would
-not do: it restarts only a running unit, and this one never started.
+until someone starts it. `systemctl try-restart` would not do: it
+restarts only a running unit, and this one never started.
 
-[krb5-operator PR #14](https://github.com/ddalton/krb5-operator/pull/14)
-(stacked on its PR #12; not merged, not built, not released) adds
-`KerberosNodeKeytab.spec.restartServices: [rpc-gssd]`, off by default.
-The node agent asks the host's systemd to start each unit when the agent
-starts, and to restart it whenever the agent rewrites the keytab. It uses
-systemd's private socket (`/run/systemd/private`, hostPath type `Socket`),
-so it needs no `hostPID`, no capabilities and no `privileged`. Its README
-also gives a host path unit (`PathChanged=/etc/krb5.keytab`) for clusters
-that would rather not grant that. flint pins
-`KRB5_OPERATOR_VERSION=0.3.0` (`kind-nfs-only.sh:51`), so the suite
-keeps the manual restart until an operator release has the field.
+krb5-operator 0.4.0 adds `KerberosNodeKeytab.spec.restartServices`, which
+the chart passes as `nfs.kerberos.nodeKeytab.restartServices` (off by
+default; see [Node prerequisites](#node-prerequisites)). The node agent
+asks the host's systemd to start each unit when the agent starts, and to
+restart it whenever the agent rewrites the keytab. It uses systemd's
+private socket (`/run/systemd/private`, hostPath type `Socket`), so it
+needs no `hostPID`, no capabilities and no `privileged`. The operator's
+README also gives a host path unit (`PathChanged=/etc/krb5.keytab`) for
+clusters that would rather not grant that. The kind suite sets
+`[rpc-gssd]` and only checks that the unit is active.
 
 **Non-systemd hosts** (OpenRC, runit, or hosts with no init you can
 reach) have no `rpc-gssd` unit to restart. `rpc.gssd` has to be started

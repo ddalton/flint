@@ -164,4 +164,20 @@ for bad in "nfs.kerberos.ldap.userBase=" "nfs.kerberos.ldap.url=http://ldap" \
   fi
 done
 
+# The node agent starts no host unit unless asked (restartServices).
+if renders "Kerberos on" "${KRB5[@]}"; then
+  if grep -q 'restartServices' "$TMP/out.yaml"; then
+    echo "✗ Kerberos on: the node agent may start host units by default"; fails=$((fails + 1))
+  else
+    echo "✓ Kerberos on: no restartServices by default"
+  fi
+fi
+if renders "restartServices" "${KRB5[@]}" --set 'nfs.kerberos.nodeKeytab.restartServices[0]=rpc-gssd'; then
+  if grep -A1 'restartServices:' "$TMP/out.yaml" | grep -q -- '- rpc-gssd'; then
+    echo "✓ restartServices: [rpc-gssd] reaches the KerberosNodeKeytab"
+  else
+    echo "✗ restartServices: not on the KerberosNodeKeytab"; fails=$((fails + 1))
+  fi
+fi
+
 [ "$fails" -eq 0 ] && echo PASS || { echo "FAIL: $fails"; exit 1; }
