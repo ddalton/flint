@@ -23,7 +23,24 @@ covered by the stability guarantee.
   fields on types flint does not build. `tests/krb5/run-krb5i.sh` (8/8)
   and `run-krb5p.sh` (6/6) pass against the kernel client.
 
+- **Client and session ids are unguessable** (2026-10-15). They were
+  counters: clientids 1, 2, 3..., and each session id an 8-byte counter
+  followed by the clientid. Nothing but the session id is checked by
+  SEQUENCE or BIND_CONN_TO_SESSION (SP4_NONE, as the Linux client uses
+  it), so any peer able to reach an NFS server could name another
+  client's session and use its opens, locks and slots: with `sec=sys`,
+  any pod; under Kerberos, any principal allowed to connect. A clientid
+  is now 64 random bits (nonzero, checked against the clients in memory,
+  persisted ones included), and a session id 64 random bits followed by
+  the clientid, checked against the live sessions.
+
 ### Added
+
+- **`root_squash`: `FLINT_NFS_ROOT_SQUASH`, chart `nfs.rootSquash`**
+  (2026-10-15), as knfsd's. uid 0 from any client and any flavor (an
+  AUTH_SYS root, or a Kerberos machine principal mapped to 0) becomes the
+  anonymous identity (`nfs.kerberos.anonIdentity`, default nobody), and
+  gid 0 is replaced and dropped from everyone's groups. Off by default.
 
 - **Kerberos callers are their principal's unix identity:
   `FLINT_NFS_GSS_IDMAP`** (2026-10-15). An RPCSEC_GSS call carried no

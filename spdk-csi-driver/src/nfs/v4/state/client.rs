@@ -16,7 +16,7 @@ use super::super::protocol::SessionId;
 use crate::state_backend::{CachedCreateSessionResRecord, ClientRecord, StateBackend};
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use tracing::{debug, info, warn};
 
 /// Persisted bits of a CREATE_SESSION response, kept on the Client so a
@@ -262,9 +262,6 @@ pub enum CreateSessionSeq {
 /// - Lock-free client registration (EXCHANGE_ID)
 /// - Per-client granularity, no global contention
 pub struct ClientManager {
-    /// Next client ID to assign (lock-free atomic)
-    next_client_id: AtomicU64,
-
     /// Active clients (client_id → client)
     /// DashMap enables lock-free concurrent access
     clients: DashMap<u64, Client>,
@@ -478,7 +475,6 @@ impl ClientManager {
         }
 
         Self {
-            next_client_id: AtomicU64::new(1),
             clients: DashMap::new(),
             owner_to_id: DashMap::new(),
             lease_manager,
@@ -491,13 +487,10 @@ impl ClientManager {
     /// Repopulate the in-memory DashMap from a backend snapshot. Called
     /// once at MDS startup before the TCP listener accepts connections,
     /// so reconnecting clients find their existing records (no
-    /// `STALE_CLIENTID`). The `next_client_id` counter is bumped past
-    /// the highest id we observed so freshly-allocated clients never
-    /// collide with persisted ones.
+    /// `STALE_CLIENTID`). Fresh clientids are random and checked against
+    /// this map, so they never collide with persisted ones.
     pub fn load_records(&self, records: Vec<ClientRecord>) {
-        let mut max_id = 0u64;
         for r in records {
-            max_id = max_id.max(r.client_id);
             let owner = r.owner.clone();
             let id = r.client_id;
             self.clients.insert(id, Client::from_record(r));
@@ -505,12 +498,6 @@ impl ClientManager {
             // Re-create the lease so the lease manager doesn't think
             // every persisted client is already expired.
             self.lease_manager.create_lease(id);
-        }
-        // `fetch_max` would be cleaner but isn't stable on AtomicU64;
-        // this load is single-threaded (startup-only), so a plain
-        // store is fine.
-        if max_id >= self.next_client_id.load(Ordering::SeqCst) {
-            self.next_client_id.store(max_id + 1, Ordering::SeqCst);
         }
         info!("ClientManager loaded {} records from backend", self.clients.len());
     }
@@ -805,7 +792,16 @@ impl ClientManager {
         flags: u32,
         principal: Vec<u8>,
     ) -> ExchangeIdOutcome {
-        let client_id = self.next_client_id.fetch_add(1, Ordering::SeqCst);
+        // Random, not a counter: a guessable clientid (they used to be
+        // 1, 2, 3...) is half of a guessable session id, and SEQUENCE
+        // checks nothing but the session id. Nonzero, and not one in use
+        // (persisted records included, which load_records put in the map).
+        let client_id = loop {
+            let id: u64 = rand::random();
+            if id != 0 && !self.clients.contains_key(&id) {
+                break id;
+            }
+        };
         // Pick a small non-zero sequence so a client that incorrectly sends
         // 0 still hits SEQ_MISORDERED. RFC 8881 §18.35.4 only requires that
         // we pick *some* initial value; clients echo it back on their first
@@ -1102,6 +1098,23 @@ mod tests {
     /// a test rather than a note: any client holding a confirmed record
     /// that needs a NEW session walks into it. Found by the §9 restart
     /// leg, reproduced on a live server over the wire.
+    /// Clientids are random (they were 1, 2, 3...), and never 0.
+    #[test]
+    fn clientids_are_not_guessable() {
+        let lease_mgr = Arc::new(LeaseManager::new());
+        let mgr = ClientManager::new(lease_mgr, "test-vol", crate::state_backend::memory_backend());
+        let mut ids = Vec::new();
+        for i in 0..64u8 {
+            match mgr.exchange_id(vec![b'c', i], 7, 0, b"p".to_vec()) {
+                ExchangeIdOutcome::NewUnconfirmed { client_id, .. } => ids.push(client_id),
+                other => panic!("expected NewUnconfirmed, got {:?}", other),
+            }
+        }
+        let set: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(set.len(), 64);
+        assert!(ids.iter().all(|id| *id > 64), "not a counter from 1, and never 0");
+    }
+
     #[test]
     fn exchange_id_names_a_sequence_create_session_will_accept() {
         let lease_mgr = Arc::new(LeaseManager::new());
@@ -1164,7 +1177,7 @@ mod tests {
         let outcome = client_mgr.exchange_id(b"client1".to_vec(), 12345, 0, b"princ".to_vec());
         // initial_cs_sequence is now 1 (small non-zero, so a client that
         // sends 0 still gets SEQ_MISORDERED).
-        assert!(matches!(outcome, ExchangeIdOutcome::NewUnconfirmed { client_id: 1, sequence_id: 1 }));
+        assert!(matches!(outcome, ExchangeIdOutcome::NewUnconfirmed { client_id, sequence_id: 1 } if client_id != 0));
         assert_eq!(client_mgr.active_count(), 1);
     }
 

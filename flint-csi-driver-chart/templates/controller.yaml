@@ -153,6 +153,15 @@ spec:
             - name: NFS_ENFORCE_PERMISSIONS
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.nfs.rootSquash }}
+            - name: NFS_ROOT_SQUASH
+              value: "true"
+            {{- if not .Values.nfs.kerberos.enabled }}
+            # Who root becomes (the Kerberos block sets it otherwise).
+            - name: NFS_GSS_ANON
+              value: {{ .Values.nfs.kerberos.anonIdentity | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.nfs.kerberos.enabled }}
             # Kerberos (nfs.kerberos): the servers' keytab, nfs/<serverName>.
             - name: NFS_KRB5_KEYTAB_SECRET

@@ -1623,7 +1623,7 @@ mod tests {
 
         let res = handler.handle_exchange_id(op, &CompoundContext::new(1));
         assert_eq!(res.status, Nfs4Status::Ok);
-        assert_eq!(res.clientid, 1);
+        assert_ne!(res.clientid, 0, "a clientid (random, never 0)");
         // EXCHANGE_ID returns the initial CREATE_SESSION sequence (eir_sequenceid).
         // We pick 1 so a client that incorrectly sends 0 still gets SEQ_MISORDERED.
         assert_eq!(res.sequenceid, 1);

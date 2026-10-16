@@ -164,12 +164,14 @@ pub struct ServerSecurity {
     pub gss_anon: Option<String>,
     /// `FLINT_NFS_ENFORCE_PERMISSIONS`: off, warn or enforce.
     pub enforce_permissions: Option<String>,
+    /// `FLINT_NFS_ROOT_SQUASH`: uid 0 is the anonymous identity.
+    pub root_squash: Option<String>,
 }
 
 impl ServerSecurity {
     /// From the controller's env (`NFS_KRB5_KEYTAB_SECRET`, `NFS_MIN_SEC`,
     /// `NFS_GSS_PRINCIPALS`, `NFS_GSS_IDMAP`, `NFS_GSS_ANON`,
-    /// `NFS_ENFORCE_PERMISSIONS`).
+    /// `NFS_ENFORCE_PERMISSIONS`, `NFS_ROOT_SQUASH`).
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
         ServerSecurity {
@@ -179,6 +181,7 @@ impl ServerSecurity {
             gss_idmap: var("NFS_GSS_IDMAP"),
             gss_anon: var("NFS_GSS_ANON"),
             enforce_permissions: var("NFS_ENFORCE_PERMISSIONS"),
+            root_squash: var("NFS_ROOT_SQUASH"),
         }
     }
 }
@@ -234,6 +237,7 @@ pub fn server_pod_parts(sec: &ServerSecurity) -> (Vec<EnvVar>, Vec<Volume>, Vec<
         "FLINT_NFS_ENFORCE_PERMISSIONS",
         &sec.enforce_permissions,
     );
+    set(&mut env, crate::nfs::gss_idmap::ROOT_SQUASH_ENV, &sec.root_squash);
     (env, volumes, mounts)
 }
 
@@ -346,6 +350,7 @@ mod tests {
             gss_idmap: Some("host/*@FLINT.TEST=0:0".into()),
             gss_anon: Some("65534:65534".into()),
             enforce_permissions: Some("enforce".into()),
+            root_squash: Some("true".into()),
         };
         let (env, vols, mounts) = server_pod_parts(&sec);
         let get = |n: &str| {
@@ -372,6 +377,7 @@ mod tests {
             get("FLINT_NFS_ENFORCE_PERMISSIONS").as_deref(),
             Some("enforce")
         );
+        assert_eq!(get("FLINT_NFS_ROOT_SQUASH").as_deref(), Some("true"));
         let s = vols[0].secret.as_ref().unwrap();
         assert_eq!(s.secret_name.as_deref(), Some("flint-nfs-krb5-keytab"));
         assert_eq!(
