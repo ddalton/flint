@@ -344,4 +344,4 @@ M12 c9b4df15, M13 f2f7fe05, M14 786befc3.
     d17 violation (263.8M); AckRescopeRestart clean d19 / 231.6M, AckRenameRestart d17 /
     217.0M (caps, not complete); N6U, D2U (DirtyUnique) clean to d19 / d21 (caps).
   EC2 i-09f7e4f4b1fbb2614 TORN DOWN 22:50Z; zero set verified (us-east-1/2, us-west-1/2);
-    outputs in results/2026-10-16-m11-ec2/out.  NOTHING COMMITTED.
+    outputs in results/2026-10-16-m11-ec2/out.
