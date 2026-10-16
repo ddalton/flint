@@ -555,10 +555,13 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
   to an SP4_MACH_CRED request (Phase 3b).
 - **The control path** between the MDS and the DSes (gRPC: registration,
   heartbeats, the F66 relay of a client's I/O to a file the MDS cannot
-  layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), but who the
-  CLIENT is still rests on the shared control token: any holder of it can
-  register a DS. Per-pod identities (Phase 5b) close that; keep
-  `pnfs.networkPolicy` on.
+  layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), and each
+  caller presents its own pod-bound ServiceAccount token, which the MDS or
+  DS reviews against a role table (`pnfs.controlAuth`, Phase 5b): only the
+  data servers register (each as its own pod), only the CSI controller
+  manages volumes, a node plugin opens block sessions only for its own
+  node, only the MDS commands a DS. A verdict is cached for a minute, so a
+  deleted pod's token works that long; keep `pnfs.networkPolicy` on.
 - **Files written under Phase 1 stay on the MDS.** A file a Kerberos client
   wrote while the DSes did no Kerberos (`dataServers: false`) lives in the
   MDS's export, and the F67 guard never pins a file that already has bytes:

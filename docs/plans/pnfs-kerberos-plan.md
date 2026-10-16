@@ -285,8 +285,16 @@ of handshakes run in tasks of their own, `connect_with_connector`), TLS
 1.3 on the MDS's gRPC, every DS's DsControl, the DS registration client,
 the MDS's DsControl clients and the CSI controller's client; chart
 `pnfs.controlTls` (default on), Secret `flint-pnfs-control-tls` from
-`genCA`/`genSignedCert`, kept with `lookup`. **5b not built:** the
-pod-bound token identities and TokenReview.
+`genCA`/`genSignedCert`, kept with `lookup`.
+
+**5b built** (`pnfs::control_auth`): a tower layer on both control servers
+reviews the caller's pod-bound token (audience per server, cached 60 s,
+an unanswered review UNAVAILABLE and not cached), a role table per RPC,
+and in the handlers `device_id` == pod name for the DS calls and
+`node_name` == the token's node for the node plugin's block sessions.
+Differs from the sketch: the node plugin is a caller too (pnfs-block's
+AttachBlockNode and BlockSessionUp at NodeStage), and the shared token is
+not a fallback once identities are on (`pnfs.controlAuth`).
 
 
 - No cert-manager, no per-pod certs: chart `genCA` + `genSignedCert`, kept
