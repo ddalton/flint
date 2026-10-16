@@ -38,6 +38,14 @@ spec:
             name: krb5-b
           status:
             phase: Running
+    catch:
+    # Who the volumes' servers think they serve (nfs::node_authz), and the
+    # attachments as the cluster has them.
+    - script:
+        content: |
+          kubectl get volumeattachments -o jsonpath='{range .items[*]}{.spec.source.persistentVolumeName} {.spec.nodeName} attached={.status.attached}{"\n"}{end}'
+          kubectl -n flint-system get pods -l app=flint-nfs-server -o jsonpath='{range .items[*]}{.metadata.name} sa={.spec.serviceAccountName}{"\n"}{end}'
+          kubectl -n flint-system logs -l app=flint-nfs-server --tail=-1 | grep -aE 'ATTACHED_NODES|serves nodes|Only the nodes|Kubernetes API|VolumeAttachments' | head -20
   - name: kerberos-mounts-share-files
     try:
     - script:
