@@ -196,8 +196,14 @@ cluster DNS rather than listing them, so the node needs no new RBAC).
 Kind: 8 MiB under `krb5i` striped on both DSes, all their calls GSS.
 The DS union gate is built too (`watch_pnfs` with no per-volume map,
 `DataServer::unattached_refusal`; ServiceAccount `flint-pnfs-ds`). **Not
-built yet:** the VM legs (E1 against a refusing DS, krb5p,
-multipath, the lima byte-identical guard).
+built yet:** multipath in kind and the lima byte-identical guard. The VM
+legs ran (`tests/krb5/results/pnfs-phase3-2026-10-16/`): krb5i and krb5p
+stripe under GSS; **E1 against a refusing DS: the client falls back to the
+MDS** (its data then reaches the DSes over the F66 relay, Phase 5's path);
+a DS with Kerberos but no floor takes the client's AUTH_SYS downgrade, which
+the chart cannot render (one switch sets floor, keytab and the MDS's grant).
+Follow-up: the DS reports its floor at registration, and the MDS grants
+Kerberos callers layouts only for DSes that report one.
 
 
 - **Share the GSS code:** extract `gss_front` from
