@@ -45,6 +45,62 @@ pub struct DataServer {
     /// RPCSEC_GSS (pNFS Kerberos plan, Phase 3): `Some` with a keytab
     /// (`KRB5_KTNAME`). Without one, RPCSEC_GSS calls are refused.
     gss: Option<Arc<RpcSecGssManager>>,
+    /// `FLINT_NFS_REQUIRE_MACH_CRED` (Phase 3b): refuse an EXCHANGE_ID
+    /// that does not ask for SP4_MACH_CRED, as the MDS does.
+    require_mach_cred: bool,
+}
+
+/// One DS connection as a compound sees it (pNFS Kerberos plan, Phase
+/// 3b): its id, which SP4_MACH_CRED sessions are bound to, and whether
+/// SP4_MACH_CRED is required.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DsConn {
+    pub id: u64,
+    pub require_mach_cred: bool,
+}
+
+#[cfg(test)]
+impl DsConn {
+    /// Connection `id`, SP4_MACH_CRED not required.
+    pub(crate) fn test(id: u64) -> Self {
+        Self { id, require_mach_cred: false }
+    }
+}
+
+/// A SEQUENCE op for `sid`, slot 0 (tests).
+#[cfg(test)]
+pub(crate) fn test_sequence(e: &mut XdrEncoder, sid: [u8; 16], seq: u32) {
+    e.encode_u32(opcode::SEQUENCE);
+    e.encode_fixed_opaque(&sid);
+    e.encode_u32(seq);
+    e.encode_u32(0); // slot
+    e.encode_u32(0); // highest slot
+    e.encode_bool(false);
+}
+
+/// Skip a SEQUENCE4resok: sessionid, then five words (tests).
+#[cfg(test)]
+pub(crate) fn test_skip_sequence_res(d: &mut XdrDecoder) {
+    for _ in 0..9 {
+        d.decode_u32().unwrap();
+    }
+}
+
+/// Connection ids, unique for the life of the process across every
+/// listener (multipath addresses included).
+static NEXT_CONN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Unbinds a closed connection from its sessions, however its handler
+/// returns.
+struct ConnBindings {
+    id: u64,
+    sessions: Arc<DsSessionManager>,
+}
+
+impl Drop for ConnBindings {
+    fn drop(&mut self) {
+        self.sessions.forget_conn(self.id);
+    }
 }
 
 impl DataServer {
@@ -160,13 +216,27 @@ impl DataServer {
             }
         );
         crate::pnfs::ds_fh::init_ds_policy(fh_policy);
+        // Phase 3b: SP4_MACH_CRED required, as on the MDS. A typo stops
+        // the DS; requiring it with no keytab would refuse every client
+        // (SP4_MACH_CRED is granted only under krb5i or krb5p).
+        let require_mach_cred = crate::nfs::v4::operations::session::require_mach_cred_from_env()
+            .map_err(crate::pnfs::Error::Config)?;
+        if require_mach_cred && gss.is_none() {
+            return Err(crate::pnfs::Error::Config(format!(
+                "{} is on but there is no keytab (KRB5_KTNAME): SP4_MACH_CRED needs krb5i or krb5p, so every client would be refused",
+                crate::nfs::v4::operations::session::REQUIRE_MACH_CRED_ENV
+            )));
+        }
         info!(
             "✓ Security: floor {}; Kerberos {}",
             floor.floor().name(),
             if gss.is_some() { "on (KRB5_KTNAME)" } else { "off (RPCSEC_GSS calls refused)" }
         );
+        if require_mach_cred {
+            info!("🔒 SP4_MACH_CRED required: sessions are bound to the machine that made them");
+        }
 
-        Ok(Self { config, io_handler, registration_clients, session_mgr, client_mgr, identity_created_at, gss })
+        Ok(Self { config, io_handler, registration_clients, session_mgr, client_mgr, identity_created_at, gss, require_mach_cred })
     }
 
     /// Start the data server
@@ -252,11 +322,12 @@ impl DataServer {
             let session_mgr = Arc::clone(&self.session_mgr);
             let client_mgr = Arc::clone(&self.client_mgr);
             let gss = self.gss.clone();
+            let require_mach_cred = self.require_mach_cred;
             let conn_id = connection_count;
             
             tokio::spawn(async move {
                 debug!("🚀 Spawned handler task for connection #{} from {}", conn_id, peer);
-                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, client_mgr, gss, peer).await {
+                if let Err(e) = Self::handle_tcp_connection(stream, io_handler, session_mgr, client_mgr, gss, require_mach_cred, peer).await {
                     warn!("❌ Connection #{} from {} error: {}", conn_id, peer, e);
                 } else {
                     info!("✓ TCP connection #{} from {} closed cleanly", conn_id, peer);
@@ -272,9 +343,16 @@ impl DataServer {
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
         gss: Option<Arc<RpcSecGssManager>>,
+        require_mach_cred: bool,
         peer: std::net::SocketAddr,
     ) -> std::io::Result<()> {
         use tokio::time::Instant;
+
+        let conn = DsConn {
+            id: NEXT_CONN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            require_mach_cred,
+        };
+        let _bindings = ConnBindings { id: conn.id, sessions: Arc::clone(&session_mgr) };
 
         let connect_time = Instant::now();
         debug!("🔌 DS connection handler started for {}", peer);
@@ -339,7 +417,7 @@ impl DataServer {
                 // owns the client's callback path — so the inline fast
                 // path stays available here.
                 false,
-                move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c, gss_c),
+                move |req| Self::dispatch_minimal_nfs(req, io_c, sess_c, client_c, gss_c, conn),
                 // The reply arrives as wire segments (see [`OpBody`]): for
                 // a READ, [rpc+compound+head], [payload], [pad]. The 128 KiB
                 // BufWriter coalesces the marker and every small segment
@@ -369,6 +447,7 @@ impl DataServer {
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
         gss: Option<Arc<RpcSecGssManager>>,
+        conn: DsConn,
     ) -> Vec<crate::nfs::segment::Segment> {
         // Parse RPC call
         let (call, args) = match CallMessage::decode_with_args(request) {
@@ -414,7 +493,7 @@ impl DataServer {
             },
 
             procedure::COMPOUND => {
-                Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr, validated.as_ref()).await
+                Self::handle_minimal_compound(call, args, io_handler, session_mgr, client_mgr, validated.as_ref(), conn).await
             }
 
             _ => vec![ReplyBuilder::proc_unavail(call.xid).into()],
@@ -429,7 +508,34 @@ impl DataServer {
         session_mgr: Arc<DsSessionManager>,
         client_mgr: Arc<ClientManager>,
         gss: Option<&ValidatedCall>,
+        conn: DsConn,
     ) -> Vec<crate::nfs::segment::Segment> {
+        let xid = call.xid;
+        let Some(results) = Self::run_compound(call, args, io_handler, session_mgr, client_mgr, gss, conn).await else {
+            return vec![ReplyBuilder::garbage_args(xid).into()];
+        };
+        // One pass, RPC header first, payloads passed through as their
+        // own segments — replaces the flatten that copied a READ payload
+        // three times (op encoder -> compound encoder -> reply encoder).
+        // Under GSS the body is framed by the shared front end: a MIC'd
+        // verifier and the body signed or sealed.
+        match gss {
+            None => assemble_reply(xid, results),
+            Some(v) => crate::nfs::gss_front::frame_reply(xid, Some(v), assemble_body(XdrEncoder::new(), results)),
+        }
+    }
+
+    /// The COMPOUND's ops, each `(opcode, status, body)`; `None` when its
+    /// header does not decode (GARBAGE_ARGS).
+    async fn run_compound(
+        call: CallMessage,
+        args: Bytes,
+        io_handler: Arc<IoOperationHandler>,
+        session_mgr: Arc<DsSessionManager>,
+        client_mgr: Arc<ClientManager>,
+        gss: Option<&ValidatedCall>,
+        conn: DsConn,
+    ) -> Option<Vec<(u32, Nfs4Status, OpBody)>> {
         // The caller as RFC 8881 §18.35.5 means it: the authenticated
         // Kerberos principal when there is one.
         let principal = match gss.and_then(|v| v.client_principal.as_deref()) {
@@ -441,7 +547,7 @@ impl DataServer {
         // Decode COMPOUND header
         let tag_len = match decoder.decode_u32() {
             Ok(len) => len,
-            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid).into()],
+            Err(_) => return None,
         };
 
         // Skip tag
@@ -451,12 +557,12 @@ impl DataServer {
 
         let minor_version = match decoder.decode_u32() {
             Ok(v) => v,
-            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid).into()],
+            Err(_) => return None,
         };
 
         let op_count = match decoder.decode_u32() {
             Ok(c) => c,
-            Err(_) => return vec![ReplyBuilder::garbage_args(call.xid).into()],
+            Err(_) => return None,
         };
 
         debug!("DS COMPOUND: minor_version={}, {} operations", minor_version, op_count);
@@ -468,8 +574,23 @@ impl DataServer {
         // SEQUENCE has named the session: Phase 4 checks a signed handle
         // against its node.
         let mut session_owner: Option<Vec<u8>> = None;
+        // Whether this compound began with a SEQUENCE that succeeded.
+        let mut in_session = false;
+        // SP4_MACH_CRED (Phase 3b): granted only to a krb5i or krb5p call,
+        // as on the MDS; over AUTH_SYS or plain krb5 nothing protects the
+        // ops it guards.
+        let gss_protected = gss.is_some_and(|v| {
+            matches!(v.service, crate::nfs::rpcsec_gss::GssService::Integrity | crate::nfs::rpcsec_gss::GssService::Privacy)
+        });
+        // An SP4_MACH_CRED client's must_enforce ops (BIND_CONN_TO_SESSION,
+        // EXCHANGE_ID, CREATE_SESSION, DESTROY_SESSION, DESTROY_CLIENTID)
+        // from any principal but the machine that made it: WRONG_CRED.
+        let wrong_cred = |client_id: u64| client_mgr.mach_cred_principal(client_id).is_some_and(|p| p != principal);
+        // The client a session id belongs to: the DS's session ids begin
+        // with their client id (`DsSessionManager::create_session`).
+        let client_of = |sid: &[u8; 16]| u64::from_be_bytes(sid[..8].try_into().expect("16 bytes"));
 
-        for _ in 0..op_count {
+        for i in 0..op_count {
             let opcode = match decoder.decode_u32() {
                 Ok(op) => op,
                 Err(e) => {
@@ -477,6 +598,30 @@ impl DataServer {
                     break;
                 }
             };
+
+            // RFC 8881 §2.6.3.1.1: SEQUENCE comes first, and every op but
+            // the five that make, bind and tear down clients and sessions
+            // runs only after it. Without this a compound with no SEQUENCE
+            // (or after a refused one) reached PUTFH, READ and WRITE with
+            // no session at all, past the session binding (Phase 3b) and
+            // the attached-nodes gate on SEQUENCE.
+            let sessionless = matches!(
+                opcode,
+                opcode::EXCHANGE_ID
+                    | opcode::CREATE_SESSION
+                    | opcode::DESTROY_SESSION
+                    | opcode::DESTROY_CLIENTID
+                    | opcode::BIND_CONN_TO_SESSION
+            );
+            if opcode == opcode::SEQUENCE && i != 0 {
+                results.push((opcode, Nfs4Status::SequencePos, OpBody::Inline(Bytes::new())));
+                break;
+            }
+            if !sessionless && opcode != opcode::SEQUENCE && !in_session {
+                warn!("DS: opcode {opcode} outside a session → OP_NOT_IN_SESSION");
+                results.push((opcode, Nfs4Status::OpNotInSession, OpBody::Inline(Bytes::new())));
+                break;
+            }
 
             debug!("DS: Processing opcode={}", opcode);
 
@@ -491,6 +636,7 @@ impl DataServer {
                     let op = match opcode {
                         opcode::EXCHANGE_ID => "EXCHANGE_ID",
                         opcode::CREATE_SESSION => "CREATE_SESSION",
+                        opcode::BIND_CONN_TO_SESSION => "BIND_CONN_TO_SESSION",
                         _ => "SEQUENCE",
                     };
                     warn!("DS: {op} refused: {} is not a node a pNFS volume is attached to", String::from_utf8_lossy(&principal));
@@ -510,7 +656,7 @@ impl DataServer {
                         Err(e) => {
                             warn!("DS: Failed to decode EXCHANGE_ID verifier: {}", e);
                             results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
-                            continue;
+                            break;
                         }
                     };
                     
@@ -520,7 +666,7 @@ impl DataServer {
                         Err(e) => {
                             warn!("DS: Failed to decode EXCHANGE_ID client_owner: {}", e);
                             results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
-                            continue;
+                            break;
                         }
                     };
                     
@@ -547,6 +693,21 @@ impl DataServer {
                             results.push((opcode, Nfs4Status::EncrAlgUnsupp, OpBody::Inline(Bytes::new())));
                             break;
                         }
+                    }
+                    let mach_cred = state_protect == 1 && gss_protected;
+                    // FLINT_NFS_REQUIRE_MACH_CRED: only SP4_MACH_CRED
+                    // clients, so every session here is bound to its
+                    // machine. ACCESS, as the MDS answers.
+                    if conn.require_mach_cred && !mach_cred {
+                        warn!(
+                            "DS: EXCHANGE_ID refused: {} did not get SP4_MACH_CRED (asked {}, {}), and it is required ({})",
+                            String::from_utf8_lossy(&principal),
+                            state_protect,
+                            if gss_protected { "krb5i/krb5p" } else { "no GSS integrity" },
+                            crate::nfs::v4::operations::session::REQUIRE_MACH_CRED_ENV,
+                        );
+                        results.push((opcode, Nfs4Status::Access, OpBody::Inline(Bytes::new())));
+                        break;
                     }
                     
                     // Skip the optional impl_id (nfs_impl_id4<1>): domain,
@@ -580,6 +741,20 @@ impl DataServer {
                             (client_id, sequence_id, true),
                         ExchangeIdOutcome::ExistingConfirmed { client_id, sequence_id } =>
                             (client_id, sequence_id, false),
+                        // RFC 8881 §18.35.4 case 3 against an SP4_MACH_CRED
+                        // client: another principal under its owner. The
+                        // client is its machine's (EXCHANGE_ID is in its
+                        // must_enforce set).
+                        ExchangeIdOutcome::ClientCollision { incumbent }
+                            if client_mgr.mach_cred_principal(incumbent).is_some() =>
+                        {
+                            warn!(
+                                "DS: EXCHANGE_ID: client {incumbent} is SP4_MACH_CRED and {} is not its principal → CLID_INUSE",
+                                String::from_utf8_lossy(&principal)
+                            );
+                            results.push((opcode, Nfs4Status::ClIdInUse, OpBody::Inline(Bytes::new())));
+                            break;
+                        }
                         // The DS path was historically tuple-returning and never
                         // exercised the UPD/error branches; map them to a fresh
                         // record for now and warn so we can revisit when the DS
@@ -591,6 +766,15 @@ impl DataServer {
                     };
                     info!("DS: EXCHANGE_ID - client_owner={:?}, verifier={}, clientid={}, is_new={}",
                           String::from_utf8_lossy(&client_owner), verifier, clientid, is_new);
+                    // Only the record's own principal gets here (another
+                    // is case 3), so the protection follows its latest
+                    // EXCHANGE_ID, as on the MDS.
+                    if clientid != 0 {
+                        client_mgr.set_mach_cred(clientid, mach_cred);
+                    }
+                    if mach_cred {
+                        info!("🔐 DS: EXCHANGE_ID: client {clientid} is SP4_MACH_CRED, bound to {}", String::from_utf8_lossy(&principal));
+                    }
                     
                     // Build response
                     let mut encoder = XdrEncoder::new();
@@ -626,8 +810,19 @@ impl DataServer {
                     
                     encoder.encode_u32(response_flags);
                     
-                    // state_protect (4 bytes) - SP4_NONE
-                    encoder.encode_u32(0);
+                    // state_protect: SP4_MACH_CRED with the MDS's
+                    // must_enforce set (the Linux client requires all
+                    // five) and an empty must_allow (the DS serves none
+                    // of the cleanup ops it may name), else SP4_NONE.
+                    if mach_cred {
+                        use crate::nfs::v4::xdr::Nfs4XdrEncoder as _;
+                        let grant = crate::nfs::v4::operations::session::mach_cred_grant(&[]);
+                        encoder.encode_u32(1);
+                        encoder.encode_bitmap(&grant.must_enforce);
+                        encoder.encode_bitmap(&grant.must_allow);
+                    } else {
+                        encoder.encode_u32(0);
+                    }
                     
                     // server_owner (so_minor_id + so_major_id)
                     // MUST match MDS for server trunking to work!
@@ -659,6 +854,11 @@ impl DataServer {
                 opcode::CREATE_SESSION => {
                     // Decode CREATE_SESSION arguments
                     let clientid = decoder.decode_u64().unwrap_or(0);
+                    if wrong_cred(clientid) {
+                        warn!("DS: CREATE_SESSION: client {clientid} is SP4_MACH_CRED and this is not its principal → WRONG_CRED");
+                        results.push((opcode, Nfs4Status::WrongCred, OpBody::Inline(Bytes::new())));
+                        break;
+                    }
                     let sequence = decoder.decode_u32().unwrap_or(0);
                     let _csa_flags = decoder.decode_u32().unwrap_or(0);
 
@@ -677,7 +877,7 @@ impl DataServer {
                         Err(e) => {
                             warn!("DS: CREATE_SESSION bad fore_chan_attrs: {}", e);
                             results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
-                            continue;
+                            break;
                         }
                     };
                     let _back = crate::nfs::v4::compound::ChannelAttrs::decode(&mut decoder);
@@ -725,6 +925,9 @@ impl DataServer {
                                 // handover.
                                 client_mgr.remove_client(old_id);
                             }
+                            // CREATE_SESSION binds its connection to the
+                            // new session (RFC 8881 §18.36.3).
+                            session_mgr.bind_conn(&sessionid, conn.id);
                             let mut encoder = XdrEncoder::new();
                             
                             // sessionid (16 bytes)
@@ -778,7 +981,7 @@ impl DataServer {
                         }
                         Err(_) => {
                             results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
-                            continue;
+                            break;
                         }
                     };
                     
@@ -786,13 +989,30 @@ impl DataServer {
                     let slotid = decoder.decode_u32().unwrap_or(0);
                     let highest_slotid = decoder.decode_u32().unwrap_or(0);
                     let _cache_this = decoder.decode_bool().unwrap_or(false);
-                    
+
+                    // Phase 3b: an SP4_MACH_CRED client's sessions are used
+                    // only on connections bound to them (by CREATE_SESSION,
+                    // or by BIND_CONN_TO_SESSION, which needs the machine's
+                    // credential), as on the MDS: a session id seen on the
+                    // wire is no use from another connection. The client
+                    // answers by binding the connection. Before the slot,
+                    // so a refused call changes nothing.
+                    if client_mgr.mach_cred_principal(client_of(&sessionid)).is_some()
+                        && !session_mgr.conn_bound(&sessionid, conn.id)
+                    {
+                        warn!(
+                            "DS: SEQUENCE: session {:02x?} is SP4_MACH_CRED and not bound to this connection → CONN_NOT_BOUND_TO_SESSION",
+                            &sessionid[..8]
+                        );
+                        results.push((opcode, Nfs4Status::ConnNotBoundToSession, OpBody::Inline(Bytes::new())));
+                        break;
+                    }
+
                     // Handle SEQUENCE via session manager
                     match session_mgr.handle_sequence(sessionid, sequenceid, slotid, highest_slotid) {
                         Ok(result) => {
-                            // The session id begins with its client id.
-                            let client_id = u64::from_be_bytes(sessionid[..8].try_into().expect("16 bytes"));
-                            session_owner = client_mgr.get_client(client_id).map(|c| c.principal);
+                            session_owner = client_mgr.get_client(client_of(&sessionid)).map(|c| c.principal);
+                            in_session = true;
                             let mut encoder = XdrEncoder::new();
                             encoder.encode_fixed_opaque(&result.sessionid);
                             encoder.encode_u32(result.sequenceid);
@@ -869,7 +1089,7 @@ impl DataServer {
                         Ok(s) => s,
                         Err(_) => {
                             results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
-                            continue;
+                            break;
                         }
                     };
                     let offset = decoder.decode_u64().unwrap_or(0);
@@ -1013,10 +1233,13 @@ impl DataServer {
                         Ok(v) => v,
                         Err(_) => {
                             results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
-                            continue;
+                            break;
                         }
                     };
-                    if session_mgr.client_session_count(clientid) > 0 {
+                    if wrong_cred(clientid) {
+                        warn!("DS: DESTROY_CLIENTID: client {clientid} is SP4_MACH_CRED, not its principal → WRONG_CRED");
+                        (Nfs4Status::WrongCred, Bytes::new())
+                    } else if session_mgr.client_session_count(clientid) > 0 {
                         // §18.50: live sessions block the destroy. The DS
                         // holds no stateids/locks/delegations, so sessions
                         // are the entire BUSY predicate.
@@ -1037,7 +1260,14 @@ impl DataServer {
                         Ok(bytes) if bytes.len() == 16 => {
                             let mut sid = [0u8; 16];
                             sid.copy_from_slice(&bytes);
-                            if session_mgr.destroy_session(&sid) {
+                            let protected = client_mgr.mach_cred_principal(client_of(&sid)).is_some();
+                            if wrong_cred(client_of(&sid)) {
+                                warn!("DS: DESTROY_SESSION: SP4_MACH_CRED session, not its principal → WRONG_CRED");
+                                (Nfs4Status::WrongCred, Bytes::new())
+                            } else if protected && session_mgr.has_session(&sid) && !session_mgr.conn_bound(&sid, conn.id) {
+                                warn!("DS: DESTROY_SESSION: connection not bound to SP4_MACH_CRED session → CONN_NOT_BOUND_TO_SESSION");
+                                (Nfs4Status::ConnNotBoundToSession, Bytes::new())
+                            } else if session_mgr.destroy_session(&sid) {
                                 info!("DS: DESTROY_SESSION {:02x?} — destroyed", &sid[0..8]);
                                 (Nfs4Status::Ok, Bytes::new())
                             } else {
@@ -1050,6 +1280,45 @@ impl DataServer {
                     }
                 }
 
+                opcode::BIND_CONN_TO_SESSION => {
+                    // RFC 8881 §18.34. The DS has no back channel (the MDS
+                    // owns callbacks), so it binds the fore channel only:
+                    // CDFS4_FORE for any direction that includes it
+                    // (FORE, FORE_OR_BOTH, BACK_OR_BOTH), INVAL for BACK.
+                    // Never RDMA.
+                    let sid = match decoder.decode_fixed_opaque(16) {
+                        Ok(b) if b.len() == 16 => {
+                            let mut sid = [0u8; 16];
+                            sid.copy_from_slice(&b);
+                            sid
+                        }
+                        _ => {
+                            results.push((opcode, Nfs4Status::BadXdr, OpBody::Inline(Bytes::new())));
+                            break;
+                        }
+                    };
+                    let dir = decoder.decode_u32().unwrap_or(0);
+                    let _rdma = decoder.decode_bool().unwrap_or(false);
+                    const CDFC4_FORE: u32 = 0x1;
+                    const CDFS4_FORE: u32 = 0x1;
+                    if wrong_cred(client_of(&sid)) {
+                        warn!("DS: BIND_CONN_TO_SESSION: SP4_MACH_CRED session, not its principal → WRONG_CRED");
+                        (Nfs4Status::WrongCred, Bytes::new())
+                    } else if dir & CDFC4_FORE == 0 {
+                        warn!("DS: BIND_CONN_TO_SESSION: direction {dir} without the fore channel; the DS has no back channel → INVAL");
+                        (Nfs4Status::Inval, Bytes::new())
+                    } else if session_mgr.bind_conn(&sid, conn.id) {
+                        info!("DS: BIND_CONN_TO_SESSION {:02x?} — connection {} bound", &sid[..8], conn.id);
+                        let mut encoder = XdrEncoder::new();
+                        encoder.encode_fixed_opaque(&sid);
+                        encoder.encode_u32(CDFS4_FORE);
+                        encoder.encode_bool(false);
+                        (Nfs4Status::Ok, encoder.finish())
+                    } else {
+                        (Nfs4Status::BadSession, Bytes::new())
+                    }
+                }
+
                 _ => {
                     warn!("DS received unsupported operation: {}", opcode);
                     (Nfs4Status::NotSupp, Bytes::new())
@@ -1057,17 +1326,13 @@ impl DataServer {
             };
 
             results.push((opcode, status, OpBody::Inline(result_data)));
+            // RFC 8881 §15.2: a COMPOUND stops at its first failed op. It
+            // used to run on, so a READ after a refused SEQUENCE was served.
+            if status != Nfs4Status::Ok {
+                break;
+            }
         }
-
-        // One pass, RPC header first, payloads passed through as their
-        // own segments — replaces the flatten that copied a READ payload
-        // three times (op encoder -> compound encoder -> reply encoder).
-        // Under GSS the body is framed by the shared front end: a MIC'd
-        // verifier and the body signed or sealed.
-        match gss {
-            None => assemble_reply(call.xid, results),
-            Some(v) => crate::nfs::gss_front::frame_reply(call.xid, Some(v), assemble_body(XdrEncoder::new(), results)),
-        }
+        Some(results)
     }
 
     /// [`crate::nfs::node_authz`] at the DS, before `opcode` runs (its
@@ -1087,7 +1352,7 @@ impl DataServer {
             opcode::EXCHANGE_ID | opcode::CREATE_SESSION => {
                 (!nodes.may_create(principal)).then_some(Nfs4Status::Access)
             }
-            opcode::SEQUENCE => {
+            opcode::SEQUENCE | opcode::BIND_CONN_TO_SESSION => {
                 // The session id begins with its client id (DsSessionManager).
                 let head: [u8; 8] = decoder.peek_bytes(8).try_into().ok()?;
                 let client_id = u64::from_be_bytes(head);
@@ -2322,7 +2587,8 @@ mod deleg_stateid_pin_tests {
         let mut args = XdrEncoder::new();
         args.encode_u32(0); // tag length
         args.encode_u32(1); // minorversion
-        args.encode_u32(2); // ops
+        args.encode_u32(3); // ops
+        test_sequence(&mut args, [7u8; 16], 1);
         args.encode_u32(opcode::PUTFH);
         args.encode_opaque(fh);
         args.encode_u32(opcode::READ);
@@ -2340,7 +2606,7 @@ mod deleg_stateid_pin_tests {
             verf: Auth::null(),
             cred_span: Bytes::new(),
         };
-        let segs = DataServer::handle_minimal_compound(call, args.finish(), io, sessions, clients, None).await;
+        let segs = DataServer::handle_minimal_compound(call, args.finish(), io, sessions, clients, None, DsConn::test(1)).await;
         // `into_test_bytes`, not `as_mem`: on Linux the DS answers a
         // READ through the splice path, so the payload segment is a
         // pipe, not bytes. `as_mem` panics on it by design. (macOS
@@ -2359,9 +2625,16 @@ mod deleg_stateid_pin_tests {
         let _tag_len = dec.decode_u32().unwrap();
         let _status = dec.decode_u32().unwrap();
         let nres = dec.decode_u32().unwrap();
-        assert_eq!(nres, 2, "both ops must answer — a truncated compound is its own bug");
+        assert_eq!(dec.decode_u32().unwrap(), opcode::SEQUENCE);
+        assert_eq!(dec.decode_u32().unwrap(), Nfs4Status::Ok as u32);
+        test_skip_sequence_res(&mut dec);
         assert_eq!(dec.decode_u32().unwrap(), opcode::PUTFH);
         let putfh = Nfs4Status::from_u32(dec.decode_u32().unwrap());
+        if putfh != Nfs4Status::Ok {
+            assert_eq!(nres, 2, "an error ends the compound");
+            return (putfh, Nfs4Status::Ok, Vec::new());
+        }
+        assert_eq!(nres, 3, "every op answers — a truncated compound is its own bug");
         assert_eq!(dec.decode_u32().unwrap(), opcode::READ);
         let read = Nfs4Status::from_u32(dec.decode_u32().unwrap());
         let data = if read == Nfs4Status::Ok {
@@ -2461,7 +2734,7 @@ mod ds_gss_tests {
         let (io, s, c) = parts(dir.path());
         // Any RPCSEC_GSS credential: the DS must not look past the flavor.
         let rec = call_record(procedure::NULL, 6, &[0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0], &[]);
-        let reply = flat(DataServer::dispatch_minimal_nfs(rec, io, s, c, None).await);
+        let reply = flat(DataServer::dispatch_minimal_nfs(rec, io, s, c, None, DsConn::test(1)).await);
         let mut dec = XdrDecoder::new(reply);
         assert_eq!(dec.decode_u32().unwrap(), 0x7a11);
         assert_eq!(dec.decode_u32().unwrap(), 1, "REPLY");
@@ -2477,7 +2750,8 @@ mod ds_gss_tests {
         let mut a = XdrEncoder::new();
         a.encode_u32(0); // tag
         a.encode_u32(1); // minorversion
-        a.encode_u32(2);
+        a.encode_u32(3);
+        test_sequence(&mut a, [7u8; 16], 1);
         a.encode_u32(opcode::PUTFH);
         a.encode_opaque(&[0xAB; 16]);
         a.encode_u32(opcode::SECINFO_NO_NAME);
@@ -2491,12 +2765,15 @@ mod ds_gss_tests {
             verf: Auth::null(),
             cred_span: Bytes::new(),
         };
-        let reply = flat(DataServer::handle_minimal_compound(call, a.finish(), io, s, c, None).await);
+        let reply = flat(DataServer::handle_minimal_compound(call, a.finish(), io, s, c, None, DsConn::test(1)).await);
         let mut dec = XdrDecoder::new(reply);
         for _ in 0..8 {
             dec.decode_u32().unwrap();
         }
-        assert_eq!(dec.decode_u32().unwrap(), 2, "both ops answered");
+        assert_eq!(dec.decode_u32().unwrap(), 3, "every op answered");
+        assert_eq!(dec.decode_u32().unwrap(), opcode::SEQUENCE);
+        assert_eq!(dec.decode_u32().unwrap(), Nfs4Status::Ok as u32);
+        test_skip_sequence_res(&mut dec);
         assert_eq!(dec.decode_u32().unwrap(), opcode::PUTFH);
         assert_eq!(dec.decode_u32().unwrap(), Nfs4Status::Ok as u32);
         assert_eq!(dec.decode_u32().unwrap(), opcode::SECINFO_NO_NAME);
@@ -2550,7 +2827,7 @@ mod ds_gss_tests {
             cred_span: Bytes::new(),
         };
         let reply = flat(
-            DataServer::handle_minimal_compound(call, exchange_id_then_putfh(state_protect), io, s, c, None).await,
+            DataServer::handle_minimal_compound(call, exchange_id_then_putfh(state_protect), io, s, c, None, DsConn::test(1)).await,
         );
         let mut dec = XdrDecoder::new(reply);
         for _ in 0..8 {
@@ -2580,15 +2857,17 @@ mod ds_gss_tests {
 
     #[tokio::test]
     async fn exchange_id_decodes_every_state_protection() {
-        let putfh_ok = Some((opcode::PUTFH, Nfs4Status::Ok));
+        // The op after EXCHANGE_ID is read as PUTFH only if EXCHANGE_ID
+        // read its arguments whole; outside a session it is then refused.
+        let putfh_read = Some((opcode::PUTFH, Nfs4Status::OpNotInSession));
         // SP4_NONE.
-        assert_eq!(exchange_id_then_putfh_status(&[0]).await, (Nfs4Status::Ok, putfh_ok));
+        assert_eq!(exchange_id_then_putfh_status(&[0]).await, (Nfs4Status::Ok, putfh_read));
         // SP4_MACH_CRED, two one-word bitmaps: read whole, so the PUTFH
         // after it decodes (only the discriminant was read before, and
         // the bitmaps were taken for the impl_id).
         assert_eq!(
             exchange_id_then_putfh_status(&[1, 1, 0x0000_0003, 1, 0x0000_0010]).await,
-            (Nfs4Status::Ok, putfh_ok)
+            (Nfs4Status::Ok, putfh_read)
         );
         // SP4_SSV: refused, as on the MDS.
         assert_eq!(exchange_id_then_putfh_status(&[2, 0, 0, 0, 0, 0]).await, (Nfs4Status::EncrAlgUnsupp, None));
@@ -2648,3 +2927,312 @@ mod ds_gss_tests {
     }
 }
 
+
+/// pNFS Kerberos plan, Phase 3b: SP4_MACH_CRED on the data servers.
+#[cfg(test)]
+mod mach_cred_tests {
+    use super::*;
+    use crate::nfs::rpc::Auth;
+    use crate::nfs::rpcsec_gss::GssService;
+
+    struct Ds {
+        io: Arc<IoOperationHandler>,
+        sessions: Arc<DsSessionManager>,
+        clients: Arc<ClientManager>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn ds() -> Ds {
+        let dir = tempfile::tempdir().unwrap();
+        Ds {
+            io: Arc::new(IoOperationHandler::new(dir.path()).unwrap()),
+            sessions: Arc::new(DsSessionManager::new()),
+            clients: Arc::new(ClientManager::new(
+                Arc::new(LeaseManager::new()),
+                "ds-mach",
+                crate::state_backend::memory_backend(),
+            )),
+            _dir: dir,
+        }
+    }
+
+    /// Who sends a compound: a GSS principal under a service, or AUTH_NONE.
+    #[derive(Clone, Copy)]
+    enum As {
+        Gss(&'static str, GssService),
+        Null,
+    }
+
+    const W1: As = As::Gss("nfs/w1@CORP", GssService::Integrity);
+    const W2: As = As::Gss("nfs/w2@CORP", GssService::Integrity);
+    const BOB: As = As::Gss("bob@CORP", GssService::Privacy);
+
+    impl Ds {
+        /// Run `ops` (encoded) on connection `conn`, sent as `who`.
+        async fn run(&self, who: As, conn: DsConn, nops: u32, ops: impl FnOnce(&mut XdrEncoder)) -> Vec<(u32, Nfs4Status, Bytes)> {
+            let mut a = XdrEncoder::new();
+            a.encode_u32(0);
+            a.encode_u32(1);
+            a.encode_u32(nops);
+            ops(&mut a);
+            let call = CallMessage {
+                xid: 9,
+                program: NFS4_PROGRAM,
+                version: 4,
+                procedure: procedure::COMPOUND,
+                cred: Auth::null(),
+                verf: Auth::null(),
+                cred_span: Bytes::new(),
+            };
+            let v = match who {
+                As::Gss(p, service) => Some(ValidatedCall { service, seq_num: 1, client_principal: Some(p.into()), tokens: None }),
+                As::Null => None,
+            };
+            DataServer::run_compound(call, a.finish(), self.io.clone(), self.sessions.clone(), self.clients.clone(), v.as_ref(), conn)
+                .await
+                .expect("decodes")
+                .into_iter()
+                .map(|(op, st, body)| match body {
+                    OpBody::Inline(b) => (op, st, b),
+                    _ => (op, st, Bytes::new()),
+                })
+                .collect()
+        }
+
+        /// EXCHANGE_ID with `state_protect` words; (status, clientid, spr_how).
+        async fn exchange_id(&self, who: As, conn: DsConn, owner: &[u8], sp: &[u32]) -> (Nfs4Status, u64, u32) {
+            let r = self
+                .run(who, conn, 1, |a| {
+                    a.encode_u32(opcode::EXCHANGE_ID);
+                    a.encode_u64(42);
+                    a.encode_opaque(owner);
+                    a.encode_u32(0);
+                    for w in sp {
+                        a.encode_u32(*w);
+                    }
+                    a.encode_bool(false);
+                })
+                .await;
+            let (_, st, body) = r.into_iter().next().unwrap();
+            if st != Nfs4Status::Ok {
+                return (st, 0, 0);
+            }
+            let mut d = XdrDecoder::new(body);
+            let id = d.decode_u64().unwrap();
+            d.decode_u32().unwrap();
+            d.decode_u32().unwrap();
+            let how = d.decode_u32().unwrap();
+            if how == 1 {
+                use crate::nfs::v4::xdr::Nfs4XdrDecoder as _;
+                let enforce = d.decode_bitmap().unwrap();
+                for op in [
+                    opcode::BIND_CONN_TO_SESSION,
+                    opcode::EXCHANGE_ID,
+                    opcode::CREATE_SESSION,
+                    opcode::DESTROY_SESSION,
+                    opcode::DESTROY_CLIENTID,
+                ] {
+                    assert!(enforce[(op / 32) as usize] & (1 << (op % 32)) != 0, "must_enforce lacks op {op}");
+                }
+                assert!(d.decode_bitmap().unwrap().iter().all(|w| *w == 0), "must_allow empty");
+            }
+            (st, id, how)
+        }
+
+        async fn create_session(&self, who: As, conn: DsConn, clientid: u64) -> (Nfs4Status, [u8; 16]) {
+            let r = self
+                .run(who, conn, 1, |a| {
+                    a.encode_u32(opcode::CREATE_SESSION);
+                    a.encode_u64(clientid);
+                    a.encode_u32(1);
+                    a.encode_u32(0);
+                    for _ in 0..2 {
+                        for w in [0, 1 << 20, 1 << 20, 4096, 16, 16, 0] {
+                            a.encode_u32(w);
+                        }
+                    }
+                    a.encode_u32(0x4000_0000);
+                    a.encode_u32(0);
+                })
+                .await;
+            let (_, st, body) = r.into_iter().next().unwrap();
+            let mut sid = [0u8; 16];
+            if st == Nfs4Status::Ok {
+                sid.copy_from_slice(&body[..16]);
+            }
+            (st, sid)
+        }
+
+        async fn one(&self, who: As, conn: DsConn, op: u32, args: impl FnOnce(&mut XdrEncoder)) -> Nfs4Status {
+            let r = self
+                .run(who, conn, 1, |a| {
+                    a.encode_u32(op);
+                    args(a);
+                })
+                .await;
+            r[0].1
+        }
+
+        async fn sequence(&self, who: As, conn: DsConn, sid: [u8; 16]) -> Nfs4Status {
+            self.run(who, conn, 1, |a| test_sequence(a, sid, 1)).await[0].1
+        }
+
+        async fn bind(&self, who: As, conn: DsConn, sid: [u8; 16], dir: u32) -> Nfs4Status {
+            self.one(who, conn, opcode::BIND_CONN_TO_SESSION, |a| {
+                a.encode_fixed_opaque(&sid);
+                a.encode_u32(dir);
+                a.encode_bool(false);
+            })
+            .await
+        }
+
+        /// An SP4_MACH_CRED client of W1's on connection 1, and its session.
+        async fn w1_session(&self) -> (u64, [u8; 16]) {
+            let (st, id, how) = self.exchange_id(W1, DsConn::test(1), b"w1-owner", &[1, 0, 0]).await;
+            assert_eq!((st, how), (Nfs4Status::Ok, 1), "krb5i asks, SP4_MACH_CRED granted");
+            let (st, sid) = self.create_session(W1, DsConn::test(1), id).await;
+            assert_eq!(st, Nfs4Status::Ok);
+            (id, sid)
+        }
+    }
+
+    #[tokio::test]
+    async fn sp4_mach_cred_is_granted_only_under_gss_integrity() {
+        let d = ds();
+        let c1 = DsConn::test(1);
+        let (st, id, how) = d.exchange_id(W1, c1, b"a", &[1, 0, 0]).await;
+        assert_eq!((st, how), (Nfs4Status::Ok, 1));
+        assert_eq!(d.clients.mach_cred_principal(id).as_deref(), Some(b"gss:nfs/w1@CORP".as_slice()));
+        // Plain krb5 (no integrity) and AUTH_NONE: SP4_NONE, as before.
+        let krb5 = As::Gss("nfs/w3@CORP", GssService::None);
+        let (st, id, how) = d.exchange_id(krb5, c1, b"b", &[1, 0, 0]).await;
+        assert_eq!((st, how), (Nfs4Status::Ok, 0));
+        assert_eq!(d.clients.mach_cred_principal(id), None);
+        let (st, id, how) = d.exchange_id(As::Null, c1, b"c", &[1, 0, 0]).await;
+        assert_eq!((st, how), (Nfs4Status::Ok, 0));
+        assert_eq!(d.clients.mach_cred_principal(id), None);
+        // A krb5i client that asks SP4_NONE gets SP4_NONE.
+        let (st, id, how) = d.exchange_id(W2, c1, b"d", &[0]).await;
+        assert_eq!((st, how), (Nfs4Status::Ok, 0));
+        assert_eq!(d.clients.mach_cred_principal(id), None);
+    }
+
+    #[tokio::test]
+    async fn a_mach_cred_session_is_used_only_on_a_connection_its_machine_bound() {
+        let d = ds();
+        let (_, sid) = d.w1_session().await;
+        let (c1, c2) = (DsConn::test(1), DsConn::test(2));
+        // CREATE_SESSION bound connection 1; a user's I/O rides it.
+        assert_eq!(d.sequence(W1, c1, sid).await, Nfs4Status::Ok);
+        assert_eq!(d.sequence(BOB, c1, sid).await, Nfs4Status::Ok);
+        // Another connection with the session id seen on the wire: by any
+        // principal, the machine's own included, until it is bound.
+        for who in [W2, BOB, W1] {
+            assert_eq!(d.sequence(who, c2, sid).await, Nfs4Status::ConnNotBoundToSession);
+        }
+        // Binding needs the machine's credential.
+        assert_eq!(d.bind(W2, c2, sid, 3).await, Nfs4Status::WrongCred);
+        assert_eq!(d.bind(BOB, c2, sid, 3).await, Nfs4Status::WrongCred);
+        assert_eq!(d.sequence(W2, c2, sid).await, Nfs4Status::ConnNotBoundToSession, "a refused bind binds nothing");
+        // The DS has no back channel: BACK alone is refused.
+        assert_eq!(d.bind(W1, c2, sid, 2).await, Nfs4Status::Inval);
+        // FORE_OR_BOTH, as Linux sends it.
+        assert_eq!(d.bind(W1, c2, sid, 3).await, Nfs4Status::Ok);
+        assert_eq!(d.sequence(BOB, c2, sid).await, Nfs4Status::Ok);
+        // A closed connection's binding goes with it.
+        d.sessions.forget_conn(2);
+        assert_eq!(d.sequence(W1, c2, sid).await, Nfs4Status::ConnNotBoundToSession);
+        // Binding a session that does not exist.
+        let mut ghost = sid;
+        ghost[15] ^= 0xff;
+        assert_eq!(d.bind(W1, c2, ghost, 3).await, Nfs4Status::BadSession);
+    }
+
+    #[tokio::test]
+    async fn the_must_enforce_ops_need_the_machine_that_made_the_client() {
+        let d = ds();
+        let (id, sid) = d.w1_session().await;
+        let c1 = DsConn::test(1);
+        for who in [W2, BOB] {
+            assert_eq!(d.create_session(who, c1, id).await.0, Nfs4Status::WrongCred);
+            assert_eq!(d.one(who, c1, opcode::DESTROY_SESSION, |a| a.encode_fixed_opaque(&sid)).await, Nfs4Status::WrongCred);
+            assert_eq!(d.one(who, c1, opcode::DESTROY_CLIENTID, |a| a.encode_u64(id)).await, Nfs4Status::WrongCred);
+            // Another principal under the client's owner: CLID_INUSE, and
+            // the client stays the machine's.
+            assert_eq!(d.exchange_id(who, c1, b"w1-owner", &[1, 0, 0]).await.0, Nfs4Status::ClIdInUse);
+            assert_eq!(d.clients.mach_cred_principal(id).as_deref(), Some(b"gss:nfs/w1@CORP".as_slice()));
+        }
+        assert_eq!(d.sequence(W1, c1, sid).await, Nfs4Status::Ok, "the refusals left the session alone");
+        // DESTROY_SESSION from the machine, but not on a bound connection.
+        assert_eq!(
+            d.one(W1, DsConn::test(2), opcode::DESTROY_SESSION, |a| a.encode_fixed_opaque(&sid)).await,
+            Nfs4Status::ConnNotBoundToSession
+        );
+        // The machine on its connection tears both down.
+        assert_eq!(d.one(W1, c1, opcode::DESTROY_SESSION, |a| a.encode_fixed_opaque(&sid)).await, Nfs4Status::Ok);
+        assert_eq!(d.one(W1, c1, opcode::DESTROY_CLIENTID, |a| a.encode_u64(id)).await, Nfs4Status::Ok);
+    }
+
+    #[tokio::test]
+    async fn required_mach_cred_refuses_every_client_without_it() {
+        let d = ds();
+        let req = DsConn { id: 1, require_mach_cred: true };
+        assert_eq!(d.exchange_id(W1, req, b"a", &[0]).await.0, Nfs4Status::Access, "asked SP4_NONE");
+        let krb5 = As::Gss("nfs/w1@CORP", GssService::None);
+        assert_eq!(d.exchange_id(krb5, req, b"b", &[1, 0, 0]).await.0, Nfs4Status::Access, "asked, but no integrity");
+        assert_eq!(d.exchange_id(As::Null, req, b"c", &[1, 0, 0]).await.0, Nfs4Status::Access, "asked, AUTH_NONE");
+        let (st, _, how) = d.exchange_id(W1, req, b"d", &[1, 0, 0]).await;
+        assert_eq!((st, how), (Nfs4Status::Ok, 1));
+    }
+
+    #[tokio::test]
+    async fn an_sp4_none_session_still_binds_to_whatever_connection_uses_it() {
+        // The AUTH_SYS path is unchanged: no binding is checked.
+        let d = ds();
+        let (st, id, how) = d.exchange_id(As::Null, DsConn::test(1), b"sys", &[0]).await;
+        assert_eq!((st, how), (Nfs4Status::Ok, 0));
+        let (st, sid) = d.create_session(As::Null, DsConn::test(1), id).await;
+        assert_eq!(st, Nfs4Status::Ok);
+        assert_eq!(d.sequence(As::Null, DsConn::test(2), sid).await, Nfs4Status::Ok);
+    }
+
+    #[tokio::test]
+    async fn io_runs_only_in_a_session_and_an_error_ends_the_compound() {
+        let d = ds();
+        let c1 = DsConn::test(1);
+        let fh = [0xABu8; 16];
+        // PUTFH and READ with no SEQUENCE: refused at the first op.
+        let r = d
+            .run(As::Null, c1, 2, |a| {
+                a.encode_u32(opcode::PUTFH);
+                a.encode_opaque(&fh);
+                a.encode_u32(opcode::READ);
+                a.encode_u32(0);
+                a.append_raw(&[0u8; 12]);
+                a.encode_u64(0);
+                a.encode_u32(64);
+            })
+            .await;
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].0, r[0].1), (opcode::PUTFH, Nfs4Status::OpNotInSession));
+        // A refused SEQUENCE ends the compound: the PUTFH after it is not run.
+        let (_, sid) = d.w1_session().await;
+        let r = d
+            .run(W2, DsConn::test(2), 2, |a| {
+                test_sequence(a, sid, 1);
+                a.encode_u32(opcode::PUTFH);
+                a.encode_opaque(&fh);
+            })
+            .await;
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].1, Nfs4Status::ConnNotBoundToSession);
+        // SEQUENCE only first.
+        let r = d
+            .run(W1, c1, 2, |a| {
+                test_sequence(a, sid, 2);
+                test_sequence(a, sid, 3);
+            })
+            .await;
+        assert_eq!(r.iter().map(|x| x.1).collect::<Vec<_>>(), vec![Nfs4Status::Ok, Nfs4Status::SequencePos]);
+    }
+}

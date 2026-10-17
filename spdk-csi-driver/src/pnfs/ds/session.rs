@@ -28,6 +28,7 @@
 //! - ✅ Return status_flags (usually 0)
 
 use dashmap::DashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -50,6 +51,17 @@ struct DsSession {
     /// Per-slot sequence tracking (DS typically only needs slot 0)
     /// We use a simple approach: track last seen sequence per slot
     slot_sequences: Vec<u32>,
+    /// The connections bound to this session (CREATE_SESSION's, then
+    /// BIND_CONN_TO_SESSION's), by `server.rs`'s connection id. Checked
+    /// only for an SP4_MACH_CRED client's sessions (Phase 3b): an
+    /// SP4_NONE session is bound to whatever connection uses it.
+    conns: HashSet<u64>,
+}
+
+impl DsSession {
+    fn new(slots: u32) -> Self {
+        Self { slot_sequences: vec![0; slots as usize], conns: HashSet::new() }
+    }
 }
 
 impl DsSessionManager {
@@ -71,11 +83,7 @@ impl DsSessionManager {
         sessionid[8..16].copy_from_slice(&1u64.to_be_bytes()); // Instance = 1
         
         // Create session entry
-        let session = DsSession {
-            slot_sequences: vec![0; self.max_slots as usize],
-        };
-        
-        self.sessions.insert(sessionid, session);
+        self.sessions.insert(sessionid, DsSession::new(self.max_slots));
         
         debug!("DS: Created session {:02x?} for clientid {}", &sessionid[0..8], clientid);
         Ok(sessionid)
@@ -141,9 +149,7 @@ impl DsSessionManager {
             .or_insert_with(|| {
                 debug!("Creating new DS session for {:02x}{:02x}{:02x}{:02x}...",
                        sessionid[0], sessionid[1], sessionid[2], sessionid[3]);
-                DsSession {
-                    slot_sequences: vec![0; self.max_slots as usize],
-                }
+                DsSession::new(self.max_slots)
             });
 
         // Simple sequence validation
@@ -171,6 +177,37 @@ impl DsSessionManager {
             target_highest_slotid: self.max_slots - 1,  // Tell client our max
             status_flags: 0,  // No special flags
         })
+    }
+
+    /// Bind connection `conn` to `sessionid` (CREATE_SESSION, and
+    /// BIND_CONN_TO_SESSION). `false` when there is no such session.
+    pub fn bind_conn(&self, sessionid: &[u8; 16], conn: u64) -> bool {
+        match self.sessions.get_mut(sessionid) {
+            Some(mut s) => {
+                s.conns.insert(conn);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `conn` is bound to `sessionid`; `false` for a session
+    /// this DS does not hold.
+    pub fn conn_bound(&self, sessionid: &[u8; 16], conn: u64) -> bool {
+        self.sessions.get(sessionid).is_some_and(|s| s.conns.contains(&conn))
+    }
+
+    /// Whether `sessionid` exists here.
+    pub fn has_session(&self, sessionid: &[u8; 16]) -> bool {
+        self.sessions.contains_key(sessionid)
+    }
+
+    /// A connection closed: unbind it everywhere, so a later connection
+    /// that happens to reuse nothing of it inherits no binding.
+    pub fn forget_conn(&self, conn: u64) {
+        for mut s in self.sessions.iter_mut() {
+            s.conns.remove(&conn);
+        }
     }
 
     /// Get session count (for monitoring)
@@ -292,5 +329,24 @@ mod tests {
         assert!(!mgr.destroy_session(&sid_a), "second destroy answers BADSESSION");
         assert_eq!(mgr.client_session_count(7), 0, "clientid 7 is destroyable now");
         assert_eq!(mgr.client_session_count(8), 1, "clientid 8 still BUSY");
+    }
+
+    /// Phase 3b: a connection is bound to a session only by asking, and
+    /// unbound when it closes.
+    #[test]
+    fn connections_bind_to_sessions_and_closing_unbinds() {
+        let mgr = DsSessionManager::new();
+        let sid = mgr.create_session(7).unwrap();
+        assert!(!mgr.conn_bound(&sid, 1), "a new session has no connection until one binds");
+        assert!(mgr.bind_conn(&sid, 1));
+        assert!(mgr.conn_bound(&sid, 1));
+        assert!(!mgr.conn_bound(&sid, 2), "another connection is not bound by the first");
+        assert!(!mgr.bind_conn(&[9u8; 16], 2), "no binding to a session that does not exist");
+        mgr.forget_conn(1);
+        assert!(!mgr.conn_bound(&sid, 1), "a closed connection's binding goes with it");
+        // A session SEQUENCE auto-creates starts unbound.
+        let auto = [3u8; 16];
+        mgr.handle_sequence(auto, 1, 0, 0).unwrap();
+        assert!(!mgr.conn_bound(&auto, 1));
     }
 }
