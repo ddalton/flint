@@ -121,13 +121,29 @@ Match(e) ==
   \/ /\ e.ev = "rescope_second" /\ RescopeSecond(e.w)
      /\ {p \in Paths : w[e.w].local[p] # Nil /\ w'[e.w].local[p] = Nil} = e.unlinked
      /\ {p \in Paths : w'[e.w].baseline[p] # w[e.w].baseline[p]} = e.taken
+  \* The sync verb, a writer's (`sync.rs`): the paths whose citation it
+  \* moved, and the ones it left the agent.
+  \/ /\ e.ev = "sync" /\ Sync(e.w)
+     /\ {p \in Paths : w'[e.w].baseline[p] # w[e.w].baseline[p]} = e.taken
+     /\ w'[e.w].skipped = e.skipped
+  \* A reader's tick (`reader.rs::reader_pull`): the pointer read, then the
+  \* sync; or nothing, where the model's skip must agree.
+  \/ e.ev = "pull" /\ RPullRead(e.w) /\ (Has(e, "seq") => seq = e.seq)
+  \/ /\ e.ev = "rpull_sync" /\ RPullSync(e.w)
+     /\ {p \in Paths : w'[e.w].baseline[p] # w[e.w].baseline[p]} = e.taken
+     /\ w'[e.w].skipped = e.skipped
+  \/ /\ e.ev = "pull_skip"
+     /\ On(e.w) /\ e.w \in Readers /\ w[e.w].pc = "idle" /\ ReaderSkips(e.w)
+     /\ UNCHANGED vars
+  \/ e.ev = "honor_reader" /\ HonorReader(e.w)
   \* A new incarnation (`release_stale_own`'s `start`).
   \/ e.ev = "restart" /\ Restart(e.w)
 
 \* The bookkeeping every protocol step carries (`Next`'s first disjunct); a
-\* reap is the retire age's own step and carries its own.
+\* reap is the retire age's own step and carries its own, and a reader's
+\* skipped tick is no step at all.
 Carried(e) ==
-  IF e.ev = "reap" THEN TRUE ELSE TookUpdate /\ RetUpdate /\ UNCHANGED <<aged, ages, rdoc, rlag>>
+  IF e.ev \in {"reap", "pull_skip"} THEN TRUE ELSE TookUpdate /\ RetUpdate /\ UNCHANGED <<aged, ages, rdoc, rlag>>
 
 TraceNext ==
   \/ /\ l <= Len(Trace)

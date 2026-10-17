@@ -206,6 +206,49 @@ def replay_forgotten(evs):
         del evs[k]
 
 
+def sync_takes_the_agents_file(evs):
+    """the writer's sync reports taking the file its agent was editing"""
+    i = nth(evs, lambda e: e["ev"] == "sync" and e["skipped"])
+    evs[i]["taken"] = sorted(set(evs[i]["taken"]) | set(evs[i]["skipped"]))
+    evs[i]["skipped"] = []
+
+
+def reader_answers_ok(evs):
+    """the reader answers its agent's publish request ok"""
+    i = nth(evs, lambda e: e["ev"] == "ack" and e["status"] == "refused-read-only")
+    evs[i]["status"] = "ok"
+
+
+def skip_pull(evs, i):
+    # The tick pulls nothing: its pull says skipped, and its sync is gone.
+    evs[i]["skipped"] = True
+    j = next(k for k in range(i + 1, len(evs)) if evs[k]["ev"] == "sync" and evs[k]["holder"] == evs[i]["holder"])
+    del evs[j]
+
+
+def reader_skips_news(evs):
+    """the reader's tick after the writer's delete pulls nothing"""
+    skip_pull(evs, nth(evs, lambda e: e["ev"] == "pull" and not e["skipped"], 1))
+
+
+def reader_skips_what_it_owes(evs):
+    """the reader's tick after its agent backed out pulls nothing (L-129)"""
+    skip_pull(evs, nth(evs, lambda e: e["ev"] == "pull" and not e["skipped"], 1))
+
+
+def retry_forgotten(evs):
+    """the barrier after the failed write never takes the path left owed"""
+    i = nth(evs, lambda e: e["ev"] == "consume" and e["action"] == "adopted" and e["path"] == "d/x.txt")
+    del evs[i]
+
+
+def sync_failure_unreported(evs):
+    """the sync whose write failed reports it took everything"""
+    i = nth(evs, lambda e: e["ev"] == "sync" and e["left"])
+    evs[i]["left"] = False
+    evs[i]["failed"] = []
+
+
 def fence_forgotten(evs):
     """the deposed holder's read of the cell never fences it"""
     ks = [k for k, e in enumerate(evs) if e["ev"] == "fence"]
@@ -222,6 +265,12 @@ def deposal_as_a_plain_claim(evs):
 
 
 MUTATIONS = [
+    ("a_consume_whose_write_fails_takes_the_path_at_the_next", "retry-forgotten", retry_forgotten),
+    ("a_sync_whose_write_fails_leaves_the_path_owed", "sync-failure-unreported", sync_failure_unreported),
+    ("a_writer_syncs_between_barriers", "sync-takes-the-agents-file", sync_takes_the_agents_file),
+    ("a_reader_follows_a_writer", "reader-answers-ok", reader_answers_ok),
+    ("a_reader_follows_a_writer", "reader-skips-news", reader_skips_news),
+    ("a_reader_resyncs_a_path_it_skipped_once_clean", "reader-skips-what-it-owes", reader_skips_what_it_owes),
     ("a_holder_deposed_before_its_cas_is_fenced", "fence-forgotten", fence_forgotten),
     ("a_holder_deposed_before_its_cas_is_fenced", "deposal-as-a-plain-claim", deposal_as_a_plain_claim),
     ("a_narrow_then_a_widen", "narrow-fetches-out-of-scope", narrow_fetches_out_of_scope),
