@@ -2285,6 +2285,83 @@ async fn a_publish_whose_upload_was_swept_is_partial() {
     assert!(m.entries.contains_key("model.bin"), "the re-touch did not publish the swept file");
 }
 
+/// The two halves of the ack's withheld set, one at a time (the model's
+/// AckIgnoresWithheld; the 2026-10-17 mutant audit). The test above is
+/// answered by both — its barrier's own report and its carrier each name
+/// the swept file — so dropping either alone passed it.
+///
+/// The CARRIER's half: the barrier that deferred the swept file installed
+/// the rest, and its ack write failed. The agent then removes the file and
+/// the UI saves other bytes there, so the retry's barrier has nothing to
+/// say about it and the carrier's `uncited` (bytes it never published) does
+/// not name it either; only the carrier's `dropped` remembers that the
+/// declaration was not carried.
+#[tokio::test]
+async fn a_retried_honour_still_names_a_file_an_earlier_carry_deferred() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.whole_put_max = 8; // 8 bytes: everything bigger composes
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+
+    let big: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    write(dir.path(), "model.bin", &big);
+    write(dir.path(), "notes.txt", "n");
+    store.inject_compose_swept();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    let squat = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    std::fs::create_dir_all(squat.join("occupied")).unwrap();
+    clear_min_interval(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the ack write did not fail");
+    std::fs::remove_dir_all(&squat).unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("notes.txt") && !m.entries.contains_key("model.bin"), "fixture: not the deferral");
+
+    std::fs::remove_file(dir.path().join("model.bin")).unwrap();
+    hitl_write(&store, &a.cfg, "model.bin", "the reviewer's model", "reviewer").await.unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["model.bin"].crc64_b64, crc_of("the reviewer's model"), "fixture: the agent's model.bin was published");
+    assert_eq!(ack.status, "partial", "the ack says the declared model.bin is in seq {:?}: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["model.bin".to_string()], "{ack:?}");
+}
+
+/// The barrier's OWN half: the swept file is the whole declaration, so the
+/// barrier installs nothing and journals no carrier; only its own report
+/// knows the file was not published.
+#[tokio::test]
+async fn an_honour_whose_only_upload_was_swept_is_partial_with_no_carrier() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.cfg.whole_put_max = 8;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "s");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+
+    let big: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    write(dir.path(), "model.bin", &big);
+    store.inject_compose_swept();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, false).await.unwrap().expect("nothing was answered");
+    let carrier = a.state.load_intent().unwrap().carrier;
+    assert!(
+        carrier.as_ref().map_or(true, |c| !c.dropped.contains("model.bin")),
+        "fixture: a carrier names the deferral, so this does not isolate the barrier's own report: {carrier:?}"
+    );
+    assert_eq!(ack.status, "partial", "the ack says the swept model.bin is in seq {:?}: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["model.bin".to_string()], "{ack:?}");
+}
+
 /// The drain's own boundary: an upload that published nothing is the
 /// agent's only copy of that file, so the drain must not attest — an
 /// attested drain lets the node remove the tree. The binary retries a
@@ -6054,6 +6131,46 @@ async fn a_replaced_handle_outlives_its_retirement_by_the_retire_age() {
     }
     let logs = format!("{}/{}/retired/", sc.cfg.prefix, super::LEAN_DIR);
     assert!(store.list(&logs).await.unwrap().is_empty(), "the retire logs were never reaped");
+}
+
+/// The retire log's own filter (the model's CollectorSparesCited; the
+/// 2026-10-17 mutant audit, CollectorGreedy): a commit retires a handle
+/// only if the installed document cites it NOWHERE. A UI copy cites p's
+/// handle at q too; the agent deletes p. The log must not name the handle
+/// q still cites. The reaper would spare it anyway (the test below), so
+/// this reads the log itself, kept by a retire age that has not passed.
+#[tokio::test]
+async fn a_commit_never_retires_a_handle_the_installed_document_cites_at_another_path() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "p.txt", "shared bytes");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+    gateway_commit(&store, &a.cfg, &super::ui_flush(now_unix()), |doc| {
+        let e = doc.entries["p.txt"].clone();
+        doc.entries.insert("q.txt".to_string(), e);
+    })
+    .await
+    .unwrap();
+    a.run_barrier().await.unwrap();
+    assert_eq!(read(dir.path(), "q.txt").as_deref(), Some("shared bytes"), "fixture: the copy never reached the tree");
+    let h = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["p.txt"].key.clone();
+
+    a.cfg.retire_grace_secs = 3600;
+    std::fs::remove_file(dir.path().join("p.txt")).unwrap();
+    let r = a.declared_barrier().await.unwrap();
+    assert_eq!(r.deleted, vec!["p.txt".to_string()], "fixture: the delete did not publish: {r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.get("q.txt").map(|e| e.key.as_str()), Some(h.as_str()), "fixture: q no longer cites the handle");
+    let logs = store.list(&manifest::retired_prefix(&a.cfg)).await.unwrap();
+    for o in &logs {
+        let (_, body) = store.get_whole(&o.key, None).await.unwrap();
+        let log: manifest::RetireLog = serde_json::from_slice(&body).unwrap();
+        assert!(!log.handles.contains(&h), "a commit retired {h}, which q.txt still cites: {log:?}");
+    }
+    assert_eq!(cited_bytes(&store, &a.cfg, "q.txt").await.as_deref(), Some(&b"shared bytes"[..]));
 }
 
 /// A retire log is data in the bucket, not a licence: one naming a handle
@@ -12207,6 +12324,57 @@ async fn a_restart_before_step_7_republishes_a_renamed_away_file_and_names_its_l
     let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
     assert_eq!(ack.status, "partial", "the ack says the carried file is in seq {:?}, which no longer cites it: {ack:?}", ack.seq);
     assert_eq!(ack.report.dropped, vec!["p.txt".to_string()], "{ack:?}");
+}
+
+/// AK4 on the DEFERRED path (the 2026-10-17 mutant audit,
+/// StampIndependent): a forced honour — the budget-deferred one, and the
+/// startup settle of a touch a restart left pending — installs under the
+/// `sentinel-deferred` clock, and its ack names that clock and that seq.
+/// The tests that compared the ack with the pointer ran the drain and the
+/// unforced honour only.
+async fn a_forced_honour_names_the_clock_it_stamped(restart: bool) {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "s");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+
+    write(dir.path(), "work.txt", "the declared bytes");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let ack = if restart {
+        drop(a);
+        let mut a = syncer(&store, dir.path()).await;
+        a.settle_pending_at_startup().await.unwrap();
+        a.read_ack(Verb::Publish).expect("the restart answered nothing")
+    } else {
+        a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered")
+    };
+    let p = manifest::load_pointer(store.as_ref(), &cfg_for(dir.path())).await.unwrap().unwrap();
+    let m = manifest::load(store.as_ref(), &cfg_for(dir.path())).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("work.txt"), "fixture: the honour installed nothing: {ack:?}");
+    assert_eq!(ack.seq, Some(p.pointer.seq), "the ack names a seq its barrier did not install: {ack:?}");
+    assert_eq!(
+        Some(ack.boundary.as_str()),
+        p.pointer.boundary_source.as_deref(),
+        "the ack and the bucket name different clocks for one install: {ack:?}"
+    );
+    assert_eq!(ack.boundary, "sentinel-deferred", "{ack:?}");
+}
+
+#[tokio::test]
+async fn a_forced_honour_names_the_clock_its_install_stamped() {
+    a_forced_honour_names_the_clock_it_stamped(false).await;
+}
+
+#[tokio::test]
+async fn a_startup_settle_names_the_clock_its_install_stamped() {
+    a_forced_honour_names_the_clock_it_stamped(true).await;
 }
 
 /// Row 15 plan, D4 (2026-10-14): the drain's publish ack names the clock

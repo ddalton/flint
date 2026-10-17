@@ -1139,7 +1139,12 @@ impl Syncer {
                             // `honor_publish`'s dropped set, decided here:
                             // parks and deferrals are settled before the
                             // CAS, and an outranked delete is one the merged
-                            // document still cites.
+                            // document still cites. Since M3 no delete is
+                            // outranked (only uploads park, and the merge
+                            // removes every unparked delete: `merge_applies_
+                            // a_local_delete_and_names_the_version_it_
+                            // deleted_over`), so the second clause is a
+                            // backstop no barrier reaches.
                             c.dropped.extend(report.parked.iter().chain(&report.deferred).cloned());
                             c.dropped.extend(
                                 classified.deletes.iter().filter(|p| merged.entries.contains_key(p.as_str())).cloned(),
