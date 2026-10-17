@@ -74,6 +74,9 @@ Match(e) ==
      /\ Has(e, "gone") => Cardinality(MergeGone(e.w)) = e.gone
      /\ PullOnly(e.w)
   \/ e.ev = "claim" /\ Claim(e.w)
+  \* Deposal (row 17): the takeover, and the deposed holder's fence.
+  \/ e.ev = "depose" /\ Depose(e.w)
+  \/ e.ev = "fence" /\ Fence(e.w)
   \/ e.ev = "verify" /\ Verify(e.w) /\ (Has(e, "withheld") => w'[e.w].gone = e.withheld)
   \/ /\ e.ev = "install"
      \* Read BEFORE the step: the merge decides against the document it

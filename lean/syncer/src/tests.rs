@@ -9453,7 +9453,7 @@ impl Hooked {
     pub(super) fn before_delete(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_delete.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
-    fn after_head(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+    pub(super) fn after_head(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.after_head.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
 }

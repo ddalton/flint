@@ -42,6 +42,13 @@ THE MAPPING (one place):
   upload (put)                     -> upload         Upload(w,p): the version, and
                                                      the copy it landed at if any
   claim verdict=claimed            -> claim          Claim(w)
+  claim verdict=claimed how=deposed -> depose        Depose(w): the takeover of a
+                                                     held cell, its rotation the
+                                                     seq it bumps (orphaned-own:
+                                                     refused)
+  fence (the first in a barrier)   -> fence          Fence(w): before its CAS the
+                                                     barrier is abandoned, after it
+                                                     the collector is skipped
   merge, claimed                   -> verify         Verify(w), what the re-read withheld
   merge adds_nothing, claimed      -> install        Install(w) installing nothing
   merge + cas ok (+ surface*)      -> install        Install(w): the deletes the
@@ -160,6 +167,7 @@ def convert(lines):
     nonce_n = {}   # (w, nonce) -> the model's touch number
     exact = {}     # w -> every fold of the standing record added one nonce
     restarts = 0
+    deposals = {}  # w -> takeovers it made
     rescopes = 0
     # Scopes are resolved to paths at the end, when every path is known.
     scoped = []  # (record, field, prefixes or None)
@@ -294,7 +302,14 @@ def convert(lines):
             v = e["verdict"]
             if v == "claimed":
                 barrier[w]["claimed"] = True
-                steps.append(({"ev": "claim", "w": w}, i))
+                how = e.get("how")
+                if how == "deposed":
+                    deposals[w] = deposals.get(w, 0) + 1
+                    steps.append(({"ev": "depose", "w": w}, i))
+                elif how == "orphaned-own":
+                    raise Unsupported("an orphaned-own claim (an acquire whose container died)")
+                else:
+                    steps.append(({"ev": "claim", "w": w}, i))
             elif v != "waiting":
                 raise Unsupported(f"claim verdict {v}")
         elif ev == "observed":
@@ -358,6 +373,12 @@ def convert(lines):
                     steps.append(({"ev": "sweep", "w": w, "h": by_key[k]}, i))
             elif e.get("removed", 0) > 0 and e.get("what") not in ("generations", "chunks"):
                 raise Unsupported(f"a sweep of {e.get('what')}")
+        elif ev == "fence":
+            # A deposed holder's first read of the cell; the ones after it in
+            # the same barrier (a renew's, then the commit's) are the same fence.
+            if not barrier.get(w, {}).get("fenced"):
+                barrier.setdefault(w, {})["fenced"] = True
+                steps.append(({"ev": "fence", "w": w}, i))
         elif ev == "rescope":
             st = e["stage"]
             if st == "begin":
@@ -454,7 +475,7 @@ def convert(lines):
         # and every tree in them writes.
         "Scopes": scopes, "MaxRescopes": rescopes, "MaxFetchFails": 0, "Readers": set(),
         # Rows 15-17: the publish requests the trace folded; no deposal yet.
-        "MaxTouches": max(touches.values(), default=0), "MaxNonces": 32, "MaxDeposals": 0,
+        "MaxTouches": max(touches.values(), default=0), "MaxNonces": 32, "MaxDeposals": max(deposals.values(), default=0),
     }
     return steps, consts, ver_of
 
@@ -475,7 +496,8 @@ def write_out(steps, consts, gen, outdir: Path, name: str, overrides=None):
         "TypeOK", "Inv_CitationsLive", "Inv_OneName", "Inv_AckedNamed", "Inv_OneHolder",
         "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches", "AK3", "AK4")]
     cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1", "PROPERTY NR1",
-            "PROPERTY Prop_ScopeRespected", "PROPERTY Prop_AgentWorkKept", "PROPERTY Prop_NarrowNeverDeletes"]
+            "PROPERTY Prop_ScopeRespected", "PROPERTY Prop_AgentWorkKept", "PROPERTY Prop_NarrowNeverDeletes",
+            "PROPERTY DP1", "PROPERTY DP2"]
     cfg += ["INVARIANT TraceProgress", "INVARIANT TraceIncomplete"]
     (outdir / "TraceCore.cfg").write_text("\n".join(cfg) + "\n")
     m = [f"{n + 1}\t{r['ev']}\tline {i + 1}" for n, (r, i) in enumerate(steps)]

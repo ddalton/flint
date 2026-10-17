@@ -206,6 +206,26 @@ where
     back
 }
 
+/// `inside`, from the barrier's re-read of `key` (its HEAD in the commit
+/// section, after its claim and before its CAS: review H2's window).
+fn inside_after_head<F>(hs: &Hooked, key: &str, other: Syncer, f: F) -> Arc<Mutex<Option<Syncer>>>
+where
+    F: Fn(Syncer) -> std::pin::Pin<Box<dyn std::future::Future<Output = Syncer>>>
+        + Send
+        + Sync
+        + 'static,
+{
+    let slot = Mutex::new(Some(other));
+    let back: Arc<Mutex<Option<Syncer>>> = Arc::new(Mutex::new(None));
+    let back_in = back.clone();
+    hs.after_head(key, move || {
+        let o = slot.lock().unwrap().take().expect("hook ran twice");
+        let o = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f(o)));
+        *back_in.lock().unwrap() = Some(o);
+    });
+    back
+}
+
 /// A delete and an edit cross between two writers: the delete reaches the
 /// other tree through its queue, the edit through the other's, and idle
 /// barriers install nothing.
@@ -655,6 +675,39 @@ async fn conformance_a_narrow_keeps_what_the_agent_wrote_after_the_uncite() {
     let r1 = a.run_barrier().await.unwrap();
     assert!(r1.uploaded.iter().any(|p| p == "outputs/big.bin"), "fixture: the agent's add was not published: {r1:?}");
     dump("a_narrow_keeps_what_the_agent_wrote_after_the_uncite", &buf);
+}
+
+/// Deposal before the CAS (row 17; review H2's position, InstallUnfenced,
+/// DP1): A's barrier has claimed the cell and is re-reading the upload it
+/// will cite when B's barrier, its quiet polls run out, deposes A (the
+/// takeover rotates the manifest) and commits its own change. A's next read
+/// of the cell fences it: no install onto its successor's document. A's
+/// upload stands; its next barrier publishes the edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn conformance_a_holder_deposed_before_its_cas_is_fenced() {
+    let (hs, store, buf, mut a, b, dir_a, dir_b) = two_writers_hooked(&[("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("a.txt", "A's edit");
+    let root_b = dir_b.path().to_path_buf();
+    let b_back = inside_after_head(&hs, &a.cfg.file_key("a.txt"), b, move |mut b| {
+        let root_b = root_b.clone();
+        Box::pin(async move {
+            Agent { name: "B", sc: &b, root: &root_b }.write("b.txt", "B's commit");
+            b.run_barrier().await.unwrap();
+            b
+        })
+    });
+    let r = a.run_barrier().await;
+    let mut b = b_back.lock().unwrap().take().expect("fixture: the hook never ran");
+    assert!(matches!(r, Err(super::LeanError::Fenced(_))), "a deposed holder's barrier must end fenced: {r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("b.txt"), "fixture: B's commit did not land");
+    assert!(!m.entries.contains_key("a.txt"), "A, deposed, installed onto its successor's document");
+    a.run_barrier().await.unwrap();
+    assert!(gateway_current(&store, &a.cfg, "a.txt").await.is_some(), "A's next barrier did not publish its edit");
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir_b.path(), "a.txt").as_deref(), Some("A's edit"), "fixture: A's edit never reached B");
+    dump("a_holder_deposed_before_its_cas_is_fenced", &buf);
 }
 
 /// A UI delete of a clean file: the first writer's barrier performs it (the

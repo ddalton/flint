@@ -206,7 +206,24 @@ def replay_forgotten(evs):
         del evs[k]
 
 
+def fence_forgotten(evs):
+    """the deposed holder's read of the cell never fences it"""
+    ks = [k for k, e in enumerate(evs) if e["ev"] == "fence"]
+    if not ks:
+        raise SystemExit("mutation anchor not found: a fence")
+    for k in reversed(ks):
+        del evs[k]
+
+
+def deposal_as_a_plain_claim(evs):
+    """B's takeover of A's held cell is reported as an ordinary claim"""
+    i = nth(evs, lambda e: e["ev"] == "claim" and e.get("how") == "deposed")
+    evs[i]["how"] = "released"
+
+
 MUTATIONS = [
+    ("a_holder_deposed_before_its_cas_is_fenced", "fence-forgotten", fence_forgotten),
+    ("a_holder_deposed_before_its_cas_is_fenced", "deposal-as-a-plain-claim", deposal_as_a_plain_claim),
     ("a_narrow_then_a_widen", "narrow-fetches-out-of-scope", narrow_fetches_out_of_scope),
     ("a_narrow_crashed_before_its_unlink_is_replayed", "replay-forgotten", replay_forgotten),
     ("an_unpublished_delete_survives_a_restart", "restart-rematerialises", restart_rematerialises),
