@@ -367,3 +367,27 @@ M12 c9b4df15, M13 f2f7fe05, M14 786befc3.
   Same-path convergence: MATCHES in consume_owed (barrier.rs:290-310); over-declares
     on the cheap path (165-175), same-bytes-new-mtime (269, scan.rs:133), out-of-scope
     (272-275) -- toward `partial`, not a wrong `ok`.
+
+2026-10-17 18:35Z  FIX (2) vs THE CODE: DECIDED -- the code answers as the fixed model does.
+  Step 1 (model, results/2026-10-17-akx-code): the PRE-fix LeanP1 (3ed14442, md5
+    6d9cbe2a) from AKXB's last state (MCAKXR): AK1 VIOLATED one step on (19 states
+    from Init) -- the honour writes ok, dropped {}, with p2 declared (its tree
+    differed from the stale baseline) and deleted by the UI.  So the pre-fix spec
+    asked for `partial` here; fix (2) is what makes `ok` legal.
+  Step 2 (code, lean/syncer/src/tests.rs, a_published_file_renamed_away_across_a_restart):
+    the AKXB trace in the code -- install v2, GC-delete snapshot + restore = restart
+    before step 7 (baseline back at v1, checked), UI rename p->q, touch, UI rename
+    back, UI delete inside the honour's barrier after its consume:
+    (a) nothing else dirty: ack ok at the consume's seq, which still cites p (v2).
+    (b) another declared file: the install merges past the delete; ack ok, dropped
+        [], at a seq that does not cite p -- the pre-fix model's violation, the
+        fixed model's answer.
+    Both equal the SAME run with no restart (step 7 ran): the restart changes
+    nothing the ack says.  The code never declared p: its declaration is what its
+    barriers carry, and the consume converged p clean before the scan.
+  So the 23:15Z "fix (2) NOT IN THE CODE" was the touch-time ghost, not a code gap;
+    FINDINGS Table 3's rename row (model wrong, code right) holds on this trace.
+    Correction to 23:15Z: after the restart baseline[p] holds v1 (stale), not nothing.
+  Not run: the barrier BEFORE the rename back (the code re-publishes p and carries
+    it, per the audit -- an over-declaration toward partial, which AK1 permits).
+  Box: syncer lib suite 289 passed, 0 failed, 1 ignored (clone /mnt/nvme/wt-akx).
