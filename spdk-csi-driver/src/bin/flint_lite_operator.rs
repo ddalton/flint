@@ -101,6 +101,11 @@ struct Args {
     #[arg(long, env = "FLINT_LITE_DEFAULT_HIBERNATE_AFTER_SECS", default_value_t = 0)]
     default_hibernate_after_secs: u64,
 
+    /// The cluster's DNS domain: a Kerberos share's principal is
+    /// `nfs/<service>.<namespace>.svc.<this>` (`lite_operator::kerberos`).
+    #[arg(long, env = "FLINT_LITE_CLUSTER_DOMAIN", default_value = "cluster.local")]
+    cluster_domain: String,
+
 }
 
 /// The fleet idle default, held to the rules admission holds a share's own
@@ -209,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
             startup_failure_threshold: args.startup_failure_threshold,
             nfs_proxy: args.nfs_proxy,
             idle: default_idle,
+            cluster_domain: args.cluster_domain.clone(),
             ..Default::default()
         },
         recorder: Recorder::new(

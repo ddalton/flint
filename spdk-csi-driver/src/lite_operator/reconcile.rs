@@ -48,7 +48,11 @@ use super::conflict::{self, Admission, Candidate, ANN_ABANDON};
 use super::hubstatus::{self, StateFree};
 use super::idle::{self, Decision, IdleState};
 use super::persistence;
-use super::crd::{FlintShare, FlintShareStatus, IdleSpec, Lifecycle, Phase, Reclaim, RestartPolicy, ShareCondition};
+use super::crd::{
+    FlintShare, FlintShareStatus, IdleSpec, KerberosSpec, KerberosStatus, Lifecycle, Phase, Reclaim, RestartPolicy,
+    ShareCondition,
+};
+use super::kerberos;
 use super::render::{self, RenderDefaults};
 
 pub const FIELD_MANAGER: &str = "flint-lite-operator";
@@ -1035,6 +1039,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 stateid_tag: None,
                 conflict_with: redirect,
                 conditions: Some(conds),
+                kerberos: None,
             },
         )
         .await?;
@@ -1102,6 +1107,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                     stateid_tag: None,
                     conflict_with: None,
                     conditions: Some(conds),
+                    kerberos: None,
                 },
             )
             .await?;
@@ -1173,6 +1179,45 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 );
             }
         }
+    }
+
+    // --- 3b. Kerberos --------------------------------------------------
+    // The share's principal before its hub: the hub must never start
+    // without its key, and a share that asked for Kerberos never gets a
+    // hub serving sec=sys instead (docs/plans/flint-lite-kerberos-plan.md).
+    if let Some(k) = share.spec.kerberos() {
+        let blocked = match kerberos::validate(&share, k, ctx.defaults.nfs_proxy) {
+            Err(why) => Some((why.reason(), why.message(), REQUEUE_SETTLED)),
+            Ok(()) => match ensure_principal(&ctx, &share, k).await {
+                Err(e) => Some(("KerberosPrincipalFailed", e, REQUEUE_BLOCKED)),
+                Ok(()) => {
+                    let secret = kerberos::principal_name(&share);
+                    get_opt(Api::<Secret>::namespaced(ctx.client.clone(), &ns).get(&secret))
+                        .await?
+                        .is_none()
+                        .then(|| {
+                            (
+                                "KerberosKeytabPending",
+                                format!(
+                                    "waiting for krb5-operator to write Secret {secret} (KerberosPrincipal \
+                                     {secret}, realm {}); the hub starts once its key exists",
+                                    k.realm
+                                ),
+                                REQUEUE_PROGRESS,
+                            )
+                        })
+                }
+            },
+        };
+        if let Some((reason, message, after)) = blocked {
+            return kerberos_blocked(&ctx, &share, &names, existing_dep.as_ref(), conds, reason, message, after).await;
+        }
+        set_condition(&mut conds, condition("Kerberos", true, "KeytabReady", None, generation));
+    } else if share.status.as_ref().is_some_and(|st| st.kerberos.is_some()) {
+        // Kerberos was turned off: its principal goes (krb5-operator then
+        // deletes it from the KDC, unless Retain). Only on that change,
+        // not on every reconcile of every share.
+        delete_principal(&ctx, &share).await?;
     }
 
     // --- 4. Render -----------------------------------------------------
@@ -1453,6 +1498,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 stateid_tag: None,
                 conflict_with: None,
                 conditions: Some(conds),
+                kerberos: kerberos_status(&share, &ctx.defaults),
             },
         )
         .await?;
@@ -1565,6 +1611,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds.clone()),
+            kerberos: kerberos_status(&share, &ctx.defaults),
         },
     )
     .await?;
@@ -2638,6 +2685,7 @@ async fn park_as_cr_only(
             stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds),
+            kerberos: kerberos_status(share, &ctx.defaults),
         },
     )
     .await?;
@@ -2803,6 +2851,7 @@ async fn cleanup(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds),
+            kerberos: None,
         },
     )
     .await
@@ -3028,6 +3077,123 @@ async fn get_opt<T>(fut: impl std::future::Future<Output = kube::Result<T>>) -> 
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// `status.kerberos` for a share with `spec.security.kerberos`.
+fn kerberos_status(share: &FlintShare, d: &RenderDefaults) -> Option<KerberosStatus> {
+    let k = share.spec.kerberos()?;
+    Some(KerberosStatus {
+        server_name: kerberos::server_name(share, &d.cluster_domain),
+        principals: kerberos::principals(share, k, &d.cluster_domain),
+    })
+}
+
+/// The share's KerberosPrincipal, applied with the FlintShare as its
+/// owner: it outlives a hibernation (which deletes the Deployment) and
+/// goes with the share. Idempotent: an existing principal keeps its
+/// keys, so clients' tickets stay good across a hub restart.
+async fn ensure_principal(ctx: &Ctx, share: &FlintShare, k: &KerberosSpec) -> std::result::Result<(), String> {
+    let ns = share.namespace().unwrap_or_default();
+    let mut obj = kerberos::principal_object(share, k, &ctx.defaults.cluster_domain);
+    let owner = share.controller_owner_ref(&()).ok_or("FlintShare has no uid")?;
+    obj["metadata"]["ownerReferences"] = serde_json::to_value(vec![owner]).map_err(|e| e.to_string())?;
+    let name = kerberos::principal_name(share);
+    principals_api(ctx, &ns)
+        .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(&obj))
+        .await
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+                "KerberosPrincipal {ns}/{name}: {e} (is krb5-operator installed, and may this operator \
+                 manage kerberosprincipals.krb5.ddalton.dev?)"
+            )
+        })
+}
+
+/// Delete the share's KerberosPrincipal; absent is done.
+async fn delete_principal(ctx: &Ctx, share: &FlintShare) -> Result<()> {
+    let ns = share.namespace().unwrap_or_default();
+    match principals_api(ctx, &ns)
+        .delete(&kerberos::principal_name(share), &Default::default())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn principals_api(ctx: &Ctx, ns: &str) -> Api<kube::api::DynamicObject> {
+    use kube::api::{ApiResource, GroupVersionKind};
+    let gvk = GroupVersionKind::gvk("krb5.ddalton.dev", "v1alpha1", "KerberosPrincipal");
+    Api::namespaced_with(ctx.client.clone(), ns, &ApiResource::from_gvk(&gvk))
+}
+
+/// Whether a Deployment's hub already runs with a keytab.
+fn runs_kerberos(dep: &Deployment) -> bool {
+    dep.spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .is_some_and(|p| {
+            p.containers
+                .iter()
+                .any(|c| c.env.iter().flatten().any(|e| e.name == "KRB5_KTNAME"))
+        })
+}
+
+/// A share whose Kerberos cannot be served (yet): say why, and fail
+/// closed. A running hub that is NOT already a Kerberos hub is scaled to
+/// zero, so a share that asked for Kerberos is never left served as
+/// sec=sys; a Kerberos hub keeps running on the key it has.
+#[allow(clippy::too_many_arguments)]
+async fn kerberos_blocked(
+    ctx: &Ctx,
+    share: &FlintShare,
+    names: &render::Names,
+    existing_dep: Option<&Deployment>,
+    mut conds: Vec<ShareCondition>,
+    reason: &str,
+    message: String,
+    after: Duration,
+) -> Result<Action> {
+    let ns = share.namespace().unwrap_or_default();
+    let generation = share.metadata.generation;
+    warn!(share = %share.name_any(), reason, "{message}");
+    event(ctx, share, EventType::Warning, reason, &message).await;
+    if let Some(dep) = existing_dep.filter(|d| !runs_kerberos(d)) {
+        if dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1) > 0 {
+            Api::<Deployment>::namespaced(ctx.client.clone(), &ns)
+                .patch(
+                    &names.deployment,
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({"spec": {"replicas": 0}})),
+                )
+                .await?;
+            info!(share = %share.name_any(), "scaled a sec=sys hub to zero: the share asks for Kerberos");
+        }
+    }
+    set_condition(&mut conds, condition("Kerberos", false, reason, message.clone(), generation));
+    set_condition(&mut conds, condition("Ready", false, reason, message, generation));
+    let pending = reason == "KerberosKeytabPending";
+    write_status(
+        ctx,
+        share,
+        FlintShareStatus {
+            phase: Some(if pending { Phase::Pending } else { Phase::Failed }),
+            address: None,
+            api_endpoint: None,
+            hub_phase: None,
+            observed_generation: generation,
+            claim_name: Some(names.claim.clone()),
+            server_id: carry_server_id(share, None),
+            stateid_tag: None,
+            conflict_with: None,
+            conditions: Some(conds),
+            kerberos: kerberos_status(share, &ctx.defaults),
+        },
+    )
+    .await?;
+    Ok(Action::requeue(after))
 }
 
 async fn write_status(ctx: &Ctx, share: &FlintShare, status: FlintShareStatus) -> Result<()> {

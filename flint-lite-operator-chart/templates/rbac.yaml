@@ -105,6 +105,14 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
+  {{- if .Values.kerberos.enabled }}
+  # Kerberos shares (spec.security.kerberos): each share's server
+  # principal, from krb5-operator, owned by the share. The keytab Secret
+  # it writes is only read (above), to start the hub once it exists.
+  - apiGroups: ["krb5.ddalton.dev"]
+    resources: ["kerberosprincipals"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  {{- end }}
   # Events. BOTH api groups, and events.k8s.io is the one that matters:
   # kube-runtime's Recorder publishes events.k8s.io/v1 (its own docs say
   # so), so granting only the core group means EVERY event the operator

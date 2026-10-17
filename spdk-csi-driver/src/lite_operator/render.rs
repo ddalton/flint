@@ -96,6 +96,9 @@ pub struct RenderDefaults {
     /// The fleet's idle policy for shares with no `spec.idle`, applied
     /// only behind the proxy (`idle::effective`).
     pub idle: Option<crate::lite_operator::crd::IdleSpec>,
+    /// The cluster's DNS domain: a Kerberos share's server name is
+    /// `<service>.<namespace>.svc.<clusterDomain>` (`lite_operator::kerberos`).
+    pub cluster_domain: String,
 }
 
 impl Default for RenderDefaults {
@@ -121,6 +124,7 @@ impl Default for RenderDefaults {
             hub_memory_request: "100Mi".to_string(),
             nfs_proxy: false,
             idle: None,
+            cluster_domain: "cluster.local".to_string(),
         }
     }
 }
@@ -858,8 +862,10 @@ pub fn deployment(
     ];
     // Permission enforcement. Rendered only when ON, so the default
     // render is byte-identical to what it was and the parity fixture
-    // keeps its meaning. Mirrored in the chart.
-    if s.enforce_permissions() {
+    // keeps its meaning. Mirrored in the chart. A Kerberos share gets it
+    // with the rest of its security below.
+    let kerberos = s.kerberos().map(|k| crate::lite_operator::kerberos::security(share, k));
+    if s.enforce_permissions() && kerberos.is_none() {
         env.push(EnvVar {
             name: "FLINT_NFS_ENFORCE_PERMISSIONS".to_string(),
             value: Some("1".to_string()),
@@ -1041,6 +1047,18 @@ pub fn deployment(
             ..Default::default()
         }),
     };
+
+    // Kerberos (`spec.security.kerberos`): the keytab, `KRB5_KTNAME`,
+    // the floor, allowlist, idmap, SP4_MACH_CRED and the directory, as
+    // the RWX servers get them (`nfs_krb5::server_pod_parts`). The
+    // reconcile renders this only once the keytab Secret exists and the
+    // spec validated (`lite_operator::kerberos::validate`).
+    if let Some(sec) = &kerberos {
+        let (e, v, m) = crate::nfs_krb5::server_pod_parts(sec);
+        env.extend(e);
+        volumes.extend(v);
+        volume_mounts.extend(m);
+    }
 
     // Suspended keeps every object and the PVC — only the pod goes.
     // Waking is a replica count, not a restore.

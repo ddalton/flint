@@ -409,6 +409,15 @@ nfsProxy:
       enabled: false
       parentRef: {}          # {name: ..., namespace: ..., sectionName: ...}
 
+# Kerberos for shares (FlintShare spec.security.kerberos; docs/nfs-kerberos.md,
+# "flint lite"). Needs krb5-operator in the cluster. enabled grants the
+# operator kerberosprincipals.krb5.ddalton.dev; without it a Kerberos share
+# reports KerberosPrincipalFailed and runs no hub.
+kerberos:
+  enabled: false
+  # A share's principal is nfs/<share>.<namespace>.svc.<clusterDomain>.
+  clusterDomain: cluster.local
+
 rbac:
   # Create the ClusterRole/Binding. The operator needs cluster scope:
   # shares live in tenant namespaces and uniqueness spans all of them.
