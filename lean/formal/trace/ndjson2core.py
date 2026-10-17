@@ -63,7 +63,9 @@ THE MAPPING (one place):
   window_clear                     -> finish         Finish(w)
   (no event)                       -> a Collect that takes nothing (TraceNext)
   claim verdict=waiting, gc per path, queue, sweep of manifest generations,
-    release, handed_off, observed (folded into verify), ack, conf_touch
+    release, handed_off, observed (folded into verify), ack, conf_touch,
+    renew (a held lease renewed: the model's holder is unchanged; a renew
+    that FAILS logs `fence`, which is refused)
                                    -> (nothing)
 
 What the model does not have is refused, not skipped: a lost CAS (one
@@ -300,7 +302,7 @@ def convert(lines):
                     steps.append(({"ev": "sweep", "w": w, "h": by_key[k]}, i))
             elif e.get("removed", 0) > 0 and e.get("what") not in ("generations", "chunks"):
                 raise Unsupported(f"a sweep of {e.get('what')}")
-        elif ev in ("queue", "release", "handed_off", "ack", "conf_touch", "drill_hold"):
+        elif ev in ("queue", "release", "handed_off", "ack", "conf_touch", "drill_hold", "renew"):
             pass
         else:
             raise Unsupported(f"event {ev}")
