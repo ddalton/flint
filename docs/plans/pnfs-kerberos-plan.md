@@ -1,11 +1,10 @@
 # Kerberos for pNFS (MDS and data servers): the plan
 
-Status, 2026-10-16: Phases 1 to 4 and 5a are built and merged (PRs #22
-Phase 1, #25 Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4,
-#30 Phase 5a); each phase below says how the build differs from its
-sketch. Phase 5b (per-pod identities on the control path) is on branch
-`pnfs-krb5-phase5b`, not merged. Phase 3b (SP4_MACH_CRED on the DSes) is
-deferred. What is built is documented for users in
+Status, 2026-10-17: Phases 1 to 5 are built (PRs #22 Phase 1, #25
+Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4, #30 Phase 5a,
+then Phase 5b, per-pod identities on the control path); each phase below
+says how the build differs from its sketch. Phase 3b (SP4_MACH_CRED on
+the DSes) is deferred. What is built is documented for users in
 [nfs-kerberos.md, "pNFS"](../nfs-kerberos.md#pnfs). The plan assumed the
 RWX Kerberos work was merged (PRs #15 per-volume keys, #18 required
 SP4_MACH_CRED, #19 LDAP identities). Line numbers are `origin/main` at
