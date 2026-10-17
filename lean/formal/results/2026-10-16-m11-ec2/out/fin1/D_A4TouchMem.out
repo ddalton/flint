@@ -1,0 +1,367 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 20:54:06 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 859 864 --cleanfp --method smt --stretch 12 --threads 1 -k LeanP1ProofM14
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:863:10:863:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:863:13:863:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:862:88:862:90
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:862:91:862:100
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:4
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:863:10:863:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:863:13:863:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:862:88:862:90
+@!!status:being proved
+@!!prover:smt
+@!!meth:time-limit: 3600
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       NEW CONSTANT s,
+       NEW CONSTANT p \in {p \in Paths :
+                             /\ (w[s].local)[p] # (w[s].baseline)[p]
+                                /\ Content((w[s].local)[p]) # Content(doc[p])
+                                /\ ~RescopeLeftover(s, p)},
+       (w[s].local)[p] # Nil ,
+       TRUE 
+PROVE  (w[s].local)[p] # Nil
+       => (\A k \in Paths : Content(doc[k]) # Content((w[s].local)[p]))
+
+@!!END
+
+Terminated
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:862:88:862:90
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 3600; time-used: 1537.5 (43%)
+@!!reason:false
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       NEW CONSTANT s,
+       NEW CONSTANT p \in {p \in Paths :
+                             /\ (w[s].local)[p] # (w[s].baseline)[p]
+                                /\ Content((w[s].local)[p]) # Content(doc[p])
+                                /\ ~RescopeLeftover(s, p)},
+       (w[s].local)[p] # Nil ,
+       TRUE 
+PROVE  (w[s].local)[p] # Nil
+       => (\A k \in Paths : Content(doc[k]) # Content((w[s].local)[p]))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:862:91:862:100
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM14.tlaps/LeanP1ProofM14.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM14.tlaps/fingerprints" *)
+File "./LeanP1ProofM14.tla", line 862, characters 88-89:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  TouchDirty(s) ==
+                    {p \in Paths :
+                       /\ (w[s].local)[p] # (w[s].baseline)[p]
+                          /\ Content((w[s].local)[p]) # Content(doc[p])
+                          /\ ~RescopeLeftover(s, p)},
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  NEW CONSTANT s,
+                  NEW CONSTANT p \in 
+                  TouchDirty(s),
+                  (w[s].local)[p] # Nil ,
+                  SMTT(300) 
+           PROVE  (w[s].local)[p] # Nil
+                  => (\A k \in Paths :
+                         Content(doc[k]) # Content((w[s].local)[p]))
+File "./LeanP1ProofM14.tla", line 1, character 1 to line 1885, character 78:
+[ERROR]: 1/4 obligations failed.
+There were backend errors processing module `"LeanP1ProofM14"`.
+WALL 1607.93 s rc 0

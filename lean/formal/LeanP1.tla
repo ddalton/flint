@@ -902,9 +902,16 @@ RPullSync(s) ==
 \* A narrow's leftover: in the rescope's "mid" stage, a dropped path whose
 \* uncite already ran and whose tree file the second half will unlink (its
 \* `unlink`, RescopeSecond; the code's replay of the intent, `checkout.rs`).
+\* After a restart mid-narrow (the stage back at "saved", `sKeep` gone) the
+\* same file: uncited, its held entry recorded (the intent's `held`,
+\* persisted before the uncite, `state.rs:80-108`); the barrier's replay
+\* unlinks it before its scan (`barrier.rs:648`, `checkout.rs:1154-1166`).
+\* (FINDINGS Table 3, 2026-10-16, the restart row.)
 RescopeLeftover(s, p) ==
-  /\ w[s].sStage = "mid" /\ RescopeUnciteFirst
-  /\ p \in w[s].sDrop \ w[s].sKeep /\ w[s].local[p] # Nil
+  /\ RescopeUnciteFirst
+  /\ p \in w[s].sDrop /\ w[s].local[p] # Nil
+  /\ \/ w[s].sStage = "mid" /\ p \notin w[s].sKeep
+     \/ w[s].sStage = "saved" /\ w[s].baseline[p] = Nil /\ w[s].sHeld[p] # Nil
   /\ \/ ~UnlinkChecksBytes
      \/ w[s].sHeld[p] # Nil /\ Content(w[s].local[p]) = Content(w[s].sHeld[p])
 Touch(s) ==
@@ -925,7 +932,14 @@ Touch(s) ==
          \* unlinked by the rescope's second half or by the barrier's replay
          \* of the intent before its scan (`barrier.rs` step 0); the code
          \* never declares it.  A path the agent rewrote there is declared.
+         \* A file whose bytes the document holds at ANY path is published
+         \* too (FINDINGS Table 3, 2026-10-16, the rename row): an install
+         \* published it, the UI renamed it away, and the agent restarted
+         \* before step 7; the rename is the peer's, as a delete would be.
+         \* (Bytes are per write: only a rename or a copy of this write's
+         \* handle holds them.)
          dirty == {p \in Paths : /\ W.local[p] # W.baseline[p] /\ Content(W.local[p]) # Content(doc[p])
+                                 /\ W.local[p] # Nil => \A q \in Paths : Content(doc[q]) # Content(W.local[p])
                                  /\ ~RescopeLeftover(s, p)}
      IN w' = [w EXCEPT ![s].nt = n,
                        ![s].pend = [id |-> IF fresh THEN n ELSE W.pend.id, fold |-> n, nonces |-> kept],

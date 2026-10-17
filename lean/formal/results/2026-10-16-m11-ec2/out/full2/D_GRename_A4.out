@@ -1,0 +1,212 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 21:53:38 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 1761 1772 --cleanfp --method smt --stretch 24 --threads 1 -k LeanP1ProofM14
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:1771:10:1771:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:1771:13:1771:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:1771:19:1771:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:1771:25:1771:31
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:1764:40:1764:42
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:1765:21:1765:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:1765:24:1765:36
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:1767:3:1767:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:1767:6:1767:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:1770:3:1770:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:1770:6:1770:10
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:1770:12:1770:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:12
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:1771:10:1771:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:1771:13:1771:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:1771:19:1771:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:1771:25:1771:31
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:1764:40:1764:42
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:1765:21:1765:23
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:1765:24:1765:36
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:1767:3:1767:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:1767:6:1767:11
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:1770:3:1770:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:1770:6:1770:10
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:1770:12:1770:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM14.tlaps/LeanP1ProofM14.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM14.tlaps/fingerprints" *)
+File "./LeanP1ProofM14.tla", line 1, character 1 to line 1885, character 78:
+[INFO]: All 12 obligations proved.
+WALL 129.33 s rc 0

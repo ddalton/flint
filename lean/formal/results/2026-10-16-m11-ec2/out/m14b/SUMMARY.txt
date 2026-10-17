@@ -1,0 +1,20 @@
+A4BrrB: 1 proved 0 failed / 1 WALL 35.58 s rc 0 0 err
+A4CM: 5 proved 0 failed / 14 WALL 69.99 s rc 0 0 err
+A4DclPG: 6 proved 0 failed / 12 WALL 60.39 s rc 0 0 err
+A4Keep: 9 proved 0 failed / 29 WALL 95.07 s rc 0 0 err
+A4One: 82 proved 3 failed / 267 WALL 756.74 s rc 0 0 err
+A4OneEq: 3 proved 0 failed / 7 WALL 47.47 s rc 0 0 err
+A4PrivDirt: 8 proved 0 failed / 20 WALL 79.59 s rc 0 0 err
+A4PrivSame: 6 proved 0 failed / 15 WALL 65.72 s rc 0 0 err
+A4ShrD: 4 proved 0 failed / 7 WALL 49.52 s rc 0 0 err
+A4TreeD: 4 proved 0 failed / 7 WALL 47.47 s rc 0 0 err
+A4Ty: 4 proved 0 failed / 8 WALL 51.78 s rc 0 0 err
+A4UplU: 4 proved 0 failed / 7 WALL 48.31 s rc 0 0 err
+Claim_A4: 10 proved 0 failed / 20 WALL 232.97 s rc 0 0 err
+Collect_A4: 11 proved 0 failed / 29 WALL 235.78 s rc 0 0 err
+HonorReader_A4: 10 proved 0 failed / 20 WALL 263.22 s rc 0 0 err
+Honor_A4: 10 proved 0 failed / 20 WALL 265.60 s rc 0 0 err
+RPullRead_A4: 10 proved 0 failed / 20 WALL 234.31 s rc 0 0 err
+Skip_A4: 10 proved 0 failed / 20 WALL 272.25 s rc 0 0 err
+Verify_A4: 10 proved 0 failed / 20 WALL 228.84 s rc 0 0 err
+DONE 19:54:51Z

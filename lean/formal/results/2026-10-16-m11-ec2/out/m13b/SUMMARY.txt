@@ -1,0 +1,12 @@
+T1: 18 proved 1 failed / 46 WALL 261.89 s rc 0 0 err
+T10: 85 proved 0 failed / 253 WALL 765.47 s rc 0 0 err
+T11: 97 proved 1 failed / 324 WALL 1011.33 s rc 0 0 err
+T2: 20 proved 0 failed / 50 WALL 235.84 s rc 0 0 err
+T3: 8 proved 0 failed / 20 WALL 173.27 s rc 0 0 err
+T4: 9 proved 0 failed / 22 WALL 200.96 s rc 0 0 err
+T5: 12 proved 0 failed / 28 WALL 314.99 s rc 0 0 err
+T6: 12 proved 0 failed / 28 WALL 300.66 s rc 0 0 err
+T7: 19 proved 0 failed / 48 WALL 358.95 s rc 0 0 err
+T8: 44 proved 0 failed / 117 WALL 614.46 s rc 0 0 err
+T9: 49 proved 0 failed / 119 WALL 545.30 s rc 0 0 err
+DONE 19:37:18Z

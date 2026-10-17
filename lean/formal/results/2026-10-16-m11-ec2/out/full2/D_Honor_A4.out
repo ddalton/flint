@@ -1,0 +1,378 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 21:53:37 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 431 450 --cleanfp --method smt --stretch 24 --threads 1 -k LeanP1ProofM14
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:449:10:449:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:449:13:449:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:449:19:449:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:449:25:449:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:449:31:449:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:449:37:449:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:449:43:449:47
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:449:49:449:55
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:434:40:434:42
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:435:74:435:76
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:438:3:438:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:440:3:440:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:443:3:443:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:444:31:444:33
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:444:34:444:38
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:445:30:445:32
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:445:33:445:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:445:39:445:43
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:446:30:446:32
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:447:67:447:69
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:448:30:448:32
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:448:33:448:38
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:22
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:449:10:449:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:449:13:449:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:449:19:449:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:449:25:449:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:449:31:449:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:449:37:449:41
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:449:43:449:47
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:449:49:449:55
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:434:40:434:42
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:435:74:435:76
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:438:3:438:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:440:3:440:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:443:3:443:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:444:31:444:33
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:444:34:444:38
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:445:30:445:32
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:445:33:445:37
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:445:39:445:43
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:446:30:446:32
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:447:67:447:69
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:448:30:448:32
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:448:33:448:38
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM14.tlaps/LeanP1ProofM14.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM14.tlaps/fingerprints" *)
+File "./LeanP1ProofM14.tla", line 1, character 1 to line 1885, character 78:
+[INFO]: All 22 obligations proved.
+WALL 403.80 s rc 0

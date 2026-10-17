@@ -1,0 +1,14 @@
+dbfeb6820e4a04ce919d7441c527cd6f  LeanP1.tla
+tla-mc: building a checker for LeanP1 (cache: /work/cache-g2AckRenameRestart)
+tla-mc: built in 51.3s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 40 workers, generated engine; loaded in 0.006s
+progress: depth 13, 27507536 generated, 11114806 distinct (0 fingerprint spills), 6591716 on queue (0 on disk), 17.8s
+progress: depth 14, 64921743 generated, 25522126 distinct (0 fingerprint spills), 14407320 on queue (0 on disk), 46.3s
+progress: depth 15, 143523145 generated, 55122721 distinct (0 fingerprint spills), 29600595 on queue (8093011 on disk), 334.6s
+progress: depth 16, 298761844 generated, 112366549 distinct (0 fingerprint spills), 57243828 on queue (35813556 on disk), 938.6s
+progress: depth 17, 587616800 generated, 216970227 distinct (0 fingerprint spills), 104603678 on queue (83274270 on disk), 2467.0s
+
+real	46m0.467s
+user	284m43.980s
+sys	2m59.354s
+rc=124 20:04:19Z

@@ -1,0 +1,32 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 21:53:37 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 328 333 --cleanfp --method smt --stretch 24 --threads 1 -k LeanP1ProofM14
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:331:1:331:3
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:1
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:331:1:331:3
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 120; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM14.tlaps/LeanP1ProofM14.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM14.tlaps/fingerprints" *)
+File "./LeanP1ProofM14.tla", line 1, character 1 to line 1885, character 78:
+[INFO]: All 1 obligation proved.
+WALL 91.01 s rc 0

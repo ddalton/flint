@@ -1,0 +1,5 @@
+dbfeb6820e4a04ce919d7441c527cd6f  LeanP1.tla
+tla-mc: building a checker for LeanP1 (cache: /work/cache-gAckRescopeRestart)
+tla-mc: built in 75.8s
+tla-mc: LeanP1 (31 variables, 0 symmetry permutations), 24 workers, generated engine; loaded in 0.010s
+progress: depth 12, 11958711 generated, 4725098 distinct (0 fingerprint spills), 2696442 on queue (0 on disk), 16.7s

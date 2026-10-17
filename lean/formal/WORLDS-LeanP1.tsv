@@ -81,6 +81,10 @@ LeanP1AckRename	HOLDS	LeanP1.tla
 LeanP1CarrierCitesAny	AK1	LeanP1.tla	CarrierCitesAny
 LeanP1AckRescopeRename	HOLDS	LeanP1.tla	
 LeanP1TouchDeclaresLeftover	AK1	LeanP1.tla	TouchDeclaresLeftover
+LeanP1AckRescopeRestart	HOLDS	LeanP1.tla	
+LeanP1TouchDeclaresRestartLeftover	AK1	LeanP1.tla	TouchDeclaresRestartLeftover
+LeanP1AckRenameRestart	HOLDS	LeanP1.tla	
+LeanP1TouchDeclaresRenamed	AK1	LeanP1.tla	TouchDeclaresRenamed
 LeanP1RequestAfterCarry	AK1	LeanP1.tla	RequestAfterCarry
 LeanP1FoldClobbers	AK3	LeanP1.tla	FoldClobbers
 LeanP1StampIndependent	AK4	LeanP1.tla	StampIndependent

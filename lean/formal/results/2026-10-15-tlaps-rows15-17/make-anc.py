@@ -593,8 +593,10 @@ rep_span("(* The boundary verbs' answer (row 15; `sentinel.rs`).", '(* The retir
     '\n'
     "\\* A narrow's leftover (LeanP1.tla, verbatim; FINDINGS Table 3, 2026-10-16).\n"
     'RescopeLeftover(s, p) ==\n'
-    '  /\\ w[s].sStage = "mid" /\\ RescopeUnciteFirst\n'
-    '  /\\ p \\in w[s].sDrop \\ w[s].sKeep /\\ w[s].local[p] # Nil\n'
+    '  /\\ RescopeUnciteFirst\n'
+    '  /\\ p \\in w[s].sDrop /\\ w[s].local[p] # Nil\n'
+    '  /\\ \\/ w[s].sStage = "mid" /\\ p \\notin w[s].sKeep\n'
+    '     \\/ w[s].sStage = "saved" /\\ w[s].baseline[p] = Nil /\\ w[s].sHeld[p] # Nil\n'
     '  /\\ \\/ ~UnlinkChecksBytes\n'
     '     \\/ w[s].sHeld[p] # Nil /\\ Content(w[s].local[p]) = Content(w[s].sHeld[p])\n'
     "\\* A request's parts (LeanP1.tla: `Touch`'s LET).\n"
@@ -603,7 +605,8 @@ rep_span("(* The boundary verbs' answer (row 15; `sentinel.rs`).", '(* The retir
     'TouchNs(s) == (IF TouchFresh(s) THEN {} ELSE w[s].pend.nonces) \\cup {TouchN(s)}\n'
     'TouchKept(s) == IF Cardinality(TouchNs(s)) > MaxNonces THEN TouchNs(s) \\ {Oldest(TouchNs(s))} ELSE TouchNs(s)\n'
     'TouchDirty(s) == {p \\in Paths : /\\ w[s].local[p] # w[s].baseline[p] /\\ Content(w[s].local[p]) # Content(doc[p])\n'
-    '                                 /\\ ~RescopeLeftover(s, p)}\n'
+    '                                /\\ w[s].local[p] # Nil => \\A q \\in Paths : Content(doc[q]) # Content(w[s].local[p])\n'
+    '                                /\\ ~RescopeLeftover(s, p)}\n'
     + rec('TouchW', 's', {
         'nt': 'TouchN(s)',
         'pend': '[id |-> IF TouchFresh(s) THEN TouchN(s) ELSE w[s].pend.id, fold |-> TouchN(s), nonces |-> TouchKept(s)]',

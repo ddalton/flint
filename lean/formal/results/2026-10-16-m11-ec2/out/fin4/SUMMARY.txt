@@ -1,0 +1,7 @@
+A12: 92 proved 0 failed / 284 WALL 1169.14 s rc 0 0 err
+A17: 78 proved 0 failed / 428 WALL 1176.62 s rc 0 0 err
+A5: 63 proved 0 failed / 156 WALL 1186.07 s rc 0 0 err
+A9: 57 proved 0 failed / 146 WALL 1177.63 s rc 0 0 err
+D_A4TouchMem: 1 proved 0 failed / 4 WALL 1168.92 s rc 0 0 err
+D_Touch_A4: 45 proved 0 failed / 145 WALL 1169.04 s rc 0 0 err
+DONE 21:42:46Z

@@ -1,10 +1,15 @@
 # Kerberos for pNFS (MDS and data servers): the plan
 
-Status: plan, 2026-10-16. Nothing here is built. The gaps it closes are in
-[nfs-kerberos.md, "pNFS"](../nfs-kerberos.md#pnfs). It assumes the RWX
-Kerberos work is merged (PRs #15 per-volume keys, #18 required
+Status, 2026-10-16: Phases 1 to 4 and 5a are built and merged (PRs #22
+Phase 1, #25 Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4,
+#30 Phase 5a); each phase below says how the build differs from its
+sketch. Phase 5b (per-pod identities on the control path) is on branch
+`pnfs-krb5-phase5b`, not merged. Phase 3b (SP4_MACH_CRED on the DSes) is
+deferred. What is built is documented for users in
+[nfs-kerberos.md, "pNFS"](../nfs-kerberos.md#pnfs). The plan assumed the
+RWX Kerberos work was merged (PRs #15 per-volume keys, #18 required
 SP4_MACH_CRED, #19 LDAP identities). Line numbers are `origin/main` at
-`1b581372`.
+`1b581372`, when the plan was written.
 
 ## Ground rules
 
@@ -91,6 +96,12 @@ is not instant; Phase 5 must not rely on it. The tonic/rustls half of E5
 is a compile spike, left to Phase 5.
 
 ## Phase 1: the MDS gets Kerberos
+
+**Built** (2026-10-16, PR #22), with layouts option B: the MDS answers
+LAYOUTUNAVAIL to GSS sessions until the DSes do Kerberos (Phase 3, which
+hands them layouts again behind `FLINT_PNFS_LAYOUTS_FOR_GSS`). The kind
+suite `PNFS=1 KRB5=1` (`tests-pnfs-krb5/`) and the VM run
+(`tests/krb5/results/pnfs-phase1-2026-10-16/`) are its evidence.
 
 Gives the floor, allowlist, idmap, enforced permissions, root squash and
 SP4_MACH_CRED for pNFS metadata. Data goes through the MDS until Phase 3
@@ -330,10 +341,25 @@ differentials that guard AUTH_SYS.
    regression; DS I/O uses the mount's flavor, else downgrades to AUTH_SYS.
 2. ~~DS principal naming (E2)~~ — settled: reverse lookup of the IP.
 3. ~~Fallback when DS GSS fails (E1)~~ — settled: downgrade to AUTH_SYS,
-   not the MDS. Still open: what the client does when the DS REFUSES
-   AUTH_SYS (rerun E1 in Phase 3).
-4. SP4_NONE accepted from a DS after asking SP4_MACH_CRED (E2).
-5. Kernel recovery from a refused DS filehandle (E4).
-6. ~~TokenReview `pod-name` extra~~ — settled (E5); tonic + rustls still a spike.
-7. Whether the MDS honours `FLINT_NFS_ENFORCE_PERMISSIONS` and root squash
-   through the shared ioops (grep + unit test in Phase 1).
+   not the MDS, when the DS accepts AUTH_SYS. ~~When the DS REFUSES
+   AUTH_SYS~~ — settled in Phase 3 (VM arm G,
+   `tests/krb5/results/pnfs-phase3-2026-10-16/`): the client tries AUTH_SYS
+   at the DS, is refused, and falls back to the MDS; a DS without a floor
+   takes the downgrade (arm H), which is why the MDS withholds GSS layouts
+   while any DS lacks its keytab or floor (#27).
+4. SP4_NONE accepted from a DS after asking SP4_MACH_CRED (E2) — the DS
+   answers SP4_NONE today; binding DS sessions to the machine is Phase 3b,
+   deferred.
+5. ~~Kernel recovery from a refused DS filehandle (E4)~~ — settled (#28,
+   `tests/krb5/results/pnfs-e4-2026-10-16/`): BADHANDLE, STALE, ACCESS and
+   FHEXPIRED make the client LAYOUTGET again, then fall back to the MDS;
+   PERM and IO go straight to the MDS; none livelocks. Phase 4 answers
+   BADHANDLE.
+6. ~~TokenReview `pod-name` extra~~ — settled (E5). ~~tonic + rustls~~ —
+   settled by Phase 5a (`serve_with_incoming` over tokio-rustls 0.26).
+7. ~~Whether the MDS honours `FLINT_NFS_ENFORCE_PERMISSIONS` and root
+   squash~~ — settled by the code: the MDS serves through
+   `nfs::server_v4::serve_tcp` (`pnfs/mds/server.rs`), so root squash
+   (`server_v4.rs` `handle_compound`) and the permission checks in the
+   shared fileops/ioops apply to it as to the RWX servers; the chart gives
+   it the same env (`nfs-kerberos.md`, "MDS pods").

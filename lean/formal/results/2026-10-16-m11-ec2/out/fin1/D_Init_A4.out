@@ -1,0 +1,840 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 20:54:06 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 1795 1807 --cleanfp --method smt --stretch 12 --threads 1 -k LeanP1ProofM14
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:1806:10:1806:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:1806:13:1806:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:1806:19:1806:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:1806:25:1806:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:1806:31:1806:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:1796:39:1796:46
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:1797:44:1797:46
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:1799:3:1799:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:1799:6:1799:10
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:1800:65:1800:67
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:1800:68:1800:72
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:1801:36:1801:38
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:1802:18:1802:20
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:1802:21:1802:25
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:1803:12:1803:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:1803:15:1803:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:1804:12:1804:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:1804:15:1804:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:1805:12:1805:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:1805:15:1805:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:20
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:1806:10:1806:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:1806:13:1806:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:1806:19:1806:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:1806:25:1806:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:1806:31:1806:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:1796:39:1796:46
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:1797:44:1797:46
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:1799:3:1799:5
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 60.0 (100%)
+@!!reason:internal timeout
+@!!already:false
+@!!obl:
+\* internal timeout while processing obligation
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       WriterInit ==
+         [st |-> "off", pc |-> "idle", local |-> [p \in Paths |-> Nil],
+          baseline |-> [p \in Paths |-> Nil], integrated |-> {},
+          uploads |-> {}, deletes |-> {}, snap |-> [p \in Paths |-> Nil],
+          upDone |-> {}, gone |-> {}, verified |-> FALSE,
+          inst |-> [p \in Paths |-> Nil], retire |-> {}, collected |-> FALSE,
+          adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {},
+          scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {},
+          sKeep |-> {}, sHeld |-> [p \in Paths |-> Nil], unlinked |-> {},
+          memo |-> 0, rnow |-> 0, nt |-> 0, pend |-> NoPend, ack |-> NoAck,
+          car |-> NoCar, cId |-> 0, cFold |-> 0, clk |-> "none", iseq |-> 0,
+          instd |-> FALSE,
+          bound |-> [id |-> 0, fold |-> 0, doc |-> [p \in Paths |-> Nil],
+                     seq |-> 0, wd |-> {}, inst |-> FALSE, clk |-> "none"],
+          cN |-> {}, aN |-> {}, capped |-> {}, dset |-> {},
+          decl |-> [p \in Paths |-> Nil], dMint |-> [p \in Paths |-> 0],
+          moved |-> {}, stamps |-> {}, lost |-> {}, deposed |-> FALSE,
+          nd |-> 0],
+       ShippedShape == Shipped,
+       FreePaths == Free \subseteq Paths,
+       MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+       ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+       ReadersWriters == Readers \subseteq Writers,
+       NilHandle == Nil \notin Handles,
+       NoneWriter == "none" \notin Writers,
+       MaxCopiesNat == MaxCopies \in Nat,
+       PathsFinite == IsFiniteSet(Paths),
+       TouchNat ==
+         MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+         /\ MaxDeposals \in Nat,
+       Init ,
+       <1>0 
+PROVE  \A u \in Writers, q \in Paths :
+          (w[u].decl)[q] = Nil /\ (w[u].local)[q] = Nil
+          /\ (w[u].baseline)[q] = Nil
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:1799:6:1799:10
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:1800:65:1800:67
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 60.0 (100%)
+@!!reason:internal timeout
+@!!already:false
+@!!obl:
+\* internal timeout while processing obligation
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       WriterInit ==
+         [st |-> "off", pc |-> "idle", local |-> [p \in Paths |-> Nil],
+          baseline |-> [p \in Paths |-> Nil], integrated |-> {},
+          uploads |-> {}, deletes |-> {}, snap |-> [p \in Paths |-> Nil],
+          upDone |-> {}, gone |-> {}, verified |-> FALSE,
+          inst |-> [p \in Paths |-> Nil], retire |-> {}, collected |-> FALSE,
+          adv |-> FALSE, synced |-> 0, derived |-> 0, skipped |-> {},
+          scope |-> {}, sStage |-> "none", sTgt |-> {}, sDrop |-> {},
+          sKeep |-> {}, sHeld |-> [p \in Paths |-> Nil], unlinked |-> {},
+          memo |-> 0, rnow |-> 0, nt |-> 0, pend |-> NoPend, ack |-> NoAck,
+          car |-> NoCar, cId |-> 0, cFold |-> 0, clk |-> "none", iseq |-> 0,
+          instd |-> FALSE,
+          bound |-> [id |-> 0, fold |-> 0, doc |-> [p \in Paths |-> Nil],
+                     seq |-> 0, wd |-> {}, inst |-> FALSE, clk |-> "none"],
+          cN |-> {}, aN |-> {}, capped |-> {}, dset |-> {},
+          decl |-> [p \in Paths |-> Nil], dMint |-> [p \in Paths |-> 0],
+          moved |-> {}, stamps |-> {}, lost |-> {}, deposed |-> FALSE,
+          nd |-> 0],
+       ShippedShape == Shipped,
+       FreePaths == Free \subseteq Paths,
+       MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+       ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+       ReadersWriters == Readers \subseteq Writers,
+       NilHandle == Nil \notin Handles,
+       NoneWriter == "none" \notin Writers,
+       MaxCopiesNat == MaxCopies \in Nat,
+       PathsFinite == IsFiniteSet(Paths),
+       TouchNat ==
+         MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+         /\ MaxDeposals \in Nat,
+       Init ,
+       <1>0 
+PROVE  \A u \in Writers : w[u].uploads = {} /\ w[u].deletes = {}
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:1800:68:1800:72
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:1801:36:1801:38
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:1802:18:1802:20
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:1802:21:1802:25
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:1803:12:1803:14
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:1803:15:1803:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:1804:12:1804:14
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:1804:15:1804:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:1805:12:1805:14
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:1805:15:1805:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM14.tlaps/LeanP1ProofM14.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM14.tlaps/fingerprints" *)
+File "./LeanP1ProofM14.tla", line 1800, characters 65-66:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  WriterInit ==
+                    [st |-> "off", pc |-> "idle",
+                     local |-> [p \in Paths |-> Nil],
+                     baseline |-> [p \in Paths |-> Nil], 
+                     integrated |-> {}, 
+                     uploads |-> {}, 
+                     deletes |-> {}, 
+                     snap |-> [p \in Paths |-> Nil], 
+                     upDone |-> {}, 
+                     gone |-> {}, verified |-> FALSE,
+                     inst |-> [p \in Paths |-> Nil], 
+                     retire |-> {}, 
+                     collected |-> FALSE, 
+                     adv |-> FALSE, 
+                     synced |-> 0, derived |-> 0, 
+                     skipped |-> {}, 
+                     scope |-> {}, sStage |-> "none", 
+                     sTgt |-> {}, sDrop |-> {}, 
+                     sKeep |-> {}, sHeld |-> [p \in Paths |-> Nil],
+                     unlinked |-> {}, 
+                     memo |-> 0, rnow |-> 0, 
+                     nt |-> 0, pend |-> NoPend, 
+                     ack |-> NoAck, 
+                     car |-> NoCar, 
+                     cId |-> 0, cFold |-> 0, 
+                     clk |-> "none", 
+                     iseq |-> 0, instd |-> FALSE,
+                     bound |-> [id |-> 0, 
+                                fold |-> 0, 
+                                doc |-> [p \in Paths |-> Nil], 
+                                seq |-> 0, 
+                                wd |-> {}, 
+                                inst |-> FALSE, 
+                                clk |-> "none"],
+                     cN |-> {}, aN |-> {}, 
+                     capped |-> {}, 
+                     dset |-> {}, decl |-> [p \in Paths |-> Nil],
+                     dMint |-> [p \in Paths |-> 0], 
+                     moved |-> {}, stamps |-> {}, 
+                     lost |-> {}, deposed |-> FALSE, 
+                     nd |-> 0],
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  Init ,
+                  <1>0 
+           PROVE  \A u \in Writers : w[u].uploads = {} /\ w[u].deletes = {}
+File "./LeanP1ProofM14.tla", line 1799, characters 3-4:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  WriterInit ==
+                    [st |-> "off", pc |-> "idle",
+                     local |-> [p \in Paths |-> Nil],
+                     baseline |-> [p \in Paths |-> Nil], 
+                     integrated |-> {}, 
+                     uploads |-> {}, 
+                     deletes |-> {}, 
+                     snap |-> [p \in Paths |-> Nil], 
+                     upDone |-> {}, 
+                     gone |-> {}, verified |-> FALSE,
+                     inst |-> [p \in Paths |-> Nil], 
+                     retire |-> {}, 
+                     collected |-> FALSE, 
+                     adv |-> FALSE, 
+                     synced |-> 0, derived |-> 0, 
+                     skipped |-> {}, 
+                     scope |-> {}, sStage |-> "none", 
+                     sTgt |-> {}, sDrop |-> {}, 
+                     sKeep |-> {}, sHeld |-> [p \in Paths |-> Nil],
+                     unlinked |-> {}, 
+                     memo |-> 0, rnow |-> 0, 
+                     nt |-> 0, pend |-> NoPend, 
+                     ack |-> NoAck, 
+                     car |-> NoCar, 
+                     cId |-> 0, cFold |-> 0, 
+                     clk |-> "none", 
+                     iseq |-> 0, instd |-> FALSE,
+                     bound |-> [id |-> 0, 
+                                fold |-> 0, 
+                                doc |-> [p \in Paths |-> Nil], 
+                                seq |-> 0, 
+                                wd |-> {}, 
+                                inst |-> FALSE, 
+                                clk |-> "none"],
+                     cN |-> {}, aN |-> {}, 
+                     capped |-> {}, 
+                     dset |-> {}, decl |-> [p \in Paths |-> Nil],
+                     dMint |-> [p \in Paths |-> 0], 
+                     moved |-> {}, stamps |-> {}, 
+                     lost |-> {}, deposed |-> FALSE, 
+                     nd |-> 0],
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  Init ,
+                  <1>0 
+           PROVE  \A u \in Writers, q \in Paths :
+                     (w[u].decl)[q] = Nil /\ (w[u].local)[q] = Nil
+                     /\ (w[u].baseline)[q] = Nil
+File "./LeanP1ProofM14.tla", line 1, character 1 to line 1885, character 78:
+[ERROR]: 2/20 obligations failed.
+There were backend errors processing module `"LeanP1ProofM14"`.
+WALL 281.49 s rc 0

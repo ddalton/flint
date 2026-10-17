@@ -1,0 +1,1050 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 20:54:06 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 569 595 --cleanfp --method smt --stretch 12 --threads 1 -k LeanP1ProofM14
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:594:10:594:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:594:13:594:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:594:19:594:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:594:25:594:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:594:31:594:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:594:37:594:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:594:43:594:47
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:594:49:594:55
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:572:14:572:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:573:42:573:44
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:574:74:574:76
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:585:12:585:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:585:15:585:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:585:21:585:25
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:576:80:576:82
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:576:83:576:87
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:576:89:576:101
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:579:82:579:84
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:581:5:581:7
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:583:5:583:7
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:584:50:584:52
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:584:53:584:57
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:584:59:584:63
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:584:65:584:69
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:25
+@!!loc:584:71:584:75
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:26
+@!!loc:587:3:587:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:27
+@!!loc:590:3:590:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:28
+@!!loc:591:32:591:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:29
+@!!loc:591:35:591:39
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:30
+@!!loc:591:41:591:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:31
+@!!loc:592:32:592:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:32
+@!!loc:593:32:593:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:32
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:594:10:594:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:594:13:594:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:594:19:594:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:594:25:594:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:594:31:594:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:594:37:594:41
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:594:43:594:47
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:594:49:594:55
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:572:14:572:16
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:573:42:573:44
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:574:74:574:76
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:585:12:585:14
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:585:15:585:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:585:21:585:25
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:576:80:576:82
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 60.0 (100%)
+@!!reason:internal timeout
+@!!already:false
+@!!obl:
+\* internal timeout while processing obligation
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       TypeOK ==
+         /\ live \subseteq Handles /\ minted \subseteq Handles
+            /\ live \subseteq minted
+         /\ doc \in [Paths -> Opt(Handles)]
+         /\ seq \in Nat
+         /\ tomb \in [Paths -> Opt(Handles)]
+         /\ base \in [Handles -> Opt(Handles)]
+         /\ acked \subseteq Paths \X Handles
+         /\ conflicts \subseteq Paths \X Opt(Handles)
+         /\ holder \in Writers \cup {"none"}
+         /\ nextGen \in Nat /\ ui \in Nat /\ reqs \in Nat /\ barriers \in Nat
+         /\ w \in [Writers -> Writer]
+         /\ took \in [Writers -> [Paths -> SUBSET Gens]]
+         /\ gw \in [Paths -> Opt(Handles)]
+         /\ mv \in Opt(Paths \X Handles)
+         /\ udel \subseteq Paths \X Handles
+         /\ restarts \in Nat /\ syncs \in Nat /\ regressed \in BOOLEAN
+            /\ rescopes \in Nat /\ fails \in Nat
+         /\ retiring \subseteq Handles /\ aged \subseteq Handles
+            /\ ages \in Nat
+         /\ rdoc \in [Paths -> Opt(Handles)] /\ rlag \in BOOLEAN
+         /\ anc \in [Handles -> SUBSET Handles],
+       ShippedShape == Shipped,
+       FreePaths == Free \subseteq Paths,
+       MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+       ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+       ReadersWriters == Readers \subseteq Writers,
+       NilHandle == Nil \notin Handles,
+       NoneWriter == "none" \notin Writers,
+       MaxCopiesNat == MaxCopies \in Nat,
+       PathsFinite == IsFiniteSet(Paths),
+       TouchNat ==
+         MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+         /\ MaxDeposals \in Nat,
+       A4Hyp ,
+       NEW CONSTANT s \in Writers,
+       Restart(s) ,
+       Frame ,
+       <1>0 ,
+       WriterFields 
+PROVE  w[s].sDrop \subseteq Paths /\ w[s].sStage \in {"none", "saved", "mid"}
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:576:83:576:87
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:576:89:576:101
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:579:82:579:84
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 60.0 (100%)
+@!!reason:internal timeout
+@!!already:false
+@!!obl:
+\* internal timeout while processing obligation
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       RestartW(s) ==
+         [st |-> w[s].st, pc |-> "idle", local |-> w[s].local,
+          baseline |-> w[s].baseline, integrated |-> w[s].integrated,
+          uploads |-> {}, deletes |-> {}, snap |-> [p \in Paths |-> Nil],
+          upDone |-> {}, gone |-> {}, verified |-> FALSE,
+          inst |-> [p \in Paths |-> Nil], retire |-> {}, collected |-> FALSE,
+          adv |-> FALSE, synced |-> w[s].synced, derived |-> w[s].derived,
+          skipped |-> w[s].skipped, scope |-> w[s].scope,
+          sStage |-> IF w[s].sStage = "none" THEN "none" ELSE "saved",
+          sTgt |-> w[s].sTgt, sDrop |-> w[s].sDrop, sKeep |-> {},
+          sHeld |-> w[s].sHeld, unlinked |-> w[s].unlinked,
+          memo |-> w[s].memo, rnow |-> w[s].rnow, nt |-> w[s].nt,
+          pend |-> w[s].pend, ack |-> w[s].ack, car |-> w[s].car, cId |-> 0,
+          cFold |-> 0, clk |-> "none", iseq |-> 0, instd |-> FALSE,
+          bound |-> w[s].bound, cN |-> w[s].cN, aN |-> w[s].aN,
+          capped |-> w[s].capped, dset |-> w[s].dset, decl |-> w[s].decl,
+          dMint |-> w[s].dMint, moved |-> w[s].moved, stamps |-> w[s].stamps,
+          lost |-> w[s].lost, deposed |-> FALSE, nd |-> w[s].nd],
+       ShippedShape == Shipped,
+       FreePaths == Free \subseteq Paths,
+       MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+       ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+       ReadersWriters == Readers \subseteq Writers,
+       NilHandle == Nil \notin Handles,
+       NoneWriter == "none" \notin Writers,
+       MaxCopiesNat == MaxCopies \in Nat,
+       PathsFinite == IsFiniteSet(Paths),
+       TouchNat ==
+         MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+         /\ MaxDeposals \in Nat,
+       A4Hyp ,
+       NEW CONSTANT s \in Writers,
+       Restart(s) ,
+       Frame 
+PROVE  /\ RestartW(s).sDrop = w[s].sDrop /\ RestartW(s).sHeld = w[s].sHeld
+          /\ RestartW(s).local = w[s].local
+       /\ RestartW(s).baseline = w[s].baseline /\ RestartW(s).sKeep = {}
+       /\ RestartW(s).sStage
+          = (IF w[s].sStage = "none" THEN "none" ELSE "saved")
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:19
+@!!loc:581:5:581:7
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:583:5:583:7
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:584:50:584:52
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:584:53:584:57
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:584:59:584:63
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:584:65:584:69
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:25
+@!!loc:584:71:584:75
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:26
+@!!loc:587:3:587:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:27
+@!!loc:590:3:590:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:28
+@!!loc:591:32:591:34
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:29
+@!!loc:591:35:591:39
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:30
+@!!loc:591:41:591:45
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:31
+@!!loc:592:32:592:34
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:32
+@!!loc:593:32:593:34
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM14.tlaps/LeanP1ProofM14.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM14.tlaps/fingerprints" *)
+File "./LeanP1ProofM14.tla", line 579, characters 82-83:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  RestartW(s) ==
+                    [st |-> w[s].st, 
+                     pc |-> "idle", 
+                     local |-> w[s].local, 
+                     baseline |-> w[s].baseline,
+                     integrated |-> w[s].integrated, 
+                     uploads |-> {}, 
+                     deletes |-> {}, 
+                     snap |-> [p \in Paths |-> Nil], 
+                     upDone |-> {}, 
+                     gone |-> {}, verified |-> FALSE,
+                     inst |-> [p \in Paths |-> Nil], 
+                     retire |-> {}, 
+                     collected |-> FALSE, 
+                     adv |-> FALSE, 
+                     synced |-> w[s].synced, 
+                     derived |-> w[s].derived, 
+                     skipped |-> w[s].skipped, 
+                     scope |-> w[s].scope,
+                     sStage |-> IF w[s].sStage = "none"
+                                  THEN "none"
+                                  ELSE "saved",
+                     sTgt |-> w[s].sTgt, 
+                     sDrop |-> w[s].sDrop, 
+                     sKeep |-> {}, sHeld |-> w[s].sHeld,
+                     unlinked |-> w[s].unlinked, 
+                     memo |-> w[s].memo, 
+                     rnow |-> w[s].rnow, 
+                     nt |-> w[s].nt, 
+                     pend |-> w[s].pend, 
+                     ack |-> w[s].ack, 
+                     car |-> w[s].car, 
+                     cId |-> 0, cFold |-> 0, 
+                     clk |-> "none", 
+                     iseq |-> 0, instd |-> FALSE, 
+                     bound |-> w[s].bound, 
+                     cN |-> w[s].cN, 
+                     aN |-> w[s].aN, 
+                     capped |-> w[s].capped, 
+                     dset |-> w[s].dset, 
+                     decl |-> w[s].decl, 
+                     dMint |-> w[s].dMint, 
+                     moved |-> w[s].moved, 
+                     stamps |-> w[s].stamps, 
+                     lost |-> w[s].lost, 
+                     deposed |-> FALSE, 
+                     nd |-> w[s].nd],
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  A4Hyp ,
+                  NEW CONSTANT s \in Writers,
+                  Restart(s) ,
+                  Frame 
+           PROVE  /\ RestartW(s).sDrop = w[s].sDrop
+                     /\ RestartW(s).sHeld = w[s].sHeld
+                     /\ RestartW(s).local = w[s].local
+                  /\ RestartW(s).baseline = w[s].baseline
+                     /\ RestartW(s).sKeep = {}
+                  /\ RestartW(s).sStage
+                     = (IF w[s].sStage = "none" THEN "none" ELSE "saved")
+File "./LeanP1ProofM14.tla", line 576, characters 80-81:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  TypeOK ==
+                    /\ live \subseteq Handles /\ minted \subseteq Handles
+                       /\ live \subseteq minted
+                    /\ doc \in [Paths -> Opt(Handles)]
+                    /\ seq \in Nat
+                    /\ tomb \in [Paths -> Opt(Handles)]
+                    /\ base \in [Handles -> Opt(Handles)]
+                    /\ acked \subseteq Paths \X Handles
+                    /\ conflicts \subseteq Paths \X Opt(Handles)
+                    /\ holder \in Writers \cup {"none"}
+                    /\ nextGen \in Nat /\ ui \in Nat /\ reqs \in Nat
+                       /\ barriers \in Nat
+                    /\ w \in [Writers -> Writer]
+                    /\ took \in [Writers -> [Paths -> SUBSET Gens]]
+                    /\ gw \in [Paths -> Opt(Handles)]
+                    /\ mv \in Opt(Paths \X Handles)
+                    /\ udel \subseteq Paths \X Handles
+                    /\ restarts \in Nat /\ syncs \in Nat
+                       /\ regressed \in BOOLEAN /\ 
+                       rescopes \in Nat /\ 
+                       fails \in Nat
+                    /\ retiring \subseteq Handles /\ aged \subseteq Handles
+                       /\ ages \in Nat
+                    /\ rdoc \in [Paths -> Opt(Handles)] /\ rlag \in BOOLEAN
+                    /\ anc \in [Handles -> SUBSET Handles],
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  A4Hyp ,
+                  NEW CONSTANT s \in Writers,
+                  Restart(s) ,
+                  Frame ,
+                  <1>0 ,
+                  WriterFields 
+           PROVE  w[s].sDrop \subseteq Paths
+                  /\ w[s].sStage \in {"none", "saved", "mid"}
+File "./LeanP1ProofM14.tla", line 1, character 1 to line 1885, character 78:
+[ERROR]: 2/32 obligations failed.
+There were backend errors processing module `"LeanP1ProofM14"`.
+WALL 529.21 s rc 0
