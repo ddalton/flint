@@ -244,6 +244,50 @@ security:
   # find workloads that were relying on the gap.
   enforcePermissions: false
 
+  # Kerberos (sec=krb5/krb5i/krb5p) with keys from krb5-operator, as the
+  # operator's FlintShare spec.security.kerberos and the RWX servers'
+  # nfs.kerberos (docs/nfs-kerberos.md, "flint lite"). Renders a
+  # KerberosPrincipal flint-lite-krb5 (nfs/flint-lite.<namespace>.svc.
+  # <clusterDomain>, plus serverNames) whose keytab Secret the hub waits
+  # for, and the hub's floor, allowlist, idmap, directory and SP4_MACH_CRED.
+  # Needs krb5-operator in the cluster. Clients mount by that name.
+  kerberos:
+    enabled: false
+    realm: ""          # e.g. CORP.EXAMPLE
+    realmRef: ""       # the KerberosRealm; it must allow this namespace
+    realmNamespace: ""
+    clusterDomain: cluster.local
+    # The weakest flavor served: krb5 or krb5i (krb5p cannot be a floor).
+    minSec: krb5i
+    requireMachCred: true
+    # Under Kerberos permissions are ENFORCED (a new posture has no
+    # installed base to break); security.enforcePermissions is not read.
+    enforcePermissions: true
+    # Who may connect; [] = the realm's host/* and nfs/* and the idmap's.
+    allowedPrincipals: []
+    # - {principal: alice@CORP.EXAMPLE, uid: 1000, gid: 1000, groups: [100]}
+    idmap: []
+    machineIdentity: "0:0"
+    anonIdentity: "65534:65534"
+    rootSquash: false
+    # More names the hub is mounted by (each nfs/<name>@<realm>).
+    serverNames: []
+    deletionPolicy: Delete
+    # As nfs.kerberos.ldap; the Secret and CA in this namespace.
+    ldap:
+      enabled: false
+      url: ""
+      insecure: false
+      realms: []
+      userBase: ""
+      groupBase: ""
+      userFilter: ""
+      principalAttribute: ""
+      groupMembership: ""
+      bindDN: ""
+      bindPasswordSecret: {name: "", key: password}
+      ca: {configMap: "", secret: "", key: ca.crt}
+
 # Serve the share READ-ONLY. Renders `options: [ro, sync, no_subtree_check]`
 # and `permissions: ro` into the hub's config; the hub answers NFS4ERR_ROFS
 # to every mutating operation whatever a client mounted with, and stops

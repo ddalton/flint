@@ -88,6 +88,7 @@ spec:
             {{- end }}
             - --election={{ ternary "enabled" "disabled" .Values.leaderElection }}
             - --manage-crd={{ .Values.manageCrd }}
+            - --cluster-domain={{ .Values.kerberos.clusterDomain | default "cluster.local" }}
             # H1 + the stateid tag on every hub, headless hub Services.
             - --nfs-proxy={{ .Values.nfsProxy.enabled }}
             {{- if .Values.nfsProxy.enabled }}

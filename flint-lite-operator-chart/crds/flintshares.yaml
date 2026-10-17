@@ -437,6 +437,202 @@ spec:
                       NFS4ERR_ACCESS. Turn it on deliberately, per share.
                     nullable: true
                     type: boolean
+                  kerberos:
+                    description: |-
+                      Kerberos for this share's NFS (`sec=krb5`/`krb5i`/`krb5p`), with
+                      keys from krb5-operator. Absent = `sec=sys`, as before.
+
+                      Present, the hub gets its own server principal
+                      (`nfs/<service>.<namespace>.svc.<clusterDomain>`, plus the
+                      `advertiseAddress` host and `serverNames`), refuses `sec=sys`
+                      below the floor, maps principals to unix identities, and
+                      ENFORCES permissions unless `enforcePermissions: false` says
+                      otherwise. Not with the NFS proxy: a GSS context is bound to the
+                      server principal, and the proxy does not end GSS (the share
+                      stays `Ready=False`, reason `KerberosBehindProxy`).
+                    nullable: true
+                    properties:
+                      allowedPrincipals:
+                        description: |-
+                          Who may connect (`FLINT_NFS_GSS_PRINCIPALS`), patterns
+                          `<component>[/<component>...]@<REALM>` with `*` within a
+                          component. Absent = the nodes' machine principals (`host/*`,
+                          `nfs/*` of the realm) and every principal `idmap` names. A
+                          connected principal has the whole share subject to permissions:
+                          list the nodes and users that should reach THIS share.
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                      anonIdentity:
+                        description: Who a principal no rule names is (`uid:gid`). Absent = `65534:65534`.
+                        nullable: true
+                        type: string
+                      deletionPolicy:
+                        description: |-
+                          What krb5-operator does with the principal when the share is
+                          deleted: `Delete` (absent) or `Retain`.
+                        nullable: true
+                        type: string
+                      idmap:
+                        description: Principal -> unix identity, first match wins.
+                        items:
+                          description: '`principal` is `uid`, `gid` and `groups`.'
+                          properties:
+                            gid:
+                              format: uint32
+                              minimum: 0.0
+                              type: integer
+                            groups:
+                              items:
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              nullable: true
+                              type: array
+                            principal:
+                              type: string
+                            uid:
+                              format: uint32
+                              minimum: 0.0
+                              type: integer
+                          required:
+                          - gid
+                          - principal
+                          - uid
+                          type: object
+                        nullable: true
+                        type: array
+                      ldap:
+                        description: |-
+                          Who a user is, from an LDAP directory (RFC 2307), when no idmap
+                          rule names it.
+                        nullable: true
+                        properties:
+                          bindDN:
+                            nullable: true
+                            type: string
+                          bindPasswordSecret:
+                            description: '`{name, key}` (key absent = `password`).'
+                            nullable: true
+                            properties:
+                              key:
+                                nullable: true
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          caConfigMap:
+                            description: An object in the share's namespace and a key in it.
+                            nullable: true
+                            properties:
+                              key:
+                                nullable: true
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          caSecret:
+                            description: An object in the share's namespace and a key in it.
+                            nullable: true
+                            properties:
+                              key:
+                                nullable: true
+                                type: string
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          groupBase:
+                            nullable: true
+                            type: string
+                          groupMembership:
+                            nullable: true
+                            type: string
+                          insecure:
+                            description: '`ldap://` with NO TLS. Test rigs only.'
+                            nullable: true
+                            type: boolean
+                          principalAttribute:
+                            nullable: true
+                            type: string
+                          realms:
+                            description: The realms whose users are looked up. Absent = `[realm]`.
+                            items:
+                              type: string
+                            nullable: true
+                            type: array
+                          url:
+                            type: string
+                          userBase:
+                            type: string
+                          userFilter:
+                            nullable: true
+                            type: string
+                        required:
+                        - url
+                        - userBase
+                        type: object
+                        x-kubernetes-validations:
+                        - message: spec.security.kerberos.ldap.url must be ldaps://host or ldap://host (StartTLS)
+                          rule: self.url.startsWith('ldaps://') || self.url.startsWith('ldap://')
+                        - message: 'spec.security.kerberos.ldap: bindDN and bindPasswordSecret go together'
+                          rule: has(self.bindDN) == has(self.bindPasswordSecret)
+                        - message: 'spec.security.kerberos.ldap: a caConfigMap or a caSecret, not both'
+                          rule: '!(has(self.caConfigMap) && has(self.caSecret))'
+                      machineIdentity:
+                        description: Who `host/*` and `nfs/*` of the realm are (`uid:gid`). Absent = `0:0`.
+                        nullable: true
+                        type: string
+                      minSec:
+                        description: The weakest flavor served (`FLINT_NFS_MIN_SEC`). Absent = `krb5i`.
+                        nullable: true
+                        type: string
+                      realm:
+                        description: The realm, e.g. `CORP.EXAMPLE`.
+                        type: string
+                      realmNamespace:
+                        description: That `KerberosRealm`'s namespace. Absent = the share's.
+                        nullable: true
+                        type: string
+                      realmRef:
+                        description: |-
+                          The krb5-operator `KerberosRealm` the principal is made in; it
+                          must allow this share's namespace.
+                        type: string
+                      requireMachCred:
+                        description: |-
+                          Every client must bind its state to its machine (SP4_MACH_CRED).
+                          Absent = true.
+                        nullable: true
+                        type: boolean
+                      rootSquash:
+                        description: uid 0 is the anonymous identity (`FLINT_NFS_ROOT_SQUASH`). Absent = false.
+                        nullable: true
+                        type: boolean
+                      serverNames:
+                        description: |-
+                          More names the hub answers to, each `nfs/<name>@<realm>` in its
+                          keytab: the names clients outside the cluster mount it by. The
+                          `advertiseAddress` host is added when it is a name.
+                        items:
+                          type: string
+                        nullable: true
+                        type: array
+                    required:
+                    - realm
+                    - realmRef
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'spec.security.kerberos.minSec must be krb5 or krb5i (krb5p cannot be a floor: Linux does its state operations over krb5i)'
+                      rule: '!has(self.minSec) || self.minSec in [''krb5'', ''krb5i'']'
+                    - message: spec.security.kerberos.deletionPolicy must be Delete or Retain
+                      rule: '!has(self.deletionPolicy) || self.deletionPolicy in [''Delete'', ''Retain'']'
                 type: object
               service:
                 description: How consumers reach the hub.
@@ -790,6 +986,25 @@ spec:
                   tell the difference.
                 nullable: true
                 type: string
+              kerberos:
+                description: |-
+                  With `spec.security.kerberos`: the name clients mount by and the
+                  principals the hub's keytab holds.
+                nullable: true
+                properties:
+                  principals:
+                    items:
+                      type: string
+                    type: array
+                  serverName:
+                    description: |-
+                      Mount the hub by this name (a PV's `server:`), so `rpc.gssd` asks
+                      for the principal the hub holds.
+                    type: string
+                required:
+                - principals
+                - serverName
+                type: object
               observedGeneration:
                 description: The `.metadata.generation` this status describes.
                 format: int64

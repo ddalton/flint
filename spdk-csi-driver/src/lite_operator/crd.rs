@@ -476,6 +476,137 @@ pub struct SecuritySpec {
     /// NFS4ERR_ACCESS. Turn it on deliberately, per share.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforce_permissions: Option<bool>,
+
+    /// Kerberos for this share's NFS (`sec=krb5`/`krb5i`/`krb5p`), with
+    /// keys from krb5-operator. Absent = `sec=sys`, as before.
+    ///
+    /// Present, the hub gets its own server principal
+    /// (`nfs/<service>.<namespace>.svc.<clusterDomain>`, plus the
+    /// `advertiseAddress` host and `serverNames`), refuses `sec=sys`
+    /// below the floor, maps principals to unix identities, and
+    /// ENFORCES permissions unless `enforcePermissions: false` says
+    /// otherwise. Not with the NFS proxy: a GSS context is bound to the
+    /// server principal, and the proxy does not end GSS (the share
+    /// stays `Ready=False`, reason `KerberosBehindProxy`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kerberos: Option<KerberosSpec>,
+}
+
+/// A share's Kerberos (`spec.security.kerberos`), as the RWX servers'
+/// `nfs.kerberos` (docs/nfs-kerberos.md).
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("!has(self.minSec) || self.minSec in ['krb5', 'krb5i']")
+    .message("spec.security.kerberos.minSec must be krb5 or krb5i (krb5p cannot be a floor: Linux does its state operations over krb5i)"))]
+#[x_kube(validation = Rule::new("!has(self.deletionPolicy) || self.deletionPolicy in ['Delete', 'Retain']")
+    .message("spec.security.kerberos.deletionPolicy must be Delete or Retain"))]
+pub struct KerberosSpec {
+    /// The realm, e.g. `CORP.EXAMPLE`.
+    pub realm: String,
+    /// The krb5-operator `KerberosRealm` the principal is made in; it
+    /// must allow this share's namespace.
+    pub realm_ref: String,
+    /// That `KerberosRealm`'s namespace. Absent = the share's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realm_namespace: Option<String>,
+    /// The weakest flavor served (`FLINT_NFS_MIN_SEC`). Absent = `krb5i`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sec: Option<String>,
+    /// Every client must bind its state to its machine (SP4_MACH_CRED).
+    /// Absent = true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_mach_cred: Option<bool>,
+    /// Who may connect (`FLINT_NFS_GSS_PRINCIPALS`), patterns
+    /// `<component>[/<component>...]@<REALM>` with `*` within a
+    /// component. Absent = the nodes' machine principals (`host/*`,
+    /// `nfs/*` of the realm) and every principal `idmap` names. A
+    /// connected principal has the whole share subject to permissions:
+    /// list the nodes and users that should reach THIS share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_principals: Option<Vec<String>>,
+    /// Principal -> unix identity, first match wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idmap: Option<Vec<KerberosIdmapRule>>,
+    /// Who `host/*` and `nfs/*` of the realm are (`uid:gid`). Absent = `0:0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_identity: Option<String>,
+    /// Who a principal no rule names is (`uid:gid`). Absent = `65534:65534`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anon_identity: Option<String>,
+    /// uid 0 is the anonymous identity (`FLINT_NFS_ROOT_SQUASH`). Absent = false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_squash: Option<bool>,
+    /// Who a user is, from an LDAP directory (RFC 2307), when no idmap
+    /// rule names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ldap: Option<KerberosLdapSpec>,
+    /// More names the hub answers to, each `nfs/<name>@<realm>` in its
+    /// keytab: the names clients outside the cluster mount it by. The
+    /// `advertiseAddress` host is added when it is a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_names: Option<Vec<String>>,
+    /// What krb5-operator does with the principal when the share is
+    /// deleted: `Delete` (absent) or `Retain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_policy: Option<String>,
+}
+
+/// `principal` is `uid`, `gid` and `groups`.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KerberosIdmapRule {
+    pub principal: String,
+    pub uid: u32,
+    pub gid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<u32>>,
+}
+
+/// The directory lookup, as `nfs.kerberos.ldap`. The Secret and the CA
+/// are in the share's namespace.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[x_kube(validation = Rule::new("self.url.startsWith('ldaps://') || self.url.startsWith('ldap://')")
+    .message("spec.security.kerberos.ldap.url must be ldaps://host or ldap://host (StartTLS)"))]
+#[x_kube(validation = Rule::new("has(self.bindDN) == has(self.bindPasswordSecret)")
+    .message("spec.security.kerberos.ldap: bindDN and bindPasswordSecret go together"))]
+#[x_kube(validation = Rule::new("!(has(self.caConfigMap) && has(self.caSecret))")
+    .message("spec.security.kerberos.ldap: a caConfigMap or a caSecret, not both"))]
+pub struct KerberosLdapSpec {
+    pub url: String,
+    /// `ldap://` with NO TLS. Test rigs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure: Option<bool>,
+    /// The realms whose users are looked up. Absent = `[realm]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realms: Option<Vec<String>>,
+    pub user_base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_attribute: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_membership: Option<String>,
+    #[serde(default, rename = "bindDN", skip_serializing_if = "Option::is_none")]
+    pub bind_dn: Option<String>,
+    /// `{name, key}` (key absent = `password`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_password_secret: Option<SecretKeyRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_config_map: Option<SecretKeyRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_secret: Option<SecretKeyRef>,
+}
+
+/// An object in the share's namespace and a key in it.
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretKeyRef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// The hub's disk.
@@ -879,6 +1010,20 @@ pub struct FlintShareStatus {
     /// field-for-field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<ShareCondition>>,
+
+    /// With `spec.security.kerberos`: the name clients mount by and the
+    /// principals the hub's keytab holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kerberos: Option<KerberosStatus>,
+}
+
+#[derive(KubeSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KerberosStatus {
+    /// Mount the hub by this name (a PV's `server:`), so `rpc.gssd` asks
+    /// for the principal the hub holds.
+    pub server_name: String,
+    pub principals: Vec<String>,
 }
 
 #[derive(JsonSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -1041,12 +1186,18 @@ impl FlintShareSpec {
     }
 
     /// Whether the hub ENFORCES the permission check rather than only
-    /// logging it. Absent = false, which is the shipped behaviour.
+    /// logging it. Absent = false, the shipped behaviour, except with
+    /// Kerberos, where it is true (a new posture has no installed base).
     pub fn enforce_permissions(&self) -> bool {
         self.security
             .as_ref()
             .and_then(|s| s.enforce_permissions)
-            .unwrap_or(false)
+            .unwrap_or(self.kerberos().is_some())
+    }
+
+    /// `spec.security.kerberos`, when present.
+    pub fn kerberos(&self) -> Option<&KerberosSpec> {
+        self.security.as_ref().and_then(|s| s.kerberos.as_ref())
     }
 
     /// Whether the export is read-only (`spec.readOnly`). Absent = false.

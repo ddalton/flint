@@ -509,6 +509,341 @@
       },
       "values": "logLevel: debug\npersistence:\n  storageClassName: gp3\n  size: 100Gi\nservice:\n  type: LoadBalancer\n  port: 2049\n  annotations:\n    service.beta.kubernetes.io/aws-load-balancer-internal: \"true\"\nresources:\n  requests:\n    cpu: 500m\n    memory: 1Gi\n  limits:\n    memory: 4Gi\nnodeSelector:\n  topology.kubernetes.io/zone: us-east-1a\ntier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-c/\n  region: us-east-1\n  importOnStart: true\n  startupFailureThreshold: 90\n  settings:\n    watermarkPct: 90\n    hydrateWarmAfterImport: true\n    hydrateWarmConcurrency: 24\n    flushFloorSecs: 120\n    reserveBytes: 536870912\nmonitoring:\n  enabled: true\n  port: 8080\n  fileApi:\n    enabled: true\n    tokenSecret: flint-api-token\n    maxUploadBytes: 1073741824\n    maxDownloadBytes: 268435456\n    hydrateWaitSecs: 45\n"
     },
+    "kerberos": {
+      "deployment": {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "lite",
+            "app.kubernetes.io/instance": "flint-lite",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/name": "flint-lite",
+            "app.kubernetes.io/version": "1.58.0",
+            "helm.sh/chart": "flint-lite-0.6.2"
+          },
+          "name": "flint-lite",
+          "namespace": "flint"
+        },
+        "spec": {
+          "replicas": 1,
+          "selector": {
+            "matchLabels": {
+              "app": "flint-lite"
+            }
+          },
+          "strategy": {
+            "type": "Recreate"
+          },
+          "template": {
+            "metadata": {
+              "annotations": {
+                "checksum/config": "d58afccd95840bf06d6e8409a5ff34fbf73f1c92632ebf7e334d5a1eb93afdfe"
+              },
+              "labels": {
+                "app": "flint-lite",
+                "app.kubernetes.io/instance": "flint-lite",
+                "app.kubernetes.io/name": "flint-lite",
+                "chert.us/role": "lite"
+              }
+            },
+            "spec": {
+              "containers": [
+                {
+                  "args": [
+                    "--config",
+                    "/etc/flint/mds.yaml"
+                  ],
+                  "command": [
+                    "/usr/local/bin/flint-pnfs-mds"
+                  ],
+                  "env": [
+                    {
+                      "name": "RUST_LOG",
+                      "value": "info"
+                    },
+                    {
+                      "name": "POD_NAME",
+                      "valueFrom": {
+                        "fieldRef": {
+                          "fieldPath": "metadata.name"
+                        }
+                      }
+                    },
+                    {
+                      "name": "FLINT_FH_KERNEL",
+                      "value": "1"
+                    },
+                    {
+                      "name": "KRB5_KTNAME",
+                      "value": "/etc/flint-krb5/krb5.keytab"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_PRINCIPALS",
+                      "value": "host/*@CORP.EXAMPLE,nfs/*@CORP.EXAMPLE,alice@CORP.EXAMPLE"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_IDMAP",
+                      "value": "alice@CORP.EXAMPLE=1000:1000:100;200,host/*@CORP.EXAMPLE=0:0,nfs/*@CORP.EXAMPLE=0:0"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_ANON",
+                      "value": "65534:65534"
+                    },
+                    {
+                      "name": "FLINT_NFS_MIN_SEC",
+                      "value": "krb5i"
+                    },
+                    {
+                      "name": "FLINT_NFS_ENFORCE_PERMISSIONS",
+                      "value": "enforce"
+                    },
+                    {
+                      "name": "FLINT_NFS_REQUIRE_MACH_CRED",
+                      "value": "true"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_URL",
+                      "value": "ldaps://ldap.corp.example"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_REALMS",
+                      "value": "CORP.EXAMPLE"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_USER_BASE",
+                      "value": "ou=People,dc=corp,dc=example"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_GROUP_MEMBERSHIP",
+                      "value": "memberUid"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_BIND_DN",
+                      "value": "cn=nfs,dc=corp,dc=example"
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_BIND_PASSWORD",
+                      "valueFrom": {
+                        "secretKeyRef": {
+                          "key": "password",
+                          "name": "ldap-bind",
+                          "optional": false
+                        }
+                      }
+                    },
+                    {
+                      "name": "FLINT_NFS_GSS_LDAP_CA_FILE",
+                      "value": "/etc/flint-ldap-ca/ca.crt"
+                    }
+                  ],
+                  "image": "dilipdalton/flint-pnfs:1.58.0",
+                  "imagePullPolicy": "IfNotPresent",
+                  "livenessProbe": {
+                    "initialDelaySeconds": 10,
+                    "periodSeconds": 15,
+                    "tcpSocket": {
+                      "port": 2049
+                    }
+                  },
+                  "name": "hub",
+                  "ports": [
+                    {
+                      "containerPort": 2049,
+                      "name": "nfs"
+                    }
+                  ],
+                  "readinessProbe": {
+                    "periodSeconds": 1,
+                    "tcpSocket": {
+                      "port": 2049
+                    }
+                  },
+                  "resources": {
+                    "requests": {
+                      "cpu": "20m",
+                      "memory": "100Mi"
+                    }
+                  },
+                  "securityContext": {
+                    "allowPrivilegeEscalation": false,
+                    "capabilities": {
+                      "add": [
+                        "CHOWN",
+                        "DAC_OVERRIDE",
+                        "DAC_READ_SEARCH",
+                        "FOWNER",
+                        "FSETID"
+                      ],
+                      "drop": [
+                        "ALL"
+                      ]
+                    },
+                    "readOnlyRootFilesystem": false,
+                    "runAsNonRoot": false,
+                    "runAsUser": 0,
+                    "seccompProfile": {
+                      "type": "RuntimeDefault"
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "mountPath": "/etc/flint",
+                      "name": "config"
+                    },
+                    {
+                      "mountPath": "/data",
+                      "name": "data"
+                    },
+                    {
+                      "mountPath": "/etc/flint-krb5",
+                      "name": "krb5-keytab",
+                      "readOnly": true
+                    },
+                    {
+                      "mountPath": "/etc/flint-ldap-ca",
+                      "name": "ldap-ca",
+                      "readOnly": true
+                    }
+                  ]
+                }
+              ],
+              "terminationGracePeriodSeconds": 120,
+              "volumes": [
+                {
+                  "configMap": {
+                    "name": "flint-lite-config"
+                  },
+                  "name": "config"
+                },
+                {
+                  "name": "data",
+                  "persistentVolumeClaim": {
+                    "claimName": "flint-lite-data"
+                  }
+                },
+                {
+                  "name": "krb5-keytab",
+                  "secret": {
+                    "defaultMode": 292,
+                    "secretName": "flint-lite-krb5"
+                  }
+                },
+                {
+                  "configMap": {
+                    "defaultMode": 292,
+                    "items": [
+                      {
+                        "key": "ca.crt",
+                        "path": "ca.crt"
+                      }
+                    ],
+                    "name": "corp-ca"
+                  },
+                  "name": "ldap-ca"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "mdsYaml": "apiVersion: chert.us/v1alpha1\nkind: PnfsConfig\nmode: standalone\nmds:\n  bind:\n    address: \"0.0.0.0\"\n    port: 2049\n  # Inert in standalone (no layouts are ever granted) but part of the\n  # config schema.\n  layout:\n    type: file\n    stripeSize: 8388608\n    policy: stripe\n  dataServers: []\n  state:\n    backend: sqlite\n    config:\n      path: /data/state/state.db\nexports:\n  - path: /data/exports\n    fsid: 1\n    options: [rw, sync, no_subtree_check]\n    access:\n      - network: 0.0.0.0/0\n        permissions: rw\nlogging:\n  level: info\n  format: text\n",
+      "pvc": {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "lite",
+            "app.kubernetes.io/instance": "flint-lite",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/name": "flint-lite",
+            "app.kubernetes.io/version": "1.58.0",
+            "helm.sh/chart": "flint-lite-0.6.2"
+          },
+          "name": "flint-lite-data",
+          "namespace": "flint"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "20Gi"
+            }
+          }
+        }
+      },
+      "service": {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+          "labels": {
+            "app.kubernetes.io/component": "lite",
+            "app.kubernetes.io/instance": "flint-lite",
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/name": "flint-lite",
+            "app.kubernetes.io/version": "1.58.0",
+            "helm.sh/chart": "flint-lite-0.6.2"
+          },
+          "name": "flint-lite",
+          "namespace": "flint"
+        },
+        "spec": {
+          "ports": [
+            {
+              "name": "nfs",
+              "port": 2049,
+              "protocol": "TCP",
+              "targetPort": 2049
+            }
+          ],
+          "selector": {
+            "app": "flint-lite"
+          },
+          "type": "ClusterIP"
+        }
+      },
+      "spec": {
+        "persistence": {
+          "size": "20Gi"
+        },
+        "security": {
+          "kerberos": {
+            "idmap": [
+              {
+                "gid": 1000,
+                "groups": [
+                  100,
+                  200
+                ],
+                "principal": "alice@CORP.EXAMPLE",
+                "uid": 1000
+              }
+            ],
+            "ldap": {
+              "bindDN": "cn=nfs,dc=corp,dc=example",
+              "bindPasswordSecret": {
+                "name": "ldap-bind"
+              },
+              "caConfigMap": {
+                "name": "corp-ca"
+              },
+              "groupMembership": "memberUid",
+              "url": "ldaps://ldap.corp.example",
+              "userBase": "ou=People,dc=corp,dc=example"
+            },
+            "realm": "CORP.EXAMPLE",
+            "realmNamespace": "krb5-system",
+            "realmRef": "corp",
+            "serverNames": [
+              "ws.corp.example"
+            ]
+          }
+        }
+      },
+      "values": "tier:\n  enabled: false\nsecurity:\n  enforcePermissions: false\n  kerberos:\n    enabled: true\n    realm: CORP.EXAMPLE\n    realmRef: corp\n    realmNamespace: krb5-system\n    idmap:\n      - {principal: alice@CORP.EXAMPLE, uid: 1000, gid: 1000, groups: [100, 200]}\n    serverNames: [ws.corp.example]\n    ldap:\n      enabled: true\n      url: ldaps://ldap.corp.example\n      userBase: ou=People,dc=corp,dc=example\n      groupMembership: memberUid\n      bindDN: cn=nfs,dc=corp,dc=example\n      bindPasswordSecret: {name: ldap-bind}\n      ca: {configMap: corp-ca}\n"
+    },
     "minimal": {
       "deployment": {
         "apiVersion": "apps/v1",
@@ -1388,5 +1723,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "f60592db7f618ad7bc06b605a90d841a83c97dd5ecba94886000d23023a0fc2e"
+  "chartSha256": "2f2845083ae74f20173682eed131e7afa6ac87f6e11599aac2b501cff24196fa"
 }

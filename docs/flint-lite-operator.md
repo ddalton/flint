@@ -662,6 +662,14 @@ client outside every listed network is refused (`NFS4ERR_ACCESS`).
 Uses: a published dataset many agents read, a project frozen while its
 bucket moves, a satellite that must never write back.
 
+## Kerberos
+
+`spec.security.kerberos` makes a share Kerberos-only (`sec=krb5i` by
+default) with its own server principal from krb5-operator, an idmap or
+LDAP for who a user is, and enforced permissions. It needs the chart's
+`kerberos.enabled: true` and is not available behind the NFS proxy. See
+[nfs-kerberos.md, "flint lite"](nfs-kerberos.md#flint-lite-flintshare-hubs).
+
 ## Locking down the network
 
 Once shares are reachable across clusters, "8080 is never on the
