@@ -89,6 +89,17 @@ THE MAPPING (one place):
                                                      since the uncite and what the
                                                      widen took (a barrier's
                                                      step-0 replay emits these)
+  sync (a writer's, whole-tree)    -> sync           Sync(w): the paths whose
+                                                     citation it moved and the
+                                                     ones it left the agent
+                                                     (scoped, or one that left
+                                                     something owed: refused)
+  pull skipped=false (a reader's)  -> pull           RPullRead(w), at the seq read
+  sync (the reader's, after it)    -> rpull_sync     RPullSync(w), as sync
+  pull skipped=true                -> pull_skip      no step: the model's
+                                                     ReaderSkips must hold there
+  ack status=refused-read-only     -> honor_reader   HonorReader(w); then
+                                    + retire         RetireByAck(w)
   start (a new incarnation's       -> restart        Restart(w): the barrier a
     `release_stale_own`)                             crash left in flight is
                                                      dropped; a takeover rotation
@@ -134,9 +145,12 @@ def convert(lines):
     evs = [json.loads(l) for l in lines if l.strip()]
     writer_of = {}
     seed = seq0 = seed_keys = None
+    readers = set()
     for e in evs:
         if e["ev"] == "conf_start":
             writer_of[e["holder"]] = e["writer"]
+            if e.get("reader"):
+                readers.add(e["writer"])
             seed, seq0, seed_keys = e["entries"], e["seq"], e.get("keys", {})
     if seed is None:
         raise Unsupported("no conf_start")
@@ -169,6 +183,8 @@ def convert(lines):
     restarts = 0
     deposals = {}  # w -> takeovers it made
     rescopes = 0
+    syncs = 0
+    pulling = {}  # reader -> a pull read the pointer, its sync not yet traced
     # Scopes are resolved to paths at the end, when every path is known.
     scoped = []  # (record, field, prefixes or None)
     unlinks = {}  # w -> the narrow's unlinks since its uncite, across a crash
@@ -400,6 +416,30 @@ def convert(lines):
             else:
                 raise Unsupported(f"rescope stage {st}")
             steps.append((rec, i))
+        elif ev == "pull":
+            if e["skipped"]:
+                steps.append(({"ev": "pull_skip", "w": w}, i))
+            else:
+                pulling[w] = True
+                rec = {"ev": "pull", "w": w}
+                if e.get("seq") is not None:
+                    rec["seq"] = seq_of(e)
+                steps.append((rec, i))
+        elif ev == "sync":
+            if e["scoped"]:
+                raise Unsupported("a scoped sync (the sync request): only the whole-tree sync is modelled")
+            if e["left"]:
+                raise Unsupported("a sync that left something owed: the traces fail no fetch")
+            paths.update(e["taken"])
+            paths.update(e["skipped"])
+            rec = {"ev": "sync", "w": w, "taken": set(e["taken"]), "skipped": set(e["skipped"])}
+            if w in readers:
+                if not pulling.pop(w, False):
+                    raise Unsupported("a reader's sync with no pull before it")
+                rec["ev"] = "rpull_sync"
+            else:
+                syncs += 1
+            steps.append((rec, i))
         elif ev == "start":
             if e["rotated"]:
                 raise Unsupported("a start that rotated the manifest (an acquire whose container died)")
@@ -424,6 +464,12 @@ def convert(lines):
             else:
                 exact[w] = False
             steps.append(({"ev": "touch", "w": w}, i))
+        elif ev == "ack" and e["status"] == "refused-read-only":
+            if e["verb"] != "Publish" or not standing.get(w):
+                raise Unsupported(f"a {e['verb']} refusal with no record standing")
+            steps.append(({"ev": "honor_reader", "w": w}, i))
+            steps.append(({"ev": "retire", "w": w}, i))
+            standing[w] = False
         elif ev == "ack":
             if e["verb"] != "Publish" or e["status"] not in ("ok", "partial"):
                 raise Unsupported(f"a {e['verb']} ack {e['status']}")
@@ -460,7 +506,7 @@ def convert(lines):
     consts = {
         "Writers": set(names), "Free": paths - set(seed), "Paths": paths,
         "MaxMint": max_mint, "MaxUI": hitl, "MaxRemovals": removals,
-        "MaxBarriers": barriers + 1, "MaxRestarts": restarts, "MaxSyncs": 0, "MaxCopies": copies,
+        "MaxBarriers": barriers + 1, "MaxRestarts": restarts, "MaxSyncs": syncs, "MaxCopies": copies,
         "MaxAges": max(reaps, 1),
         # THE CODE'S SHAPE: every rule on.
         **{k: True for k in (
@@ -471,9 +517,8 @@ def convert(lines):
             "ConsumeHonorsScope", "RescopeUnciteFirst", "RescopeKeepsDirty", "WidenKeepsLocal",
             "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft", "ReaderRechecksOwed",
             "InstallFenced", "DeletesUnderLease")},
-        # The traces check out unscoped, never rescope, never fail a fetch,
-        # and every tree in them writes.
-        "Scopes": scopes, "MaxRescopes": rescopes, "MaxFetchFails": 0, "Readers": set(),
+        # The traces check out unscoped and never fail a fetch.
+        "Scopes": scopes, "MaxRescopes": rescopes, "MaxFetchFails": 0, "Readers": readers,
         # Rows 15-17: the publish requests the trace folded; no deposal yet.
         "MaxTouches": max(touches.values(), default=0), "MaxNonces": 32, "MaxDeposals": max(deposals.values(), default=0),
     }
@@ -494,7 +539,7 @@ def write_out(steps, consts, gen, outdir: Path, name: str, overrides=None):
     # The core's claims, on the run the code actually performed.
     cfg += [f"INVARIANT {i}" for i in (
         "TypeOK", "Inv_CitationsLive", "Inv_OneName", "Inv_AckedNamed", "Inv_OneHolder",
-        "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches", "AK3", "AK4")]
+        "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches", "Inv_ReaderSound", "AK3", "AK4")]
     cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1", "PROPERTY NR1",
             "PROPERTY Prop_ScopeRespected", "PROPERTY Prop_AgentWorkKept", "PROPERTY Prop_NarrowNeverDeletes",
             "PROPERTY DP1", "PROPERTY DP2"]

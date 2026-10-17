@@ -123,6 +123,13 @@ impl Syncer {
         let mut report = SyncReport::default();
         report.scope = scope.as_ref().map(|s| s.entries().to_vec());
         let mut baseline = self.state.load_baseline()?;
+        // What the baseline cited before, for the trace (only when it is on):
+        // the paths this sync took are the ones whose citation it moved.
+        let before: Option<BTreeMap<String, String>> = self
+            .cfg
+            .event_trace
+            .is_some()
+            .then(|| baseline.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect());
 
         // 1. The scan comes FIRST; dirt is judged against it alone.
         let scanned = scan::scan(&self.cfg.root)?;
@@ -436,8 +443,21 @@ impl Syncer {
         // Materialised files before the baseline that vouches for them.
         self.state.sync_tree()?;
         self.state.save_baseline(&baseline)?;
+        let taken: Vec<&String> = before
+            .as_ref()
+            .map(|before| {
+                before
+                    .keys()
+                    .chain(baseline.entries.keys())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .filter(|p| before.get(*p) != baseline.entries.get(*p).map(|e| &e.etag))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.trace("sync", serde_json::json!({"scoped": scope.is_some(), "applied": report.applied.len(),
-            "deleted": report.deleted.len(), "conflicts": report.conflicts.len(), "seq": report.seq}));
+            "deleted": report.deleted.len(), "conflicts": report.conflicts.len(), "seq": report.seq,
+            "taken": taken, "skipped": baseline.skipped, "left": left, "reader": self.cfg.access.is_read()}));
         Ok(report)
     }
 }

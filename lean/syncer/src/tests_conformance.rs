@@ -76,7 +76,8 @@ async fn start(store: &Arc<MemoryStore>, writers: &[(&'static str, &Syncer)]) {
     let keys: serde_json::Map<String, serde_json::Value> =
         m.entries.iter().map(|(p, e)| (p.clone(), serde_json::Value::String(e.key.clone()))).collect();
     for (name, sc) in writers {
-        sc.trace("conf_start", serde_json::json!({"writer": name, "seq": m.seq, "entries": entries, "keys": keys}));
+        sc.trace("conf_start", serde_json::json!({"writer": name, "seq": m.seq, "entries": entries, "keys": keys,
+            "reader": sc.cfg.access.is_read()}));
     }
 }
 
@@ -160,6 +161,28 @@ async fn two_writers(
     a.run_barrier().await.unwrap();
     b.checkout().await.unwrap();
     (store, buf, a, b, dir_a, dir_b)
+}
+
+/// `two_writers` with the second tree a READER (read access, `reader.rs`):
+/// its floor tick is a pull, and it never writes to the bucket.
+async fn writer_and_reader(
+    seed: &[(&str, &str)],
+) -> (Arc<MemoryStore>, Buf, Syncer, Syncer, tempfile::TempDir, tempfile::TempDir) {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_r) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let buf: Buf = Arc::new(Mutex::new(vec![]));
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut r = syncer(&store, dir_r.path()).await;
+    r.cfg.access = super::Access::Read;
+    traced(&mut a, &buf);
+    traced(&mut r, &buf);
+    a.checkout().await.unwrap();
+    for (p, c) in seed {
+        write(dir_a.path(), p, c);
+    }
+    a.run_barrier().await.unwrap();
+    r.checkout().await.unwrap();
+    (store, buf, a, r, dir_a, dir_r)
 }
 
 /// `two_writers` over the hooked double, for a scenario that must run one
@@ -708,6 +731,79 @@ async fn conformance_a_holder_deposed_before_its_cas_is_fenced() {
     b.run_barrier().await.unwrap();
     assert_eq!(read(dir_b.path(), "a.txt").as_deref(), Some("A's edit"), "fixture: A's edit never reached B");
     dump("a_holder_deposed_before_its_cas_is_fenced", &buf);
+}
+
+/// The sync verb between barriers (`sync.rs`, Sync): B edits one file,
+/// deletes another, and edits the file A's agent is editing. A's sync takes
+/// the edit and the delete and leaves the agent's file, recorded as skipped
+/// (the consume's cheap path); A's next barrier publishes it over B's, with
+/// B's version recorded (R7).
+#[tokio::test]
+async fn conformance_a_writer_syncs_between_barriers() {
+    let (store, buf, mut a, mut b, dir_a, dir_b) =
+        two_writers(&[("x.txt", "x v1"), ("y.txt", "y"), ("z.txt", "z v1")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    let bw = Agent { name: "B", sc: &b, root: dir_b.path() };
+    bw.write("x.txt", "B's x");
+    bw.write("z.txt", "B's z");
+    bw.delete("y.txt");
+    // Declared: a cadence barrier defers a first absence.
+    b.declared_barrier().await.unwrap();
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("z.txt", "A's z");
+    let r = a.sync().await.unwrap();
+    assert_eq!(r.applied, vec!["x.txt".to_string()], "fixture: {r:?}");
+    assert_eq!(r.deleted, vec!["y.txt".to_string()], "fixture: {r:?}");
+    assert_eq!(r.conflicts, vec!["z.txt".to_string()], "the sync took the agent's file: {r:?}");
+    assert_eq!(read(dir_a.path(), "z.txt").as_deref(), Some("A's z"));
+    a.run_barrier().await.unwrap();
+    assert_eq!(gateway_current(&store, &a.cfg, "z.txt").await, Some(etag_of("A's z")), "fixture: A's z not published");
+    dump("a_writer_syncs_between_barriers", &buf);
+}
+
+/// A reader follows a writer (`reader.rs`, RPullRead/RPullSync): each tick
+/// with news pulls, a tick without skips (ReaderSkips, Inv_ReaderSound). Its
+/// agent's publish request is answered `refused-read-only` and publishes
+/// nothing (HonorReader).
+#[tokio::test]
+async fn conformance_a_reader_follows_a_writer() {
+    let (store, buf, mut a, mut r, dir_a, dir_r) = writer_and_reader(&[("x.txt", "x v1"), ("y.txt", "y")]).await;
+    start(&store, &[("A", &a), ("R", &r)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("x.txt", "A's x");
+    a.run_barrier().await.unwrap();
+    r.floor_tick().await.unwrap();
+    assert_eq!(read(dir_r.path(), "x.txt").as_deref(), Some("A's x"), "fixture: the reader did not pull");
+    let t = r.floor_tick().await.unwrap();
+    assert!(t.no_change, "a reader with nothing new synced again: {t:?}");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.delete("y.txt");
+    a.declared_barrier().await.unwrap();
+    Agent { name: "R", sc: &r, root: dir_r.path() }.touch("r1");
+    r.poll_sentinels().unwrap();
+    let t = r.floor_tick().await.unwrap();
+    assert_eq!(t.acks.first().map(|a| a.status.as_str()), Some("refused-read-only"), "fixture: {t:?}");
+    assert_eq!(read(dir_r.path(), "y.txt"), None, "the reader did not take the delete");
+    dump("a_reader_follows_a_writer", &buf);
+}
+
+/// L-129 (review 2026-09-29, S4; StillOwed): a reader's sync skips a path
+/// its agent made, which a writer then published; the agent removes its
+/// file, and the reader's next tick, with the pointer unmoved, still pulls:
+/// the path is owed again.
+#[tokio::test]
+async fn conformance_a_reader_resyncs_a_path_it_skipped_once_clean() {
+    let (store, buf, mut a, mut r, dir_a, dir_r) = writer_and_reader(&[("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("R", &r)]).await;
+    Agent { name: "R", sc: &r, root: dir_r.path() }.write("new.txt", "R's scratch");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("new.txt", "A's new");
+    a.run_barrier().await.unwrap();
+    r.floor_tick().await.unwrap();
+    assert_eq!(read(dir_r.path(), "new.txt").as_deref(), Some("R's scratch"), "the reader's sync took its agent's file");
+    Agent { name: "R", sc: &r, root: dir_r.path() }.delete("new.txt");
+    let t = r.floor_tick().await.unwrap();
+    assert!(!t.no_change, "the reader skipped a path still owed: {t:?}");
+    assert_eq!(read(dir_r.path(), "new.txt").as_deref(), Some("A's new"), "the reader did not take the path once clean");
+    let t = r.floor_tick().await.unwrap();
+    assert!(t.no_change, "fixture: {t:?}");
+    dump("a_reader_resyncs_a_path_it_skipped_once_clean", &buf);
 }
 
 /// A UI delete of a clean file: the first writer's barrier performs it (the

@@ -123,6 +123,9 @@ else
   check "$TRACES"/a_narrow_then_a_widen.ndjson reject control-scope-ignored --set=ConsumeHonorsScope=FALSE
   # The unlink blind to the bytes: it takes the agent's write the code kept.
   check "$TRACES"/a_narrow_keeps_what_the_agent_wrote_after_the_uncite.ndjson reject control-unlink-blind --set=UnlinkChecksBytes=FALSE
+  # The reader judged by the pointer alone (L-129): once its agent backs out,
+  # the model's reader would skip a path still owed (Inv_ReaderSound).
+  check "$TRACES"/a_reader_resyncs_a_path_it_skipped_once_clean.ndjson unsafe control-reader-owed-ignored --set=ReaderRechecksOwed=FALSE
 fi
 echo "work dir: $WORK"
 [ "$FAIL" -eq 0 ] && echo "trace check (core): ok" || { echo "trace check (core): $FAIL FAILED"; exit 1; }

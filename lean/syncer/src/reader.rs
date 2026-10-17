@@ -77,7 +77,9 @@ impl Syncer {
             };
         let now = PulledFrom { manifest_etag: manifest_etag.clone(), inbox_etag: ib.etag };
         let mut out = Pull { observed_seq, observed_etag: manifest_etag, sync: None };
-        if self.load_pulled_from().as_ref() == Some(&now) && !self.still_owed()? {
+        let skip = self.load_pulled_from().as_ref() == Some(&now) && !self.still_owed()?;
+        self.trace("pull", serde_json::json!({"seq": observed_seq, "skipped": skip}));
+        if skip {
             return Ok(out);
         }
         // `sync` reads both documents again. If either moved in between,
