@@ -8805,6 +8805,39 @@ pub(super) async fn hitl_remove(store: &Arc<MemoryStore>, cfg: &LeanConfig, path
     .unwrap();
 }
 
+/// The model's MN2 (the 2026-10-17 mutant audit): a delete the document
+/// records must be ANSWERED (`udel`), or the UI believes a committed
+/// delete failed. The gateway's `remove_files` runs this edit through
+/// `manifest::commit_edit`; here the pointer CAS lands and its response is
+/// lost, so the SDK's retry meets its own write and answers 412.
+/// `commit_edit` reads that as a lost race, reloads, and the edit — the
+/// gateway's, which refuses a path the document does not cite — finds the
+/// path already gone.
+#[tokio::test]
+async fn a_ui_delete_whose_cas_landed_behind_a_lost_response_is_answered_committed() {
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&inner, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "a.txt", "published");
+    a.run_barrier().await.unwrap();
+    let before = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+
+    hooked.put_lands_then_412(&a.cfg.current_key());
+    let r = manifest::commit_edit(hooked.as_ref(), &a.cfg, &super::ui_flush(now_unix()), |_, doc| {
+        let Some(gone) = doc.entries.remove("a.txt") else {
+            return Err("NoSuchFile(a.txt)");
+        };
+        doc.tombstones.insert("a.txt".to_string(), manifest::Tombstone { etag: gone.etag, seq: doc.seq });
+        Ok(())
+    })
+    .await;
+    let m = manifest::load(inner.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("a.txt") && m.seq == before + 1, "fixture: the delete did not commit once");
+    assert!(r.is_ok(), "the delete committed at seq {} and the UI was told it failed: {:?}", m.seq, r.err());
+}
+
 /// The version the gateway resolves for a path under P2: the citation.
 pub(super) async fn gateway_current(store: &Arc<MemoryStore>, cfg: &LeanConfig, path: &str) -> Option<String> {
     manifest::load(store.as_ref(), cfg).await.unwrap().and_then(|m| m.manifest.entries.get(path).map(|e| e.etag.clone()))
@@ -9224,11 +9257,18 @@ pub(super) struct Hooks {
     /// answer S3's 409 ConditionalRequestConflict without landing — what
     /// S3 says to a conditional write racing another on the same key.
     put_conflicts: std::sync::Mutex<Option<(String, u32)>>,
+    /// The next `put_whole` on a key ending with the suffix LANDS and then
+    /// answers 412, once: an SDK's retry of a conditional PUT whose first
+    /// response was lost meets the object its first attempt wrote.
+    put_lands_then_412: std::sync::Mutex<Option<String>>,
 }
 
 pub(super) struct Hooked(pub(super) Arc<MemoryStore>, pub(super) Hooks);
 
 impl Hooked {
+    pub(super) fn put_lands_then_412(&self, suffix: &str) {
+        *self.1.put_lands_then_412.lock().unwrap() = Some(suffix.to_string());
+    }
     fn before_put(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_put.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
@@ -9326,6 +9366,15 @@ impl ObjectStore for Hooked {
         if r.is_ok() {
             if let Some(h) = take_hook(&self.1.after_put, key) {
                 h();
+            }
+        }
+        if r.is_ok() {
+            let mut g = self.1.put_lands_then_412.lock().unwrap();
+            if g.as_deref().is_some_and(|s| key.ends_with(s)) {
+                *g = None;
+                return Err(flint_store::StoreError::PreconditionFailed(format!(
+                    "injected: the retry of a PUT that landed on {key}"
+                )));
             }
         }
         r

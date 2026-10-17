@@ -394,6 +394,17 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a UI edit that committed is never answered as failed** (2026-10-17;
+  found by auditing the LeanP1 model's mutants against the tests, MN2). When
+  a delete, save or rename's manifest CAS landed but its response was lost,
+  the SDK's retry met the object its first attempt wrote and answered 412;
+  the edit was judged again against its own result and refused
+  (`NoSuchFile` for a delete, tested; a save naming what it read would meet
+  its own version, `FileChanged`). Nothing was lost --
+  the document held the edit -- but the UI was told it failed. The edit now
+  recognises its own document after a 412 and answers committed
+  (`manifest::commit_edit`).
+
 - **pNFS volumes never detached from a node without SPDK** (2026-10-16).
   NodeUnstageVolume read the PV by the volume handle, but a pNFS handle
   carries the shard pin (`<pv>~m<shard>`) and the PV's name does not, so

@@ -512,8 +512,22 @@ pub async fn commit_edit<E>(
     flush: &str,
     edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), E>,
 ) -> Result<(), EditError<E>> {
+    // The document the last attempt sent, when its CAS answered 412 or
+    // 409. An SDK retries a conditional PUT whose response was lost, and
+    // the retry meets the object its first attempt wrote: if the document
+    // now IS the one sent, the edit committed, and it is answered so rather
+    // than judged again against itself (a delete would find its path gone
+    // and answer NoSuchFile; the model's GDelete acknowledges what it
+    // commits, `udel`). A peer's identical edit at the same seq (the same
+    // delete, raced) leaves the same document: committed either way.
+    let mut sent: Option<LeanManifest> = None;
     for _ in 0..EDIT_CAS_ATTEMPTS {
         let current = load(store, cfg).await.map_err(EditError::Store)?;
+        if let (Some(s), Some(c)) = (sent.as_ref(), current.as_ref()) {
+            if same_document(s, &c.manifest) {
+                return Ok(());
+            }
+        }
         let mut doc = current.as_ref().map(|l| l.manifest.clone()).unwrap_or_default();
         doc.seq += 1;
         doc.sole_writer = false;
@@ -526,12 +540,23 @@ pub async fn commit_edit<E>(
         match cas_write_retiring(store, cfg, &doc, before, expected.as_ref(), 0, flush, None).await {
             Ok(_) => return Ok(()),
             Err(LeanError::Store(StoreError::PreconditionFailed(_))) | Err(LeanError::Store(StoreError::Conflict(_))) => {
-                continue
+                sent = Some(doc);
+                continue;
             }
             Err(e) => return Err(EditError::Store(e)),
         }
     }
     Err(EditError::Contended)
+}
+
+/// Is `b` the document `a` is — the same generation with the same
+/// citations, tombstones and stamps? (`commit_edit`'s own-write check.)
+fn same_document(a: &LeanManifest, b: &LeanManifest) -> bool {
+    a.seq == b.seq
+        && a.entries == b.entries
+        && a.tombstones == b.tombstones
+        && a.sole_writer == b.sole_writer
+        && a.boundary_source == b.boundary_source
 }
 
 /// CAS-write the manifest document. `expected`: None ⇒ first write
