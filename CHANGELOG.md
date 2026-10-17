@@ -27,6 +27,12 @@ covered by the stability guarantee.
   `pnfs.controlAuth.serviceAccounts` (default on with the in-chart
   server): ServiceAccounts for the MDS and the data servers, a ClusterRole
   with `tokenreviews: create`, projected tokens for every caller.
+- **pNFS: a refused data server handle names its node** (2026-10-17). A
+  data server's `DS PUTFH refused` line now says which attached node the
+  handle was signed for, and its file and stripe; the MDS logs the node it
+  signs each layout's handles for. A handle of one node on another node's
+  session is a stolen handle, or a client kernel without 6b9785dc8b13
+  (shared pNFS DS connections across network namespaces, as on kind).
 - **pNFS: TLS on the control path** (2026-10-16; plan Phase 5a). The
   MDS's gRPC (data server registration, heartbeats, the CSI controller's
   volume calls) and each data server's DsControl (truncates, the MDS's
