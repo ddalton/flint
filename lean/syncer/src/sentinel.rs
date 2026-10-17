@@ -581,7 +581,8 @@ impl Syncer {
             whole_tree: false,
             id: String::new(),
         });
-        if pending.id.is_empty() {
+        let fresh = pending.id.is_empty();
+        if fresh {
             pending.id = uuid::Uuid::new_v4().to_string();
         }
         pending.consumed_mtime_unix_ns = pending.consumed_mtime_unix_ns.max(ns);
@@ -627,6 +628,10 @@ impl Syncer {
             _ => {}
         }
         self.save_pending(verb, &pending)?;
+        // The model's Touch: the request folded into the standing record (a
+        // fresh one when none stood), whichever door it came through.
+        self.trace("fold", serde_json::json!({"verb": format!("{verb:?}"), "id": pending.id,
+            "fresh": fresh, "nonces": pending.nonces}));
         Ok(())
     }
 

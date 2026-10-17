@@ -4,7 +4,8 @@
 mutate.py's twin for traces-core/ (the P1-lite traces TraceCore.tla
 reads, against LeanP1.tla). Each mutation edits ONE fact the converter maps to a check; a
 checker that accepted any of them would be checking less than it says.
-(mutate.py's `ack-ok` has no twin: the core has no ack.)
+(mutate.py's `ack-ok` has twins since the core replays the publish
+request, rows 15-17: `ack-*` and `carry-clock-swapped`.)
 
   mutate_core.py <traces-dir> <out-dir>   writes <out-dir>/<trace>.<name>.ndjson
 """
@@ -136,7 +137,49 @@ def cas_seq_skips(evs):
     evs[i]["seq"] += 1
 
 
+def ack_partial_invented(evs):
+    """the honour's ack says partial, naming a file the boundary carried"""
+    i = nth(evs, lambda e: e["ev"] == "ack" and e["status"] == "ok")
+    evs[i]["status"], evs[i]["dropped"] = "partial", ["keep.txt"]
+
+
+def ack_clock_swapped(evs):
+    """the ack names a clock other than the one its barrier stamped"""
+    i = nth(evs, lambda e: e["ev"] == "ack" and e["boundary"] == "sentinel")
+    evs[i]["boundary"] = "sentinel-deferred"
+
+
+def ack_seq_stale(evs):
+    """the ack names the seq before the one its barrier installed"""
+    i = nth(evs, lambda e: e["ev"] == "ack" and e.get("seq"))
+    evs[i]["seq"] -= 1
+
+
+def carry_clock_swapped(evs):
+    """the barrier that carried the request started under another clock"""
+    i = nth(evs, lambda e: e["ev"] == "barrier_start" and e["declared"] and e["source"] == "sentinel")
+    evs[i]["source"] = "drain"
+
+
+def ack_ok_over_a_peers_delete(evs):
+    """the honour says ok although the UI deleted the carried file (AK1's lie)"""
+    i = nth(evs, lambda e: e["ev"] == "ack" and e["status"] == "partial")
+    evs[i]["status"], evs[i]["dropped"] = "ok", []
+
+
+def ack_forgets_the_first_nonce(evs):
+    """the ack answers only the second touch of the folded record"""
+    i = nth(evs, lambda e: e["ev"] == "ack" and len(e["nonces"]) == 2)
+    evs[i]["nonces"] = evs[i]["nonces"][1:]
+
+
 MUTATIONS = [
+    ("a_ui_delete_of_a_carried_file_before_the_honour", "ack-ok-over-a-peers-delete", ack_ok_over_a_peers_delete),
+    ("a_second_touch_folds_into_the_carried_record", "ack-forgets-the-first-nonce", ack_forgets_the_first_nonce),
+    ("delete_over_a_peers_edit", "ack-partial-invented", ack_partial_invented),
+    ("delete_over_a_peers_edit", "ack-clock-swapped", ack_clock_swapped),
+    ("delete_over_a_peers_edit", "ack-seq-stale", ack_seq_stale),
+    ("delete_over_a_peers_edit", "carry-clock-swapped", carry_clock_swapped),
     ("delete_over_a_peers_edit", "over-theirs-dropped", over_theirs_dropped),
     ("delete_over_a_peers_edit", "outranked-invented", outranked_invented),
     ("delete_over_a_peers_edit", "over-delete-unrecorded", over_delete_unrecorded),

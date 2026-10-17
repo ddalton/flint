@@ -61,9 +61,17 @@ THE MAPPING (one place):
                                                      (M1); the age itself elapses
                                                      silently (TraceNext's Age)
   window_clear                     -> finish         Finish(w)
+  fold verb=Publish                -> touch          Touch(w): the request folded
+                                                     into the standing record
+  barrier_start while a record     -> (the consume)  its carry clock: the
+    stands                                           barrier's `source`
+  ack status=ok|partial            -> honor          Honor(w): status, dropped,
+                                    + retire         seq, clock, nonces; then
+                                                     RetireByAck(w)
   (no event)                       -> a Collect that takes nothing (TraceNext)
   claim verdict=waiting, gc per path, queue, sweep of manifest generations,
-    release, handed_off, observed (folded into verify), ack, conf_touch,
+    release, handed_off, observed (folded into verify), conf_touch (the
+    test's marker; the code's step is `fold`),
     renew (a held lease renewed: the model's holder is unchanged; a renew
     that FAILS logs `fence`, which is refused)
                                    -> (nothing)
@@ -125,6 +133,14 @@ def convert(lines):
     up_key = {e["key"]: j for j, e in enumerate(evs) if e["ev"] == "upload" and e.get("key")}
     early = set()  # upload events already stepped at a sweep
     barrier = {}  # w -> dict(claimed, observed, merge, scanned)
+    # The publish request (rows 15-17): a record stands from a fold to the
+    # ack that retires it. The model numbers a writer's touches 1, 2, ...;
+    # a nonce maps to the touch that first carried it, and an ack's nonces
+    # are checked only when every fold carried a nonce of its own.
+    touches = {}   # w -> folds so far
+    standing = {}  # w -> a record stands
+    nonce_n = {}   # (w, nonce) -> the model's touch number
+    exact = {}     # w -> every fold of the standing record added one nonce
 
     def ver(p, et, what):
         if (p, et) not in ver_of:
@@ -211,7 +227,14 @@ def convert(lines):
             steps.append((rec, i))
         elif ev == "barrier_start":
             barriers += 1
-            open_consume[w] = {"adopted": {}, "removed": set()}
+            clk = "none"
+            if standing.get(w):
+                # A barrier that begins while a record stands carries it
+                # (`barrier_inner`), under the clock it stamps.
+                clk = e["source"]
+                if clk not in ("sentinel", "sentinel-deferred", "drain"):
+                    raise Unsupported(f"a barrier carrying a declaration under clock {clk}")
+            open_consume[w] = {"adopted": {}, "removed": set(), "clk": clk}
             barrier[w] = {"claimed": False, "observed": {}, "merge": None, "scanned": False}
         elif ev == "consume":
             c = open_consume[w]
@@ -302,7 +325,37 @@ def convert(lines):
                     steps.append(({"ev": "sweep", "w": w, "h": by_key[k]}, i))
             elif e.get("removed", 0) > 0 and e.get("what") not in ("generations", "chunks"):
                 raise Unsupported(f"a sweep of {e.get('what')}")
-        elif ev in ("queue", "release", "handed_off", "ack", "conf_touch", "drill_hold", "renew"):
+        elif ev == "fold":
+            if e["verb"] != "Publish":
+                raise Unsupported(f"a {e['verb']} request: only publish is modelled")
+            touches[w] = touches.get(w, 0) + 1
+            n = touches[w]
+            if e["fresh"]:
+                exact[w] = True
+            if e["fresh"] != (not standing.get(w)):
+                raise Unsupported("a fold the trace's records disagree on (fresh vs standing)")
+            standing[w] = True
+            new = [x for x in e["nonces"] if (w, x) not in nonce_n]
+            if len(new) == 1:
+                nonce_n[(w, new[0])] = n
+            else:
+                exact[w] = False
+            steps.append(({"ev": "touch", "w": w}, i))
+        elif ev == "ack":
+            if e["verb"] != "Publish" or e["status"] not in ("ok", "partial"):
+                raise Unsupported(f"a {e['verb']} ack {e['status']}")
+            if not standing.get(w):
+                raise Unsupported("an ack with no record standing")
+            rec = {"ev": "honor", "w": w, "st": e["status"], "dropped": set(e["dropped"]),
+                   "src": e["boundary"]}
+            if e.get("seq") is not None:
+                rec["seq"] = seq_of(e)
+            if exact.get(w):
+                rec["nonces"] = {nonce_n[(w, x)] for x in e["nonces"]}
+            steps.append((rec, i))
+            steps.append(({"ev": "retire", "w": w}, i))
+            standing[w] = False
+        elif ev in ("queue", "release", "handed_off", "conf_touch", "drill_hold", "renew"):
             pass
         else:
             raise Unsupported(f"event {ev}")
@@ -328,8 +381,8 @@ def convert(lines):
         # The traces check out unscoped, never rescope, never fail a fetch,
         # and every tree in them writes.
         "Scopes": {frozenset(paths)}, "MaxRescopes": 0, "MaxFetchFails": 0, "Readers": set(),
-        # Rows 15-17 (2026-10-14): no request, no deposal, until the traces carry them.
-        "MaxTouches": 0, "MaxNonces": 32, "MaxDeposals": 0,
+        # Rows 15-17: the publish requests the trace folded; no deposal yet.
+        "MaxTouches": max(touches.values(), default=0), "MaxNonces": 32, "MaxDeposals": 0,
     }
     return steps, consts, ver_of
 
@@ -348,8 +401,8 @@ def write_out(steps, consts, gen, outdir: Path, name: str, overrides=None):
     # The core's claims, on the run the code actually performed.
     cfg += [f"INVARIANT {i}" for i in (
         "TypeOK", "Inv_CitationsLive", "Inv_OneName", "Inv_AckedNamed", "Inv_OneHolder",
-        "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches")]
-    cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles"]
+        "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches", "AK3", "AK4")]
+    cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1"]
     cfg += ["INVARIANT TraceProgress", "INVARIANT TraceIncomplete"]
     (outdir / "TraceCore.cfg").write_text("\n".join(cfg) + "\n")
     m = [f"{n + 1}\t{r['ev']}\tline {i + 1}" for n, (r, i) in enumerate(steps)]

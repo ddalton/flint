@@ -51,6 +51,8 @@ Match(e) ==
   \/ e.ev = "ui_rename" /\ GRename(e.p, e.q) /\ (Has(e, "seq") => seq' = e.seq)
   \/ /\ e.ev = "consume"
      /\ Consume(e.w)
+     \* The clock a carrying barrier stamps is the code's `source`.
+     /\ Has(e, "clk") => w'[e.w].clk = e.clk
      /\ Has(e, "adopted") => AdoptedBy(e.w) = e.adopted
      /\ Has(e, "removed") => RemovedBy(e.w) = e.removed
   \/ /\ e.ev = "scan"
@@ -96,6 +98,16 @@ Match(e) ==
   \* The retire logs' reap (M1): a handle retired at least G ago.
   \/ e.ev = "reap" /\ Reap(e.w, e.h)
   \/ e.ev = "finish" /\ Finish(e.w)
+  \* The publish request (rows 15-17): the fold, the honour's ack (what the
+  \* code wrote), and the retire that follows it.
+  \/ e.ev = "touch" /\ Touch(e.w)
+  \/ /\ e.ev = "honor" /\ Honor(e.w)
+     /\ w'[e.w].ack.st = e.st
+     /\ w'[e.w].ack.dropped = e.dropped
+     /\ w'[e.w].ack.src = e.src
+     /\ Has(e, "seq") => w'[e.w].ack.seq = e.seq
+     /\ Has(e, "nonces") => w'[e.w].ack.nonces = e.nonces
+  \/ e.ev = "retire" /\ RetireByAck(e.w)
 
 \* The bookkeeping every protocol step carries (`Next`'s first disjunct); a
 \* reap is the retire age's own step and carries its own.

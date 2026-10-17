@@ -374,6 +374,53 @@ async fn conformance_delete_over_a_peers_edit() {
     dump("delete_over_a_peers_edit", &buf);
 }
 
+/// The publish request's `partial` (rows 15-17, H10/L-135's shape): the
+/// floor's barrier carries A's declaration and publishes it; the UI deletes
+/// the declared file before the honour, whose barrier takes the delete. The
+/// carrier names the upload the document no longer cites, and the ack says
+/// so (`partial`, dropped work.txt): AK1 on the run the code performed.
+#[tokio::test]
+async fn conformance_a_ui_delete_of_a_carried_file_before_the_honour() {
+    let (store, buf, mut a, b, dir_a, _dir_b) = two_writers(&[("keep.txt", "keep")]).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("work.txt", "the declared bytes");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.touch("n-1");
+    a.poll_sentinels().unwrap();
+    a.cadence_barrier().await.unwrap();
+    assert!(gateway_current(&store, &a.cfg, "work.txt").await.is_some(), "fixture: the carry did not publish");
+    ui_delete(&store, &a, "work.txt").await;
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().unwrap();
+    assert_eq!(ack.status, "partial", "fixture: {ack:?}");
+    assert_eq!(ack.report.dropped, vec!["work.txt".to_string()], "fixture: {ack:?}");
+    dump("a_ui_delete_of_a_carried_file_before_the_honour", &buf);
+}
+
+/// A second touch FOLDS into the record the floor's barrier carried (row 15,
+/// D7: the record keeps its id across folds). The honour answers both
+/// nonces in one `ok` ack: AK3 and the fold on the run the code performed.
+#[tokio::test]
+async fn conformance_a_second_touch_folds_into_the_carried_record() {
+    let (store, buf, mut a, b, dir_a, _dir_b) = two_writers(&[("keep.txt", "keep")]).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("one.txt", "first");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.touch("n-1");
+    a.poll_sentinels().unwrap();
+    a.cadence_barrier().await.unwrap();
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("two.txt", "second");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.touch("n-2");
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+    assert_eq!(ack.status, "ok", "fixture: {ack:?}");
+    assert_eq!(ack.nonces, vec!["n-1".to_string(), "n-2".to_string()], "fixture: {ack:?}");
+    dump("a_second_touch_folds_into_the_carried_record", &buf);
+}
+
 /// A UI delete of a clean file: the first writer's barrier performs it (the
 /// tree's unlink and the document's delete in one barrier) and the other
 /// writer's tree follows.
