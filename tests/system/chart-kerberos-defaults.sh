@@ -255,7 +255,7 @@ if renders "pNFS Kerberos, data servers" "${PNFS[@]}" "${PK[@]}" --set pnfs.serv
     echo "✗ $c: no KerberosPrincipal flint-pnfs-ds"; fails=$((fails + 1))
   fi
   if doc_of StatefulSet flint-pnfs-ds; then
-    for kv in KRB5_KTNAME=/etc/flint-krb5/krb5.keytab FLINT_NFS_MIN_SEC=krb5i FLINT_NFS_REQUIRE_MACH_CRED=- \
+    for kv in KRB5_KTNAME=/etc/flint-krb5/krb5.keytab FLINT_NFS_MIN_SEC=krb5i FLINT_NFS_REQUIRE_MACH_CRED=true \
       FLINT_NFS_ENFORCE_PERMISSIONS=-; do
       got=$(env_of "${kv%%=*}" "$TMP/doc.yaml")
       if [ "$got" = "${kv#*=}" ]; then echo "✓ $c: ${kv%%=*}=${kv#*=}"
@@ -397,6 +397,11 @@ if renders "pNFS Kerberos, relaxed" "${PNFS[@]}" "${PK[@]}" --set pnfs.kerberos.
     if [ "$got" = "${kv#*=}" ]; then echo "✓ pNFS Kerberos, relaxed: ${kv%%=*}=${kv#*=}"
     else echo "✗ pNFS Kerberos, relaxed: ${kv%%=*} is $got, want ${kv#*=}"; fails=$((fails + 1)); fi
   done
+  # Phase 3b: the data servers follow requireMachCred off too.
+  doc_of StatefulSet flint-pnfs-ds
+  got=$(env_of FLINT_NFS_REQUIRE_MACH_CRED "$TMP/doc.yaml")
+  if [ "$got" = - ]; then echo "✓ pNFS Kerberos, relaxed: the data servers do not require SP4_MACH_CRED"
+  else echo "✗ pNFS Kerberos, relaxed: FLINT_NFS_REQUIRE_MACH_CRED is $got on the data servers"; fails=$((fails + 1)); fi
 fi
 
 # The MDS's server env, by name, is the RWX servers' (nfs_krb5::server_pod_parts):

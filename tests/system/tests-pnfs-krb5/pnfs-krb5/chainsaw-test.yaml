@@ -164,6 +164,16 @@ spec:
             if echo "$l" | grep -F 'Refusing sec='; then
               echo "FAIL: a client sent $d calls below the floor"; exit 1
             fi
+            # Phase 3b: the data server requires SP4_MACH_CRED, the node's
+            # client got it, and nothing was refused for its credential.
+            echo "$l" | grep -F 'SP4_MACH_CRED required' ||
+              { echo "FAIL: $d does not require SP4_MACH_CRED"; exit 1; }
+            g=$(echo "$l" | grep -cF 'is SP4_MACH_CRED, bound to gss:' || true)
+            echo "$d: $g SP4_MACH_CRED client(s); $(echo "$l" | grep -cF 'CONN_NOT_BOUND_TO_SESSION' || true) unbound-connection SEQUENCE(s), $(echo "$l" | grep -cF 'BIND_CONN_TO_SESSION' || true) bind(s)"
+            [ "$g" -gt 0 ] || { echo "FAIL: no client of $d got SP4_MACH_CRED"; exit 1; }
+            if echo "$l" | grep -E 'EXCHANGE_ID refused|WRONG_CRED|CLID_INUSE|OP_NOT_IN_SESSION'; then
+              echo "FAIL: $d refused a node's own session traffic"; exit 1
+            fi
             # Phase 4: only signed handles, and every one the MDS handed
             # out verified for its node's session.
             echo "$l" | grep -F 'Filehandles: signed handles only' ||
@@ -193,7 +203,7 @@ spec:
         content: |
           for d in $(kubectl -n flint-system get pod -l app=flint-pnfs-ds -o jsonpath='{.items[*].metadata.name}'); do
             echo "== $d"; kubectl -n flint-system exec "$d" -c ds -- sh -c 'find /data -type f | head -20; du -s --block-size=1 /data'
-            kubectl -n flint-system logs "$d" -c ds --tail=-1 | grep -aE 'Security|GSS|Refusing|refused|❌' | tail -20
+            kubectl -n flint-system logs "$d" -c ds --tail=-1 | grep -aE 'Security|GSS|Refusing|refused|❌|SP4_MACH_CRED|CONN_NOT_BOUND|BIND_CONN|WRONG_CRED' | tail -20
           done
           for p in pnfs-a pnfs-b; do
             n=$(kubectl -n "$NAMESPACE" get pod "$p" -o jsonpath='{.spec.nodeName}')

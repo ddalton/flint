@@ -443,7 +443,18 @@ and an LDAP bind password Secret and CA must be there too.
 authenticated and signed (`krb5i`) or sealed (`krb5p`), metadata and data:
 the floor refuses `sec=sys` mounts, the allowlist decides who connects, a
 caller is its `idmap`/directory identity with permissions enforced, and
-sessions are bound to their machine (SP4_MACH_CRED).
+sessions are bound to their machine (SP4_MACH_CRED), on the MDS and on the
+data servers.
+
+**Data server sessions** (Phase 3b). A data server grants SP4_MACH_CRED to
+a `krb5i` or `krb5p` client and, with `pnfs.kerberos.requireMachCred` (the
+default, as on the MDS), refuses one that does not get it. Such a session
+is used only on connections its machine bound to it (CREATE_SESSION, or
+BIND_CONN_TO_SESSION with the machine's key): a session id seen on the wire
+is no use from another connection, so another node cannot borrow a node's
+session, and with it the handles signed for that node. Every I/O op needs
+the session (a compound without SEQUENCE is refused with
+OP_NOT_IN_SESSION), and a compound stops at its first refused op.
 
 **Only the nodes a volume is attached to** (`pnfs.kerberos.attachedNodesOnly`,
 the default; Phase 2). One MDS shard serves every pNFS volume it holds, each
@@ -560,8 +571,6 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
   With `attachedNodesOnly` the DS still drops a node attached to no pNFS
   volume at all (it watches the same PVs and VolumeAttachments as the MDS,
   through ServiceAccount `flint-pnfs-ds`).
-- **DS sessions are not bound to the machine.** The DS answers SP4_NONE
-  to an SP4_MACH_CRED request (Phase 3b).
 - **The control path** between the MDS and the DSes (gRPC: registration,
   heartbeats, the F66 relay of a client's I/O to a file the MDS cannot
   layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), and each

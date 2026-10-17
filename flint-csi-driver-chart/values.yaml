@@ -784,14 +784,14 @@ pnfs:
   # anonIdentity, ldap, nodeKeytab and deletionPolicy (set them there;
   # nfs.kerberos.enabled itself may stay false), and nfs.rootSquash.
   #
-  # Today (Phase 1) the MDS does Kerberos: each shard has its own
-  # principal, nfs/flint-pnfs-mds-<shard>.<namespace>.svc.<clusterDomain>,
-  # and the floor, allowlist, idmap, enforced permissions and
-  # SP4_MACH_CRED apply to pNFS mounts. The data servers do NOT do
-  # Kerberos yet, so a Kerberos client gets no layouts: ALL its I/O goes
-  # through the MDS, under Kerberos, and files it writes stay on the MDS
-  # volume (size pnfs.server.mds.storage for them). AUTH_SYS mounts still
-  # get layouts, but the floor below refuses them.
+  # Each MDS shard has its own principal,
+  # nfs/flint-pnfs-mds-<shard>.<namespace>.svc.<clusterDomain>, and the
+  # floor, allowlist, idmap, enforced permissions and SP4_MACH_CRED apply
+  # to pNFS mounts. With dataServers (below, the default) the data servers
+  # do Kerberos too and Kerberos clients get layouts; with it off they get
+  # none, ALL their I/O goes through the MDS, and files they write stay on
+  # the MDS volume (size pnfs.server.mds.storage for them). The floor
+  # refuses AUTH_SYS mounts.
   #
   # Before turning it on, unmount every sec=sys pNFS volume on each node:
   # the kernel reuses a node's AUTH_SYS client for new mounts of the same
@@ -803,7 +803,9 @@ pnfs:
     # requireMachCred: false.
     minSec: krb5i
     # Every client must ask for SP4_MACH_CRED (FLINT_NFS_REQUIRE_MACH_CRED),
-    # as nfs.kerberos.requireMachCred.
+    # as nfs.kerberos.requireMachCred, at the MDS and (with dataServers) at
+    # the data servers: a session there is then used only on connections
+    # its machine bound to it (Phase 3b).
     requireMachCred: true
     # FLINT_NFS_ENFORCE_PERMISSIONS on the MDS: enforce, warn or off.
     enforcePermissions: enforce

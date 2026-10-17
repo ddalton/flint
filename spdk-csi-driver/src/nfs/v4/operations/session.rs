@@ -314,7 +314,7 @@ pub fn require_mach_cred_from_env() -> Result<bool, String> {
 ///   has gone (CLOSE, OPEN_DOWNGRADE, LOCKU, DELEGRETURN, TEST_STATEID,
 ///   FREE_STATEID). Not WRITE or COMMIT: those keep the user's identity,
 ///   which the permission checks need.
-fn mach_cred_grant(client_must_allow: &[u32]) -> crate::nfs::v4::compound::Sp4MachCred {
+pub(crate) fn mach_cred_grant(client_must_allow: &[u32]) -> crate::nfs::v4::compound::Sp4MachCred {
     use crate::nfs::v4::protocol::opcode;
     let bit = |op: u32| -> (usize, u32) { ((op / 32) as usize, 1u32 << (op % 32)) };
     let set = |ops: &[u32]| -> Vec<u32> {
