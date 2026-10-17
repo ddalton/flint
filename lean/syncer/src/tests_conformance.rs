@@ -21,6 +21,7 @@ use flint_store::memory::MemoryStore;
 use sha2::{Digest, Sha256};
 
 use super::control;
+use super::lease;
 use super::manifest;
 use super::sentinel::Verb;
 use super::tests::{
@@ -419,6 +420,149 @@ async fn conformance_a_second_touch_folds_into_the_carried_record() {
     assert_eq!(ack.status, "ok", "fixture: {ack:?}");
     assert_eq!(ack.nonces, vec!["n-1".to_string(), "n-2".to_string()], "fixture: {ack:?}");
     dump("a_second_touch_folds_into_the_carried_record", &buf);
+}
+
+/// A restart: a new incarnation of the writer over the same tree and state,
+/// through the binary's startup (`run_loop`): the release of a cell a
+/// previous container left held (it traces `start`, the model's Restart),
+/// the checkout (a no-op on a live tree), and the settle of a pending
+/// request. The store is the one the writer had, hooked or not.
+async fn restart(store: Arc<dyn flint_store::ObjectStore>, buf: &Buf, root: &std::path::Path) -> Syncer {
+    let cfg = super::tests::cfg_for(root);
+    let state = super::state::SyncerState::open(cfg.state_dir()).unwrap();
+    let mut sc = Syncer { store, cfg, state, lease: None, cell_written_at: None, noted_not_regular: Default::default() };
+    traced(&mut sc, buf);
+    lease::release_stale_own(&mut sc).await.unwrap();
+    sc.checkout().await.unwrap();
+    sc.settle_pending_at_startup().await.unwrap();
+    sc
+}
+
+/// A crash: the barrier stops at the first DELETE of `key` (step 6, after
+/// its CAS, before its collector and step 7), as a killed process would —
+/// no event and no store effect after that point.
+async fn crash_at_delete(hs: &Arc<Hooked>, key: &str, run: impl std::future::Future<Output = ()>) {
+    use futures::FutureExt;
+    hs.before_delete(key, || panic!("the crash"));
+    let r = std::panic::AssertUnwindSafe(run).catch_unwind().await;
+    let msg = r.err().and_then(|e| e.downcast_ref::<&str>().map(|s| s.to_string()));
+    assert_eq!(msg.as_deref(), Some("the crash"), "fixture: the barrier never reached the delete");
+}
+
+/// The restart row (NR1, row 16): the agent's delete, unpublished when the
+/// container restarts, is not brought back by the restart — a live tree is
+/// never re-materialised — and the next barriers publish it.
+#[tokio::test]
+async fn conformance_an_unpublished_delete_survives_a_restart() {
+    let (store, buf, a, mut b, dir_a, dir_b) = two_writers(&[("gone.txt", "doomed"), ("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.delete("gone.txt");
+    drop(a);
+    let mut a = restart(store.clone(), &buf, dir_a.path()).await;
+    assert_eq!(read(dir_a.path(), "gone.txt"), None, "the restart brought the agent's delete back");
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    assert!(gateway_current(&store, &a.cfg, "gone.txt").await.is_none(), "fixture: the delete never published");
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir_b.path(), "gone.txt"), None, "fixture: the delete never reached B");
+    dump("an_unpublished_delete_survives_a_restart", &buf);
+}
+
+/// A crash between the CAS and step 7 (the restart rows' window, H10's and
+/// FINDINGS Table 3's): the install landed, step 7 never ran, so the
+/// baseline still holds v1. The restarted writer's next barrier converges
+/// on its own upload (ContentConverges) and publishes nothing again; B
+/// takes the edit.
+#[tokio::test]
+async fn conformance_a_restart_between_the_cas_and_step_7() {
+    let (hs, store, buf, mut a, mut b, dir_a, dir_b) = two_writers_hooked(&[("x.txt", "v1"), ("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    let v1 = gateway_current(&store, &a.cfg, "x.txt").await.unwrap();
+    let v1_key = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].key.clone();
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("x.txt", "A's v2");
+    backdate_baseline(&a, "x.txt");
+    crash_at_delete(&hs, &v1_key, async {
+        let _ = a.run_barrier().await;
+    })
+    .await;
+    assert_ne!(gateway_current(&store, &a.cfg, "x.txt").await, Some(v1), "fixture: the install did not land");
+    drop(a);
+    let mut a = restart(hs.clone(), &buf, dir_a.path()).await;
+    let seq = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq;
+    a.run_barrier().await.unwrap();
+    assert_eq!(
+        manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.seq,
+        seq,
+        "the restarted writer re-published its own install"
+    );
+    b.run_barrier().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's v2"), "fixture: the edit never reached B");
+    dump("a_restart_between_the_cas_and_step_7", &buf);
+}
+
+/// A crash between the CAS and step 7 of the HONOUR's barrier, then a UI
+/// delete of the file it published. Step 7 never ran, so the restarted
+/// tree still reads the agent's v2 as unpublished, and the settle's barrier
+/// publishes it again over the delete it never integrated — the delete
+/// override (mine wins, the deleted version recorded) — and answers `ok`
+/// from the document that cites it. (The model's Restart keeps the stale
+/// baseline too; FINDINGS Table 3's rows live in this window.)
+#[tokio::test]
+async fn conformance_a_restart_before_step_7_republishes_over_a_ui_delete() {
+    let (hs, store, buf, mut a, b, dir_a, _dir_b) = two_writers_hooked(&[("x.txt", "v1"), ("keep.txt", "keep")]).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    let v1_key = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["x.txt"].key.clone();
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("x.txt", "A's declared v2");
+    backdate_baseline(&a, "x.txt");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.touch("n-1");
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    crash_at_delete(&hs, &v1_key, async {
+        let _ = a.honor_pending(Verb::Publish, false).await;
+    })
+    .await;
+    assert!(a.read_ack(Verb::Publish).is_none(), "fixture: an ack was written before the crash");
+    ui_delete(&store, &a, "x.txt").await;
+    drop(a);
+    let a = restart(hs.clone(), &buf, dir_a.path()).await;
+    let ack = a.read_ack(Verb::Publish).expect("the restart answered nothing");
+    assert_eq!(ack.status, "ok", "fixture: {ack:?}");
+    assert!(
+        ack.report.conflicts.iter().any(|c| c.path == "x.txt" && c.kind.starts_with("commit-recreated-deleted")),
+        "fixture: the delete override left no record: {ack:?}"
+    );
+    assert!(gateway_current(&store, &a.cfg, "x.txt").await.is_some(), "fixture: x.txt is not cited");
+    dump("a_restart_before_step_7_republishes_over_a_ui_delete", &buf);
+}
+
+/// H10's restart route (rows 15-17): the honour's barrier installs A's
+/// declared edit and runs step 7, and the container dies before the ack;
+/// the UI deletes the declared file; the restarted writer's settle re-runs
+/// the barrier, which takes the delete, and answers from ITS document,
+/// which no longer cites the file: `partial` (AK1 across a restart, on the
+/// run the code performed).
+#[tokio::test]
+async fn conformance_a_restart_before_the_ack_answers_a_ui_delete_partial() {
+    let (store, buf, mut a, b, dir_a, _dir_b) = two_writers(&[("x.txt", "v1"), ("keep.txt", "keep")]).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("x.txt", "A's declared v2");
+    backdate_baseline(&a, "x.txt");
+    Agent { name: "A", sc: &a, root: dir_a.path() }.touch("n-1");
+    a.poll_sentinels().unwrap();
+    // The honour's barrier, through step 7; the ack is never written.
+    a.declared_barrier_as("sentinel").await.unwrap();
+    assert!(a.read_ack(Verb::Publish).is_none(), "fixture: an ack was written");
+    ui_delete(&store, &a, "x.txt").await;
+    drop(a);
+    let a = restart(store.clone(), &buf, dir_a.path()).await;
+    let ack = a.read_ack(Verb::Publish).expect("the restart answered nothing");
+    assert_eq!(ack.status, "partial", "fixture: {ack:?}");
+    assert_eq!(ack.report.dropped, vec!["x.txt".to_string()], "fixture: {ack:?}");
+    dump("a_restart_before_the_ack_answers_a_ui_delete_partial", &buf);
 }
 
 /// A UI delete of a clean file: the first writer's barrier performs it (the

@@ -649,9 +649,14 @@ pub async fn release_stale_own(sc: &mut Syncer) -> LeanResult<()> {
             // mid-commit, and neither this release nor the next claim of
             // a released cell rotates, so its CAS on the unmoved pointer
             // landed. Rotate first, as that arm does.
-            if state.epoch != inc.epoch {
+            let rotated = state.epoch != inc.epoch;
+            if rotated {
                 manifest::rotate_for_takeover(sc.store.as_ref(), &sc.cfg, state.epoch).await?;
             }
+            // The model's Restart: a new incarnation of this writer, which
+            // drops the barrier a previous one left in flight and frees the
+            // cell it held.
+            sc.trace("start", serde_json::json!({"held": true, "rotated": rotated}));
             sc.lease = Some(EpochLease {
                 holder_id: state.holder_id,
                 epoch: state.epoch,
@@ -661,6 +666,7 @@ pub async fn release_stale_own(sc: &mut Syncer) -> LeanResult<()> {
             return release(sc).await;
         }
     }
+    sc.trace("start", serde_json::json!({"held": false, "rotated": false}));
     Ok(())
 }
 

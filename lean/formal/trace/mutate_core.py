@@ -173,7 +173,23 @@ def ack_forgets_the_first_nonce(evs):
     evs[i]["nonces"] = evs[i]["nonces"][1:]
 
 
+def restart_rematerialises(evs):
+    """the barrier after the restart brings back the delete the agent never published (NR1)"""
+    s = nth(evs, lambda e: e["ev"] == "start")
+    start = next(e for e in evs if e["ev"] == "conf_start")
+    j = next(k for k in range(s, len(evs)) if evs[k]["ev"] == "barrier_start" and evs[k]["holder"] == evs[s]["holder"])
+    evs.insert(j + 1, {"ts_ms": 0, "mono_ms": 0, "holder": evs[s]["holder"], "ev": "consume", "path": "gone.txt",
+                       "etag": start["entries"]["gone.txt"], "action": "adopted", "from": "manifest"})
+
+
+def restart_forgotten(evs):
+    """the crashed incarnation's barrier is never abandoned: no restart"""
+    del evs[nth(evs, lambda e: e["ev"] == "start")]
+
+
 MUTATIONS = [
+    ("an_unpublished_delete_survives_a_restart", "restart-rematerialises", restart_rematerialises),
+    ("a_restart_between_the_cas_and_step_7", "restart-forgotten", restart_forgotten),
     ("a_ui_delete_of_a_carried_file_before_the_honour", "ack-ok-over-a-peers-delete", ack_ok_over_a_peers_delete),
     ("a_second_touch_folds_into_the_carried_record", "ack-forgets-the-first-nonce", ack_forgets_the_first_nonce),
     ("delete_over_a_peers_edit", "ack-partial-invented", ack_partial_invented),

@@ -53,7 +53,9 @@ Match(e) ==
      /\ Consume(e.w)
      \* The clock a carrying barrier stamps is the code's `source`.
      /\ Has(e, "clk") => w'[e.w].clk = e.clk
-     /\ Has(e, "adopted") => AdoptedBy(e.w) = e.adopted
+     \* A converge onto the version the tree already holds (its own write,
+     \* installed before a restart skipped step 7) changes nothing there.
+     /\ Has(e, "adopted") => AdoptedBy(e.w) = {a \in e.adopted : w[e.w].local[a[1]] # a[2]}
      /\ Has(e, "removed") => RemovedBy(e.w) = e.removed
   \/ /\ e.ev = "scan"
      /\ Scan(e.w)
@@ -85,7 +87,8 @@ Match(e) ==
      \* citation, or the version a delete of theirs removed where mine
      \* re-creates the path.
      /\ Has(e, "surfaced") =>
-          e.surfaced = {c \in conflicts' \ conflicts :
+          e.surfaced \cup {<<p, DeletedAt(e.w, p)>> : p \in (IF Has(e, "sdel") THEN e.sdel ELSE {})}
+            = {c \in conflicts' \ conflicts :
                           /\ c[2] # Nil
                           /\ \/ c[2] = doc[c[1]]
                              \/ doc[c[1]] = Nil /\ c[2] = DeletedAt(e.w, c[1])}
@@ -108,6 +111,8 @@ Match(e) ==
      /\ Has(e, "seq") => w'[e.w].ack.seq = e.seq
      /\ Has(e, "nonces") => w'[e.w].ack.nonces = e.nonces
   \/ e.ev = "retire" /\ RetireByAck(e.w)
+  \* A new incarnation (`release_stale_own`'s `start`).
+  \/ e.ev = "restart" /\ Restart(e.w)
 
 \* The bookkeeping every protocol step carries (`Next`'s first disjunct); a
 \* reap is the retire age's own step and carries its own.

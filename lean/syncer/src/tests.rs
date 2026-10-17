@@ -9450,7 +9450,7 @@ impl Hooked {
     fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_get_return.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
-    fn before_delete(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+    pub(super) fn before_delete(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_delete.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
     fn after_head(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {

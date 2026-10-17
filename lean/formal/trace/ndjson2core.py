@@ -68,6 +68,10 @@ THE MAPPING (one place):
   ack status=ok|partial            -> honor          Honor(w): status, dropped,
                                     + retire         seq, clock, nonces; then
                                                      RetireByAck(w)
+  start (a new incarnation's       -> restart        Restart(w): the barrier a
+    `release_stale_own`)                             crash left in flight is
+                                                     dropped; a takeover rotation
+                                                     at the start is refused
   (no event)                       -> a Collect that takes nothing (TraceNext)
   claim verdict=waiting, gc per path, queue, sweep of manifest generations,
     release, handed_off, observed (folded into verify), conf_touch (the
@@ -141,6 +145,7 @@ def convert(lines):
     standing = {}  # w -> a record stands
     nonce_n = {}   # (w, nonce) -> the model's touch number
     exact = {}     # w -> every fold of the standing record added one nonce
+    restarts = 0
 
     def ver(p, et, what):
         if (p, et) not in ver_of:
@@ -292,12 +297,20 @@ def convert(lines):
                 raise Unsupported("a lost CAS: the model's commit section has one holder")
             steps.append(({"ev": "install", "w": w, "outranked": set(m["outranked"]),
                            "over": set(m.get("over_theirs", [])), "seq": seq_of(e),
-                           "foreign": m["foreign"], "gone": m["gone"], "surfaced": set()}, i))
+                           "foreign": m["foreign"], "gone": m["gone"], "surfaced": set(), "sdel": set()}, i))
             barrier[w]["install"] = steps[-1][0]
         elif ev == "surface":
             # A record written after the CAS, naming the version this install
             # published over. It belongs to that install.
-            barrier[w]["install"]["surfaced"].add((e["path"], ver(e["path"], e["etag"], "surface")))
+            # A record of a DELETE this install went over names the deleted
+            # version by etag alone, which a re-upload of the same bytes
+            # shares: it is passed by path, and the check reads the version
+            # the tombstone names (DeletedAt). Otherwise by key, then etag.
+            if e.get("deleted"):
+                barrier[w]["install"]["sdel"].add(e["path"])
+            else:
+                h = by_key.get(e.get("key")) or ver(e["path"], e["etag"], "surface")
+                barrier[w]["install"]["surfaced"].add((e["path"], h))
         elif ev == "gc":
             if "retired" in e:
                 steps.append(({"ev": "collect", "w": w, "retired": e["retired"]}, i))
@@ -325,6 +338,14 @@ def convert(lines):
                     steps.append(({"ev": "sweep", "w": w, "h": by_key[k]}, i))
             elif e.get("removed", 0) > 0 and e.get("what") not in ("generations", "chunks"):
                 raise Unsupported(f"a sweep of {e.get('what')}")
+        elif ev == "start":
+            if e["rotated"]:
+                raise Unsupported("a start that rotated the manifest (an acquire whose container died)")
+            restarts += 1
+            # What the crashed incarnation had in flight is gone with it.
+            open_consume.pop(w, None)
+            barrier.pop(w, None)
+            steps.append(({"ev": "restart", "w": w}, i))
         elif ev == "fold":
             if e["verb"] != "Publish":
                 raise Unsupported(f"a {e['verb']} request: only publish is modelled")
@@ -367,7 +388,7 @@ def convert(lines):
     consts = {
         "Writers": set(names), "Free": paths - set(seed), "Paths": paths,
         "MaxMint": max_mint, "MaxUI": hitl, "MaxRemovals": removals,
-        "MaxBarriers": barriers + 1, "MaxRestarts": 0, "MaxSyncs": 0, "MaxCopies": copies,
+        "MaxBarriers": barriers + 1, "MaxRestarts": restarts, "MaxSyncs": 0, "MaxCopies": copies,
         "MaxAges": max(reaps, 1),
         # THE CODE'S SHAPE: every rule on.
         **{k: True for k in (
@@ -402,7 +423,7 @@ def write_out(steps, consts, gen, outdir: Path, name: str, overrides=None):
     cfg += [f"INVARIANT {i}" for i in (
         "TypeOK", "Inv_CitationsLive", "Inv_OneName", "Inv_AckedNamed", "Inv_OneHolder",
         "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches", "AK3", "AK4")]
-    cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1"]
+    cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1", "PROPERTY NR1"]
     cfg += ["INVARIANT TraceProgress", "INVARIANT TraceIncomplete"]
     (outdir / "TraceCore.cfg").write_text("\n".join(cfg) + "\n")
     m = [f"{n + 1}\t{r['ev']}\tline {i + 1}" for n, (r, i) in enumerate(steps)]

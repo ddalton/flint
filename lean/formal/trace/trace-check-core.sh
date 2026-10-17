@@ -95,8 +95,7 @@ else
   # that only RESTRICT the model (SweepUnderLease, GatewaySweepGrace) or
   # guard a step no scenario takes (GatewayJudgesRead: no save is refused;
   # GatewayIgnoresLease: no save lands while a writer holds the lease;
-  # CollectorSparesCited: no install retires a handle it still cites;
-  # ContentConverges: no scenario restarts between a CAS and step 7) are
+  # CollectorSparesCited: no install retires a handle it still cites) are
   # the model checker's to show (gen-leanp1.sh).
   check "$TRACES"/both_edit_one_file.ndjson reject control-no-r7 --set=CommitSurfacesForeign=FALSE
   check "$TRACES"/commit_withholds_a_swept_upload.ndjson reject control-commit-blind --set=CommitVerifiesUploads=FALSE
@@ -113,6 +112,9 @@ else
   # A rename in two CASes cannot follow the code's one: its first CAS cites
   # one handle at both names, and the check stops UNSAFE right there.
   check "$TRACES"/ui_rename.ndjson unsafe control-rename-two-cas --set=RenameAtomic=FALSE
+  # A restart between a CAS and step 7: without the converge the model's
+  # restarted tree cannot take its own install as the code's does.
+  check "$TRACES"/a_restart_between_the_cas_and_step_7.ndjson reject control-no-convergence --set=ContentConverges=FALSE
 fi
 echo "work dir: $WORK"
 [ "$FAIL" -eq 0 ] && echo "trace check (core): ok" || { echo "trace check (core): $FAIL FAILED"; exit 1; }
