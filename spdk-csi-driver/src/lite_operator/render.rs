@@ -1050,11 +1050,12 @@ pub fn deployment(
 
     // Kerberos (`spec.security.kerberos`): the keytab, `KRB5_KTNAME`,
     // the floor, allowlist, idmap, SP4_MACH_CRED and the directory, as
-    // the RWX servers get them (`nfs_krb5::server_pod_parts`). The
+    // the RWX servers get them, mounted outside the config directory
+    // (`kerberos::hub_pod_parts`). The
     // reconcile renders this only once the keytab Secret exists and the
     // spec validated (`lite_operator::kerberos::validate`).
     if let Some(sec) = &kerberos {
-        let (e, v, m) = crate::nfs_krb5::server_pod_parts(sec);
+        let (e, v, m) = crate::lite_operator::kerberos::hub_pod_parts(sec);
         env.extend(e);
         volumes.extend(v);
         volume_mounts.extend(m);

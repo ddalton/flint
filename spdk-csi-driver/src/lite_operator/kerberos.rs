@@ -202,6 +202,41 @@ pub fn security(share: &FlintShare, k: &KerberosSpec) -> ServerSecurity {
     sec
 }
 
+/// Where the hub mounts its keytab and the directory's CA: OUT of
+/// `/etc/flint`, which is the hub's config ConfigMap (kubelet's atomic
+/// writer owns that directory; a foreign mount point inside it is
+/// fragile), as the pNFS MDS chart does (`krb5ServerMounts`).
+pub const HUB_KEYTAB_DIR: &str = "/etc/flint-krb5";
+pub const HUB_LDAP_CA_DIR: &str = "/etc/flint-ldap-ca";
+
+/// [`crate::nfs_krb5::server_pod_parts`] for a hub: the same env,
+/// volumes and mounts, the keytab and CA moved to [`HUB_KEYTAB_DIR`] and
+/// [`HUB_LDAP_CA_DIR`] with the env that names them.
+pub fn hub_pod_parts(
+    sec: &ServerSecurity,
+) -> (
+    Vec<k8s_openapi::api::core::v1::EnvVar>,
+    Vec<k8s_openapi::api::core::v1::Volume>,
+    Vec<k8s_openapi::api::core::v1::VolumeMount>,
+) {
+    let (mut env, volumes, mut mounts) = crate::nfs_krb5::server_pod_parts(sec);
+    for m in &mut mounts {
+        match m.name.as_str() {
+            "krb5-keytab" => m.mount_path = HUB_KEYTAB_DIR.into(),
+            "ldap-ca" => m.mount_path = HUB_LDAP_CA_DIR.into(),
+            _ => {}
+        }
+    }
+    for e in &mut env {
+        if e.name == "KRB5_KTNAME" {
+            e.value = Some(format!("{HUB_KEYTAB_DIR}/krb5.keytab"));
+        } else if e.name == crate::nfs::gss_ldap::CA_FILE_ENV {
+            e.value = Some(format!("{HUB_LDAP_CA_DIR}/ca.crt"));
+        }
+    }
+    (env, volumes, mounts)
+}
+
 /// The share's `KerberosPrincipal` (krb5-operator): every server name's
 /// `nfs/` principal, keys in Secret [`principal_name`]. The caller sets
 /// the owner reference to the FlintShare, which survives hibernation.
@@ -338,6 +373,27 @@ mod tests {
             let e = validate(&s, s.spec.kerberos().unwrap(), false).expect_err(field);
             assert_eq!(e.reason(), "KerberosInvalid", "{field}");
         }
+    }
+
+    #[test]
+    fn nothing_is_mounted_inside_the_hubs_config_directory() {
+        let mut kk = k();
+        kk.ldap = Some(
+            serde_json::from_value(serde_json::json!({
+                "url": "ldaps://ldap.corp.example", "userBase": "dc=x", "caSecret": {"name": "ca"},
+            }))
+            .unwrap(),
+        );
+        let s = share(kk, None);
+        let (env, volumes, mounts) = hub_pod_parts(&security(&s, s.spec.kerberos().unwrap()));
+        let names: Vec<_> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["krb5-keytab", "ldap-ca"]);
+        for m in &mounts {
+            assert!(!m.mount_path.starts_with("/etc/flint/"), "{} at {}", m.name, m.mount_path);
+        }
+        let get = |n: &str| env.iter().find(|e| e.name == n).and_then(|e| e.value.clone());
+        assert_eq!(get("KRB5_KTNAME").as_deref(), Some("/etc/flint-krb5/krb5.keytab"));
+        assert_eq!(get(crate::nfs::gss_ldap::CA_FILE_ENV).as_deref(), Some("/etc/flint-ldap-ca/ca.crt"));
     }
 
     #[test]
