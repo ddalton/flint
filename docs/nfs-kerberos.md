@@ -813,6 +813,16 @@ already running without Kerberos is scaled to zero, so a share that asks
 for Kerberos is never served as `sec=sys`. A Kerberos hub already running
 keeps its key.
 
+**The single-hub chart** (`flint-lite-chart`) has the same settings under
+`security.kerberos` (`enabled`, `realm`, `realmRef`, `realmNamespace`,
+`clusterDomain`, `minSec`, `requireMachCred`, `allowedPrincipals`, `idmap`,
+`machineIdentity`, `anonIdentity`, `rootSquash`, `serverNames`,
+`deletionPolicy`, `ldap`) and renders the same hub, checked by the render
+parity test: `KerberosPrincipal flint-lite-krb5`, Secret `flint-lite-krb5`.
+Its `security.kerberos.enforcePermissions` (default true) decides
+enforcement under Kerberos; `security.enforcePermissions` is not read
+then. A setting the hub would refuse fails the render.
+
 **Not behind the NFS proxy.** The proxy refuses RPCSEC_GSS (a GSS context
 is bound to the server principal), so with the operator's `nfsProxy`
 on, a Kerberos share is `KerberosBehindProxy` and runs no hub.
