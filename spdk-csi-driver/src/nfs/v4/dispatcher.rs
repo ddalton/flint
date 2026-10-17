@@ -3700,6 +3700,12 @@ impl CompoundDispatcher {
                         warn!("LAYOUTGET '{}': a legacy pin cannot carry a signed data server handle → LAYOUTUNAVAIL", lg_file);
                         return OperationResult::LayoutGet(Nfs4Status::LayoutUnavail, None);
                     }
+                    // Phase 4b: and for the file's volume (the first
+                    // component of its export path), so a DS with the
+                    // per-volume map stops serving them at a detach.
+                    let volume = crate::pnfs::ds_fh::volume_tag(
+                        &crate::nfs::node_authz::volume_of(std::path::Path::new(&lg_file)).unwrap_or_default(),
+                    );
                     let layout_content = Self::encode_file_layout_striped(
                         &layout.segments,
                         &filehandle,
@@ -3707,7 +3713,7 @@ impl CompoundDispatcher {
                         layout.device_id_bin,
                         layout.file_id,
                         layout.stripe_width,
-                        self.ds_fh_keys.as_deref().zip(node.as_deref()),
+                        self.ds_fh_keys.as_deref().zip(node.as_deref()).map(|(k, n)| (k, n, volume)),
                     );
 
                     debug!("   📤 FILE layout content encoded: {} bytes", layout_content.len());
@@ -4850,7 +4856,7 @@ impl CompoundDispatcher {
         device_id_bytes: [u8; 16],
         file_id: u64,
         stripe_width: usize,
-        signer: Option<(&crate::pnfs::ds_fh::FhKeys, &[u8])>,
+        signer: Option<(&crate::pnfs::ds_fh::FhKeys, &[u8], [u8; 8])>,
     ) -> Bytes {
         use crate::nfs::xdr::XdrEncoder;
         use std::collections::hash_map::DefaultHasher;
@@ -4947,7 +4953,7 @@ impl CompoundDispatcher {
             for j in 0..stripe_width {
                 match signer {
                     // Phase 4: signed for the asking session's node.
-                    Some((keys, node)) => encoder.encode_opaque(&keys.mint(file_id, j as u32, node)),
+                    Some((keys, node, volume)) => encoder.encode_opaque(&keys.mint(file_id, j as u32, volume, node)),
                     None => {
                         let fh = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(
                             0, // instance check disabled DS-side (PNFS_INSTANCE_ID unset)
@@ -9048,7 +9054,11 @@ mod tests {
         assert_eq!(l.decode_u32().unwrap(), 1, "one handle per slot");
         let fh = l.decode_opaque().unwrap();
         assert_eq!(fh[0], crate::pnfs::ds_fh::VERSION);
-        assert_eq!(keys.verify(&fh, b"w1.corp"), Some((42, 0)), "file 42, stripe 0, for w1");
+        assert_eq!(
+            keys.verify(&fh, b"w1.corp"),
+            Some((42, 0, crate::pnfs::ds_fh::volume_tag("f"))),
+            "file 42, stripe 0, in volume f (its first path component), for w1"
+        );
         assert_eq!(keys.verify(&fh, b"w2.corp"), None, "not for another node");
     }
 
