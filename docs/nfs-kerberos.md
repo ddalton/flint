@@ -526,6 +526,15 @@ then the MDS; once the clients' layouts are fresh, drop `previous`. It
 works without Kerberos as well (`pnfs.dsAuth.enabled`), where it stops a
 guessed file id but binds no node.
 
+A refusal's log line names the attached node the handle was signed for
+(`DS PUTFH refused: … session of …, node "w2…", signed for node "w1…"`).
+Seen on a real cluster, that is a handle used from the wrong node. One
+benign source: a client kernel without 6b9785dc8b13 ("nfs: don't share
+pNFS DS connections between net namespaces", April 2025, in the stable
+trees since) shares a DS connection among network namespaces, so where
+several "nodes" run on one kernel (kind) one node's I/O reaches the DS on
+another node's session and is refused; the client recovers as above.
+
 **Without the data servers: no layouts for Kerberos callers.** Measured
 (plan, "Phase 0 results"):
 a Linux client with a `sec=krb5i` mount that cannot get a GSS context with
@@ -555,10 +564,13 @@ callers again; it is for when the DSes do Kerberos (Phase 3), not before.
   to an SP4_MACH_CRED request (Phase 3b).
 - **The control path** between the MDS and the DSes (gRPC: registration,
   heartbeats, the F66 relay of a client's I/O to a file the MDS cannot
-  layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), but who the
-  CLIENT is still rests on the shared control token: any holder of it can
-  register a DS. Per-pod identities (Phase 5b) close that; keep
-  `pnfs.networkPolicy` on.
+  layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), and each
+  caller presents its own pod-bound ServiceAccount token, which the MDS or
+  DS reviews against a role table (`pnfs.controlAuth`, Phase 5b): only the
+  data servers register (each as its own pod), only the CSI controller
+  manages volumes, a node plugin opens block sessions only for its own
+  node, only the MDS commands a DS. A verdict is cached for a minute, so a
+  deleted pod's token works that long; keep `pnfs.networkPolicy` on.
 - **Files written under Phase 1 stay on the MDS.** A file a Kerberos client
   wrote while the DSes did no Kerberos (`dataServers: false`) lives in the
   MDS's export, and the F67 guard never pins a file that already has bytes:

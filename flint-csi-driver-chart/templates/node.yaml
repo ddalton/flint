@@ -754,4 +754,7 @@ spec:
         {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
         {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" . | nindent 8 }}
         {{- end }}
+        {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+        {{- include "flint-csi-driver-chart.pnfsTokenVolume" (dict "name" "pnfs-mds-token" "audience" "flint-pnfs-mds") | nindent 8 }}
+        {{- end }}
 {{- end }}{{- /* end lite-profile guard */}}

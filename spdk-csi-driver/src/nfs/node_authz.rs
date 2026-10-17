@@ -88,6 +88,13 @@ impl AttachedNodes {
         *self.hosts.write().unwrap() = Some(hosts);
     }
 
+    /// The attached hosts, sorted; `None` before the first list.
+    pub fn hosts(&self) -> Option<Vec<String>> {
+        let mut hosts: Vec<String> = self.hosts.read().unwrap().as_ref()?.iter().cloned().collect();
+        hosts.sort();
+        Some(hosts)
+    }
+
     fn attached(&self, host: &str) -> bool {
         self.hosts.read().unwrap().as_ref().is_some_and(|h| h.contains(host))
     }

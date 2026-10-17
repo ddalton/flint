@@ -159,6 +159,12 @@ async fn async_main(worker_threads: usize) -> Result<(), Box<dyn std::error::Err
         error!("❌ Control TLS refused: {}", e);
         return Err(e.into());
     }
+    // Who may call it (FLINT_PNFS_CONTROL_AUTH, Phase 5b): a typo stops the
+    // process rather than leaving the shared-token check in place.
+    if let Err(e) = spdk_csi_driver::pnfs::control_auth::mode_from_env() {
+        error!("❌ Control auth refused: {}", e);
+        return Err(e.into());
+    }
     let ds = spdk_csi_driver::pnfs::ds::DataServer::new(ds_config)?;
 
     info!("🚀 Starting Data Server...");

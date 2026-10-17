@@ -86,6 +86,51 @@ data:
   tls.key: {{ $cert.Key | b64enc }}
   {{- end }}
 {{- end }}
+{{- if and .Values.pnfs.server.enabled (include "flint-csi-driver-chart.pnfsDsServiceAccount" .) }}
+---
+# The data servers' identity (pnfs.controlAuth, pnfs.kerberos's gate).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: pnfs-ds
+{{- end }}
+{{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+---
+# Per-pod identities on the control path (pnfs.controlAuth, Phase 5b): the
+# MDS and the data servers review their callers' tokens.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-pnfs-tokenreview
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+rules:
+- apiGroups: [authentication.k8s.io]
+  resources: [tokenreviews]
+  verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-pnfs-tokenreview
+  labels:
+    {{- include "flint-csi-driver-chart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "flint-csi-driver-chart.fullname" . }}-pnfs-tokenreview
+subjects:
+- kind: ServiceAccount
+  name: flint-pnfs-mds
+  namespace: {{ .Release.Namespace }}
+- kind: ServiceAccount
+  name: flint-pnfs-ds
+  namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if and .Values.pnfs.server.enabled .Values.pnfs.networkPolicy.enabled }}
 ---
 # NFS data ports: MDS + DS 2049 from node CIDRs only. Kernel NFS

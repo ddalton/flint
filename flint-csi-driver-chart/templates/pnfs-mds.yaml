@@ -248,12 +248,13 @@ spec:
       {{- with $.Values.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
-      {{- if or ((($.Values.pnfs.server.mds.blockExport).witness).enabled) (include "flint-csi-driver-chart.pnfsAttachedNodesOnly" $) }}
+      {{- if include "flint-csi-driver-chart.pnfsMdsServiceAccount" $ }}
       # The composition witness reads and CAS's ConfigMaps in this
       # namespace; without this ServiceAccount the MDS falls back to its
       # own record and says so at startup, and replicated volumes cannot
       # fail over. pnfs.kerberos.attachedNodesOnly reads PVs,
-      # VolumeAttachments and Nodes with it.
+      # VolumeAttachments and Nodes with it; pnfs.controlAuth reviews
+      # callers' tokens and presents its own to the data servers.
       serviceAccountName: flint-pnfs-mds
       {{- end }}
       {{- if $be.enabled }}
@@ -302,6 +303,18 @@ spec:
             {{- if include "flint-csi-driver-chart.pnfsDsAuth" $ }}
             # Signed data server filehandles (pnfs.dsAuth).
             {{- include "flint-csi-driver-chart.pnfsDsFhEnv" (dict "root" $ "ds" false) | nindent 12 }}
+            {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlAuth" $ }}
+            # Per-pod identities (pnfs.controlAuth): review callers' tokens;
+            # present our own to the data servers.
+            - name: FLINT_PNFS_CONTROL_AUTH
+              value: serviceaccount
+            - name: FLINT_PNFS_DS_TOKEN_FILE
+              value: /var/run/secrets/flint/pnfs-ds-token/token
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- end }}
             {{- if include "flint-csi-driver-chart.pnfsControlTls" $ }}
             # TLS on the control path (pnfs.controlTls).
@@ -369,6 +382,9 @@ spec:
             {{- if include "flint-csi-driver-chart.pnfsControlTls" $ }}
             {{- include "flint-csi-driver-chart.pnfsControlTlsMount" $ | nindent 12 }}
             {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlAuth" $ }}
+            {{- include "flint-csi-driver-chart.pnfsTokenMount" (dict "name" "pnfs-ds-token") | nindent 12 }}
+            {{- end }}
           {{- with $.Values.pnfs.server.mds.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -376,6 +392,9 @@ spec:
       volumes:
         {{- if include "flint-csi-driver-chart.pnfsControlTls" $ }}
         {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" $ | nindent 8 }}
+        {{- end }}
+        {{- if include "flint-csi-driver-chart.pnfsControlAuth" $ }}
+        {{- include "flint-csi-driver-chart.pnfsTokenVolume" (dict "name" "pnfs-ds-token" "audience" "flint-pnfs-ds") | nindent 8 }}
         {{- end }}
         - name: config
           configMap:

@@ -41,7 +41,20 @@ and the chart ships two layers to make that boundary real:
    the CSI controller at startup rather than falling back to plaintext.
    Rotation: replace the Secret (same CA, or a new CA with every pod
    restarted together); a split CA leaves the fleet unable to talk.
-3. **NetworkPolicies** (`pnfs.networkPolicy`, default OFF — enable in
+3. **Per-pod identities** (`pnfs.controlAuth.serviceAccounts`, default
+   ON with the in-chart server): the shared token above is then not
+   accepted. Each caller presents its own pod-bound ServiceAccount token,
+   projected for the server it calls (audience `flint-pnfs-mds` or
+   `flint-pnfs-ds`), and the server reviews it (`TokenReview`, cached a
+   minute) against a role table: `flint-pnfs-ds` registers and
+   heartbeats, and only as its own pod (`device_id` must be its pod
+   name); `flint-csi-controller` manages volumes and block exports;
+   `flint-csi-node` opens block sessions only for its own node;
+   `flint-pnfs-mds` alone calls a data server's DsControl. Anything else
+   is PERMISSION_DENIED; a review the apiserver cannot answer is
+   UNAVAILABLE (the caller retries), never a pass. The MDS and the data
+   servers get ServiceAccounts with `tokenreviews: create`.
+4. **NetworkPolicies** (`pnfs.networkPolicy`, default OFF — enable in
    production): 2049 on MDS+DS admits only `nodeCIDRs` (NFS mounts
    originate from the NODE kernel via kubelet, never from pod IPs —
    which also means hostNetwork pods share the node's network

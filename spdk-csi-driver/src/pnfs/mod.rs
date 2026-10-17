@@ -108,7 +108,8 @@ pub mod mds;
 
 // Data Server module
 pub mod ds;
-pub mod control_tls;  // TLS on the MDS-DS control path (pNFS Kerberos Phase 5)
+pub mod control_tls;
+pub mod control_auth;  // who may call the control path (pNFS Kerberos Phase 5b)  // TLS on the MDS-DS control path (pNFS Kerberos Phase 5)
 pub mod ds_fh;  // MAC'd data server filehandles (pNFS Kerberos Phase 4)
 
 // Re-exports for convenience

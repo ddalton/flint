@@ -25,11 +25,39 @@ pub use proto::mds_control_client::MdsControlClient;
 pub use proto::ds_control_server::{DsControl, DsControlServer};
 pub use proto::ds_control_client::DsControlClient;
 
-/// Client-side control-plane auth: attaches FLINT_PNFS_CONTROL_TOKEN
-/// as a Bearer token to every outgoing MdsControl RPC. The token is
-/// read once; unset = no header (matches an MDS with auth disabled).
+/// Client-side control-plane auth: a Bearer token on every outgoing
+/// control RPC. The caller's own pod-bound ServiceAccount token for the
+/// server's audience when its file is configured (Phase 5b,
+/// `pnfs::control_auth`; re-read as the kubelet rotates it), else the
+/// shared FLINT_PNFS_CONTROL_TOKEN (read once); neither = no header.
 #[derive(Clone)]
-pub struct ControlTokenInterceptor;
+pub struct ControlTokenInterceptor {
+    token_file: Option<std::sync::Arc<crate::pnfs::control_auth::TokenFile>>,
+}
+
+impl ControlTokenInterceptor {
+    /// For calls to the MDS (`FLINT_PNFS_MDS_TOKEN_FILE`).
+    pub fn to_mds() -> Self {
+        static F: std::sync::OnceLock<Option<std::sync::Arc<crate::pnfs::control_auth::TokenFile>>> =
+            std::sync::OnceLock::new();
+        let f = F.get_or_init(|| {
+            crate::pnfs::control_auth::TokenFile::from_env(crate::pnfs::control_auth::MDS_TOKEN_FILE_ENV)
+                .map(std::sync::Arc::new)
+        });
+        Self { token_file: f.clone() }
+    }
+
+    /// For calls to a data server (`FLINT_PNFS_DS_TOKEN_FILE`).
+    pub fn to_ds() -> Self {
+        static F: std::sync::OnceLock<Option<std::sync::Arc<crate::pnfs::control_auth::TokenFile>>> =
+            std::sync::OnceLock::new();
+        let f = F.get_or_init(|| {
+            crate::pnfs::control_auth::TokenFile::from_env(crate::pnfs::control_auth::DS_TOKEN_FILE_ENV)
+                .map(std::sync::Arc::new)
+        });
+        Self { token_file: f.clone() }
+    }
+}
 
 fn control_token_header() -> Option<&'static tonic::metadata::MetadataValue<tonic::metadata::Ascii>> {
     static HEADER: std::sync::OnceLock<
@@ -46,6 +74,12 @@ fn control_token_header() -> Option<&'static tonic::metadata::MetadataValue<toni
 
 impl tonic::service::Interceptor for ControlTokenInterceptor {
     fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
+        if let Some(file) = &self.token_file {
+            if let Some(header) = file.header().and_then(|h| h.parse().ok()) {
+                req.metadata_mut().insert("authorization", header);
+                return Ok(req);
+            }
+        }
         if let Some(header) = control_token_header() {
             req.metadata_mut().insert("authorization", header.clone());
         }
@@ -63,7 +97,7 @@ pub type AuthedMdsControlClient = MdsControlClient<
 
 /// Build a token-attaching MdsControl client over `channel`.
 pub fn authed_mds_control_client(channel: tonic::transport::Channel) -> AuthedMdsControlClient {
-    MdsControlClient::with_interceptor(channel, ControlTokenInterceptor)
+    MdsControlClient::with_interceptor(channel, ControlTokenInterceptor::to_mds())
 }
 
 /// A DsControl client (MDS → DS) that carries the control-plane token.
@@ -78,7 +112,7 @@ pub type AuthedDsControlClient = DsControlClient<
 
 /// Build a token-attaching DsControl client over `channel`.
 pub fn authed_ds_control_client(channel: tonic::transport::Channel) -> AuthedDsControlClient {
-    DsControlClient::with_interceptor(channel, ControlTokenInterceptor)
+    DsControlClient::with_interceptor(channel, ControlTokenInterceptor::to_ds())
 }
 
 /// Server-side control-plane auth check, shared by the MDS's
@@ -88,7 +122,12 @@ pub fn authed_ds_control_client(channel: tonic::transport::Channel) -> AuthedDsC
 /// process logs a loud WARN at startup).
 pub fn check_control_token(req: Request<()>) -> Result<Request<()>, Status> {
     static EXPECTED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    // With ServiceAccount checks on (Phase 5b) the token is not the shared
+    // one: `control_auth::AuthLayer` has judged it already.
     let expected = EXPECTED.get_or_init(|| {
+        if crate::pnfs::control_auth::mode_from_env().unwrap_or(false) {
+            return None;
+        }
         std::env::var("FLINT_PNFS_CONTROL_TOKEN")
             .ok()
             .map(|t| format!("Bearer {}", t))
@@ -343,6 +382,8 @@ impl MdsControl for MdsControlService {
         &self,
         request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>, Status> {
+        // Phase 5b: a ServiceAccount caller acts only for itself.
+        crate::pnfs::control_auth::check_device(&request, &request.get_ref().device_id)?;
         let req = request.into_inner();
         
         // Override the DS-reported endpoint(s) with the operator-configured
@@ -518,6 +559,8 @@ impl MdsControl for MdsControlService {
         &self,
         request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
+        // Phase 5b: a ServiceAccount caller acts only for itself.
+        crate::pnfs::control_auth::check_device(&request, &request.get_ref().device_id)?;
         let req = request.into_inner();
         
         // Update heartbeat timestamp
@@ -581,6 +624,8 @@ impl MdsControl for MdsControlService {
         &self,
         request: Request<CapacityUpdate>,
     ) -> Result<Response<CapacityResponse>, Status> {
+        // Phase 5b: a ServiceAccount caller acts only for itself.
+        crate::pnfs::control_auth::check_device(&request, &request.get_ref().device_id)?;
         let req = request.into_inner();
         
         if let Err(e) = self.device_registry.update_capacity(
@@ -1390,6 +1435,8 @@ impl MdsControl for MdsControlService {
         &self,
         request: Request<AttachBlockNodeRequest>,
     ) -> Result<Response<AttachBlockNodeResponse>, Status> {
+        // Phase 5b: a ServiceAccount caller acts only for itself.
+        crate::pnfs::control_auth::check_node(&request, &request.get_ref().node_name)?;
         let req = request.into_inner();
         let refuse = |message: String| {
             Ok(Response::new(AttachBlockNodeResponse {
@@ -1494,6 +1541,8 @@ impl MdsControl for MdsControlService {
         &self,
         request: Request<BlockSessionUpRequest>,
     ) -> Result<Response<BlockSessionUpResponse>, Status> {
+        // Phase 5b: a ServiceAccount caller acts only for itself.
+        crate::pnfs::control_auth::check_node(&request, &request.get_ref().node_name)?;
         let req = request.into_inner();
         if req.volume_id.is_empty()
             || req.volume_id.contains('/')
@@ -1700,6 +1749,8 @@ impl MdsControl for MdsControlService {
         &self,
         request: Request<UnregisterRequest>,
     ) -> Result<Response<UnregisterResponse>, Status> {
+        // Phase 5b: a ServiceAccount caller acts only for itself.
+        crate::pnfs::control_auth::check_device(&request, &request.get_ref().device_id)?;
         let req = request.into_inner();
         
         info!("📤 DS Unregistration: device_id={}, reason={}", req.device_id, req.reason);

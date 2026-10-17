@@ -825,9 +825,36 @@ impl DataServer {
                                 (Nfs4Status::Ok, Bytes::new())
                             }
                             Err(why) => {
+                                // The handle's clear part (version, key id,
+                                // file id, stripe), never its MAC. The
+                                // MDS logs the node it signed a file's
+                                // handles for at LAYOUTGET.
+                                let clear: String = fh.data.iter().take(17).map(|b| format!("{b:02x}")).collect();
+                                let (file, stripe) = match fh.data.get(5..17) {
+                                    Some(c) => (
+                                        u64::from_be_bytes(c[..8].try_into().expect("8 bytes")).to_string(),
+                                        u32::from_be_bytes(c[8..].try_into().expect("4 bytes")).to_string(),
+                                    ),
+                                    None => ("?".into(), "?".into()),
+                                };
+                                // Which attached node the handle was signed
+                                // for, if any: a handle of one node sent on
+                                // another's session (two nodes sharing one
+                                // kernel's DS connection, or a stolen
+                                // handle) against a bad key or encoding.
+                                let hosts = crate::nfs::node_authz::global().and_then(|n| n.hosts()).unwrap_or_default();
+                                let signer = crate::pnfs::ds_fh::ds_policy()
+                                    .keys
+                                    .as_ref()
+                                    .and_then(|k| k.signed_for(&fh.data, &hosts))
+                                    .map(|h| format!("signed for node {h:?}"))
+                                    .unwrap_or_else(|| "signed for no attached node".into());
                                 warn!(
-                                    "DS PUTFH refused: {why} (session of {})",
-                                    session_owner.as_deref().map(String::from_utf8_lossy).unwrap_or_default()
+                                    "DS PUTFH refused: {why} (session of {}, node {:?}, {signer}, file {file} stripe {stripe}, handle {}…, {} bytes)",
+                                    session_owner.as_deref().map(String::from_utf8_lossy).unwrap_or_default(),
+                                    String::from_utf8_lossy(&session_owner.as_deref().map(crate::pnfs::ds_fh::node_of).unwrap_or_default()),
+                                    clear,
+                                    fh.data.len()
                                 );
                                 current_fh = None;
                                 (Nfs4Status::BadHandle, Bytes::new())
@@ -1485,7 +1512,9 @@ impl DataServer {
             );
             return;
         };
-        if std::env::var("FLINT_PNFS_CONTROL_TOKEN").is_err() {
+        if std::env::var("FLINT_PNFS_CONTROL_TOKEN").is_err()
+            && !crate::pnfs::control_auth::mode_from_env().unwrap_or(false)
+        {
             warn!(
                 "⚠️ FLINT_PNFS_CONTROL_TOKEN unset — DsControl listener is UNAUTHENTICATED; \
                  anyone who can reach port {} can truncate stripe files", port
@@ -1499,16 +1528,28 @@ impl DataServer {
                     return;
                 }
             };
-        let svc = DsControlService {
-            device_id: self.config.device_id.clone(),
-            data_dir: std::path::PathBuf::from(
+        let svc = DsControlService::new(
+            self.config.device_id.clone(),
+            std::path::PathBuf::from(
                 self.config.bdevs.first().map(|b| b.mount_point.clone())
                     .unwrap_or_else(|| "/data".to_string()),
             ),
-        };
+        );
         info!("🎛️ DsControl gRPC listener on {}", addr);
         tokio::spawn(async move {
+            // Phase 5b: the MDS's own ServiceAccount token, reviewed.
+            let sa_policy = match crate::pnfs::control_auth::policy_from_env(crate::pnfs::control_auth::DS_AUDIENCE).await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("❌ DsControl NOT served: {}", e);
+                    return;
+                }
+            };
+            if sa_policy.is_some() {
+                info!("🔐 DsControl: the MDS's ServiceAccount token, reviewed");
+            }
             let router = tonic::transport::Server::builder()
+                .layer(tower::util::option_layer(sa_policy.map(crate::pnfs::control_auth::AuthLayer::new)))
                 .add_service(tonic::service::interceptor::InterceptedService::new(
                     crate::pnfs::grpc::DsControlServer::new(svc),
                     crate::pnfs::grpc::check_control_token,

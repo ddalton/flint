@@ -14,6 +14,25 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS: per-pod identities on the control path** (2026-10-16; plan
+  Phase 5b). TLS (Phase 5a) protected the shared control token on the
+  wire, but every holder of it could still register a data server, create
+  and delete volumes, or command a data server. Now each caller presents
+  its own pod-bound ServiceAccount token, projected for the server it
+  calls, and the MDS or data server reviews it (`TokenReview`, cached a
+  minute) against a role table: only `flint-pnfs-ds` registers, and only
+  as its own pod; only `flint-csi-controller` manages volumes; a node
+  plugin opens block sessions only for its own node; only `flint-pnfs-mds`
+  commands a data server. The shared token is not accepted then. Chart
+  `pnfs.controlAuth.serviceAccounts` (default on with the in-chart
+  server): ServiceAccounts for the MDS and the data servers, a ClusterRole
+  with `tokenreviews: create`, projected tokens for every caller.
+- **pNFS: a refused data server handle names its node** (2026-10-17). A
+  data server's `DS PUTFH refused` line now says which attached node the
+  handle was signed for, and its file and stripe; the MDS logs the node it
+  signs each layout's handles for. A handle of one node on another node's
+  session is a stolen handle, or a client kernel without 6b9785dc8b13
+  (shared pNFS DS connections across network namespaces, as on kind).
 - **pNFS: TLS on the control path** (2026-10-16; plan Phase 5a). The
   MDS's gRPC (data server registration, heartbeats, the CSI controller's
   volume calls) and each data server's DsControl (truncates, the MDS's

@@ -421,7 +421,7 @@ impl Identity {
 /// 2026-10-03 an apiserver blip during a refresh cost a tenant its
 /// credential (s3csi/SECURITY.md §4.5). Unavailable is answered 503,
 /// which the plugin keeps a still-valid key through.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewError {
     Refused(String),
     Unavailable(String),

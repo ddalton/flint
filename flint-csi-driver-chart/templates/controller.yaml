@@ -220,6 +220,11 @@ spec:
             # The driver's main.rs reads this env var via PnfsCsi::from_env();
             # if unset (the default), the entire pNFS code path is dormant
             # and SPDK behaviour is byte-identical to the no-pNFS build.
+            {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+            # Our own token for the MDS (pnfs.controlAuth).
+            - name: FLINT_PNFS_MDS_TOKEN_FILE
+              value: /var/run/secrets/flint/pnfs-mds-token/token
+            {{- end }}
             {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
             # TLS to the MDS (pnfs.controlTls).
             {{- include "flint-csi-driver-chart.pnfsControlTlsEnv" . | nindent 12 }}
@@ -286,6 +291,9 @@ spec:
               mountPath: /csi
             {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
             {{- include "flint-csi-driver-chart.pnfsControlTlsMount" . | nindent 12 }}
+            {{- end }}
+            {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+            {{- include "flint-csi-driver-chart.pnfsTokenMount" (dict "name" "pnfs-mds-token") | nindent 12 }}
             {{- end }}
         - name: csi-provisioner
           image: "{{ include "flint-csi-driver-chart.sidecarPrefix" . }}/{{ .Values.csiSidecars.externalProvisioner.name }}:{{ .Values.csiSidecars.externalProvisioner.tag }}"
@@ -355,5 +363,8 @@ spec:
           emptyDir: {}
         {{- if include "flint-csi-driver-chart.pnfsControlTls" . }}
         {{- include "flint-csi-driver-chart.pnfsControlTlsVolume" . | nindent 8 }}
+        {{- end }}
+        {{- if include "flint-csi-driver-chart.pnfsControlAuth" . }}
+        {{- include "flint-csi-driver-chart.pnfsTokenVolume" (dict "name" "pnfs-mds-token" "audience" "flint-pnfs-mds") | nindent 8 }}
         {{- end }}
 {{- end }}{{- /* end lite-profile guard */}}

@@ -152,6 +152,13 @@ impl FhKeys {
         key.mac(file_id, stripe, node).verify_truncated_left(&fh[17..]).ok()?;
         Some((file_id, stripe))
     }
+
+    /// Which of `nodes` a v5 handle verifies for. For a refusal's log line
+    /// (a handle of one node sent on another node's session), never to
+    /// admit one.
+    pub fn signed_for<'a>(&self, fh: &[u8], nodes: &'a [String]) -> Option<&'a str> {
+        nodes.iter().map(String::as_str).find(|n| self.verify(fh, n.as_bytes()).is_some())
+    }
 }
 
 /// Whether `fh` is a v5 handle (verified or not).
@@ -266,6 +273,15 @@ mod tests {
         assert_eq!(k.verify(&fh[..32], b"w1.corp"), None, "truncated");
         let v2 = crate::nfs::v4::filehandle_pnfs::generate_pnfs_filehandle_from_id(0, 0xdead_beef, 3);
         assert_eq!(k.verify(&v2.data, b"w1.corp"), None, "an unsigned v2 handle");
+    }
+
+    #[test]
+    fn a_refused_handle_names_the_node_it_was_signed_for() {
+        let k = keys(K1, None);
+        let nodes = vec!["w1.corp".to_string(), "w2.corp".to_string()];
+        assert_eq!(k.signed_for(&k.mint(7, 0, b"w2.corp"), &nodes), Some("w2.corp"));
+        assert_eq!(k.signed_for(&k.mint(7, 0, b"w3.corp"), &nodes), None, "not an attached node");
+        assert_eq!(k.signed_for(&keys(K2, None).mint(7, 0, b"w1.corp"), &nodes), None, "another key");
     }
 
     #[test]

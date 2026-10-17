@@ -743,6 +743,18 @@ pnfs:
     # certificate must be for flint-pnfs-control).
     existingSecret: ""
 
+  # ── Per-pod identities on the control path (Phase 5b) ──
+  # Each caller presents its own pod-bound ServiceAccount token, projected
+  # for the audience of the server it calls; the MDS and the data servers
+  # review it (TokenReview, cached a minute) and check a role table: only
+  # the data servers register (each as its own pod), only the CSI
+  # controller manages volumes, a node plugin opens block sessions only for
+  # its own node, only the MDS commands a data server. The shared control
+  # token is then not accepted. The MDS and the data servers get
+  # ServiceAccounts with `tokenreviews: create`.
+  controlAuth:
+    serviceAccounts: true
+
   controlToken:
     enabled: true
     # Name of an existing Secret with key `token` to use instead of a

@@ -1,11 +1,10 @@
 # Kerberos for pNFS (MDS and data servers): the plan
 
-Status, 2026-10-16: Phases 1 to 4 and 5a are built and merged (PRs #22
-Phase 1, #25 Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4,
-#30 Phase 5a); each phase below says how the build differs from its
-sketch. Phase 5b (per-pod identities on the control path) is on branch
-`pnfs-krb5-phase5b`, not merged. Phase 3b (SP4_MACH_CRED on the DSes) is
-deferred. What is built is documented for users in
+Status, 2026-10-17: Phases 1 to 5 are built (PRs #22 Phase 1, #25
+Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4, #30 Phase 5a,
+then Phase 5b, per-pod identities on the control path); each phase below
+says how the build differs from its sketch. Phase 3b (SP4_MACH_CRED on
+the DSes) is deferred. What is built is documented for users in
 [nfs-kerberos.md, "pNFS"](../nfs-kerberos.md#pnfs). The plan assumed the
 RWX Kerberos work was merged (PRs #15 per-volume keys, #18 required
 SP4_MACH_CRED, #19 LDAP identities). Line numbers are `origin/main` at
@@ -296,8 +295,16 @@ of handshakes run in tasks of their own, `connect_with_connector`), TLS
 1.3 on the MDS's gRPC, every DS's DsControl, the DS registration client,
 the MDS's DsControl clients and the CSI controller's client; chart
 `pnfs.controlTls` (default on), Secret `flint-pnfs-control-tls` from
-`genCA`/`genSignedCert`, kept with `lookup`. **5b not built:** the
-pod-bound token identities and TokenReview.
+`genCA`/`genSignedCert`, kept with `lookup`.
+
+**5b built** (`pnfs::control_auth`): a tower layer on both control servers
+reviews the caller's pod-bound token (audience per server, cached 60 s,
+an unanswered review UNAVAILABLE and not cached), a role table per RPC,
+and in the handlers `device_id` == pod name for the DS calls and
+`node_name` == the token's node for the node plugin's block sessions.
+Differs from the sketch: the node plugin is a caller too (pnfs-block's
+AttachBlockNode and BlockSessionUp at NodeStage), and the shared token is
+not a fallback once identities are on (`pnfs.controlAuth`).
 
 
 - No cert-manager, no per-pod certs: chart `genCA` + `genSignedCert`, kept
