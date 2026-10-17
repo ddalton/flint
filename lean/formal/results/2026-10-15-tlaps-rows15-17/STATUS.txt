@@ -388,6 +388,10 @@ M12 c9b4df15, M13 f2f7fe05, M14 786befc3.
   So the 23:15Z "fix (2) NOT IN THE CODE" was the touch-time ghost, not a code gap;
     FINDINGS Table 3's rename row (model wrong, code right) holds on this trace.
     Correction to 23:15Z: after the restart baseline[p] holds v1 (stale), not nothing.
-  Not run: the barrier BEFORE the rename back (the code re-publishes p and carries
-    it, per the audit -- an over-declaration toward partial, which AK1 permits).
-  Box: syncer lib suite 289 passed, 0 failed, 1 ignored (clone /mnt/nvme/wt-akx).
+  The barrier BEFORE the rename back (run 2026-10-17, a_restart_before_step_7_
+    republishes_a_renamed_away_file_and_names_its_later_delete): the scan reads v2 as
+    an upload against the stale v1, the barrier re-publishes p (the doc cites v2 at p
+    and q) and carries it; a UI delete before the honour is named, partial [p] -- an
+    over-declaration, which AK1 permits.  Control: with the carrier's upload paths and
+    bytes dropped in barrier.rs, the test FAILS ("did not carry p.txt"); restored.
+  Box: syncer lib suite 290 passed, 0 failed, 1 ignored (clone /mnt/nvme/wt-akx).

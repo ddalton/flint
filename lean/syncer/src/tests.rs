@@ -11769,6 +11769,26 @@ async fn a_published_file_renamed_away_across_a_restart(
     other_dirty: bool,
     restart: bool,
 ) -> (super::sentinel::Ack, manifest::LeanManifest) {
+    let (inner, dir, mut a, cfg) = renamed_away_after_an_install(restart).await;
+    if other_dirty {
+        write(dir.path(), "r.txt", "another declared file");
+    }
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    hitl_rename(&inner, &cfg, "q.txt", "p.txt", "reviewer").await;
+    land_delete_during_next_barrier(&inner, &a, "p.txt");
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("p.txt"), "fixture: the UI delete did not land");
+    (ack, m)
+}
+
+/// The fixture both routes share: v1 published, v2 installed, the UI's
+/// rename of p.txt to q.txt, and (if `restart`) the restart before step 7
+/// that leaves the baseline at v1.
+async fn renamed_away_after_an_install(restart: bool) -> (Arc<MemoryStore>, tempfile::TempDir, Syncer, LeanConfig) {
     let inner = Arc::new(MemoryStore::new());
     let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
     let dir = tempfile::tempdir().unwrap();
@@ -11821,20 +11841,7 @@ async fn a_published_file_renamed_away_across_a_restart(
     a.settle_pending_at_startup().await.unwrap();
     let stale = a.state.load_baseline().unwrap().entries.get("p.txt").map(|e| e.etag.clone());
     assert_eq!(stale != Some(m.entries["p.txt"].etag.clone()), restart, "fixture: the baseline after the restart");
-
-    if other_dirty {
-        write(dir.path(), "r.txt", "another declared file");
-    }
-    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
-    a.poll_sentinels().unwrap();
-    hitl_rename(&inner, &cfg, "q.txt", "p.txt", "reviewer").await;
-    land_delete_during_next_barrier(&inner, &a, "p.txt");
-    clear_min_interval(&a);
-    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
-    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
-    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
-    assert!(!m.entries.contains_key("p.txt"), "fixture: the UI delete did not land");
-    (ack, m)
+    (inner, dir, a, cfg)
 }
 
 /// Nothing else to publish: the barrier binds the document its consume
@@ -11858,6 +11865,35 @@ async fn a_restart_before_step_7_does_not_declare_a_renamed_away_file_an_install
     assert_eq!(ack.seq, Some(m.seq), "fixture: the ack does not name the install past the delete: {ack:?}");
     assert_eq!((ack.status.as_str(), &ack.report.dropped), (control.status.as_str(), &control.report.dropped), "{ack:?}");
     assert_eq!(ack.status, "ok", "{ack:?}");
+}
+
+/// The barrier BEFORE the rename back: the restart left the baseline at
+/// v1, so the scan reads the agent's v2 as an upload and the honour's
+/// barrier re-publishes it (the document cites it at both names) and
+/// carries it. The code declares more than the fixed model here, which
+/// AK1 permits: a later UI delete of the path is named, `partial`.
+#[tokio::test]
+async fn a_restart_before_step_7_republishes_a_renamed_away_file_and_names_its_later_delete() {
+    let (inner, dir, mut a, cfg) = renamed_away_after_an_install(true).await;
+    let squat = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    std::fs::create_dir_all(squat.join("occupied")).unwrap();
+    clear_min_interval(&a);
+    assert!(a.honor_pending(Verb::Publish, false).await.is_err(), "fixture: the ack write did not fail");
+    std::fs::remove_dir_all(&squat).unwrap();
+    let m = manifest::load(inner.as_ref(), &cfg).await.unwrap().unwrap().manifest;
+    let v2 = crc_of("v2, the agent's bytes");
+    assert_eq!(m.entries.get("p.txt").map(|e| &e.crc64_b64), Some(&v2), "the barrier did not re-publish p.txt");
+    assert_eq!(m.entries.get("q.txt").map(|e| &e.crc64_b64), Some(&v2), "fixture: the UI's rename was lost");
+    let carried = a.state.load_intent().unwrap().carrier.map(|c| c.paths).unwrap_or_default();
+    assert!(carried.contains("p.txt"), "the barrier did not carry p.txt: {carried:?}");
+
+    // The UI deletes the re-published file before the honour.
+    hitl_remove(&inner, &cfg, "p.txt", "reviewer").await;
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    assert_eq!(ack.status, "partial", "the ack says the carried file is in seq {:?}, which no longer cites it: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["p.txt".to_string()], "{ack:?}");
 }
 
 /// Row 15 plan, D4 (2026-10-14): the drain's publish ack names the clock
