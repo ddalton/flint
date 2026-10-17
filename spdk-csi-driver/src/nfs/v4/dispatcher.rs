@@ -3692,7 +3692,9 @@ impl CompoundDispatcher {
                         .as_ref()
                         .map(|_| crate::pnfs::ds_fh::node_of(&self.session_client_principal(context).unwrap_or_default()));
                     if let Some(n) = &node {
-                        debug!("LAYOUTGET '{}': data server handles signed for node {:?}", lg_file, String::from_utf8_lossy(n));
+                        // Info: a DS refusal names the file, and this line
+                        // the node its handles were signed for.
+                        info!("LAYOUTGET '{}': file {} data server handles signed for node {:?}", lg_file, layout.file_id, String::from_utf8_lossy(n));
                     }
                     if self.ds_fh_keys.is_some() && layout.file_id == 0 {
                         warn!("LAYOUTGET '{}': a legacy pin cannot carry a signed data server handle → LAYOUTUNAVAIL", lg_file);

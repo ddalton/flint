@@ -168,9 +168,23 @@ spec:
             # out verified for its node's session.
             echo "$l" | grep -F 'Filehandles: signed handles only' ||
               { echo "FAIL: $d does not enforce signed handles"; echo "$l" | grep -F Filehandles; exit 1; }
-            if echo "$l" | grep -F 'DS PUTFH refused'; then
-              echo "FAIL: $d refused a handle the MDS handed out"; exit 1
-            fi
+            # A refusal is a FAIL unless the handle verified for ANOTHER
+            # attached node than the session's: kind's nodes share one
+            # kernel, and a kernel without 6b9785dc8b13 ("nfs: don't share
+            # pNFS DS connections between net namespaces", e.g. mainline
+            # 6.12.0) sends one node's I/O on the DS session another node
+            # made. Refusing that handle is Phase 4 working; the client
+            # gets a fresh layout or goes through the MDS (E4), and the
+            # md5 above shows the data is right either way.
+            echo "$l" | grep -F 'DS PUTFH refused' | while IFS= read -r r; do
+              own=$(echo "$r" | sed -nE 's/.*, node "([^"]*)", signed for node "[^"]*".*/\1/p')
+              by=$(echo "$r" | sed -nE 's/.*, signed for node "([^"]*)".*/\1/p')
+              if [ -n "$own" ] && [ -n "$by" ] && [ "$own" != "$by" ]; then
+                echo "$d: node $own's session sent a handle signed for $by (a shared kernel's DS connection): refused, as it must be"
+              else
+                echo "FAIL: $d refused a handle the MDS handed out to this session's node: $r"; exit 1
+              fi
+            done
           done
           kubectl -n flint-system logs "$mds" -c mds --tail=-1 | grep -F 'layouts for Kerberos callers granted'
           echo PASS

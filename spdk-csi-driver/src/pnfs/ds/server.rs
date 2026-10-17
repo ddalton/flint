@@ -826,10 +826,31 @@ impl DataServer {
                             }
                             Err(why) => {
                                 // The handle's clear part (version, key id,
-                                // file id, stripe), never its MAC.
+                                // file id, stripe), never its MAC. The
+                                // MDS logs the node it signed a file's
+                                // handles for at LAYOUTGET.
                                 let clear: String = fh.data.iter().take(17).map(|b| format!("{b:02x}")).collect();
+                                let (file, stripe) = match fh.data.get(5..17) {
+                                    Some(c) => (
+                                        u64::from_be_bytes(c[..8].try_into().expect("8 bytes")).to_string(),
+                                        u32::from_be_bytes(c[8..].try_into().expect("4 bytes")).to_string(),
+                                    ),
+                                    None => ("?".into(), "?".into()),
+                                };
+                                // Which attached node the handle was signed
+                                // for, if any: a handle of one node sent on
+                                // another's session (two nodes sharing one
+                                // kernel's DS connection, or a stolen
+                                // handle) against a bad key or encoding.
+                                let hosts = crate::nfs::node_authz::global().and_then(|n| n.hosts()).unwrap_or_default();
+                                let signer = crate::pnfs::ds_fh::ds_policy()
+                                    .keys
+                                    .as_ref()
+                                    .and_then(|k| k.signed_for(&fh.data, &hosts))
+                                    .map(|h| format!("signed for node {h:?}"))
+                                    .unwrap_or_else(|| "signed for no attached node".into());
                                 warn!(
-                                    "DS PUTFH refused: {why} (session of {}, node {:?}, handle {}…, {} bytes)",
+                                    "DS PUTFH refused: {why} (session of {}, node {:?}, {signer}, file {file} stripe {stripe}, handle {}…, {} bytes)",
                                     session_owner.as_deref().map(String::from_utf8_lossy).unwrap_or_default(),
                                     String::from_utf8_lossy(&session_owner.as_deref().map(crate::pnfs::ds_fh::node_of).unwrap_or_default()),
                                     clear,
