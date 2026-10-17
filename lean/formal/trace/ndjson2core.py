@@ -68,6 +68,20 @@ THE MAPPING (one place):
   ack status=ok|partial            -> honor          Honor(w): status, dropped,
                                     + retire         seq, clock, nonces; then
                                                      RetireByAck(w)
+  rescope stage=begin              -> rescope_begin  RescopeBegin(w): the target
+                                                     (the paths its prefixes
+                                                     cover, `Scope::covers`) and
+                                                     the recorded drop set
+  rescope stage=uncited            -> rescope_first  RescopeFirst(w): what it kept
+  rescope stage=unlink (each)      -> (into the next RescopeSecond: a crash
+                                                     part-way through the loop
+                                                     leaves some unlinked, which
+                                                     the model's one-step second
+                                                     half does in the replay)
+  rescope stage=applied            -> rescope_second RescopeSecond(w): every unlink
+                                                     since the uncite and what the
+                                                     widen took (a barrier's
+                                                     step-0 replay emits these)
   start (a new incarnation's       -> restart        Restart(w): the barrier a
     `release_stale_own`)                             crash left in flight is
                                                      dropped; a takeover rotation
@@ -146,6 +160,10 @@ def convert(lines):
     nonce_n = {}   # (w, nonce) -> the model's touch number
     exact = {}     # w -> every fold of the standing record added one nonce
     restarts = 0
+    rescopes = 0
+    # Scopes are resolved to paths at the end, when every path is known.
+    scoped = []  # (record, field, prefixes or None)
+    unlinks = {}  # w -> the narrow's unlinks since its uncite, across a crash
 
     def ver(p, et, what):
         if (p, et) not in ver_of:
@@ -192,7 +210,9 @@ def convert(lines):
             for ow in list(open_consume):
                 close_consume(ow, i)
         if ev == "conf_start":
-            steps.append(({"ev": "checkout", "w": e["writer"]}, i))
+            rec = {"ev": "checkout", "w": e["writer"]}
+            scoped.append((rec, "scope", None))  # the conformance writers check out unscoped
+            steps.append((rec, i))
         elif ev in ("conf_agent_write", "conf_hitl_write"):
             p, et = e["path"], e["etag"]
             paths.add(p)
@@ -338,6 +358,27 @@ def convert(lines):
                     steps.append(({"ev": "sweep", "w": w, "h": by_key[k]}, i))
             elif e.get("removed", 0) > 0 and e.get("what") not in ("generations", "chunks"):
                 raise Unsupported(f"a sweep of {e.get('what')}")
+        elif ev == "rescope":
+            st = e["stage"]
+            if st == "begin":
+                rescopes += 1
+                paths.update(e["drop"])
+                rec = {"ev": "rescope_begin", "w": w, "drop": set(e["drop"])}
+                scoped.append((rec, "tgt", e["target"]))
+            elif st == "uncited":
+                rec = {"ev": "rescope_first", "w": w, "keep": set(e["kept"])}
+            elif st == "unlink":
+                unlinks.setdefault(w, set()).add(e["path"])
+                continue
+            elif st == "applied":
+                paths.update(e["taken"])
+                done = unlinks.pop(w, set())
+                if not set(e["unlinked"]) <= done:
+                    raise Unsupported(f"an applied narrow names unlinks no unlink event showed: {e['unlinked']}")
+                rec = {"ev": "rescope_second", "w": w, "unlinked": done, "taken": set(e["taken"])}
+            else:
+                raise Unsupported(f"rescope stage {st}")
+            steps.append((rec, i))
         elif ev == "start":
             if e["rotated"]:
                 raise Unsupported("a start that rotated the manifest (an acquire whose container died)")
@@ -381,6 +422,16 @@ def convert(lines):
         else:
             raise Unsupported(f"event {ev}")
 
+    def covers(prefixes, p):
+        if prefixes is None:
+            return True
+        es = [x.strip("/").replace("\\", "/") for x in prefixes]
+        return any(p == x or p.startswith(x + "/") for x in es if x)
+
+    scopes = {frozenset(paths)}
+    for rec, field, prefixes in scoped:
+        rec[field] = {p for p in paths if covers(prefixes, p)}
+        scopes.add(frozenset(rec[field]))
     # An adds_nothing install keeps the seq; the model says so, not the trace.
     for r, _ in steps:
         if r["ev"] == "install" and r["seq"] is None:
@@ -401,7 +452,7 @@ def convert(lines):
             "InstallFenced", "DeletesUnderLease")},
         # The traces check out unscoped, never rescope, never fail a fetch,
         # and every tree in them writes.
-        "Scopes": {frozenset(paths)}, "MaxRescopes": 0, "MaxFetchFails": 0, "Readers": set(),
+        "Scopes": scopes, "MaxRescopes": rescopes, "MaxFetchFails": 0, "Readers": set(),
         # Rows 15-17: the publish requests the trace folded; no deposal yet.
         "MaxTouches": max(touches.values(), default=0), "MaxNonces": 32, "MaxDeposals": 0,
     }
@@ -423,7 +474,8 @@ def write_out(steps, consts, gen, outdir: Path, name: str, overrides=None):
     cfg += [f"INVARIANT {i}" for i in (
         "TypeOK", "Inv_CitationsLive", "Inv_OneName", "Inv_AckedNamed", "Inv_OneHolder",
         "Inv_NoRegress", "Inv_ShortcutSound", "Inv_ReaderFetches", "AK3", "AK4")]
-    cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1", "PROPERTY NR1"]
+    cfg += ["PROPERTY Prop_NoSilentRevert", "PROPERTY Prop_DeleteSettles", "PROPERTY AK1", "PROPERTY NR1",
+            "PROPERTY Prop_ScopeRespected", "PROPERTY Prop_AgentWorkKept", "PROPERTY Prop_NarrowNeverDeletes"]
     cfg += ["INVARIANT TraceProgress", "INVARIANT TraceIncomplete"]
     (outdir / "TraceCore.cfg").write_text("\n".join(cfg) + "\n")
     m = [f"{n + 1}\t{r['ev']}\tline {i + 1}" for n, (r, i) in enumerate(steps)]

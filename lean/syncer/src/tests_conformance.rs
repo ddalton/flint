@@ -565,6 +565,98 @@ async fn conformance_a_restart_before_the_ack_answers_a_ui_delete_partial() {
     dump("a_restart_before_the_ack_answers_a_ui_delete_partial", &buf);
 }
 
+/// A's holder id as the trace names it (its `conf_start` line).
+fn holder_of(buf: &Buf, writer: &str) -> String {
+    buf.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["ev"] == "conf_start" && e["writer"] == writer)
+        .and_then(|e| e["holder"].as_str().map(String::from))
+        .expect("fixture: no conf_start for the writer")
+}
+
+/// The narrow and the widen (scoped-read design §4; NarrowUnlinkFirst,
+/// ScopeIgnored, WidenOverwrites): A narrows to `inputs`, which unlinks
+/// `outputs/` from its tree and publishes not one delete; B's later edit
+/// there is not fetched into A's tree (the scope is respected); the widen
+/// back takes B's version.
+#[tokio::test]
+async fn conformance_a_narrow_then_a_widen() {
+    let (store, buf, mut a, mut b, dir_a, dir_b) =
+        two_writers(&[("inputs/a.txt", "in"), ("outputs/big.bin", "out v1"), ("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    a.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    assert_eq!(read(dir_a.path(), "outputs/big.bin"), None, "fixture: the narrow did not unlink");
+    a.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    assert!(gateway_current(&store, &a.cfg, "outputs/big.bin").await.is_some(), "the narrow published a delete");
+    Agent { name: "B", sc: &b, root: dir_b.path() }.write("outputs/big.bin", "out v2, B's");
+    b.run_barrier().await.unwrap();
+    a.run_barrier().await.unwrap();
+    assert_eq!(read(dir_a.path(), "outputs/big.bin"), None, "a narrowed tree fetched an out-of-scope edit");
+    a.rescope(None).await.unwrap();
+    assert_eq!(read(dir_a.path(), "outputs/big.bin").as_deref(), Some("out v2, B's"), "the widen did not take B's");
+    dump("a_narrow_then_a_widen", &buf);
+}
+
+/// A crash between the uncite and the unlink of a narrow (the design's
+/// third mutation check, NarrowUnlinkFirst), then a restart: the intent is
+/// on disk, and the next barrier replays it before its scan — the leftover
+/// is unlinked, not re-uploaded, and nothing is deleted from the bucket.
+#[tokio::test]
+async fn conformance_a_narrow_crashed_before_its_unlink_is_replayed() {
+    use futures::FutureExt;
+    let (store, buf, mut a, b, dir_a, _dir_b) =
+        two_writers(&[("inputs/a.txt", "in"), ("outputs/big.bin", "out"), ("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some(("outputs/big.bin".into(), "rescope-before-unlink", Box::new(|| panic!("the crash"))))
+    });
+    let r = std::panic::AssertUnwindSafe(a.rescope(Some(vec!["inputs".into()]))).catch_unwind().await;
+    assert!(r.is_err(), "fixture: the narrow did not stop in its window");
+    assert!(read(dir_a.path(), "outputs/big.bin").is_some(), "fixture: the leftover is not on disk");
+    drop(a);
+    let mut a = restart(store.clone(), &buf, dir_a.path()).await;
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.rescope_replayed, "fixture: the barrier did not replay the narrow: {r:?}");
+    assert!(r.uploaded.is_empty() && r.deleted.is_empty(), "the replay published the leftover: {r:?}");
+    assert_eq!(read(dir_a.path(), "outputs/big.bin"), None, "the replay did not unlink the leftover");
+    a.run_barrier().await.unwrap();
+    assert!(gateway_current(&store, &a.cfg, "outputs/big.bin").await.is_some(), "the narrow deleted from the bucket");
+    dump("a_narrow_crashed_before_its_unlink_is_replayed", &buf);
+}
+
+/// The agent writes a dropped path BETWEEN the uncite and the unlink
+/// (UnlinkBlind, L-131): the unlink must not take bytes it did not uncite.
+/// Kept, uncited, recorded; the next barrier publishes it as the agent's.
+#[tokio::test]
+async fn conformance_a_narrow_keeps_what_the_agent_wrote_after_the_uncite() {
+    let (store, buf, mut a, b, dir_a, _dir_b) =
+        two_writers(&[("inputs/a.txt", "in"), ("outputs/big.bin", "out"), ("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    let (root, holder, tb) = (dir_a.path().to_path_buf(), holder_of(&buf, "A"), buf.clone());
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            "outputs/big.bin".into(),
+            "rescope-before-unlink",
+            Box::new(move || {
+                let content = "the agent's edit after the uncite";
+                write(&root, "outputs/big.bin", content);
+                let line = super::trace::line(Some(&holder), "conf_agent_write",
+                    serde_json::json!({"writer": "A", "path": "outputs/big.bin", "etag": etag_of(content)}));
+                tb.lock().unwrap().push(line);
+            }),
+        ))
+    });
+    let r = a.rescope(Some(vec!["inputs".into()])).await.unwrap();
+    assert!(r.kept_dirty.contains(&"outputs/big.bin".to_string()), "fixture: {r:?}");
+    assert_eq!(read(dir_a.path(), "outputs/big.bin").as_deref(), Some("the agent's edit after the uncite"));
+    let r1 = a.run_barrier().await.unwrap();
+    assert!(r1.uploaded.iter().any(|p| p == "outputs/big.bin"), "fixture: the agent's add was not published: {r1:?}");
+    dump("a_narrow_keeps_what_the_agent_wrote_after_the_uncite", &buf);
+}
+
 /// A UI delete of a clean file: the first writer's barrier performs it (the
 /// tree's unlink and the document's delete in one barrier) and the other
 /// writer's tree follows.

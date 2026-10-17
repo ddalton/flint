@@ -187,7 +187,28 @@ def restart_forgotten(evs):
     del evs[nth(evs, lambda e: e["ev"] == "start")]
 
 
+def narrow_fetches_out_of_scope(evs):
+    """the narrowed tree's consume takes B's edit outside its scope"""
+    w = nth(evs, lambda e: e["ev"] == "conf_agent_write" and e["writer"] == "B" and e["path"] == "outputs/big.bin")
+    a = next(e["holder"] for e in evs if e["ev"] == "conf_start" and e["writer"] == "A")
+    j = next(k for k in range(w, len(evs)) if evs[k]["ev"] == "barrier_start" and evs[k]["holder"] == a)
+    evs.insert(j + 1, {"ts_ms": 0, "mono_ms": 0, "holder": a, "ev": "consume", "path": "outputs/big.bin",
+                       "etag": evs[w]["etag"], "action": "adopted", "from": "manifest"})
+
+
+def replay_forgotten(evs):
+    """the barrier after the restart never replays the crashed narrow"""
+    s = nth(evs, lambda e: e["ev"] == "start")
+    drop = [k for k in range(s, len(evs)) if evs[k]["ev"] == "rescope"]
+    if not drop:
+        raise SystemExit("mutation anchor not found: a replay after the restart")
+    for k in reversed(drop):
+        del evs[k]
+
+
 MUTATIONS = [
+    ("a_narrow_then_a_widen", "narrow-fetches-out-of-scope", narrow_fetches_out_of_scope),
+    ("a_narrow_crashed_before_its_unlink_is_replayed", "replay-forgotten", replay_forgotten),
     ("an_unpublished_delete_survives_a_restart", "restart-rematerialises", restart_rematerialises),
     ("a_restart_between_the_cas_and_step_7", "restart-forgotten", restart_forgotten),
     ("a_ui_delete_of_a_carried_file_before_the_honour", "ack-ok-over-a-peers-delete", ack_ok_over_a_peers_delete),

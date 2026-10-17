@@ -1026,6 +1026,8 @@ impl Syncer {
 
         let intent = super::state::ScopeIntent { target, drop: leaving, held: Default::default() };
         self.state.save_scope_intent(&intent)?;
+        // The model's RescopeBegin: the intent durable, nothing applied.
+        self.trace("rescope", serde_json::json!({"stage": "begin", "target": intent.target, "drop": intent.drop}));
         self.apply_scope_intent(&intent).await
     }
 
@@ -1139,6 +1141,9 @@ impl Syncer {
         }
         report.uncited = drop_set.len();
         self.state.save_baseline(&baseline)?;
+        // The model's RescopeFirst: the uncite durable, what it kept named.
+        self.trace("rescope", serde_json::json!({"stage": "uncited", "kept": dirty, "uncited": drop_set}));
+        let mut unlinked: Vec<&String> = vec![];
 
         for p in &drop_set {
             let local = self.cfg.root.join(p);
@@ -1165,7 +1170,13 @@ impl Syncer {
                 continue;
             }
             match std::fs::remove_file(&local) {
-                Ok(()) => report.unlinked += 1,
+                Ok(()) => {
+                    report.unlinked += 1;
+                    unlinked.push(p);
+                    // Each unlink as it lands: a crash part-way through the
+                    // loop leaves some done, and the replay does the rest.
+                    self.trace("rescope", serde_json::json!({"stage": "unlink", "path": p}));
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(LeanError::Io(e)),
             }
@@ -1208,6 +1219,7 @@ impl Syncer {
         report.kept_dirty.extend(kept_local);
         report.already_held =
             m.entries.keys().filter(|p| covered(p) && baseline.entries.contains_key(*p)).count();
+        let mut taken: Vec<String> = vec![];
         if !add.is_empty() {
             // Review 2026-09-18, M3: the rescope holds the fence for its
             // whole run, and the widen's fetch is its long stretch. Renew
@@ -1236,6 +1248,7 @@ impl Syncer {
                 }
                 baseline.prev_scan.insert(f.path.clone());
                 if let Some(be) = f.be {
+                    taken.push(f.path.clone());
                     baseline.entries.insert(f.path, be);
                 }
             }
@@ -1255,6 +1268,9 @@ impl Syncer {
         // LAST. While this document exists the workspace is mid-rescope
         // and `run_barrier` will replay before doing anything else.
         self.state.clear_scope_intent()?;
+        // The model's RescopeSecond: the unlink and the widen, the new scope.
+        self.trace("rescope", serde_json::json!({"stage": "applied", "unlinked": unlinked, "taken": taken,
+            "target": target}));
         Ok(report)
     }
 }

@@ -38,7 +38,7 @@ RemovedBy(s) == {p \in Paths : w[s].local[p] # Nil /\ w'[s].local[p] = Nil}
 Has(e, f) == f \in DOMAIN e
 
 Match(e) ==
-  \/ e.ev = "checkout" /\ Checkout(e.w)
+  \/ e.ev = "checkout" /\ Checkout(e.w) /\ (Has(e, "scope") => w'[e.w].scope = e.scope)
   \/ e.ev = "agent_write" /\ nextGen = e.g /\ Edit(e.w, e.p)
   \/ e.ev = "agent_delete" /\ Delete(e.w, e.p)
   \* The gateway: a save's bytes, then its commit, which installs the
@@ -111,6 +111,13 @@ Match(e) ==
      /\ Has(e, "seq") => w'[e.w].ack.seq = e.seq
      /\ Has(e, "nonces") => w'[e.w].ack.nonces = e.nonces
   \/ e.ev = "retire" /\ RetireByAck(e.w)
+  \* The narrow / widen (`checkout.rs::rescope`) and a barrier's replay of it.
+  \/ /\ e.ev = "rescope_begin" /\ RescopeBegin(e.w)
+     /\ w'[e.w].sTgt = e.tgt /\ w'[e.w].sDrop = e.drop
+  \/ e.ev = "rescope_first" /\ RescopeFirst(e.w) /\ w'[e.w].sKeep = e.keep
+  \/ /\ e.ev = "rescope_second" /\ RescopeSecond(e.w)
+     /\ {p \in Paths : w[e.w].local[p] # Nil /\ w'[e.w].local[p] = Nil} = e.unlinked
+     /\ {p \in Paths : w'[e.w].baseline[p] # w[e.w].baseline[p]} = e.taken
   \* A new incarnation (`release_stale_own`'s `start`).
   \/ e.ev = "restart" /\ Restart(e.w)
 

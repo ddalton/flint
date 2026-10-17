@@ -115,6 +115,14 @@ else
   # A restart between a CAS and step 7: without the converge the model's
   # restarted tree cannot take its own install as the code's does.
   check "$TRACES"/a_restart_between_the_cas_and_step_7.ndjson reject control-no-convergence --set=ContentConverges=FALSE
+  # The narrow, unlink-first: the model unlinks at its first half and cannot
+  # follow the code's uncite, then a crash, then the replay's unlink.
+  check "$TRACES"/a_narrow_crashed_before_its_unlink_is_replayed.ndjson reject control-narrow-unlink-first --set=RescopeUnciteFirst=FALSE
+  # The consume blind to the scope: it takes B's out-of-scope edit, which the
+  # code's narrowed tree never fetched.
+  check "$TRACES"/a_narrow_then_a_widen.ndjson reject control-scope-ignored --set=ConsumeHonorsScope=FALSE
+  # The unlink blind to the bytes: it takes the agent's write the code kept.
+  check "$TRACES"/a_narrow_keeps_what_the_agent_wrote_after_the_uncite.ndjson reject control-unlink-blind --set=UnlinkChecksBytes=FALSE
 fi
 echo "work dir: $WORK"
 [ "$FAIL" -eq 0 ] && echo "trace check (core): ok" || { echo "trace check (core): $FAIL FAILED"; exit 1; }
