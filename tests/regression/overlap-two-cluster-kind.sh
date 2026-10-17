@@ -36,8 +36,9 @@
 #      prefix — exactly one serves.
 #   4  the outer hub does NOT ingest the inner share's control objects.
 #      ANTI-VACUITY: it DOES ingest an ordinary file the inner wrote.
-#   5  KNOWN BUG, asserted as it currently behaves: a new project on a
-#      REUSED prefix silently serves the previous project's data.
+#   5  B12: a new project on a REUSED prefix is refused at startup (the
+#      owner object names the old project); CONTROL: a fresh prefix
+#      starts; adoptData takes the prefix over deliberately.
 #      CONTROL: a project on a fresh prefix serves nothing.
 #
 # One MinIO, shared by both clusters over the docker network, so the two
@@ -126,8 +127,8 @@ say "building the hub and the operator ($TRIPLE)"
    --bin flint-pnfs-mds --bin flint-lite-operator >/tmp/ov-build.log 2>&1) \
   || { tail -20 /tmp/ov-build.log; fail "zigbuild failed"; }
 IMGDIR=$(mktemp -d -t flint-ov-img.XXXXXX)
-cp "$CARGO_DIR/target/$TRIPLE/release/flint-pnfs-mds"     "$IMGDIR/"
-cp "$CARGO_DIR/target/$TRIPLE/release/flint-lite-operator" "$IMGDIR/"
+cp "${CARGO_TARGET_DIR:-$CARGO_DIR/target}/$TRIPLE/release/flint-pnfs-mds"     "$IMGDIR/"
+cp "${CARGO_TARGET_DIR:-$CARGO_DIR/target}/$TRIPLE/release/flint-lite-operator" "$IMGDIR/"
 cat >"$IMGDIR/Dockerfile.hub" <<'EOF'
 FROM alpine:3.20
 RUN apk add --no-cache curl
@@ -208,8 +209,9 @@ STAMP=$(ka get crd flintshares.chert.us \
 pass "both operators Ready; CRD stamped at schema $STAMP"
 
 # ── helpers that need the cluster ────────────────────────────────────
-mk_share() {  # $1 ctx-fn, $2 name, $3 prefix, $4 endpoint
-  local kc=$1 name=$2 prefix=$3 ep=$4
+mk_share() {  # $1 ctx-fn, $2 name, $3 prefix, $4 endpoint, [$5 = adopt: spec.adoptData]
+  local kc=$1 name=$2 prefix=$3 ep=$4 adopt=""
+  [ "${5:-}" = adopt ] && adopt="adoptData: true"
   $kc apply -f - >/dev/null <<EOF || fail "applying $name failed"
 apiVersion: chert.us/v1alpha1
 kind: FlintShare
@@ -220,6 +222,7 @@ spec:
   endpoint: $ep
   region: us-east-1
   credentialsSecretRef: s3creds
+  ${adopt}
   settings:
     flushFloorSecs: 3
   persistence: { size: 1Gi }
@@ -420,10 +423,12 @@ put_file kb inner "payload.txt" "inner-payload"
 wait_object "n/inner/payload.txt" 60 || fail "the inner hub never published payload.txt"
 wait_object "n/inner/.flint/epoch" 30 || fail "the inner hub has no control objects to be confused by"
 # Force the outer hub to import from scratch: import runs when tier state
-# is FRESH, so it needs a new claim, not a restart.
+# is FRESH, so it needs a new claim, not a restart. A recreated FlintShare
+# is a new uid on a prefix the old one owns, which B12 refuses (leg 5):
+# taking it over is adoptData's job, so this one says so.
 ka -n "$NS" delete flintshare outer --wait=true >/dev/null 2>&1
 ka -n "$NS" delete pvc outer-data --wait=true >/dev/null 2>&1
-mk_share ka outer "n/" "$EP"
+mk_share ka outer "n/" "$EP" adopt
 wait_phase_in ka outer Ready 240
 OPOD=""
 for _ in $(seq 1 60); do OPOD=$(hubpod_in ka outer); [ -n "$OPOD" ] && break; sleep 2; done
@@ -440,39 +445,61 @@ case "$LISTING" in
 esac
 pass "ordinary file imported, .flint/ refused at depth — the outer hub cannot shadow the inner's control objects"
 
-# ── leg 5 — KNOWN BUG: PREFIX REUSE ──────────────────────────────────
-say "leg 5: KNOWN BUG — a new project on a reused prefix serves the old project's data"
-# Asserted AS IT CURRENTLY BEHAVES, deliberately. When identity lands in
-# <prefix>.flint/ and the importer refuses a foreign owner, this leg
-# FAILS and is the signal to update it.
+# ── leg 5 — PREFIX REUSE (B12) ───────────────────────────────────────
+say "leg 5: a new project on a REUSED prefix is refused (B12); adoptData takes it over"
+# Was asserted as a KNOWN BUG until the owner object (tier/owner.rs,
+# e70f7084): <prefix>.flint/owner names the FlintShare uid that claimed
+# the prefix, and a hub of any other uid refuses to start there.
+owner_doc() { s3 s3api get-object --bucket "$BUCKET" --key "reuse/.flint/owner" /dev/stdout 2>/dev/null | head -c 400; }
 mk_share ka proja "reuse/" "$EP"
 wait_phase_in ka proja Ready 180
+UID_A=$(ka -n "$NS" get flintshare proja -o jsonpath='{.metadata.uid}')
 put_file ka proja "secret.txt" "project-A-private-data"
 wait_object "reuse/secret.txt" 60 || fail "project A never published its marker"
+case "$(owner_doc)" in *"$UID_A"*) ;; *) fail "reuse/.flint/owner does not name project A ($UID_A): $(owner_doc)" ;; esac
 ka -n "$NS" delete flintshare proja --wait=true >/dev/null 2>&1
 ka -n "$NS" delete pvc proja-data --wait=true >/dev/null 2>&1
 s3 s3api head-object --bucket "$BUCKET" --key "reuse/secret.txt" >/dev/null 2>&1 \
   || fail "deleting the CR removed the bucket data — that is not the behaviour under test"
-note "project A is gone; its bytes are still in the bucket (the operator never touches it)"
+note "project A is gone; its bytes and its owner object are still in the bucket"
 
 mk_share ka projb "reuse/" "$EP"
-wait_phase_in ka projb Ready 240
-LEAKED=""
-for _ in $(seq 1 30); do
-  LEAKED=$(get_file ka projb "secret.txt"); [ -n "$LEAKED" ] && break; sleep 2
+UID_B=$(ka -n "$NS" get flintshare projb -o jsonpath='{.metadata.uid}')
+REFUSAL=""
+for _ in $(seq 1 90); do
+  [ "$(phase_in ka projb)" = Ready ] && fail "project B reached Ready on project A's prefix — B12 is open again"
+  pod=$(ka -n "$NS" get pods -l "chert.us/share=projb" -o name 2>/dev/null | head -1)
+  if [ -n "$pod" ]; then
+    REFUSAL=$( { ka -n "$NS" logs "$pod" --previous 2>/dev/null; ka -n "$NS" logs "$pod" 2>/dev/null; } |
+      grep -m1 -F "already belongs to $UID_A" || true)
+  fi
+  [ -n "$REFUSAL" ] && break
+  sleep 2
 done
-# CONTROL: a project on a FRESH prefix sees nothing, so the leak above is
-# the reuse and not the drill handing it the file.
+[ -n "$REFUSAL" ] || fail "project B's hub did not log the B12 refusal naming project A ($UID_A)"
+echo "    ${REFUSAL:0:220}"
+case "$(owner_doc)" in *"$UID_A"*) ;; *) fail "the refusal rewrote the owner object: $(owner_doc)" ;; esac
+[ -z "$(get_file ka projb "secret.txt")" ] || fail "project B served project A's secret.txt"
+pass "REFUSED: project B on the reused prefix does not start, names the owner, and serves nothing"
+
+# CONTROL: a project on a FRESH prefix starts and sees nothing, so the
+# refusal above is the reuse and not a share that cannot start at all.
 mk_share ka projc "fresh/" "$EP"
 wait_phase_in ka projc Ready 180
 CLEAN=$(get_file ka projc "secret.txt")
-[ -z "$CLEAN" ] || fail "a project on a FRESH prefix also served secret.txt — the control is broken"
-if [ "$LEAKED" = "project-A-private-data" ]; then
-  pass "REPRODUCED: project B on the reused prefix serves project A's bytes verbatim (control on a fresh prefix serves nothing)"
-  note "expected — the bucket carries no owner identity and importOnStart defaults true"
-else
-  fail "project B did NOT adopt the old data (got '${LEAKED:-<empty>}'). If identity landed in .flint/, this leg is now stale and should assert the refusal instead."
-fi
+[ -z "$CLEAN" ] || fail "a project on a FRESH prefix served secret.txt — the control is broken"
+pass "control: a fresh prefix starts and serves nothing"
+
+# The deliberate takeover: adoptData rewrites the owner and imports.
+ka -n "$NS" patch flintshare projb --type=merge -p '{"spec":{"adoptData":true}}' >/dev/null
+wait_phase_in ka projb Ready 240
+ADOPTED=""
+for _ in $(seq 1 30); do
+  ADOPTED=$(get_file ka projb "secret.txt"); [ -n "$ADOPTED" ] && break; sleep 2
+done
+[ "$ADOPTED" = "project-A-private-data" ] || fail "adoptData did not import project A's data (got '${ADOPTED:-<empty>}')"
+case "$(owner_doc)" in *"$UID_B"*) ;; *) fail "adoption did not rewrite the owner to project B ($UID_B): $(owner_doc)" ;; esac
+pass "adoptData: project B takes the prefix over, serves its data, and now owns it"
 
 echo
 echo "══════════════════════════════════════════════════════════════════"
