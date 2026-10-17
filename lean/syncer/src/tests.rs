@@ -806,6 +806,131 @@ async fn a_commit_withholds_an_upload_a_peers_sweep_took_and_uploads_afresh_next
     assert_eq!(cited_bytes(&inner, &a.cfg, "x.txt").await.as_deref(), Some(&b"A's upload"[..]));
 }
 
+/// Rule R4's UI half (the model's GatewaySweepGrace; the 2026-10-17
+/// mutant audit, SweepNoGrace): a UI save PUTs its handle and then CASes
+/// the document onto it with no re-read, so the orphan sweep's grace is
+/// the only thing between a writer's due sweep and a citation of nothing.
+/// The writer commits, sweeping, inside the save's window: at the shipped
+/// grace the handle is spared and the save cites its bytes; with no grace
+/// (the control arm) the sweep takes it and the save cites a deleted handle.
+async fn a_writers_sweep_inside_a_ui_saves_window(grace: bool) {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    if !grace {
+        a.cfg.untracked_grace_secs = 0;
+    }
+    a.state.save_orphan_sweep_at(now_unix() - a.cfg.untracked_sweep_secs - 1).unwrap();
+
+    // The save's first half: its handle lands (`Workspace::put_file`).
+    let added = now_unix();
+    let flush = super::ui_flush(added);
+    let key = a.cfg.handle_key("ui.txt", &flush);
+    let body = Bytes::from_static(b"the reviewer's save");
+    let crc = crc64_nvme(&body);
+    let stamps =
+        GenerationStamps { generation: 0, epoch: 0, flush_uuid: flush.clone(), boundary_source: None, posix: None };
+    let meta = store.put_whole(&key, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc).await.unwrap();
+
+    // A writer's commit, its orphan sweep due, before the save's CAS.
+    write(dir.path(), "a.txt", "A publishes");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["a.txt".to_string()], "fixture: the writer did not commit: {r:?}");
+
+    // The save's second half: the CAS onto the handle, no re-read.
+    let (entry_key, etag) = (key.clone(), meta.etag.clone());
+    gateway_commit(&store, &a.cfg, &flush, move |doc| {
+        doc.entries.insert(
+            "ui.txt".to_string(),
+            manifest::LeanEntry {
+                key: entry_key.clone(),
+                etag: etag.clone(),
+                crc64_b64: flint_store::crc64_to_b64(crc),
+                size: body.len() as u64,
+                mode: 0o644,
+                mtime_unix: added as i64,
+                generation: 1,
+                epoch: 0,
+            },
+        );
+    })
+    .await
+    .unwrap();
+    let cited = cited_bytes(&store, &a.cfg, "ui.txt").await;
+    if grace {
+        assert_eq!(r.swept, 0, "the sweep took a UI save's handle inside its grace: {r:?}");
+        assert_eq!(cited.as_deref(), Some(&b"the reviewer's save"[..]), "the UI save cites a deleted handle");
+    } else {
+        assert_eq!(r.swept, 1, "fixture: with no grace the sweep did not take the save's handle: {r:?}");
+        assert!(cited.is_none(), "fixture: the control arm's citation is readable");
+    }
+}
+
+#[tokio::test]
+async fn a_writers_orphan_sweep_spares_a_ui_save_between_its_put_and_its_commit() {
+    a_writers_sweep_inside_a_ui_saves_window(true).await;
+}
+
+/// The control arm: what the grace prevents.
+#[tokio::test]
+async fn without_the_grace_a_writers_sweep_leaves_a_ui_save_citing_nothing() {
+    a_writers_sweep_inside_a_ui_saves_window(false).await;
+}
+
+/// Rule R4b (the model's SweepUnderLease; the 2026-10-17 mutant audit,
+/// SweepFree): the orphan sweep runs only inside the commit section,
+/// under the cell. A's commit holds the cell and has re-read the upload it
+/// is about to cite; a peer's barrier, its sweep due with no grace, runs
+/// in that window. At the shipped spacing the peer cannot depose A before
+/// its claim deadline, so it never reaches its sweep, and A's citation is
+/// of bytes that exist. A sweep run before the claim takes A's upload
+/// between its re-read and its CAS, and A cites a deleted handle.
+#[tokio::test]
+async fn a_peers_sweep_never_runs_inside_a_holders_commit() {
+    let inner = Arc::new(MemoryStore::new());
+    let ha = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&ha, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "seed.txt", "seed");
+    a.run_barrier().await.unwrap();
+    syncer(&inner, dir_b.path()).await.checkout().await.unwrap();
+
+    write(dir_a.path(), "x.txt", "A's upload");
+    let rb: Arc<std::sync::Mutex<Option<Result<super::barrier::BarrierReport, LeanError>>>> = Default::default();
+    {
+        let (inner, root_b, rb) = (inner.clone(), dir_b.path().to_path_buf(), rb.clone());
+        ha.after_head(&a.cfg.file_key("x.txt"), move || {
+            let (inner, root_b) = (inner.clone(), root_b.clone());
+            let r = std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    let mut b = syncer(&inner, &root_b).await;
+                    b.cfg.claim_quiet_spacing_secs = lease::QUIET_SPACING_SECS;
+                    b.cfg.untracked_grace_secs = 0;
+                    b.state.save_orphan_sweep_at(now_unix() - b.cfg.untracked_sweep_secs - 1).unwrap();
+                    write(&root_b, "b.txt", "B publishes");
+                    b.run_barrier().await
+                })
+            })
+            .join()
+            .unwrap();
+            *rb.lock().unwrap() = Some(r);
+        });
+    }
+    let ra = a.run_barrier().await.expect("A's barrier");
+    let rb = rb.lock().unwrap().take().expect("fixture: the hook never ran");
+    assert!(rb.is_err(), "fixture: B committed inside A's commit section: {rb:?}");
+    assert_eq!(ra.uploaded, vec!["x.txt".to_string()], "{ra:?}");
+    assert_eq!(
+        cited_bytes(&inner, &a.cfg, "x.txt").await.as_deref(),
+        Some(&b"A's upload"[..]),
+        "A's commit cites a handle a peer's sweep took inside it"
+    );
+}
+
 /// A withheld upload is PARKED: the path is the agent's work and "publishes
 /// next barrier", so the merge does not count theirs there as owed. If the
 /// agent then backs out, theirs IS owed, and nothing else may move the
@@ -12203,6 +12328,20 @@ async fn the_compose_path_reads_the_descriptor_it_was_given_not_the_path_it_was_
 /// not see it (`LeanBarrierLeaseStragglerLoadsSuccessor`).
 #[tokio::test]
 async fn a_holder_deposed_during_its_commit_heads_does_not_install_onto_its_successors_document() {
+    deposed_during_its_commit_heads(false).await;
+}
+
+/// The same at the SHIPPED renew spacing (the 2026-10-17 mutant audit,
+/// InstallUnfenced). The battery's spacing is 0, so `renew_if_due` renews
+/// at every call and its renew is what fenced A above: the test passed
+/// with `verify_not_deposed` deleted. At the shipped spacing the cell A
+/// claimed is not yet due a renew, and only the fence can stop the install.
+#[tokio::test]
+async fn a_holder_deposed_during_its_commit_heads_is_fenced_by_the_load_not_by_a_renew() {
+    deposed_during_its_commit_heads(true).await;
+}
+
+async fn deposed_during_its_commit_heads(shipped_spacing: bool) {
     let inner = Arc::new(MemoryStore::new());
     let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
     let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -12211,6 +12350,9 @@ async fn a_holder_deposed_during_its_commit_heads_does_not_install_onto_its_succ
     write(dir_a.path(), "base.txt", "x");
     a.run_barrier().await.unwrap();
     syncer(&inner, dir_b.path()).await.checkout().await.unwrap();
+    if shipped_spacing {
+        a.cfg.claim_quiet_spacing_secs = lease::QUIET_SPACING_SECS;
+    }
 
     // A's next barrier holds the cell; while its commit re-reads the
     // citation it adds, B deposes it (six quiet polls, rotation) and
