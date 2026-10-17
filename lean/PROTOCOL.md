@@ -16,7 +16,10 @@ and what a commit stops citing is collected only after the retire age G
 writer-local queue, citation repairs, the journal's installed document — is
 `formal/LeanCore.tla` (and `LeanP2.tla` for the step between); neither
 describes the code any more. The trace check (`formal/trace/TraceCore.tla`)
-replays the code's conformance traces against `LeanP1.tla`.
+replays the code's conformance traces against `LeanP1.tla`: since
+2026-10-17, 28 traces that between them take every rule on this page
+(`formal/README.md`, "The code-trace check", says which steps are not
+traced).
 
 ## The objects
 
@@ -67,12 +70,18 @@ Guards read the state; effects write it.
 | **Age** | — | G elapses: everything retiring is due; a reader that loaded before now has lagged | — | — |
 | **Reap**(s, h) | inside a commit section; h retired at least G ago, not cited | `live \= {h}`; the log goes once its handles are gone (`untracked.rs::reap_retired`) | `Inv_ReaderFetches` | `LeanP1ReaderLoses` |
 | **Finish**(s) | cased, collected | the baseline follows what was published (its uploads, its landed deletes); `synced := seq` if the install was the document; `derived := seq` only if the CAS replaced exactly the derived document (`adv`: the install is it plus this tree's own changes), and the published paths leave `skipped`; the section closes | `Inv_ShortcutSound` | `LeanP1AdvanceUnguarded` |
-| **Restart**(s) | — | keeps the tree and the baseline (with `synced`, `derived` and `skipped`, on disk); drops the barrier in flight. No journal is read back: content convergence settles an upload the CAS already cited | `Inv_NoRegress` | `LeanP1ProbeRestartAfterCas` (reachable) |
+| **Restart**(s) | — | keeps the tree and the baseline (with `synced`, `derived` and `skipped`, on disk); drops the barrier in flight and releases the cell it held. No journal is read back: content convergence settles an upload the CAS already cited | `Inv_NoRegress`, `NR1` | `LeanP1ProbeRestartAfterCas` (reachable), `LeanP1Rematerialise` (NR1) |
 | **RescopeBegin**(s) | idle, no rescope in flight | THE DOOR: a target scope T; refused if a path T drops (held, not admitted) has unpublished changes. Else the INTENT (T, the drop set) is durable before the first mutation | — | — |
 | **RescopeFirst**(s) | an intent "saved" (a fresh one, or a replay after a crash) | keeps the still-cited dirty paths of the drop set (a replay must converge, not refuse); records what it drops (`ScopeIntent::held`) with the intent; UNCITES the rest (the baseline lets go) | `Prop_NarrowNeverDeletes` | `LeanP1NarrowUnlinkFirst` (unlink first, crash, replay: the absence publishes as a delete) |
 | **RescopeSecond**(s) | the uncite landed | UNLINKS what it uncited — only while the tree's bytes there are still the recorded ones (L-131); then the WIDEN: fetches each admitted citation the tree does not hold, adopts bytes that ARE the document's, keeps a file the agent made there (L-130); the scope := T; `derived` := 0 (the next consume derives in full); the intent clears. A restart between the halves sends the replay back to RescopeFirst, which re-derives what it keeps from the RECORDED drop set; the barrier replays before any consume | `Prop_AgentWorkKept`, `Prop_ScopeRespected` | `LeanP1UnlinkBlind` (L-131), `LeanP1WidenOverwrites` (L-130) |
 | **RPullRead**(s) | a reader, idle; NOT (the pointer is the one its last pull synced against and nothing is still owed: `derived` set and every `skipped` path still dirty) | reads the pointer (`rnow := seq`) | — | — |
 | **RPullSync**(s) | the pointer read | a whole-tree sync against the document as it is now, recording what it derived as a consume would (a failed fetch: nothing derived); then `memo := rnow`, the pointer read BEFORE the sync, so a document that moved in between is pulled again | `Inv_ReaderSound` | `LeanP1ReaderOwedIgnored` (judged by the pointer alone, L-129) |
+| **Touch**(s) | idle | the agent's publish request (`.flint/publish`, the gateway's `boundary_request`, the UDS door), consumed at once and folded into the pending record: its nonce appended (the oldest dropped past the cap), a new record minting its id, a fold into a standing one keeping it (L-133). It declares the tree as it stands: the paths changed whose bytes the document does not already hold, at any path, and not a narrow's leftover | `AK1`, `AK3` | `LeanP1FoldClobbers` (AK3), `LeanP1TouchDeclaresLeftover`, `LeanP1TouchDeclaresRenamed` (AK1) |
+| **Honor**(s) | a writer, idle; a record pending and not yet answered; a barrier that began after its latest fold has ended | the ack: `ok` iff that barrier withheld nothing and the carrier dropped and uncited nothing for this record, else `partial` naming them; its seq and clock are the barrier's | `AK1`, `AK4` | `LeanP1AckIgnoresWithheld`, `LeanP1AckIgnoresUncited`, `LeanP1CarrierKeepsDelete` (AK1), `LeanP1StampIndependent` (AK4) |
+| **HonorReader**(s) | a reader, idle, a record pending | the ack `refused-read-only`; nothing is published | `AK3` | — |
+| **RetireByAck**(s) | idle; the ack answers the pending record | the record is retired, never re-run (the restart rule, `ack_matches`) | `AK3` | — |
+| **Depose**(t) | scanned, uploads landed, something to publish; ANOTHER writer holds the cell (judged dead: the model has no clock) | `holder := t`; the manifest ROTATES (a content-identical CAS, `seq + 1`), so a CAS the deposed holder computed fails; the old holder is marked deposed | `DP1` | `LeanP1InstallUnfenced` (an install not fenced) |
+| **Fence**(s) | deposed | before its CAS: the barrier is abandoned, nothing installed; after it: the collector is skipped (it deletes only under the lease) | `DP1`, `DP2` | `LeanP1InstallUnfenced`, `LeanP1DeletesOffLease` |
 | **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left) — only when it took everything owed: a fetch or a write it could not complete records nothing, as the consume's `left` (L-128); a scoped sync in the code records nothing, so the next consume derives. With no document at all, a sync of a tree that holds paths refuses rather than read the absence as an empty document (L-127) | `Inv_NoRegress` | — |
 
 ## The invariants
@@ -96,6 +105,12 @@ Predicates on a state, and two on a step. Each world's list is in
 | **Prop_AgentWorkKept** | bytes the agent wrote that nobody has PUT yet leave its tree only by the agent's own hand | the widen keeping a file the agent made (`LeanP1WidenOverwrites`, L-130), the unlink taking only the bytes it uncited (`LeanP1UnlinkBlind`, L-131) |
 | **Prop_ScopeRespected** | no step but the agent's writes the tree at a path it neither holds nor admits | the consume's scope filter (`LeanP1ScopeIgnored`) |
 | **Prop_NarrowNeverDeletes** | a narrow is an unwatch, never an absence: no barrier publishes the delete of a path a rescope unlinked that the agent has not touched since | the uncite before the unlink (`LeanP1NarrowUnlinkFirst`) |
+| **AK1** (a step property) | an ack names every path the request declared, and the agent has not touched since, whose bytes in the ack's document are not the declared ones, unless a later version of them is there or a record surfaced them; `ok` names none. It may name more | the ack reading what the barrier withheld (`LeanP1AckIgnoresWithheld`), the carrier's uncited set (`LeanP1AckIgnoresUncited`), a per-fold carrier (`LeanP1CarrierPerFold`), a request read after the carry (`LeanP1RequestAfterCarry`), and the declaration rules (`LeanP1TouchDeclaresLeftover`, `LeanP1TouchDeclaresRenamed`) |
+| **AK3** | every consumed request is pending or was answered, but for what the nonce cap dropped | a fold that replaces the standing record (`LeanP1FoldClobbers`) |
+| **AK4** | an ack whose barrier installed names the clock its CAS stamped on the bucket | the clock stamped apart from the ack (`LeanP1StampIndependent`) |
+| **NR1** (a step property) | a path the tree deleted and has not published comes back only by the agent's own write | a restart that rematerialises (`LeanP1Rematerialise`), a consume that takes the deleted path (`LeanP1ConsumeTakesDeleted`) |
+| **DP1** (a step property) | an install is the lease holder's | the fence (`LeanP1InstallUnfenced`) |
+| **DP2** (a step property) | the collector deletes only under the lease (the sweep and the reap are guarded in place) | the per-batch lease check (`LeanP1DeletesOffLease`, L-132) |
 
 `Prop_UISaveCompletes` is the liveness claim: fair to the gateway's CAS
 alone, every save the gateway starts is answered (it lands, or it is a
@@ -108,8 +123,9 @@ the lease).
 Every claim in this table is PROVED in TLAPS for every path count, writer
 count and bound under the shipped rules
 (`formal/results/2026-10-07-tlaps-m5/`, `formal/results/2026-10-14-tlaps-live/`;
-`lean/SAFETY.md` §3.3), and so is `TypeOK`: the theorem names are in
-`formal/README.md`.
+AK1, AK3, AK4, NR1, DP1 and DP2 with the chain re-proved on their model in
+`formal/results/2026-10-15-tlaps-rows15-17/`; `lean/SAFETY.md` §3.3), and
+so is `TypeOK`: the theorem names are in `formal/README.md`.
 
 ## Honest limits
 
@@ -152,9 +168,9 @@ state a step writes, so the claim stays a predicate on a state.
 
 ## What this page does not cover
 
-The ack machinery (the sentinel, the declared boundary's ack and its
-`Carrier::uncited`), the narrow verb, deposal under a stall, the ingress
-namespace, and the gateway's read path (the manifest cache and the CRC
+The ingress namespace, the gateway's lost reply (a commit that landed
+behind a lost response is answered committed, MN2; tests only), and the
+gateway's read path (the manifest cache and the CRC
 check, M8). The last is pinned by tests only
 (`a_warm_read_fetches_the_pointer_and_the_object_and_no_manifest_entries`,
 `a_read_whose_bytes_do_not_match_the_citation_is_refused`).

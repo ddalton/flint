@@ -40,7 +40,12 @@ all (`../SAFETY.md` §3.3). The theorems: `TypeInvariant`
 `CitationsLive`, `OneName`, `ShortcutSound`, `ReaderSound`,
 `ReaderFetches`, `NoSilentRevert`, `NoRegress` (NR5), `AckedNamed` (AN5),
 `AgentWorkKept`, `ScopeRespected`, and `UISaveCompletes`
-(`LSpec => Prop_UISaveCompletes`). `LeanP1Proof.tla` is generated
+(`LSpec => Prop_UISaveCompletes`). Since 2026-10-16, on the model with the
+publish request, the restart claim and deposal (rows 15-17), with the chain
+above re-proved on it: `NoNonceOrphaned` (AK3), `OneClock` (AK4),
+`DeletedStaysDeleted` (NR1), `InstallUnderLease` (DP1), `CollectUnderLease`
+(DP2) and `AK1Holds` (AK1) — `results/2026-10-15-tlaps-rows15-17/`
+(STATUS.txt; the texts pinned in `chain/MD5.txt` and `final/md5.txt`). `LeanP1Proof.tla` is generated
 (`results/2026-10-07-tlaps-m5/gen-proof.py`, which chains the earlier
 milestones' generators) and split by `split-proof.py`; edit the
 generators, never the output. Two of the original claims were FALSE once the gateway
@@ -61,7 +66,8 @@ action property `NR5`). The gate checks the restatements, and since
   E33; `Inv_NoRegress` for E29; `Inv_AckedNamed` for E38, E39.
 
 Expectations were written before any run (`WORLDS-LeanP1.tsv`). The trace
-check accepts 41/41 (`results/2026-09-25-tracecore-on-leanp1/`). **The gate
+check accepts 74/74 on 28 traces (2026-10-17; below), was 41/41 on 15
+(`results/2026-09-25-tracecore-on-leanp1/`). **The gate
 passed 2026-10-14 on the restated claims** (`results/2026-10-14-leanp1-gate-ec2/`,
 SUMMARY.txt): 68 of 69 worlds as expected — 12 hold, 54 fire, 2 recorded —
 and `LeanP1LiveHolds`, which no checker has finished (Holds's 1.66B states
@@ -69,6 +75,49 @@ with a liveness graph), is decided by the proof instead. It passed first on
 2026-10-04 (49/49, `results/2026-10-04-leanp1-gate/`). Its first run
 (2026-09-25) had reported `Inv_ShortcutSound` violated in both shipped
 worlds; that was settled before 2026-10-04.
+
+### The code-trace check (`trace/trace-check-core.sh`, 2026-10-17)
+
+The proof is about the model; this is what ties the code to it. Each
+conformance scenario (`lean/syncer/src/tests_conformance.rs`) drives real
+syncers and the gateway's verbs over the in-memory store and logs the
+syncer's event trace; `trace/ndjson2core.py` maps each event to a model
+step (the mapping is its docstring) and `trace/TraceCore.tla` replays the
+steps through `LeanP1.tla`, every rule constant as the code ships, with the
+model's claims checked in every state. Accepted means the model can take
+exactly the code's run with no claim broken. Every run regenerates the
+traces from the tree's code (`TRACES=<dir>` checks a saved set), on tla-mc
+by default; `TRACE_CHECKER=tlc` is the reference.
+
+What it replays (28 traces): the barrier (consume, scan, upload, claim,
+verify, install, collect, the sweep and the reap, finish), the UI's save,
+delete and rename; the publish request, its fold, its honour and the ack's
+status, dropped set, seq, clock and nonces (`Touch`, `Honor`,
+`RetireByAck`); restarts, a crash between the CAS and step 7 included
+(`Restart`); narrows and widens, a crash mid-narrow and its replay
+(`RescopeBegin/First/Second`); a holder deposed before its CAS and fenced
+(`Depose`, `Fence`); a writer's sync, a reader's pull, skip and refused
+publish (`Sync`, `RPullRead`, `RPullSync`, `HonorReader`).
+
+What makes it able to fail: 35 mutations, each one fact of a real trace
+corrupted, must be rejected (`trace/mutate_core.py`), and 11 controls, a
+shipped rule turned off in the model, must change the verdict (rejected,
+or the code's own run unsafe). On 2026-10-17 (77a491b2): 74/74 as required
+under tla-mc (5 s) and TLC (130 s), the same verdicts.
+
+Not traced: a deposal AFTER the holder's CAS (every hook there follows the
+collector's renew or precedes the `cas` event; the unit test
+`a_holder_deposed_during_one_sweep_batch_deletes_no_further_batch` pins
+that fence), a scoped sync and a sync or consume whose fetch fails (both
+refused by the converter; the traces fail no fetch, `MaxFetchFails` 0), a
+lost CAS (the model's commit section has one holder), an orphaned-own
+claim, and the sync request (`.flint/sync`; only the publish request is
+modelled). One
+known mismatch no trace takes: the code's sync drops the baseline entry of
+a path the tree and the document both deleted; the model's `Sync` keeps it
+(its consume converges there; its sync does not). It looks harmless — the
+model's next scan publishes a delete of an uncited path — but no trace has
+checked it.
 
 The runner's large worlds need a big box: on one c8g.48xlarge (192 vCPU,
 371 GB) phase 1 (62 worlds, 24 at a time, 4 workers each) took 31 min and

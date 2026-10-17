@@ -12,9 +12,12 @@ invariant is checked in which world) and `lean/FINDINGS.md` (every defect
 found so far, with how it was found).
 
 Since 2026-10-14 the claims of the shipped shape's model are PROVED, in
-TLAPS, for every path count, writer count and bound (§3.3). That is a
-proof about the MODEL. That the code is the model rests on the trace check,
-the tests and the drills, and every other check below is exhaustive over a
+TLAPS, for every path count, writer count and bound (§3.3); since
+2026-10-16 so are its claims for the publish request's answer, the restart
+and deposal (AK1, AK3, AK4, NR1, DP1, DP2, §3.3). That is a proof about the
+MODEL. That the code is the model rests on the trace check (28 scenario
+traces replayed through the model since 2026-10-17, §3), the tests and the
+drills, and every other check below is exhaustive over a
 SMALL world, or a replay of a run that actually happened. §5 says what
 that leaves open.
 
@@ -29,12 +32,12 @@ bound (§3.3):
 
 | promise | on the shipped shape |
 |---|---|
-| S1, an agent's publish ack (rows 1-5) | **not modelled**: the sentinel, its ack and the inbox cell's two requests are not in `LeanP1.tla` (§5 row 15) |
+| S1, an agent's publish ack (rows 1-5) | since 2026-10-16: the ack names every declared path its document does not carry, and `ok` names none, `AK1` (rows 1-2); a fenced writer never answers `ok`, a corollary of `AK1` and `DP1` (row 3); every consumed request is pending or answered, but for what the nonce cap dropped, `AK3` (row 4); an installing ack names the clock its CAS stamped, `AK4` (row 5). The inbox cell's two requests only schedule a barrier or carry news, so they are behaviours already (§5 row 15) |
 | S1, a UI write (rows 6-7) | acknowledged only once its CAS lands, so it is cited by the document itself: `Inv_CitationsLive`; gone only accounted for, `AN5`; never replaced unseen, `Prop_NoSilentRevert`; every save answered, `Prop_UISaveCompletes` |
 | S2 | `Inv_CitationsLive` (the commit re-reads its uploads, the sweep runs under the lease and spares a save in flight), `Inv_ReaderFetches` (the retire age); the gateway's CRC check is tests only |
 | S3 | `Prop_NoSilentRevert` (no lost update, R7, the gateway judging a save against the version read), `Prop_AgentWorkKept` (the agent's unPUT bytes leave its tree only by its hand), `Inv_ShortcutSound` (what a tree is owed), `Prop_DeleteSettles` and `AN5` (M3), `NR5` (no step back over a version, L-123) |
-| S4 | a rename is one CAS and never cited under two names, `Inv_OneName`; an acked version is accounted along its rename chain, `AN5`; a narrow never deletes, `Prop_NarrowNeverDeletes`, and no step but the agent's writes outside the scope, `Prop_ScopeRespected`. **Not stated** in `LeanP1.tla`: that a restart never republishes a delete (row 1's `Inv_NoResurrection`) |
-| S5 | `Inv_OneHolder`. **Not modelled**: deposal under a stall, so rows 3-4 (`Inv_NoStragglerInstall`, `Inv_NoDeposedPut`) are the pre-step-5 models' only |
+| S4 | a rename is one CAS and never cited under two names, `Inv_OneName`; an acked version is accounted along its rename chain, `AN5`; a narrow never deletes, `Prop_NarrowNeverDeletes`, and no step but the agent's writes outside the scope, `Prop_ScopeRespected`; a restart never republishes a delete: a path the tree deleted and has not published comes back only by the agent's own write, `NR1` (row 1, since 2026-10-16) |
+| S5 | `Inv_OneHolder`; since 2026-10-16 deposal is modelled: an install is the lease holder's, `DP1` (row 3), and the collector deletes only under the lease, `DP2` (L-132). Row 4 (`Inv_NoDeposedPut`) is retired by the handles design: a straggler's PUT lands at a fresh handle nobody cites, and `Inv_CitationsLive` covers what a commit may cite |
 | S6 | **not stated**: `LeanP1.tla` has no convergence claim; `LeanP1NoConvergence` holding shows convergence is an economy, not a safety rule (§3.2) |
 
 **S1. An acknowledged write is never lost.** Two kinds of acknowledgement:
@@ -118,8 +121,10 @@ A claim with unnamed assumptions is a claim about nothing.
 | trace validation, phase 1 | the model is the code, on 5 scenario traces, in CI | 5 accepted, 5 mutations + 5 controls rejected |
 | trace validation, phase 2 | the model is the code on a REAL 6-writer run on S3, with the invariants checked while replaying | one leg, one path: 3,258 steps, no invariant violated |
 | the live drill | the binary is the code: each fix has a control arm that fails | host legs H1-H6, storm legs S0-S5 (2026-09-15) |
-| trace validation on the shipped shape (step 5) | the code's conformance traces are behaviours of `LeanP1.tla` (`formal/trace/TraceCore.tla`) | 41/41 on 2026-09-25: 15 traces accepted, 16 mutations and 10 controls rejected |
-| the unit battery | each finding pinned by a test whose control fails it; every step-5 line mutation-checked | 257 syncer tests; gateway 24 unit, 31 verbs, 5 battery (2026-09-25) |
+| trace validation on the shipped shape (step 5) | the code's conformance traces are behaviours of `LeanP1.tla` (`formal/trace/TraceCore.tla`), with the model's claims checked along each: the core barrier, the UI verbs and the collector since 2026-09-25; since 2026-10-17 also the publish request and its answer, restarts, narrows and widens, deposal, the sync and the reader (`formal/README.md`, "The code-trace check") | 74/74 on 2026-10-17 (77a491b2): 28 traces accepted, 35 mutations and 11 controls rejected or unsafe; tla-mc and TLC give the same verdicts. Was 41/41 on 15 traces (2026-09-25) |
+| the unit battery | each finding pinned by a test whose control fails it; every step-5 line mutation-checked | 317 syncer tests, 64 gateway tests (2026-10-17) |
+| the mutant code audit (2026-10-17) | for each of the gate's 44 LeanP1 mutation worlds, a code test that FAILS if the code had that bug | at the start 29 covered, 8 partial, 2 with none, 5 with no code analogue; every gap since tested (each new test failing under its mutation) or documented. It found one real defect, MN2: a UI edit whose commit landed behind a lost response was answered as failed (`manifest::commit_edit`; fixed e27823dc, no data loss: the committed state was right). The lost reply is not modelled (the model's gateway commits and answers in one step); tests pin it |
+| the TLAPS proof of rows 15-17 (§3.3) | `AK1`, `AK3`, `AK4`, `NR1`, `DP1`, `DP2` for every bound, with M0-M6 re-proved on the extended model | M0-M14 (2026-10-15 to 2026-10-16) |
 | the TLAPS proof of the shipped shape's model (§3.3) | every claim of `LeanP1.tla` (`PROTOCOL.md`'s table) and the liveness claim, for EVERY path count, writer count and bound, under the shipped rules | 19,235 obligations, 11 modules (2026-10-14) |
 | the LeanP1 gate on the restated claims (§3.2) | the same claims, exhaustively, in 69 worlds; every rule removed one at a time; the deep counterexamples as scripted traces | 68 of 69 as expected, the 69th decided by the proof (2026-10-14) |
 
@@ -218,7 +223,7 @@ model is `formal/LeanP1.tla` (`PROTOCOL.md` is written from it):
   Tests only; no model.
 
 What checks it: the trace check replays the code against `LeanP1.tla`
-(41/41 at f6f6a892, §3), the model's own gate (`gen-leanp1.sh`,
+(28 traces, 74/74 at 77a491b2, §3), the model's own gate (`gen-leanp1.sh`,
 expectations in `WORLDS-LeanP1.tsv`, written before any run), and since
 2026-10-14 a proof (§3.3).
 
@@ -305,6 +310,31 @@ every rule constant TRUE):
 | M5D `AckedNamed` | AN5 | 1,207 |
 | M6 `AgentWorkKept`, `ScopeRespected` | `Prop_AgentWorkKept`, `Prop_ScopeRespected` | 789 |
 | L1 `UISaveCompletes` | `LSpec => Prop_UISaveCompletes` (G1: every save the gateway starts is answered) | 27 |
+
+**Rows 15-17 (2026-10-15 to 2026-10-16):** the model gained the publish
+request and its answer (`Touch`, `Honor`, `HonorReader`, `RetireByAck`),
+a claim for the restart, and deposal (`Depose`, `Fence`), and the whole
+chain was re-proved on it (`formal/results/2026-10-15-tlaps-rows15-17/`,
+STATUS.txt; `chain/MD5.txt` and `final/md5.txt` pin every text):
+
+| theorem | claim | obligations |
+|---|---|---|
+| M0-M6, L1 | the claims above, on the extended model | M0 2,566; M1 3,115; M2 5,427; M3 2,663; M4 1,070; M5A 1,566; M5B 214; M5C 4,345; M5D 1,316; M6 878; L1 27 |
+| M7 `NoNonceOrphaned`, `OneClock` | `AK3`, `AK4` | 725 |
+| M8 `DeletedStaysDeleted` | `NR1` | 523 |
+| M9 `InstallUnderLease`, `CollectUnderLease` | `DP1`, `DP2` | 533 |
+| M10-M14 `AK1Holds` | `AK1` (M10 from `BoundOK` and `UncitedCatches`, 426; M11-M14 the rest, STATUS.txt "22:47Z") | — |
+
+The AK1 proof needed two fixes to the MODEL's `Touch` (what a request
+declares; `FINDINGS.md` Table 3): a narrow's leftover is not declared, and
+neither are bytes the document holds at another path. Both were checked
+against the code on 2026-10-17: the code declares what its barriers carry,
+and answers as the fixed model does (tests
+`a_touch_after_a_restart_mid_narrow_never_declares_the_leftover`,
+`a_restart_before_step_7_does_not_change_the_ack_of_a_renamed_away_file`
+and its siblings in `lean/syncer/src/tests.rs`). Two gate worlds for them,
+`LeanP1AckRescopeRestart` and `LeanP1AckRenameRestart`, are clean to depth
+19 and 17 but have not finished.
 
 **Two of the original claims were FALSE**, and the proof found it: once the
 gateway may remove three times, `Inv_NoRegress` fails (E29: a conflict
@@ -619,10 +649,10 @@ encodes today's answer.
 | 11 | ~~the review of 2026-09-18's other routes~~ **H2, H3, M7, H4, H5, H7 done 2026-09-19** (§4.15); H6 shipped (row H6); H5's compose path done in f6f6a892 (`ComposeSpec` takes the opened file, across flint-store, forge packio and the CSI tier). ~~**Open:** the review's M3~~ **done 2026-10-14** (`FINDINGS.md` L-132): `lease::renew_if_due` renews inside the commit section by the node's monotonic clock — before the CAS's fence read, between delete batches, around the rescope's fetch — and a holder deposed after its CAS deletes nothing more | — |
 | 12 | ~~a TLC confirmation of one large LeanP1 HOLDS~~ **answered 2026-10-14** by the TLAPS proof (§3.3), which decides the same claims for every bound with no model checker in the loop; the large HOLDS verdicts remain tlc-rs's and tla-mc's (they agree with each other and with TLC on `Holds1p3b`'s count) | — |
 | 13 | ~~a three-SYNCER LeanP1 world~~ **answered by the proof 2026-10-14** (§3.3: every claim for any number of syncers); four three-syncer rungs also HOLD in TLC (2026-10-05/06, up to 9,821,039,047 distinct, §3.2) | — |
-| 14 | replay a REAL run against the shipped shape's model: the trace check (`formal/trace/TraceCore.tla`, `ndjson2core.py`) accepts the code's 15 conformance traces (§3); a multi-writer run on S3 (the storm legs' kind, §3's phase 2, which replayed only the pre-step-5 model) has not been replayed against `LeanP1.tla`, invariants on | a day for one leg, then CI |
-| 15 | the boundary verbs' ANSWER in the shipped shape's model. The inbox cell's two requests only schedule a barrier (`boundary_request`) or are carried to the agent as news (`sync_request`, D14), watermarked locally and mutating nothing shared (`barrier.rs:427-457`), so a requested barrier is already a behaviour of `LeanP1.tla` and every proved claim covers it. What is not modelled is the sentinel's ack (`sentinel.rs`), so S1's ack rows (§3.1: `Inv_AckImpliesCited`, `Inv_AckBoundaryCoherent`, `Inv_NoNonceOrphan`, `Inv_BoundaryNamesItsClock`) are certified only on the pre-step-5 models, and "a requested boundary is eventually published" is not claimed. Model the ack (an observation, with the ok/partial rule and the covered nonces) in `LeanP1.tla`, gate it, prove the four, and the progress claim as an L2 beside L1. Plan, with rows 16 and 17: `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md` (approved 2026-10-14) | about a week to model and gate; the proof after |
-| 16 | a restart never republishes a delete, on the shipped shape: `LeanP1.tla` has `Restart` but no claim for it (§1, S4 row 1 is `LeanSubtree.tla`'s `Prop_NoResurrection`). State it in `LeanP1.tla` — no step that is a restart creates a local file or cites a path the agent deleted — with the rematerialise mutation as its control, then prove it. Planned with rows 15 and 17: `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md` (NR1, M8; approved 2026-10-14) | a day to state and gate; the proof after |
-| 17 | deposal under a stall, on the shipped shape: a writer deposed while it holds the lease (§1, S5 rows 3-4) is not in `LeanP1.tla` (`PROTOCOL.md`, "What this page does not cover"); `Inv_NoStragglerInstall` and `Inv_NoDeposedPut` are the pre-step-5 models' only. Model the deposal, gate it, prove it. Planned with rows 15 and 16, so the proof's frame changes once: `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md` (DP1, DP2, M9; approved 2026-10-14) | days |
+| 14 | replay a REAL run against the shipped shape's model. **The scenario half done 2026-10-17**: the trace check (`formal/trace/TraceCore.tla`, `ndjson2core.py`) replays 28 conformance traces covering every action of `LeanP1.tla` (§3; not traced: a deposal after the holder's CAS, a scoped sync, a failed fetch, a lost CAS, an orphaned-own claim, the sync request — `formal/README.md`). Open: a multi-writer run on S3 (the storm legs' kind, §3's phase 2, which replayed only the pre-step-5 model) has not been replayed against `LeanP1.tla`, invariants on | a day for one leg, then CI |
+| 15 | ~~the boundary verbs' ANSWER in the shipped shape's model~~ **done 2026-10-16**: modelled, gated and proved (`AK1`, `AK3`, `AK4`, §3.3); the progress claim (L2) is not stated. The original row: The inbox cell's two requests only schedule a barrier (`boundary_request`) or are carried to the agent as news (`sync_request`, D14), watermarked locally and mutating nothing shared (`barrier.rs:427-457`), so a requested barrier is already a behaviour of `LeanP1.tla` and every proved claim covers it. What is not modelled is the sentinel's ack (`sentinel.rs`), so S1's ack rows (§3.1: `Inv_AckImpliesCited`, `Inv_AckBoundaryCoherent`, `Inv_NoNonceOrphan`, `Inv_BoundaryNamesItsClock`) are certified only on the pre-step-5 models, and "a requested boundary is eventually published" is not claimed. Model the ack (an observation, with the ok/partial rule and the covered nonces) in `LeanP1.tla`, gate it, prove the four, and the progress claim as an L2 beside L1. Plan, with rows 16 and 17: `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md` (approved 2026-10-14) | about a week to model and gate; the proof after |
+| 16 | ~~a restart never republishes a delete, on the shipped shape~~ **done 2026-10-16**: `NR1`, proved (M8), with `LeanP1Rematerialise` and `LeanP1ConsumeTakesDeleted` as its controls. The original row: `LeanP1.tla` has `Restart` but no claim for it (§1, S4 row 1 is `LeanSubtree.tla`'s `Prop_NoResurrection`). State it in `LeanP1.tla` — no step that is a restart creates a local file or cites a path the agent deleted — with the rematerialise mutation as its control, then prove it. Planned with rows 15 and 17: `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md` (NR1, M8; approved 2026-10-14) | a day to state and gate; the proof after |
+| 17 | ~~deposal under a stall, on the shipped shape~~ **done 2026-10-16**: `DP1`, `DP2`, proved (M9), with `LeanP1InstallUnfenced` and `LeanP1DeletesOffLease` as controls. The original row: a writer deposed while it holds the lease (§1, S5 rows 3-4) is not in `LeanP1.tla` (`PROTOCOL.md`, "What this page does not cover"); `Inv_NoStragglerInstall` and `Inv_NoDeposedPut` are the pre-step-5 models' only. Model the deposal, gate it, prove it. Planned with rows 15 and 16, so the proof's frame changes once: `docs/plans/lean-row15-boundary-verbs-model-plan-2026-10-14.md` (DP1, DP2, M9; approved 2026-10-14) | days |
 
 Regenerate `COVERAGE.md` with `python3 lean/formal/coverage.py` and check
 it with `--check`.
