@@ -29,6 +29,8 @@
 //!   FLINT_FORGE_UNDO_WINDOW_SECS / UNDO_MAX_POINTS  how long a force-pushed state stays recoverable, and how many
 //!                                  points a sweep reads (604800 / 64; 0 = undo off)
 //!   FLINT_FORGE_FANOUT           pack PUTs / ranged GETs in flight (default 4)
+//!   FLINT_FORGE_UPLOAD_PART_PARALLELISM  parts of ONE pack uploaded at once (default 8; 1 = serial)
+//!   FLINT_FORGE_UPLOAD_INFLIGHT_MB  bytes those parts may hold at once (default 512; 0 = no bound)
 //!   FLINT_FORGE_NAME_ACCEPTED_SET  name only the packs ACCEPTED pushes need (default ON)
 //!   FLINT_FORGE_RECLAIM_AT_REST    drop packs wholly covered, at restore (default ON)
 //!   FLINT_FORGE_DEFAULT_BRANCH   HEAD for an empty repository (main)
@@ -154,8 +156,29 @@ async fn serve() {
     let repo = PathBuf::from(env_req("FLINT_FORGE_REPO"));
     let endpoint = std::env::var("FLINT_FORGE_ENDPOINT").ok();
 
+    // A pack above WHOLE_PUT_MAX is a multipart compose, and the store
+    // uploads its parts one at a time unless told otherwise: FANOUT
+    // spreads work ACROSS packs, so a push whose critical path is one
+    // large pack gets one stream (runbw 2026-09-05: 10 GiB in 262 s,
+    // "161 serial 64 MiB parts"). Every part is read whole into RAM
+    // before its PUT, so the width only comes with the byte bound —
+    // without it the window holds FANOUT x this x 64 MiB.
+    //
+    // The bound must be SIZED TO THE WIDTH: the gate counts each 64 MiB
+    // part, so lean's flint_sync pair (8 / 256 MiB) admits only 4 parts
+    // and runs 4-wide. 8 / 512 MiB measured on EC2 2026-10-17
+    // (forge/e2e/partpar/README.md, two rounds): 537-638 MiB/s against
+    // 87-90 serial, 6.1-7.1x by mean, on i4i.xlarge and i4i.4xlarge alike;
+    // every run 8 connections wide, peak RSS 529 MiB. The
+    // whole-PUT bodies (packs at or under 64 MiB, FANOUT of them) do not
+    // take the gate, so the worst case is this plus FANOUT x 64 MiB.
+    let part_par = env_u64("FLINT_FORGE_UPLOAD_PART_PARALLELISM", 8).max(1) as usize;
+    let upload_inflight = env_u64("FLINT_FORGE_UPLOAD_INFLIGHT_MB", 512) * 1024 * 1024;
     let store = match S3Store::connect(bucket_name.clone(), endpoint.clone()).await {
-        Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
+        Ok(s) => Arc::new(
+            s.with_part_parallelism(part_par)
+                .with_upload_inflight_max_bytes(upload_inflight),
+        ) as Arc<dyn ObjectStore>,
         Err(e) => {
             eprintln!("flint-forge-syncer: store connect: {e}");
             std::process::exit(1);

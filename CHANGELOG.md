@@ -350,6 +350,18 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **forge: a large pack uploads its parts 8 at a time** (2026-10-17).
+  A pack over 64 MiB is a multipart upload, and the syncer sent its parts
+  one at a time, about 89 MiB/s whatever the node. It now sends 8 at once
+  under a 512 MiB bound on the bytes they hold:
+  - **6.1–7.1× faster** on EC2 i4i.xlarge and i4i.4xlarge (537–638 MiB/s);
+  - **528 MiB peak memory** while such a pack uploads, against 79 MiB before.
+
+  `FLINT_FORGE_UPLOAD_PART_PARALLELISM` (8; 1 = the old serial upload) and
+  `FLINT_FORGE_UPLOAD_INFLIGHT_MB` (512) set them. The bound counts 64 MiB
+  parts, so raise it with the width (16 parts needs 1024), or the bound
+  caps the width. Measurement: `forge/e2e/partpar/README.md`.
+
 - **krb5 1.0.0** (2026-10-16), the Kerberos acceptor's crate, up from
   0.12.1. Its API is settled for 1.0: the raw crypto modules are private
   and its errors and option structs are `#[non_exhaustive]`. The NFS

@@ -26,6 +26,13 @@ name = "flint-forge-syncer"
 path = "src/bin/flint_forge_syncer.rs"
 required-features = ["s3"]
 
+# The part-parallelism measurement (forge/e2e/partpar/): one pack through
+# packio::upload_file to a real bucket. An example, so it never ships.
+[[example]]
+name = "upload_bench"
+path = "examples/upload_bench.rs"
+required-features = ["s3"]
+
 # The hook needs no object store: it is a relay between git and the
 # syncer's socket, and it is spawned once per push, so it must build
 # and start without the AWS SDK anywhere near it.
