@@ -7508,6 +7508,66 @@ async fn a_crash_between_the_uncite_and_the_unlink_does_not_re_cite() {
     );
 }
 
+/// FINDINGS Table 3, the restart row (2026-10-16, fix (1); the model's
+/// TouchDeclaresRestartLeftover): the UI deletes a file a narrow then
+/// drops, and the syncer restarts between the uncite and the unlink. The
+/// file is a leftover: uncited, on disk, its held entry in the intent.
+/// The agent touches. The pre-fix model's touch declared it (its tree
+/// differed from the baseline and from the document) and the honour's
+/// `ok` broke AK1 once the replay unlinked it. The code declares only
+/// what its barriers carry, and the barrier replays the intent before its
+/// scan: the leftover is unlinked, never uploaded, never declared, and
+/// the UI's delete stands.
+#[tokio::test]
+async fn a_touch_after_a_restart_mid_narrow_never_declares_the_leftover() {
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, b) = rescope_fixture(&store).await;
+
+    // The UI deletes a file the narrow drops; this tree has not seen it.
+    hitl_remove(&store, &b.cfg, "outputs/big-0.bin", "reviewer").await;
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(!m.entries.contains_key("outputs/big-0.bin"), "fixture: the UI delete did not land");
+
+    // The crash between the uncite and the unlink, as above.
+    let mut base = b.state.load_baseline().unwrap();
+    let dropped: Vec<String> = (0..6).map(|i| format!("outputs/big-{i}.bin")).collect();
+    b.state
+        .save_scope_intent(&super::state::ScopeIntent {
+            target: Some(vec!["inputs".into()]),
+            held: dropped.iter().map(|p| (p.clone(), base.entries[p].clone())).collect(),
+            drop: dropped,
+        })
+        .unwrap();
+    for i in 0..6 {
+        let p = format!("outputs/big-{i}.bin");
+        base.entries.remove(&p);
+        base.prev_scan.remove(&p);
+    }
+    b.state.save_baseline(&base).unwrap();
+    drop(b);
+    assert!(read(dir.path(), "outputs/big-0.bin").is_some(), "fixture: the leftover is not on disk");
+
+    // The restart, and the agent's touch.
+    let mut b = syncer(&store, dir.path()).await;
+    let posture = b.sentinel_preflight().unwrap();
+    b.write_capabilities(&posture).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    b.poll_sentinels().unwrap();
+    clear_min_interval(&b);
+    let ack = b.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    assert!(
+        !m.entries.contains_key("outputs/big-0.bin"),
+        "the barrier re-published the leftover over the UI's delete: {ack:?}"
+    );
+    assert!(read(dir.path(), "outputs/big-0.bin").is_none(), "the replay did not unlink the leftover");
+    assert!(b.state.load_scope_intent().unwrap().is_none(), "the replay did not finish the narrow");
+    assert_eq!(ack.report.uploaded, 0, "the barrier carried a leftover: {ack:?}");
+    assert_eq!((ack.status.as_str(), ack.report.dropped.len()), ("ok", 0), "{ack:?}");
+}
+
 /// A narrow may unwatch a file; it may never discard an edit. The DOOR
 /// is strict — it refuses and names the paths, and the old scope stands
 /// untouched.

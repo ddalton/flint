@@ -395,3 +395,14 @@ M12 c9b4df15, M13 f2f7fe05, M14 786befc3.
     over-declaration, which AK1 permits.  Control: with the carrier's upload paths and
     bytes dropped in barrier.rs, the test FAILS ("did not carry p.txt"); restored.
   Box: syncer lib suite 290 passed, 0 failed, 1 ignored (clone /mnt/nvme/wt-akx).
+
+2026-10-17 19:10Z  FIX (1) vs THE CODE: TESTED (was read-only).
+  a_touch_after_a_restart_mid_narrow_never_declares_the_leftover (lean/syncer/src/tests.rs):
+    the UI deletes a file a narrow drops; a restart between the uncite and the unlink
+    leaves it a leftover (uncited, on disk, held in the intent); the agent touches.
+    The honour's barrier replays the intent before its scan: the leftover is unlinked,
+    never uploaded, the UI's delete stands; ack ok, dropped [] -- the fixed model's
+    answer (the pre-fix model's touch declared it: TouchDeclaresRestartLeftover).
+  Control: with the barrier's step-0 replay disabled the test FAILS -- the scan
+    re-publishes the leftover over the UI's delete (uploaded 1); restored.
+  Box: syncer suite 291 passed, 0 failed, 1 ignored.
