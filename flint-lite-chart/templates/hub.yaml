@@ -202,7 +202,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            {{- if .Values.security.enforcePermissions }}
+            {{- if and .Values.security.enforcePermissions (not .Values.security.kerberos.enabled) }}
             # Enforce the permission check rather than only logging it.
             # Off by default: turning it on is a behaviour change for an
             # existing install, because work that succeeded starts
@@ -220,6 +220,12 @@ spec:
             {{- if and .Values.tier.enabled .Values.tier.region }}
             - name: AWS_REGION
               value: {{ .Values.tier.region | quote }}
+            {{- end }}
+            {{- if .Values.security.kerberos.enabled }}
+            {{- include "flint-lite.krb5Check" . }}
+            # Kerberos: the keytab, the floor, who may connect and who they
+            # are (security.kerberos; enforcement comes with it).
+            {{- include "flint-lite.krb5Env" . | nindent 12 }}
             {{- end }}
           {{- if and .Values.tier.enabled .Values.tier.credentialsSecret }}
           # S3 credentials ride an operator-supplied Secret verbatim
@@ -277,6 +283,9 @@ spec:
               mountPath: /etc/flint/api-token
               readOnly: true
             {{- end }}
+            {{- if .Values.security.kerberos.enabled }}
+            {{- include "flint-lite.krb5Mounts" . | nindent 12 }}
+            {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -292,4 +301,7 @@ spec:
         - name: api-token
           secret:
             secretName: {{ .Values.monitoring.fileApi.tokenSecret }}
+        {{- end }}
+        {{- if .Values.security.kerberos.enabled }}
+        {{- include "flint-lite.krb5Volumes" . | nindent 8 }}
         {{- end }}

@@ -1,0 +1,22 @@
+{{- if .Values.security.kerberos.enabled }}
+{{- $k := .Values.security.kerberos }}
+# The hub's server principal (krb5-operator): every name it is mounted by,
+# keys in Secret flint-lite-krb5, which the hub mounts and waits for.
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosPrincipal
+metadata:
+  name: flint-lite-krb5
+  labels:
+    {{- include "flint-lite.labels" . | nindent 4 }}
+spec:
+  realmRef: {{ $k.realmRef }}
+  {{- with $k.realmNamespace }}
+  realmNamespace: {{ . }}
+  {{- end }}
+  principals:
+    {{- range (include "flint-lite.krb5ServerNames" . | fromJsonArray) }}
+    - {{ printf "nfs/%s@%s" . $k.realm | quote }}
+    {{- end }}
+  secretName: flint-lite-krb5
+  deletionPolicy: {{ $k.deletionPolicy }}
+{{- end }}
