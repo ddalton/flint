@@ -992,6 +992,15 @@ spec:
                   principals the hub's keytab holds.
                 nullable: true
                 properties:
+                  clusterIP:
+                    description: |-
+                      The hub's ClusterIP, which client nodes map to `serverName` in
+                      their hosts file (`flint-nfs-client-identity --krb5-hosts`): the
+                      kubelet mounts with the host's resolver, which does not resolve
+                      cluster names, and a wake can change the IP. Absent while no
+                      Service is up, or a headless one.
+                    nullable: true
+                    type: string
                   principals:
                     items:
                       type: string

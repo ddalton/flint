@@ -3,6 +3,7 @@ flint-nfs-client-identity: one per node. Keeps /etc/flint/nfs-tls equal
 to the client Secret and reports whether the node can mount with
 xprtsec=mtls (spdk-csi-driver/src/nfs_client_identity.rs).
 */}}
+{{- if .Values.tls.enabled }}
 {{- if and .Values.certificate.create (not .Values.certificate.uri) }}
 {{- fail "certificate.create requires certificate.uri — the name the proxy's `clients:` rules match" }}
 {{- end }}
@@ -173,3 +174,4 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

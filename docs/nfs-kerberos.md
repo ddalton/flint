@@ -827,14 +827,25 @@ then. A setting the hub would refuse fails the render.
 is bound to the server principal), so with the operator's `nfsProxy`
 on, a Kerberos share is `KerberosBehindProxy` and runs no hub.
 
-**Clients.** A client node needs what an RWX client node needs (Node
-prerequisites above: a machine keytab from a `KerberosNodeKeytab`,
-`rpc.gssd`, the realm in krb5.conf) and must reach the hub by
-`status.kerberos.serverName`, not its ClusterIP: put that name in the PV's
-`server:` and give the node a hosts entry for it (the kubelet mounts with
-the host's resolver, which does not resolve `*.svc.cluster.local`). Plan
-L3 has the client chart write that entry; until then it is the
-operator's. From another cluster, mount by the `advertiseAddress` name.
+**Clients.** `flint-nfs-client-chart` with `kerberos.enabled: true` (and
+`tls.enabled: false` where nothing mounts through the proxy) prepares every
+node: a `KerberosNodeKeytab` (machine keys and krb5.conf from krb5-operator,
+`rpc-gssd` restarted once they are there), and an agent
+(`flint-nfs-client-identity --krb5-hosts`) that keeps the host's
+`/etc/hosts` lines marked `# flint-lite-krb5` equal to every Kerberos
+hub's `status.kerberos.clusterIP` and `serverName`, following a new
+ClusterIP when a hub's Service is recreated. A PV then names the hub by
+`status.kerberos.serverName` (the kubelet mounts with the host's
+resolver, which does not resolve `*.svc.cluster.local`, and `rpc.gssd`
+names the server by the reverse lookup of its address):
+
+```yaml
+mountOptions: [nfsvers=4.1, proto=tcp, hard, sec=krb5i]
+nfs: {server: ws1.team-a.svc.cluster.local, path: /}
+```
+
+From another cluster, mount by the `advertiseAddress` name, which must be
+real DNS there; its principal is in the hub's keytab.
 
 **Not for a hub:** attached-nodes-only (a hub's clients are not
 VolumeAttachments, and the hub refuses the setting at startup). The

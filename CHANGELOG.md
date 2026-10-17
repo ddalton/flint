@@ -26,6 +26,15 @@ covered by the stability guarantee.
   `sec=sys` hub is scaled to zero. `status.kerberos.serverName` is the name
   to mount by. Operator chart `kerberos.enabled` grants
   `kerberosprincipals`; `kerberos.clusterDomain` names the domain.
+  `flint-lite-chart` has the same under `security.kerberos` (L2).
+- **flint lite: Kerberos client nodes** (2026-10-17; plan L3).
+  `flint-nfs-client-chart` `kerberos.enabled` gives every node its machine
+  keytab (krb5-operator `KerberosNodeKeytab`) and runs
+  `flint-nfs-client-identity --krb5-hosts`, which keeps the host's
+  `/etc/hosts` mapping each Kerberos hub's ClusterIP to its server name
+  (`status.kerberos.clusterIP`, new), so PVs mount a hub by name.
+  `tls.enabled` (default true) now switches the mTLS agent, for clusters
+  that only mount Kerberos hubs.
 
 - **pNFS: per-pod identities on the control path** (2026-10-16; plan
   Phase 5b). TLS (Phase 5a) protected the shared control token on the
