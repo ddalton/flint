@@ -526,6 +526,15 @@ then the MDS; once the clients' layouts are fresh, drop `previous`. It
 works without Kerberos as well (`pnfs.dsAuth.enabled`), where it stops a
 guessed file id but binds no node.
 
+A refusal's log line names the attached node the handle was signed for
+(`DS PUTFH refused: … session of …, node "w2…", signed for node "w1…"`).
+Seen on a real cluster, that is a handle used from the wrong node. One
+benign source: a client kernel without 6b9785dc8b13 ("nfs: don't share
+pNFS DS connections between net namespaces", April 2025, in the stable
+trees since) shares a DS connection among network namespaces, so where
+several "nodes" run on one kernel (kind) one node's I/O reaches the DS on
+another node's session and is refused; the client recovers as above.
+
 **Without the data servers: no layouts for Kerberos callers.** Measured
 (plan, "Phase 0 results"):
 a Linux client with a `sec=krb5i` mount that cannot get a GSS context with
