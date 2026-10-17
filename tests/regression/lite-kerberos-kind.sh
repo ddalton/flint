@@ -113,6 +113,7 @@ spec:
   services: [host, nfs]
   tolerations: [{operator: Exists}]
   keytabPath: /etc/krb5.keytab
+  krb5ConfPath: /etc/krb5.conf
   restartServices: [rpc-gssd]
   deletionPolicy: Delete
 EOF
