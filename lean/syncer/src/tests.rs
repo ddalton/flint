@@ -7633,6 +7633,58 @@ async fn a_crash_between_the_uncite_and_the_unlink_does_not_re_cite() {
     );
 }
 
+/// The order itself (the model's NarrowUnlinkFirst; the 2026-10-17 mutant
+/// audit): the crash tests above BUILD the uncite-first state by hand, so a
+/// `rescope` that unlinked first passed them all. Here a real narrow is
+/// stopped before its LAST unlink: the durable baseline must already lack
+/// every dropped path. Then the crash takes the intent with it, the case
+/// the order exists for: what is left reads as local ADDS (uploaded,
+/// recoverable), never as local deletes published as DELETEs.
+#[tokio::test]
+async fn a_narrow_stopped_before_its_last_unlink_has_uncited_everything_first() {
+    use futures::FutureExt;
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+    let dropped: Vec<String> = (0..6).map(|i| format!("outputs/big-{i}.bin")).collect();
+
+    let (state_dir, gone) = (b.cfg.state_dir(), dropped.clone());
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            "outputs/big-5.bin".into(),
+            "rescope-before-unlink",
+            Box::new(move || {
+                // The file the barrier reads at its next start (the state
+                // dir's lock refuses a second `SyncerState` while it runs).
+                let raw = std::fs::read(state_dir.join("baseline.json")).unwrap();
+                let durable: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                let still: Vec<&String> = gone.iter().filter(|p| durable["entries"].get(p.as_str()).is_some()).collect();
+                assert!(durable["entries"].get("inputs/wanted.txt").is_some(), "fixture: not the baseline file");
+                assert!(still.is_empty(), "a narrow unlinked before its uncite was durable: still cited {still:?}");
+                panic!("the crash");
+            }),
+        ))
+    });
+    let crashed = std::panic::AssertUnwindSafe(b.rescope(Some(vec!["inputs".into()]))).catch_unwind().await;
+    let msg = crashed.err().and_then(|e| e.downcast_ref::<&str>().map(|s| s.to_string()));
+    assert_eq!(msg.as_deref(), Some("the crash"), "fixture: the narrow did not stop in the window");
+    drop(b);
+    assert!(read(dir.path(), "outputs/big-0.bin").is_none(), "fixture: no unlink ran before the crash");
+    assert!(read(dir.path(), "outputs/big-5.bin").is_some(), "fixture: the last file is not on disk");
+
+    // The intent is lost with the crash.
+    let mut b = syncer(&store, dir.path()).await;
+    b.state.clear_scope_intent().unwrap();
+    for _ in 0..2 {
+        let r = b.run_barrier().await.unwrap();
+        assert!(r.deleted.is_empty(), "the narrow's leftovers were published as DELETES: {r:?}");
+    }
+    let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
+    for p in &dropped {
+        assert!(m.entries.contains_key(p.as_str()), "{p} left the bucket: a narrow deleted it");
+    }
+}
+
 /// FINDINGS Table 3, the restart row (2026-10-16, fix (1); the model's
 /// TouchDeclaresRestartLeftover): the UI deletes a file a narrow then
 /// drops, and the syncer restarts between the uncite and the unlink. The
@@ -9850,6 +9902,33 @@ async fn only_the_queue_head_is_told_to_poll_fast() {
     assert_eq!(next(lease::claim_step(&mut c, false).await.unwrap()), Some(false));
     assert_eq!(next(lease::claim_step(&mut b, false).await.unwrap()), None, "B claims its reservation");
     assert_eq!(next(lease::claim_step(&mut c, false).await.unwrap()), Some(true), "C heads the queue behind B");
+}
+
+/// The model's FinishReleasesForeign (the 2026-10-17 mutant audit): a
+/// straggler's release frees only its OWN lease. A is deposed by B and,
+/// still believing it holds the cell, releases it: its handoff 412s on B's
+/// token, and the re-read finds the cell B's, so it leaves it. Adopting the
+/// token it re-read regardless would hand off B's lease, and two writers
+/// would then hold the commit section.
+#[tokio::test]
+async fn a_deposed_holders_release_never_frees_its_successors_lease() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    assert!(claim_until_held(&mut a, 1).await);
+    assert!(claim_until_held(&mut b, 12).await, "fixture: B never deposed A");
+    let key = a.cfg.epoch_key();
+    let held = store.epoch_read(&key).await.unwrap().unwrap();
+    assert_eq!(held.holder_id, b.lease.as_ref().unwrap().holder_id, "fixture: the cell is not B's");
+    assert!(a.lease.is_some(), "fixture: A no longer believes it holds the cell");
+
+    lease::release(&mut a).await.unwrap();
+    let after = store.epoch_read(&key).await.unwrap().unwrap();
+    assert_eq!(after.holder_id, held.holder_id, "A's release moved B's cell: {after:?}");
+    assert!(!after.released && after.handoff.is_none(), "A's release freed B's lease: {after:?}");
+    assert_eq!((after.epoch, &after.token), (held.epoch, &held.token), "A's release wrote B's cell: {after:?}");
+    lease::renew(&mut b).await.expect("B's lease survives its predecessor's release");
 }
 
 /// The handoff races the queue. Every waiter's enqueue moves the cell's
@@ -12547,6 +12626,73 @@ async fn a_holder_deposed_after_its_cas_deletes_nothing_under_its_successor() {
     assert!(a.lease.is_none(), "A still believes it holds the cell its successor took");
     let logs = inner.list(&manifest::retired_prefix(&a.cfg)).await.unwrap();
     assert!(!logs.is_empty(), "A, deposed, went on deleting retire logs under its successor's cell");
+}
+
+/// The same after the CAS, past one delete batch (the model's
+/// DeletesOffLease; the 2026-10-17 mutant audit): the orphan sweep renews
+/// between its batches (`delete_many_renewing`), and a holder deposed
+/// during one batch deletes no further batch under its successor's cell;
+/// nor does the chunk reaper run after it (`may_delete`, renewed first).
+/// The test above deposes inside a single batch, so neither the renew
+/// between batches nor that gate was pinned by it.
+#[tokio::test]
+async fn a_holder_deposed_during_one_sweep_batch_deletes_no_further_batch() {
+    const LOST: &str = "5f0c1d2e-0000-4000-8000-00000000dead";
+    let n = super::untracked::DELETE_RENEW_BATCH + 100;
+    let inner = Arc::new(MemoryStore::new());
+    let hooked = Arc::new(Hooked(inner.clone(), Hooks::default()));
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = hooked_syncer(&hooked, dir_a.path());
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    syncer(&inner, dir_b.path()).await.checkout().await.unwrap();
+
+    // A lost writer's uploads, never cited: the orphan sweep's to take.
+    let stamps = GenerationStamps { generation: 0, epoch: 0, flush_uuid: LOST.into(), boundary_source: None, posix: None };
+    let keys: Vec<String> = (0..n).map(|i| a.cfg.handle_key(&format!("o/{i:04}.bin"), LOST)).collect();
+    for k in &keys {
+        let body = Bytes::from_static(b"o");
+        inner.put_whole(k, body.clone(), &PutCondition::IfNoneMatchAny, &stamps, crc64_nvme(&body)).await.unwrap();
+    }
+    a.cfg.untracked_grace_secs = 0;
+    a.state.save_orphan_sweep_at(now_unix() - a.cfg.untracked_sweep_secs - 1).unwrap();
+
+    // When A's sweep starts its first batch, B deposes A.
+    let deposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (inner, root_b, deposed) = (inner.clone(), dir_b.path().to_path_buf(), deposed.clone());
+        hooked.before_delete(&keys[0], move || {
+            let (inner, root_b) = (inner.clone(), root_b.clone());
+            std::thread::spawn(move || {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    let mut b = syncer(&inner, &root_b).await;
+                    assert!(claim_until_held(&mut b, 10).await, "fixture: B never deposed A");
+                })
+            })
+            .join()
+            .unwrap();
+            deposed.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    // The chunks v1's document references: superseded by A's CAS below, and
+    // with no grace the reaper's to take — if A still held the cell.
+    a.cfg.orphan_grace_secs = 0;
+    let chunks = format!("{}/{}/chunks/", a.cfg.prefix, super::LEAN_DIR);
+    let superseded: Vec<String> = inner.list(&chunks).await.unwrap().into_iter().map(|o| o.key).collect();
+    assert!(!superseded.is_empty(), "fixture: the workspace is not chunked");
+    write(dir_a.path(), "f.txt", "v2");
+    let r = a.run_barrier().await;
+    assert!(deposed.load(std::sync::atomic::Ordering::SeqCst), "fixture: A's sweep never reached its first batch: {r:?}");
+    for k in &superseded {
+        assert!(inner.head(k).await.is_ok(), "A, deposed, reaped chunk {k} under its successor's cell: {r:?}");
+    }
+    let left = inner.list(&a.cfg.files_prefix()).await.unwrap().into_iter().filter(|o| o.key.contains(LOST)).count();
+    assert!(left < n, "fixture: the first batch was not deleted ({left} of {n} left)");
+    assert!(
+        left >= n - super::untracked::DELETE_RENEW_BATCH,
+        "A, deposed during its first batch, went on deleting under its successor's cell ({left} of {n} left): {r:?}"
+    );
 }
 
 /// Review 2026-09-18, H2 (the rotation a restart skipped). B deposes A —

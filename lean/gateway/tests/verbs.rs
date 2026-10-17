@@ -29,6 +29,14 @@ async fn hold_lease(store: &Arc<dyn ObjectStore>, w: &Workspace) -> u64 {
     lease.epoch
 }
 
+/// A verb under a held lease must not WAIT on it (P2; the model's
+/// GatewayIgnoresLease, whose mutant waits): a waiting verb would hang the
+/// test rather than fail it, so each is bounded. The lease never expires
+/// here, so a verb that waits for it is caught, not let through.
+async fn without_waiting<T>(verb: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(2), verb).await.expect("the verb waited on the writers' lease")
+}
+
 /// Every handle of `path` the bucket holds — what a HEAD of the bare
 /// path answered before handles.
 async fn handles_of(s: &Arc<dyn ObjectStore>, w: &Workspace, path: &str) -> Vec<String> {
@@ -95,7 +103,7 @@ async fn a_ui_save_commits_directly_even_while_a_writer_holds_the_lease() {
     hold_lease(&s, &w).await;
 
     let create = PutFile { if_none_match: Some("*".into()), ..Default::default() };
-    let e1 = w.put_file("a.txt", Bytes::from("one"), &create).await.unwrap();
+    let e1 = without_waiting(w.put_file("a.txt", Bytes::from("one"), &create)).await.unwrap();
     let snap = w.snapshot().await.unwrap();
     let cited = snap.manifest.entries.get("a.txt").expect("the save is not cited");
     assert_eq!(cited.etag, e1);
@@ -104,7 +112,7 @@ async fn a_ui_save_commits_directly_even_while_a_writer_holds_the_lease() {
     let seq1 = snap.manifest.seq;
 
     let ok = PutFile { if_match: Some(e1.clone()), ..Default::default() };
-    let e2 = w.put_file("a.txt", Bytes::from("two"), &ok).await.unwrap();
+    let e2 = without_waiting(w.put_file("a.txt", Bytes::from("two"), &ok)).await.unwrap();
     let snap = w.snapshot().await.unwrap();
     assert_eq!(snap.manifest.entries["a.txt"].etag, e2);
     assert_eq!(snap.manifest.seq, seq1 + 1);
@@ -585,14 +593,14 @@ async fn a_rename_commits_in_one_cas_even_while_a_writer_holds_the_lease() {
     let s = store();
     let w = ws(&s);
     hold_lease(&s, &w).await;
-    let a = w.put_file("a.txt", Bytes::from("aaa"), &PutFile::default()).await.unwrap();
+    let a = without_waiting(w.put_file("a.txt", Bytes::from("aaa"), &PutFile::default())).await.unwrap();
     w.put_file("taken.txt", Bytes::from("t"), &PutFile::default()).await.unwrap();
     let before = w.snapshot().await.unwrap().manifest;
 
     let err = w.rename_file("a.txt", "taken.txt", None).await.unwrap_err();
     assert!(matches!(err, VerbError::DestinationExists { .. }), "{err}");
 
-    let etag = w.rename_file("a.txt", "dir/b.txt", Some("dilip")).await.unwrap();
+    let etag = without_waiting(w.rename_file("a.txt", "dir/b.txt", Some("dilip"))).await.unwrap();
     assert_eq!(etag, a);
     let snap = w.snapshot().await.unwrap();
     assert_eq!(snap.manifest.seq, before.seq + 1, "a rename is ONE commit");
