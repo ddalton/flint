@@ -182,7 +182,7 @@ spec:
               if [ -n "$own" ] && [ -n "$by" ] && [ "$own" != "$by" ]; then
                 echo "$d: node $own's session sent a handle signed for $by (a shared kernel's DS connection): refused, as it must be"
               else
-                echo "FAIL: $d refused a handle the MDS handed out to this session's node: $r"; exit 1
+                echo "FAIL: $d refused a handle that is not another attached node's (a bad key, encoding or node): $r"; exit 1
               fi
             done
           done
