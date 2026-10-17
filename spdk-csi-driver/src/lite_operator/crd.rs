@@ -1024,6 +1024,13 @@ pub struct KerberosStatus {
     /// for the principal the hub holds.
     pub server_name: String,
     pub principals: Vec<String>,
+    /// The hub's ClusterIP, which client nodes map to `serverName` in
+    /// their hosts file (`flint-nfs-client-identity --krb5-hosts`): the
+    /// kubelet mounts with the host's resolver, which does not resolve
+    /// cluster names, and a wake can change the IP. Absent while no
+    /// Service is up, or a headless one.
+    #[serde(default, rename = "clusterIP", skip_serializing_if = "Option::is_none")]
+    pub cluster_ip: Option<String>,
 }
 
 #[derive(JsonSchema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]

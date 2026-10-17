@@ -313,24 +313,29 @@ pub fn parse_pnfs_ds(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `hosts` with the data servers' lines replaced by `entries` (IP to
+/// Marks the lines `flint-nfs-client-identity --krb5-hosts` owns: each
+/// Kerberos FlintShare hub's ClusterIP and server name. Not a suffix of
+/// the other markers, nor they of it.
+pub const LITE_HOSTS_MARKER: &str = "# flint-lite-krb5";
+
+/// `hosts` with the lines marked `marker` replaced by `entries` (IP to
 /// name), after everything else.
-pub fn ds_hosts_with(hosts: &str, entries: &BTreeMap<String, String>) -> String {
+pub fn marked_hosts_with(hosts: &str, marker: &str, entries: &BTreeMap<String, String>) -> String {
     let mut out: String = hosts
         .lines()
-        .filter(|l| !l.trim_end().ends_with(DS_HOSTS_MARKER))
+        .filter(|l| !l.trim_end().ends_with(marker))
         .map(|l| format!("{l}\n"))
         .collect();
     for (ip, name) in entries {
-        out.push_str(&format!("{ip} {name} {DS_HOSTS_MARKER}\n"));
+        out.push_str(&format!("{ip} {name} {marker}\n"));
     }
     out
 }
 
-/// Make the data servers' lines of `hosts_file` exactly `entries`, in
+/// Make the lines marked `marker` of `hosts_file` exactly `entries`, in
 /// place under an exclusive lock (as [`ensure_host_entry`]). Whether it
 /// changed the file.
-pub fn ensure_ds_hosts(hosts_file: &Path, entries: &BTreeMap<String, String>) -> std::io::Result<bool> {
+pub fn ensure_marked_hosts(hosts_file: &Path, marker: &str, entries: &BTreeMap<String, String>) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
     let mut f = std::fs::OpenOptions::new().read(true).write(true).open(hosts_file)?;
     // SAFETY: flock on a descriptor this function owns; released on close.
@@ -338,7 +343,7 @@ pub fn ensure_ds_hosts(hosts_file: &Path, entries: &BTreeMap<String, String>) ->
         return Err(std::io::Error::last_os_error());
     }
     let current = std::fs::read_to_string(hosts_file)?;
-    let next = ds_hosts_with(&current, entries);
+    let next = marked_hosts_with(&current, marker, entries);
     if next == current {
         return Ok(false);
     }
@@ -347,6 +352,16 @@ pub fn ensure_ds_hosts(hosts_file: &Path, entries: &BTreeMap<String, String>) ->
     f.write_all(next.as_bytes())?;
     f.sync_all()?;
     Ok(true)
+}
+
+/// `hosts` with the data servers' lines replaced by `entries`.
+pub fn ds_hosts_with(hosts: &str, entries: &BTreeMap<String, String>) -> String {
+    marked_hosts_with(hosts, DS_HOSTS_MARKER, entries)
+}
+
+/// [`ensure_marked_hosts`] for the data servers' lines.
+pub fn ensure_ds_hosts(hosts_file: &Path, entries: &BTreeMap<String, String>) -> std::io::Result<bool> {
+    ensure_marked_hosts(hosts_file, DS_HOSTS_MARKER, entries)
 }
 
 /// The node plugin, before a pNFS mount: for a Kerberos mount with the

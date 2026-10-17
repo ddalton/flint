@@ -20,6 +20,11 @@ image:
   ref: ""
   pullPolicy: IfNotPresent
 
+# The mTLS identity agent below (xprtsec=mtls through flint-nfs-proxy).
+# false for a cluster that only mounts Kerberos hubs directly.
+tls:
+  enabled: true
+
 # The client certificate: a kubernetes.io/tls Secret in the release
 # namespace with tls.crt, tls.key and ca.crt. ca.crt is what tlshd
 # verifies the PROXY's certificate with; a cert-manager CA issuer
@@ -73,3 +78,27 @@ resources:
     memory: 16Mi
   limits:
     memory: 64Mi
+
+# Kerberos FlintShare hubs, mounted directly (not through the proxy, which
+# does not carry Kerberos): every node gets a machine keytab and a krb5.conf
+# from krb5-operator (KerberosNodeKeytab), rpc.gssd is restarted once the
+# keytab is there, and an agent keeps the host's /etc/hosts mapping each
+# Kerberos hub's ClusterIP to its server name (status.kerberos), which is
+# the name a PV must mount it by (docs/nfs-kerberos.md, "flint lite").
+# Node prerequisites: rpc.gssd (nfs-common / nfs-utils), and the kernel's
+# rpcsec_gss_krb5.
+kerberos:
+  enabled: false
+  # The krb5-operator KerberosRealm the node keys come from.
+  realmRef: ""
+  realmNamespace: ""
+  nodeKeytab:
+    create: true
+    # Appended to node names without a dot (KerberosNodeKeytab's rule).
+    domain: ""
+    keytabPath: /etc/krb5.keytab
+    krb5ConfPath: /etc/krb5.conf
+    restartServices: [rpc-gssd]
+    deletionPolicy: Delete
+  # The host file the agent keeps (its marked lines only).
+  hostsFile: /etc/hosts

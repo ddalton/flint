@@ -7,6 +7,9 @@
 //!       --install-dir /host/etc/flint/nfs-tls --host-dir /etc/flint/nfs-tls \
 //!       [--tlshd-conf /proc/1/root/etc/tlshd.conf] [--node-label]
 //!   flint-nfs-client-identity --check     (the readiness probe)
+//!   flint-nfs-client-identity --krb5-hosts /host/etc/hosts
+//!       (Kerberos FlintShare hubs: their ClusterIP -> server name lines in
+//!       the host's hosts file, lite_operator::client_hosts; no TLS)
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -54,6 +57,10 @@ struct Args {
     /// Label this node (NODE_NAME) chert.us/nfs-tls-ready=true|false.
     #[arg(long)]
     node_label: bool,
+    /// Keep this hosts file's Kerberos FlintShare lines instead (the host's
+    /// /etc/hosts as this process sees it); the TLS settings are not read.
+    #[arg(long)]
+    krb5_hosts: Option<PathBuf>,
 }
 
 async fn label(client: &kube::Client, node: &str, ready: bool) -> Result<(), kube::Error> {
@@ -74,6 +81,16 @@ async fn main() -> anyhow::Result<()> {
         let s = std::fs::read_to_string(&args.status_file).unwrap_or_default();
         print!("{s}");
         std::process::exit(if s.starts_with("ready\n") { 0 } else { 1 });
+    }
+    if let Some(hosts) = args.krb5_hosts {
+        let client = kube::Client::try_default().await?;
+        return spdk_csi_driver::lite_operator::client_hosts::run(
+            client,
+            hosts,
+            args.status_file,
+            Duration::from_secs(args.interval_secs.clamp(1, 10)),
+        )
+        .await;
     }
     let cfg = AgentConfig {
         secret_dir: args.secret_dir,

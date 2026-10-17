@@ -1498,7 +1498,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
                 stateid_tag: None,
                 conflict_with: None,
                 conditions: Some(conds),
-                kerberos: kerberos_status(&share, &ctx.defaults),
+                kerberos: kerberos_status(&share, &ctx.defaults, None),
             },
         )
         .await?;
@@ -1611,7 +1611,7 @@ async fn apply(share: Arc<FlintShare>, ctx: Arc<Ctx>) -> Result<Action> {
             stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds.clone()),
-            kerberos: kerberos_status(&share, &ctx.defaults),
+            kerberos: kerberos_status(&share, &ctx.defaults, svc_live.as_ref()),
         },
     )
     .await?;
@@ -2685,7 +2685,7 @@ async fn park_as_cr_only(
             stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds),
-            kerberos: kerberos_status(share, &ctx.defaults),
+            kerberos: kerberos_status(share, &ctx.defaults, None),
         },
     )
     .await?;
@@ -3080,11 +3080,15 @@ async fn get_opt<T>(fut: impl std::future::Future<Output = kube::Result<T>>) -> 
 }
 
 /// `status.kerberos` for a share with `spec.security.kerberos`.
-fn kerberos_status(share: &FlintShare, d: &RenderDefaults) -> Option<KerberosStatus> {
+fn kerberos_status(share: &FlintShare, d: &RenderDefaults, svc: Option<&Service>) -> Option<KerberosStatus> {
     let k = share.spec.kerberos()?;
     Some(KerberosStatus {
         server_name: kerberos::server_name(share, &d.cluster_domain),
         principals: kerberos::principals(share, k, &d.cluster_domain),
+        cluster_ip: svc
+            .and_then(|s| s.spec.as_ref())
+            .and_then(|s| s.cluster_ip.clone())
+            .filter(|ip| !ip.is_empty() && ip != "None"),
     })
 }
 
@@ -3189,7 +3193,7 @@ async fn kerberos_blocked(
             stateid_tag: None,
             conflict_with: None,
             conditions: Some(conds),
-            kerberos: kerberos_status(share, &ctx.defaults),
+            kerberos: kerberos_status(share, &ctx.defaults, None),
         },
     )
     .await?;

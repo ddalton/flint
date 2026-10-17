@@ -40,6 +40,7 @@
 //!    serves another tenant's bytes at its own address ([`conflict`]).
 
 pub mod bootstrap;
+pub mod client_hosts;
 pub mod conflict;
 pub mod crd;
 pub mod hubstatus;
