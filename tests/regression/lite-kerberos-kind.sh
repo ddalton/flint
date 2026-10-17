@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # Kerberos for a FlintShare hub, on kind (docs/plans/flint-lite-kerberos-plan.md,
-# L1 checked as L4 describes): krb5-operator and a realm, node keytabs and
-# rpc.gssd, the lite operator from this tree with kerberos.enabled, then
+# L1-L3 checked as L4 describes): krb5-operator and a realm, the lite
+# operator from this tree with kerberos.enabled, flint-nfs-client-chart with
+# kerberos.enabled (node keytabs, rpc.gssd, the hosts agent), then
 #   1. a Kerberos share: its KerberosPrincipal (owned by the share), keytab
 #      Secret, the hub's security env, status.kerberos;
-#   2. a client pod on a static PV, sec=krb5i by status.kerberos.serverName:
-#      it mounts, writes and reads back, and /proc/mounts says sec=krb5i;
+#   2. the node's hosts line, written by the agent from status.kerberos; a
+#      client pod on a static PV, sec=krb5i by that name: it mounts, writes
+#      and reads back, and /proc/mounts says sec=krb5i;
 #   3. the same hub by sec=sys: refused by the krb5i floor;
 #   4. a setting the hub would refuse (a lower-case realm): KerberosInvalid,
 #      no Deployment;
 #   5. a sec=sys share turned Kerberos whose keytab never comes: its running
 #      hub is scaled to zero (KerberosKeytabPending), never left on sec=sys;
-#   6. Kerberos turned off again on the first share: its principal goes.
+#   6. the hub's Service recreated with a new ClusterIP (as a wake does):
+#      the node's hosts line follows it;
+#   7. Kerberos turned off again on the first share: its principal goes,
+#      and so does the node's line.
 #
 # Needs: docker, kind, kubectl, helm, cargo-zigbuild, sudo -n modprobe.
 # Env: CLUSTER (flint-lite-krb5), KEEP (0; 1 keeps the cluster),
@@ -72,13 +77,14 @@ docker build -q --build-arg KIND_NODE_IMAGE="$KIND_NODE_IMAGE" -t flint-kind-nod
 step "build the operator and the hub ($TAG)"
 (cd "$ROOT/spdk-csi-driver" &&
   cargo zigbuild --release --target x86_64-unknown-linux-musl \
-    --bin flint-lite-operator --bin flint-pnfs-mds --bin flint-pnfs-ds)
+    --bin flint-lite-operator --bin flint-nfs-client-identity --bin flint-pnfs-mds --bin flint-pnfs-ds)
 rel="${CARGO_TARGET_DIR:-$ROOT/spdk-csi-driver/target}/x86_64-unknown-linux-musl/release"
 mkdir -p "$WORK/op" "$WORK/hub/amd64"
-cp "$rel/flint-lite-operator" "$WORK/op/"
+cp "$rel/"{flint-lite-operator,flint-nfs-client-identity} "$WORK/op/"
 cat > "$WORK/op/Dockerfile" <<'EOF'
 FROM cgr.dev/chainguard/static:latest
 COPY flint-lite-operator /usr/local/bin/flint-lite-operator
+COPY flint-nfs-client-identity /usr/local/bin/flint-nfs-client-identity
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/flint-lite-operator"]
 EOF
@@ -100,7 +106,7 @@ EOF
 kind load docker-image --name "$CLUSTER" "$OPIMG" "$HUBIMG" >/dev/null
 WORKER="$CLUSTER-worker"
 
-step "krb5-operator $KRB5_OPERATOR_VERSION, realm FLINT.TEST, node keytabs"
+step "krb5-operator $KRB5_OPERATOR_VERSION, realm FLINT.TEST"
 ops="https://raw.githubusercontent.com/ddalton/krb5-operator/v$KRB5_OPERATOR_VERSION/deploy"
 kubectl apply --server-side -f "$ops/crds.yaml" -f "$ops/operator.yaml" >/dev/null
 kubectl -n krb5-operator rollout status deploy/krb5-operator --timeout=5m
@@ -108,30 +114,21 @@ kubectl create namespace "$NS"
 kubectl apply -f "$HERE/krb5/realm.yaml"
 kubectl -n "$NS" wait kerberosrealm/flint --timeout=5m \
   --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
-kubectl apply -f - <<EOF
-apiVersion: krb5.ddalton.dev/v1alpha1
-kind: KerberosNodeKeytab
-metadata: {name: lite-clients}
-spec:
-  realmRef: flint
-  realmNamespace: $NS
-  services: [host, nfs]
-  tolerations: [{operator: Exists}]
-  keytabPath: /etc/krb5.keytab
-  krb5ConfPath: /etc/krb5.conf
-  restartServices: [rpc-gssd]
-  deletionPolicy: Delete
-EOF
-kubectl wait kerberosnodekeytab/lite-clients --timeout=5m \
-  --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
-for _ in $(seq 30); do docker exec "$WORKER" systemctl is-active -q rpc-gssd && break; sleep 2; done
-docker exec "$WORKER" systemctl is-active -q rpc-gssd || fail "rpc-gssd is not running on $WORKER"
-
 step "the lite operator, kerberos.enabled"
 helm install flint-lite-operator "$ROOT/flint-lite-operator-chart" -n "$NS" \
   --set image.ref="$OPIMG" --set image.pullPolicy=Never --set hubImage="$HUBIMG" \
   --set hubImagePullPolicy=Never --set replicas=1 --set kerberos.enabled=true >/dev/null
 kubectl -n "$NS" rollout status deploy/flint-lite-operator --timeout=3m
+
+step "flint-nfs-client-chart, kerberos.enabled: node keytabs, rpc.gssd, the hosts agent"
+helm install flint-nfs-client "$ROOT/flint-nfs-client-chart" -n "$NS" \
+  --set image.ref="$OPIMG" --set image.pullPolicy=Never --set tls.enabled=false \
+  --set kerberos.enabled=true --set kerberos.realmRef=flint --set kerberos.realmNamespace="$NS" >/dev/null
+kubectl wait kerberosnodekeytab/flint-nfs-client-krb5 --timeout=5m \
+  --for=jsonpath='{.status.conditions[?(@.type=="Ready")].status}'=True
+kubectl -n "$NS" rollout status ds/flint-nfs-client-krb5 --timeout=3m
+for _ in $(seq 30); do docker exec "$WORKER" systemctl is-active -q rpc-gssd && break; sleep 2; done
+docker exec "$WORKER" systemctl is-active -q rpc-gssd || fail "rpc-gssd is not running on $WORKER"
 
 share() { # name [kerberos yaml, indented 6]
   { printf '%s\n' "apiVersion: chert.us/v1alpha1" "kind: FlintShare" "metadata: {name: $1, namespace: $NS}" \
@@ -162,9 +159,16 @@ SERVER=$(kubectl -n "$NS" get flintshare ws1 -o jsonpath='{.status.kerberos.serv
 kubectl -n "$NS" logs deploy/ws1 | grep -E 'floor|Kerberos|KRB5' | head -5
 pass "the share's principal, keytab and hub security"
 
-step "2. a client pod mounts it with sec=krb5i by its server name"
+step "2. the node maps the hub's name; a client pod mounts it with sec=krb5i"
+hosts_line() { docker exec "$WORKER" grep -F '# flint-lite-krb5' /etc/hosts || true; }
+wait_line() { # want-line ("" = none)
+  for _ in $(seq 60); do [ "$(hosts_line)" = "$1" ] && return 0; sleep 2; done
+  fail "the node's flint-lite-krb5 lines are '$(hosts_line)', want '$1'"
+}
 IP=$(kubectl -n "$NS" get svc ws1 -o jsonpath='{.spec.clusterIP}')
-docker exec "$WORKER" sh -c "echo '$IP $SERVER # flint-lite-krb5' >> /etc/hosts"
+[ "$(kubectl -n "$NS" get flintshare ws1 -o jsonpath='{.status.kerberos.clusterIP}')" = "$IP" ] ||
+  fail "status.kerberos.clusterIP is not the Service's $IP"
+wait_line "$IP $SERVER # flint-lite-krb5"
 pv() { # name sec
   kubectl apply -f - <<EOF
 apiVersion: v1
@@ -234,12 +238,24 @@ for _ in $(seq 30); do [ "$(kubectl -n "$NS" get deploy ws3 -o jsonpath='{.spec.
 [ "$(kubectl -n "$NS" get deploy ws3 -o jsonpath='{.spec.replicas}')" = 0 ] || fail "the sec=sys hub of ws3 still runs"
 pass "a share that asked for Kerberos is not served as sec=sys"
 
-step "6. Kerberos turned off: its principal goes"
-# Unmount first: the hub restarts without Kerberos below.
+# Unmount first: the hub's address changes and it loses Kerberos below.
 kubectl -n default delete pod krb5i sys --timeout=2m >/dev/null
+
+step "6. a new ClusterIP (as a wake gives): the node's line follows"
+kubectl -n "$NS" delete svc ws1 >/dev/null
+for _ in $(seq 60); do
+  NEW=$(kubectl -n "$NS" get svc ws1 -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+  [ -n "$NEW" ] && [ "$NEW" != "$IP" ] && break; sleep 2
+done
+[ -n "$NEW" ] && [ "$NEW" != "$IP" ] || fail "the operator did not recreate Service ws1 with a new ClusterIP"
+wait_line "$NEW $SERVER # flint-lite-krb5"
+pass "the hosts line moved $IP -> $NEW"
+
+step "7. Kerberos turned off: its principal goes, and the node's line"
 kubectl -n "$NS" patch flintshare ws1 --type=json -p '[{"op":"remove","path":"/spec/security"}]'
 for _ in $(seq 60); do kubectl -n "$NS" get kerberosprincipal ws1-krb5 >/dev/null 2>&1 || break; sleep 2; done
 ! kubectl -n "$NS" get kerberosprincipal ws1-krb5 >/dev/null 2>&1 || fail "KerberosPrincipal ws1-krb5 outlived spec.security.kerberos"
-pass "the principal is deleted with the setting"
+wait_line ""
+pass "the principal and the node's line are gone with the setting"
 
 echo; echo "PASS: all"

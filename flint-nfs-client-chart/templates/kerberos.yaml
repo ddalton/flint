@@ -1,0 +1,156 @@
+{{- /*
+Kerberos FlintShare hubs, mounted directly: node keys from krb5-operator,
+and an agent per node keeping the host's hosts file's "# flint-lite-krb5"
+lines equal to every Kerberos hub's ClusterIP and server name
+(spdk-csi-driver/src/lite_operator/client_hosts.rs).
+*/}}
+{{- if .Values.kerberos.enabled }}
+{{- $k := .Values.kerberos }}
+{{- $name := printf "%s-krb5" (include "flint-nfs-client.name" . | trunc 58 | trimSuffix "-") }}
+{{- if $k.nodeKeytab.create }}
+apiVersion: krb5.ddalton.dev/v1alpha1
+kind: KerberosNodeKeytab
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+spec:
+  realmRef: {{ required "kerberos.realmRef" $k.realmRef }}
+  realmNamespace: {{ $k.realmNamespace | default .Release.Namespace }}
+  services: [host, nfs]
+  {{- with .Values.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $k.nodeKeytab.domain }}
+  domain: {{ . }}
+  {{- end }}
+  keytabPath: {{ $k.nodeKeytab.keytabPath }}
+  krb5ConfPath: {{ $k.nodeKeytab.krb5ConfPath }}
+  {{- with $k.nodeKeytab.restartServices }}
+  restartServices:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  deletionPolicy: {{ $k.nodeKeytab.deletionPolicy }}
+---
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+---
+# Read-only: the hubs' status.kerberos (server name, ClusterIP).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["chert.us"]
+    resources: ["flintshares"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flint-nfs-client.labels" . | nindent 4 }}
+spec:
+  selector:
+    # Not the TLS agent's selector: two DaemonSets must not match each
+    # other's pods.
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: hosts
+          image: {{ include "flint-nfs-client.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/flint-nfs-client-identity"]
+          args:
+            - --krb5-hosts=/host/hosts
+            - --status-file=/run/flint-nfs-client-identity/status
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logLevel | quote }}
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/flint-nfs-client-identity", "--check"]
+            periodSeconds: 10
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # root rewriting the host's root-owned hosts file in place
+              add: ["DAC_OVERRIDE"]
+          volumeMounts:
+            # The file itself, rewritten in place (same inode), so the
+            # bind mount keeps seeing it.
+            - name: hosts
+              mountPath: /host/hosts
+            - name: run
+              mountPath: /run/flint-nfs-client-identity
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      volumes:
+        - name: hosts
+          hostPath:
+            path: {{ $k.hostsFile }}
+            type: File
+        - name: run
+          emptyDir:
+            medium: Memory
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
