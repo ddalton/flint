@@ -127,8 +127,8 @@ say "building the hub and the operator ($TRIPLE)"
    --bin flint-pnfs-mds --bin flint-lite-operator >/tmp/ov-build.log 2>&1) \
   || { tail -20 /tmp/ov-build.log; fail "zigbuild failed"; }
 IMGDIR=$(mktemp -d -t flint-ov-img.XXXXXX)
-cp "$CARGO_DIR/target/$TRIPLE/release/flint-pnfs-mds"     "$IMGDIR/"
-cp "$CARGO_DIR/target/$TRIPLE/release/flint-lite-operator" "$IMGDIR/"
+cp "${CARGO_TARGET_DIR:-$CARGO_DIR/target}/$TRIPLE/release/flint-pnfs-mds"     "$IMGDIR/"
+cp "${CARGO_TARGET_DIR:-$CARGO_DIR/target}/$TRIPLE/release/flint-lite-operator" "$IMGDIR/"
 cat >"$IMGDIR/Dockerfile.hub" <<'EOF'
 FROM alpine:3.20
 RUN apk add --no-cache curl
