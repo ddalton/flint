@@ -66,7 +66,7 @@ action property `NR5`). The gate checks the restatements, and since
   E33; `Inv_NoRegress` for E29; `Inv_AckedNamed` for E38, E39.
 
 Expectations were written before any run (`WORLDS-LeanP1.tsv`). The trace
-check accepts 74/74 on 28 traces (2026-10-17; below), was 41/41 on 15
+check passes 81/81 on 31 traces (2026-10-17; below), was 41/41 on 15
 (`results/2026-09-25-tracecore-on-leanp1/`). **The gate
 passed 2026-10-14 on the restated claims** (`results/2026-10-14-leanp1-gate-ec2/`,
 SUMMARY.txt): 68 of 69 worlds as expected — 12 hold, 54 fire, 2 recorded —
@@ -89,7 +89,7 @@ exactly the code's run with no claim broken. Every run regenerates the
 traces from the tree's code (`TRACES=<dir>` checks a saved set), on tla-mc
 by default; `TRACE_CHECKER=tlc` is the reference.
 
-What it replays (28 traces): the barrier (consume, scan, upload, claim,
+What it replays (31 traces): the barrier (consume, scan, upload, claim,
 verify, install, collect, the sweep and the reap, finish), the UI's save,
 delete and rename; the publish request, its fold, its honour and the ack's
 status, dropped set, seq, clock and nonces (`Touch`, `Honor`,
@@ -97,27 +97,35 @@ status, dropped set, seq, clock and nonces (`Touch`, `Honor`,
 (`Restart`); narrows and widens, a crash mid-narrow and its replay
 (`RescopeBegin/First/Second`); a holder deposed before its CAS and fenced
 (`Depose`, `Fence`); a writer's sync, a reader's pull, skip and refused
-publish (`Sync`, `RPullRead`, `RPullSync`, `HonorReader`).
+publish (`Sync`, `RPullRead`, `RPullSync`, `HonorReader`); a consume and a
+sync whose write fails (a read-only directory), the path left owed and
+taken by the next (the model's `fail` set, `MaxFetchFails`).
 
-What makes it able to fail: 35 mutations, each one fact of a real trace
-corrupted, must be rejected (`trace/mutate_core.py`), and 11 controls, a
+What makes it able to fail: 37 mutations, each one fact of a real trace
+corrupted, must be rejected (`trace/mutate_core.py`), and 13 controls, a
 shipped rule turned off in the model, must change the verdict (rejected,
-or the code's own run unsafe). On 2026-10-17 (77a491b2): 74/74 as required
-under tla-mc (5 s) and TLC (130 s), the same verdicts.
+or the code's own run unsafe). On 2026-10-17: 81/81 as required under
+tla-mc (11 s) and TLC (99 s), the same verdicts.
 
 Not traced: a deposal AFTER the holder's CAS (every hook there follows the
 collector's renew or precedes the `cas` event; the unit test
 `a_holder_deposed_during_one_sweep_batch_deletes_no_further_batch` pins
-that fence), a scoped sync and a sync or consume whose fetch fails (both
-refused by the converter; the traces fail no fetch, `MaxFetchFails` 0), a
-lost CAS (the model's commit section has one holder), an orphaned-own
-claim, and the sync request (`.flint/sync`; only the publish request is
-modelled). One
-known mismatch no trace takes: the code's sync drops the baseline entry of
-a path the tree and the document both deleted; the model's `Sync` keeps it
-(its consume converges there; its sync does not). It looks harmless — the
-model's next scan publishes a delete of an uncited path — but no trace has
-checked it.
+that fence), a scoped sync (not modelled, D4; refused by the converter),
+a fetch that fails at the store (`missing`, `refused-checksum`: mapped, but
+no scenario makes one), a lost CAS (the model's commit section has one
+holder), an orphaned-own claim (the model's `Depose` needs another holder),
+and the sync request (`.flint/sync`; only the publish request is modelled).
+
+ONE KNOWN MISMATCH, kept as a trace that must be REJECTED
+(`known_a_sync_lets_go_of_a_path_both_deleted`; a `known_` trace is checked
+as a reject, so a fix to either side shows): a path the agent deleted
+unpublished that a peer's commit deleted too. The code's sync lets go of it
+(the baseline drops the entry); the model's `Sync` has no convergence and
+keeps it, and the replay stops at that sync. The code is the sensible side
+(its consume converges there, and the model's consume does too); the
+model's next scan would publish a delete of a path nothing cites. Closing
+it is a change to `Sync` in `LeanP1.tla`, and so to every proof module's
+`Sync` step.
 
 The runner's large worlds need a big box: on one c8g.48xlarge (192 vCPU,
 371 GB) phase 1 (62 worlds, 24 at a time, 4 workers each) took 31 min and

@@ -236,6 +236,19 @@ def reader_skips_what_it_owes(evs):
     skip_pull(evs, nth(evs, lambda e: e["ev"] == "pull" and not e["skipped"], 1))
 
 
+def retry_forgotten(evs):
+    """the barrier after the failed write never takes the path left owed"""
+    i = nth(evs, lambda e: e["ev"] == "consume" and e["action"] == "adopted" and e["path"] == "d/x.txt")
+    del evs[i]
+
+
+def sync_failure_unreported(evs):
+    """the sync whose write failed reports it took everything"""
+    i = nth(evs, lambda e: e["ev"] == "sync" and e["left"])
+    evs[i]["left"] = False
+    evs[i]["failed"] = []
+
+
 def fence_forgotten(evs):
     """the deposed holder's read of the cell never fences it"""
     ks = [k for k, e in enumerate(evs) if e["ev"] == "fence"]
@@ -252,6 +265,8 @@ def deposal_as_a_plain_claim(evs):
 
 
 MUTATIONS = [
+    ("a_consume_whose_write_fails_takes_the_path_at_the_next", "retry-forgotten", retry_forgotten),
+    ("a_sync_whose_write_fails_leaves_the_path_owed", "sync-failure-unreported", sync_failure_unreported),
     ("a_writer_syncs_between_barriers", "sync-takes-the-agents-file", sync_takes_the_agents_file),
     ("a_reader_follows_a_writer", "reader-answers-ok", reader_answers_ok),
     ("a_reader_follows_a_writer", "reader-skips-news", reader_skips_news),

@@ -806,6 +806,87 @@ async fn conformance_a_reader_resyncs_a_path_it_skipped_once_clean() {
     dump("a_reader_resyncs_a_path_it_skipped_once_clean", &buf);
 }
 
+/// A directory of the tree made read-only: a write into it fails, as a full
+/// disk would. Returns the guard that makes it writable again.
+struct ReadOnly(std::path::PathBuf);
+
+impl ReadOnly {
+    fn dir(root: &std::path::Path, rel: &str) -> ReadOnly {
+        use std::os::unix::fs::PermissionsExt;
+        let d = root.join(rel);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        ReadOnly(d)
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// A consume whose write fails (MaxFetchFails, ConsumeKeepsLeft, L-128):
+/// the path stays as it was and owed, nothing is recorded as derived, and
+/// the next barrier derives in full and takes it.
+#[tokio::test]
+async fn conformance_a_consume_whose_write_fails_takes_the_path_at_the_next() {
+    let (store, buf, mut a, mut b, dir_a, dir_b) =
+        two_writers(&[("d/x.txt", "x v1"), ("keep.txt", "keep")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "B", sc: &b, root: dir_b.path() }.write("d/x.txt", "B's x");
+    b.run_barrier().await.unwrap();
+    {
+        let _ro = ReadOnly::dir(dir_a.path(), "d");
+        a.run_barrier().await.unwrap();
+        assert_eq!(read(dir_a.path(), "d/x.txt").as_deref(), Some("x v1"), "fixture: the write did not fail");
+    }
+    a.run_barrier().await.unwrap();
+    assert_eq!(read(dir_a.path(), "d/x.txt").as_deref(), Some("B's x"), "the next barrier did not take the path left owed");
+    dump("a_consume_whose_write_fails_takes_the_path_at_the_next", &buf);
+}
+
+/// A sync whose write fails (SyncKeepsLeft, L-128): it takes the rest,
+/// records nothing as derived, and the next sync takes the path.
+#[tokio::test]
+async fn conformance_a_sync_whose_write_fails_leaves_the_path_owed() {
+    let (store, buf, mut a, mut b, dir_a, dir_b) =
+        two_writers(&[("d/x.txt", "x v1"), ("e.txt", "e v1")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "B", sc: &b, root: dir_b.path() }.write("d/x.txt", "B's x");
+    Agent { name: "B", sc: &b, root: dir_b.path() }.write("e.txt", "B's e");
+    b.run_barrier().await.unwrap();
+    {
+        let _ro = ReadOnly::dir(dir_a.path(), "d");
+        let r = a.sync().await.unwrap();
+        assert_eq!(r.applied, vec!["e.txt".to_string()], "fixture: {r:?}");
+    }
+    let r = a.sync().await.unwrap();
+    assert_eq!(r.applied, vec!["d/x.txt".to_string()], "the next sync did not take the path left owed: {r:?}");
+    dump("a_sync_whose_write_fails_leaves_the_path_owed", &buf);
+}
+
+/// KNOWN MISMATCH (the trace check REJECTS it, by design; `known_` traces
+/// are checked as rejects): a path the agent deleted unpublished that a
+/// peer's commit deleted too. The code's sync lets go of it (the baseline
+/// drops the entry); the model's `Sync` has no convergence and keeps it,
+/// so its next scan would publish a delete of an uncited path.
+#[tokio::test]
+async fn conformance_known_a_sync_lets_go_of_a_path_both_deleted() {
+    let (store, buf, mut a, mut b, dir_a, dir_b) =
+        two_writers(&[("x.txt", "x v1"), ("y.txt", "y")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "B", sc: &b, root: dir_b.path() }.write("x.txt", "B's x");
+    Agent { name: "B", sc: &b, root: dir_b.path() }.delete("y.txt");
+    b.declared_barrier().await.unwrap();
+    Agent { name: "A", sc: &a, root: dir_a.path() }.delete("y.txt");
+    let r = a.sync().await.unwrap();
+    assert_eq!(r.applied, vec!["x.txt".to_string()], "fixture: {r:?}");
+    let base = a.state.load_baseline().unwrap();
+    assert!(!base.entries.contains_key("y.txt"), "fixture: the sync kept the entry");
+    dump("known_a_sync_lets_go_of_a_path_both_deleted", &buf);
+}
+
 /// A UI delete of a clean file: the first writer's barrier performs it (the
 /// tree's unlink and the document's delete in one barrier) and the other
 /// writer's tree follows.

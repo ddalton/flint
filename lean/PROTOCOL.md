@@ -17,7 +17,7 @@ writer-local queue, citation repairs, the journal's installed document — is
 `formal/LeanCore.tla` (and `LeanP2.tla` for the step between); neither
 describes the code any more. The trace check (`formal/trace/TraceCore.tla`)
 replays the code's conformance traces against `LeanP1.tla`: since
-2026-10-17, 28 traces that between them take every rule on this page
+2026-10-17, 31 traces that between them take every rule on this page
 (`formal/README.md`, "The code-trace check", says which steps are not
 traced).
 
@@ -82,7 +82,7 @@ Guards read the state; effects write it.
 | **RetireByAck**(s) | idle; the ack answers the pending record | the record is retired, never re-run (the restart rule, `ack_matches`) | `AK3` | — |
 | **Depose**(t) | scanned, uploads landed, something to publish; ANOTHER writer holds the cell (judged dead: the model has no clock) | `holder := t`; the manifest ROTATES (a content-identical CAS, `seq + 1`), so a CAS the deposed holder computed fails; the old holder is marked deposed | `DP1` | `LeanP1InstallUnfenced` (an install not fenced) |
 | **Fence**(s) | deposed | before its CAS: the barrier is abandoned, nothing installed; after it: the collector is skipped (it deletes only under the lease) | `DP1`, `DP2` | `LeanP1InstallUnfenced`, `LeanP1DeletesOffLease` |
-| **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left) — only when it took everything owed: a fetch or a write it could not complete records nothing, as the consume's `left` (L-128); a scoped sync in the code records nothing, so the next consume derives. With no document at all, a sync of a tree that holds paths refuses rather than read the absence as an empty document (L-127) | `Inv_NoRegress` | — |
+| **Sync**(s) | idle, something owed | takes what is owed, and records what it derived as a consume would (`derived := seq`, `skipped` := the dirty paths it left) — only when it took everything owed: a fetch or a write it could not complete records nothing, as the consume's `left` (L-128); a scoped sync in the code records nothing, so the next consume derives. With no document at all, a sync of a tree that holds paths refuses rather than read the absence as an empty document (L-127) | `Inv_NoRegress` | — (one known mismatch: the code's sync also lets go of a path the tree and the document both deleted, as the consume's convergence does; this rule keeps it, `formal/README.md`) |
 
 ## The invariants
 

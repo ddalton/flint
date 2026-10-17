@@ -82,7 +82,11 @@ check() { # <ndjson> <expect: accept|reject|unsafe> [label] [--set=K=V ...]
 if [ $# -gt 0 ]; then
   for f in "$@"; do check "$f" accept; done
 else
-  for f in "$TRACES"/*.ndjson; do check "$f" accept; done
+  for f in "$TRACES"/*.ndjson; do
+    # A `known_` trace is a mismatch the model has not caught up with: it
+    # must be REJECTED, so a fix to either side shows up here.
+    case $(basename "$f") in known_*) check "$f" reject ;; *) check "$f" accept ;; esac
+  done
   # MUTATIONS: one fact of a real trace corrupted — must reject.
   # A mutation whose anchor is missing stops the generator; every one after
   # it would go unchecked, so that is a failure, not a shorter list.
@@ -123,6 +127,10 @@ else
   check "$TRACES"/a_narrow_then_a_widen.ndjson reject control-scope-ignored --set=ConsumeHonorsScope=FALSE
   # The unlink blind to the bytes: it takes the agent's write the code kept.
   check "$TRACES"/a_narrow_keeps_what_the_agent_wrote_after_the_uncite.ndjson reject control-unlink-blind --set=UnlinkChecksBytes=FALSE
+  # A failure recorded as a derive (L-128): the tree is then owed a path the
+  # model says it is not (Inv_ShortcutSound).
+  check "$TRACES"/a_consume_whose_write_fails_takes_the_path_at_the_next.ndjson unsafe control-consume-keeps-left-off --set=ConsumeKeepsLeft=FALSE
+  check "$TRACES"/a_sync_whose_write_fails_leaves_the_path_owed.ndjson unsafe control-sync-keeps-left-off --set=SyncKeepsLeft=FALSE
   # The reader judged by the pointer alone (L-129): once its agent backs out,
   # the model's reader would skip a path still owed (Inv_ReaderSound).
   check "$TRACES"/a_reader_resyncs_a_path_it_skipped_once_clean.ndjson unsafe control-reader-owed-ignored --set=ReaderRechecksOwed=FALSE

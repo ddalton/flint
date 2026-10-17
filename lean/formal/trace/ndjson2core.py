@@ -91,9 +91,12 @@ THE MAPPING (one place):
                                                      step-0 replay emits these)
   sync (a writer's, whole-tree)    -> sync           Sync(w): the paths whose
                                                      citation it moved and the
-                                                     ones it left the agent
-                                                     (scoped, or one that left
-                                                     something owed: refused)
+                                                     ones it left the agent; the
+                                                     paths it failed count toward
+                                                     MaxFetchFails (scoped: refused)
+  consume action=deferred|missing|
+    refused-checksum               -> (the consume)  a path it failed: counts toward
+                                                     MaxFetchFails
   pull skipped=false (a reader's)  -> pull           RPullRead(w), at the seq read
   sync (the reader's, after it)    -> rpull_sync     RPullSync(w), as sync
   pull skipped=true                -> pull_skip      no step: the model's
@@ -184,6 +187,7 @@ def convert(lines):
     deposals = {}  # w -> takeovers it made
     rescopes = 0
     syncs = 0
+    fails = 0  # paths a consume or a sync could not take (MaxFetchFails)
     pulling = {}  # reader -> a pull read the pointer, its sync not yet traced
     # Scopes are resolved to paths at the end, when every path is known.
     scoped = []  # (record, field, prefixes or None)
@@ -292,8 +296,12 @@ def convert(lines):
                 raise Unsupported(f"a consume from the {e.get('from')}: the tree is owed only what the document cites")
             if act in ("adopted", "converged"):
                 c["adopted"][p] = ver(p, et, f"consume {act}")
+            elif act in ("deferred", "missing", "refused-checksum"):
+                # A fetch or a write that failed: the path stays as it was
+                # and owed (the model's `fail` set).
+                fails += 1
             else:
-                # missing / refused: a cited handle is live in the model.
+                # refused (containment): the model's tree has no links.
                 raise Unsupported(f"consume action {act}")
         elif ev == "tombstone":
             c = open_consume[w]
@@ -429,7 +437,9 @@ def convert(lines):
             if e["scoped"]:
                 raise Unsupported("a scoped sync (the sync request): only the whole-tree sync is modelled")
             if e["left"]:
-                raise Unsupported("a sync that left something owed: the traces fail no fetch")
+                if not e.get("failed"):
+                    raise Unsupported("a sync left something owed and names nothing it failed")
+                fails += len(e["failed"])
             paths.update(e["taken"])
             paths.update(e["skipped"])
             rec = {"ev": "sync", "w": w, "taken": set(e["taken"]), "skipped": set(e["skipped"])}
@@ -517,8 +527,8 @@ def convert(lines):
             "ConsumeHonorsScope", "RescopeUnciteFirst", "RescopeKeepsDirty", "WidenKeepsLocal",
             "UnlinkChecksBytes", "ConsumeKeepsLeft", "SyncKeepsLeft", "ReaderRechecksOwed",
             "InstallFenced", "DeletesUnderLease")},
-        # The traces check out unscoped and never fail a fetch.
-        "Scopes": scopes, "MaxRescopes": rescopes, "MaxFetchFails": 0, "Readers": readers,
+        # The traces check out unscoped; a fetch fails as often as the trace says.
+        "Scopes": scopes, "MaxRescopes": rescopes, "MaxFetchFails": fails, "Readers": readers,
         # Rows 15-17: the publish requests the trace folded; no deposal yet.
         "MaxTouches": max(touches.values(), default=0), "MaxNonces": 32, "MaxDeposals": max(deposals.values(), default=0),
     }
