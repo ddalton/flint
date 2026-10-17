@@ -815,9 +815,10 @@ pnfs:
     # sessions on an MDS shard, and a node reaches only the volumes
     # attached to it (NFS4ERR_ACCESS on any other). Needs minSec. The MDS
     # gets a service account that reads PersistentVolumes,
-    # VolumeAttachments and Nodes (cluster-wide, read-only). Layouts
-    # handed out before a detach keep working at the data servers until
-    # they do Kerberos (docs/plans/pnfs-kerberos-plan.md, Phase 4).
+    # VolumeAttachments and Nodes (cluster-wide, read-only), and so do the
+    # data servers: a signed handle names its volume, and a DS serves it
+    # only while that volume is attached to the caller's node, so a detach
+    # revokes the node's layouts there too (pnfs-kerberos-plan.md, Phase 4b).
     attachedNodesOnly: true
     # The data servers do Kerberos too (Phase 3): each gets its own
     # principal, nfs/flint-pnfs-ds-<i>.flint-pnfs-ds-headless.<ns>.svc.<domain>

@@ -4,7 +4,8 @@ Status, 2026-10-17: Phases 1 to 5 are built (PRs #22 Phase 1, #25
 Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4, #30 Phase 5a,
 then Phase 5b, per-pod identities on the control path, then Phase 3b,
 SP4_MACH_CRED on the DSes); each phase below says how the build differs
-from its sketch. What is built is documented for users in
+from its sketch. Phase 4b (a detach revokes the node's DS handles) is
+built too. What is built is documented for users in
 [nfs-kerberos.md, "pNFS"](../nfs-kerberos.md#pnfs). The plan assumed the
 RWX Kerberos work was merged (PRs #15 per-volume keys, #18 required
 SP4_MACH_CRED, #19 LDAP identities). Line numbers are `origin/main` at
@@ -331,6 +332,31 @@ mode; `enforce` refuses unsigned ones. Error: BADHANDLE (E4).
   through the MDS; no error livelocked).
 - Works without Kerberos (closes "know or guess a file id"); opt-in
   `pnfs.dsAuth.enabled`. Size ~800 lines, 1–1.5 weeks.
+
+## Phase 4b: a detach revokes the node's layouts at the DSes
+
+**Built** (2026-10-17). Phase 4 bound a handle to the node that asked for
+the layout, not to the node's attachment: the MDS refused a detached node
+at its next call, but the handles it already held kept working at the
+DSes. A well-behaved kernel returns its layouts at unmount, before
+Kubernetes detaches; a node that kept the bytes could replay them.
+
+- Handle version **6**, 41 bytes:
+  `6 | key_id(4) | file_id(8) | stripe(4) | volume(8) | mac(16)`, the MAC
+  over all of it and the node. `volume = SHA-256("flint-pnfs-volume:" ‖
+  name)[..8]` (`ds_fh::volume_tag`), the name being the first component of
+  the file's export path, as the MDS's per-volume gate names volumes.
+- The DS runs `watch_pnfs` with the per-volume map (it ran the union only)
+  and keeps it by tag too (`VolumeNodes::may_reach_tag`). PUTFH of a
+  signed handle whose volume is not attached to the session's node:
+  BADHANDLE, as for any refused handle (E4).
+- Tests: `ds_fh` (the tag under the MAC; served while attached, refused
+  after a detach, served again on re-attach; a user's session reaches no
+  volume; no check without the map), the MDS LAYOUTGET test (the file's
+  volume in the handle). Kind: every DS checks volumes, and the striped
+  8 MiB verifies through the check. A replayed handle after a detach is
+  not driven in kind: the kernel returns its layouts before the detach,
+  and replaying needs a hand-built GSS client.
 
 ## Phase 5: TLS and identities on MDS↔DS gRPC
 

@@ -127,13 +127,30 @@ impl AttachedNodes {
 #[derive(Debug, Default)]
 pub struct VolumeNodes {
     volumes: RwLock<Option<HashMap<String, HashSet<String>>>>,
+    /// The same map by [`crate::pnfs::ds_fh::volume_tag`]: how a data
+    /// server, which sees only a signed handle's tag, finds the volume.
+    by_tag: RwLock<HashMap<[u8; 8], HashSet<String>>>,
 }
 
 impl VolumeNodes {
     /// Replace the map (from fresh PersistentVolume and VolumeAttachment
     /// lists).
     pub fn set(&self, volumes: HashMap<String, HashSet<String>>) {
+        let by_tag = volumes
+            .iter()
+            .map(|(v, hosts)| (crate::pnfs::ds_fh::volume_tag(v), hosts.clone()))
+            .collect();
+        *self.by_tag.write().unwrap() = by_tag;
         *self.volumes.write().unwrap() = Some(volumes);
+    }
+
+    /// [`Self::may_reach`] for the volume a signed data server handle
+    /// names by its tag (pNFS Kerberos plan, Phase 4b).
+    pub fn may_reach_tag(&self, tag: &[u8; 8], client_principal: &[u8]) -> bool {
+        let Caller::Machine(host) = caller(client_principal) else {
+            return false;
+        };
+        self.by_tag.read().unwrap().get(tag).is_some_and(|hosts| hosts.contains(&host))
     }
 
     /// May the client made by `client_principal` reach `volume`? Only a

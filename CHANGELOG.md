@@ -14,6 +14,14 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS: a detach revokes a node's layouts at the data servers**
+  (2026-10-17; `docs/plans/pnfs-kerberos-plan.md`, Phase 4b). A signed
+  data server handle now names the volume its file is in (version 6, the
+  volume under the MAC), and with `attachedNodesOnly` each data server
+  keeps the per-volume attachment map the MDS keeps: it serves a handle
+  only while its volume is attached to the caller's node. Before, a node
+  detached from a volume was refused at the MDS but could keep using
+  handles it already held at the data servers.
 - **pNFS data servers: sessions bound to the machine** (2026-10-17;
   `docs/plans/pnfs-kerberos-plan.md`, Phase 3b). A data server grants
   SP4_MACH_CRED to a `krb5i`/`krb5p` client, as the MDS does, where it

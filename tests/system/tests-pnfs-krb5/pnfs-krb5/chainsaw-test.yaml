@@ -174,6 +174,11 @@ spec:
             if echo "$l" | grep -E 'EXCHANGE_ID refused|WRONG_CRED|CLID_INUSE|OP_NOT_IN_SESSION'; then
               echo "FAIL: $d refused a node's own session traffic"; exit 1
             fi
+            # Phase 4b: the data server keeps the per-volume map, so a
+            # handle is served only while its volume is attached to the
+            # session's node (the 8 MiB above verified through it).
+            echo "$l" | grep -F 'each only for those volumes' ||
+              { echo "FAIL: $d does not check a handle's volume"; exit 1; }
             # Phase 4: only signed handles, and every one the MDS handed
             # out verified for its node's session.
             echo "$l" | grep -F 'Filehandles: signed handles only' ||

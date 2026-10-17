@@ -1049,7 +1049,7 @@ impl DataServer {
                                 // file id, stripe), never its MAC. The
                                 // MDS logs the node it signed a file's
                                 // handles for at LAYOUTGET.
-                                let clear: String = fh.data.iter().take(17).map(|b| format!("{b:02x}")).collect();
+                                let clear: String = fh.data.iter().take(25).map(|b| format!("{b:02x}")).collect();
                                 let (file, stripe) = match fh.data.get(5..17) {
                                     Some(c) => (
                                         u64::from_be_bytes(c[..8].try_into().expect("8 bytes")).to_string(),

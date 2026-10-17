@@ -522,9 +522,10 @@ through `pnfs.kerberos.dsAuth`; Phase 4). A files layout tells the client
 which handle to send each DS. These used to be `file_id` and stripe, in
 the clear: anyone who reached a DS and knew or guessed a file id read and
 wrote its stripes. The MDS now signs each one,
-`5 | key_id | file_id | stripe | HMAC-SHA256(key, … ‖ node)[..16]`, where
-`node` is the machine host of the session that asked for the layout (empty
-without Kerberos), and the DSes serve only handles that verify for the
+`6 | key_id | file_id | stripe | volume | HMAC-SHA256(key, … ‖ volume ‖ node)[..16]`,
+where `node` is the machine host of the session that asked for the layout
+(empty without Kerberos) and `volume` names the pNFS volume the file is in
+(a hash of its name), and the DSes serve only handles that verify for the
 caller's own session (`FLINT_PNFS_DS_FH_AUTH=enforce`). Another node's
 layout, a guessed file id, or a handle from a key since rotated away gets
 NFS4ERR_BADHANDLE; the client then asks for a fresh layout, and failing
@@ -563,14 +564,18 @@ affected: their data goes over NVMe-oF, which Kerberos does not cover.
 `FLINT_PNFS_LAYOUTS_FOR_GSS=true` on the MDS hands layouts to Kerberos
 callers again; it is for when the DSes do Kerberos (Phase 3), not before.
 
+**A detach reaches the data servers too** (Phase 4b). With
+`attachedNodesOnly`, each DS keeps the same per-volume map as the MDS (the
+pNFS PVs and their VolumeAttachments, through ServiceAccount
+`flint-pnfs-ds`), and serves a signed handle only while the volume it
+names is attached to the session's node. A detach therefore revokes the
+node's layouts at its next DS call (BADHANDLE), as it does at the MDS: a
+node that kept handle bytes from before the detach cannot replay them.
+(Kubernetes detaches only after kubelet has unmounted, so a well-behaved
+kernel has returned its layouts by then; this stops one that did not.)
+
 **What it does not protect yet.**
 
-- **A layout granted before a detach keeps working.** The DS checks that
-  a handle came from the MDS for the caller's node (below), not that the
-  node is still attached: a node keeps its layouts until it returns them.
-  With `attachedNodesOnly` the DS still drops a node attached to no pNFS
-  volume at all (it watches the same PVs and VolumeAttachments as the MDS,
-  through ServiceAccount `flint-pnfs-ds`).
 - **The control path** between the MDS and the DSes (gRPC: registration,
   heartbeats, the F66 relay of a client's I/O to a file the MDS cannot
   layout, truncates) is TLS 1.3 (`pnfs.controlTls`, Phase 5a), and each
