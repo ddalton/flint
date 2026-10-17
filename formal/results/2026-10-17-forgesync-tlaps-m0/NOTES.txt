@@ -1,0 +1,69 @@
+M0 (TypeOK) for formal/ForgeSync.tla (md5 3f296d75), 2026-10-17. Box /mnt/nvme/forge-m0-2026-10-17.
+
+PARSE. tlapm 1.6.0-pre (bfa9468) reads ForgeSync.tla AS WRITTEN, EXTENDS TLC included
+(ForgeSyncParse.tla: 2/2 proved). No copy of the model, so no tie to make.
+
+RUN 1 (coarse: IndTypeOK == TypeOK, 38 step lemmas, one BY DEF each). 21 min, 0.5 GB.
+  12 step lemmas failed, every one a TIMEOUT (60-105 s of 60).
+RUN 2 (those 12 split into one step per TypeOK conjunct). 75 min, 7.0 GB.
+  5 steps failed, all timeouts (62-72 s of 60): BatchCas snap'; FoldInit uploads';
+  FoldCommit snap', belief', localPacks'.
+RUN 3 (the 5 given SMTT(20) = 240 s; micro/Budget.tla shows --stretch 12 makes it 240).
+  BatchCas snap' failed at 240.0 s, FoldInit uploads' at 246.2 s. Stopped by hand.
+
+DIAGNOSIS. The 5 goals were FALSE from TypeOK alone, not slow: z3 answers an unprovable
+goal with a timeout. TypeOK lets a batch in progress carry push 0 (BatchCas then reads
+anc[0] and puts 0 in snap.history) and a fold in progress carry id 0 (FoldInit puts it in
+uploads, FoldCommit in snap.packs / belief.packs / localPacks). Both are outside the types.
+The SMTT budgets were withdrawn.
+
+THE STRENGTHENING, TLC FIRST (tlc/: MCForgeSyncM0.tla, tla-mc 0.1.2 compiled, 6 workers):
+  F1 == \A s : batch[s].stage # "none" => batch[s].push \in Pushes
+  F2 == \A s : fold[s].stage # "none" => fold[s].id \in FoldIds        (first form)
+  M0ProbeBatch  ProbeNoBatch VIOLATED, depth 6                         as required
+  M0ProbeFold   ProbeNoFold  VIOLATED, depth 14                        as required
+  M0Code        HOLDS, 30,277,694 distinct / 140,912,765 generated, depth 60, 540 s
+                -- exactly the gate's ForgeSyncCode count
+  M0Overlap     F2 VIOLATED, depth 19 (out/M0Overlap-trace.out, 20 states)
+
+THE F2 COUNTEREXAMPLE (state 19 -> 20, KeptSetRead):
+  s1 is "reclaiming"; snap.packs = {p1, p2}, history {p1}; s1's fold slot is "none".
+  KeptSetRead takes the slot to drop D = {p1}: [stage |-> "keptRenewed", id |-> 0, ...].
+  This is the model AS DESIGNED (ForgeSync.tla:1461): the kept-set reclaim builds NOTHING,
+  so it has no fold id; FoldAbandon's guard (:1274) already excludes "keptRenewed" with
+  "none". F2's first form was wrong, not the model. Only PacksOverlap reaches it (with
+  disjoint packs the kept set never commits -- the 10-05 finding).
+
+F2 RESTATED: fold[s].stage \notin {"none", "keptRenewed"} => fold[s].id \in FoldIds.
+  It is all the three fold steps need: FoldInit runs at "planned", FoldCommit at "renewed"
+  (CodeRules: ~FoldNoRenew), and FoldPlan sets the id when it plans (:1101).
+  Probe for the new premise: ProbeNoRealFold == \A s : fold[s].stage \in {"none","keptRenewed"}.
+
+THE RESTATED F2, TLC (m0-tlc-then-record.sh; tla-mc 0.1.2 compiled, 6 workers; md5s in the box's
+out/m0-record.txt: MCForgeSyncM0.tla 8b7673ab, proof module 19ef8b3b):
+  M0ProbeRealFold  ProbeNoRealFold VIOLATED, depth 14 (21,940 distinct)   as required
+  M0Code           HOLDS, 30,277,694 distinct / 140,912,765 generated, depth 60, 502 s
+                   -- exactly the gate's ForgeSyncCode count
+  M0Overlap        HOLDS, 155,567,536 distinct / 745,985,842 generated, depth 63, 2,434 s, 11 GB
+                   -- exactly the gate's ForgeSyncCodeOverlap count (2026-10-05)
+  TLC PASSED 21:43:29Z; the record run (run 5, --cleanfp) started the same second.
+
+RUN 5, THE RECORD RUN (--cleanfp, z3 reaper; proof module 19ef8b3b, ForgeSync.tla 3f296d75):
+  932 obligations: proved 443, trivial 488, FAILED 1, omitted 0.  WALL 4,322 s, MAXRSS 8.5 GB.
+  Box shared with another session's Lean proofs and TLC the whole run (load 12-20 on 8 cores).
+  The one failure: KeptSetCommit_TypeOK <1>21 (line 849, fold' typed), 76.6 s of a 60 s limit.
+RUN 6, that line alone (--toolbox 849 849, same limits): FAILED again at 60 s -- not just load.
+  THE GOAL IS TRUE (read, not timed): both branches of KeptSetCommit's IF -- the commit and
+  Fall(s) -- set fold' = [fold EXCEPT ![s] = NoFold], and NoFold is typed.  z3 spends its budget
+  on the other 25 variables the two branches assign.
+FIX (generator HINT table, not a budget): the step gets the fact as its own sub-step,
+    <2>1. fold' = [fold EXCEPT ![s] = NoFold]   BY DEF KeptSetCommit, Fall
+    <2>.  QED BY <2>1 DEF IndTypeOK, TypeOK, NoFold, FoldStages
+  New module 4a464ad2 (ForgeSyncProofM0-run7.tla here); diff vs 19ef8b3b is exactly those lines.
+RUN 7, the hinted step alone (--toolbox 848 851, --cleanfp, same limits): proved, 0.1 s + 0.8 s.
+RUN 8, the whole new module with run 5's .tlacache copied in (no --cleanfp): the fingerprints did
+  NOT hit (1 already:true), so it re-proved from scratch; STOPPED by hand at ~10 min (54 proved,
+  0 failed) because the box was shutting down.
+STANDING: runs 5 + 7 prove M0 on 4a464ad2 by composition (931 obligations textually unchanged
+  from run 5, the changed step proved in run 7).  OWED: one --cleanfp run of 4a464ad2 end to end
+  as the record (~72 min on a loaded box), then RESULTS.txt.
