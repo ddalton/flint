@@ -768,6 +768,68 @@ Until 1 to 5 exist, the only protection for pNFS data is the network:
 turn on `pnfs.networkPolicy` (`docs/pnfs-operator-runbook.md`, "Trust
 model").
 
+## flint lite (FlintShare hubs)
+
+A lite hub is `flint-pnfs-mds` in standalone mode, which does Kerberos as
+the pNFS MDS does (Phase 1 above). `spec.security.kerberos` on a
+FlintShare turns it on for that share; it needs krb5-operator in the
+cluster and the lite operator chart's `kerberos.enabled: true`, which
+grants the operator `kerberosprincipals`.
+
+```yaml
+apiVersion: chert.us/v1alpha1
+kind: FlintShare
+metadata: {name: ws1, namespace: team-a}
+spec:
+  persistence: {size: 20Gi}
+  security:
+    kerberos:
+      realm: CORP.EXAMPLE
+      realmRef: corp                 # a KerberosRealm that allows team-a
+      realmNamespace: krb5-system
+      idmap:
+        - {principal: alice@CORP.EXAMPLE, uid: 1000, gid: 1000}
+```
+
+**What the operator does.** It applies `KerberosPrincipal ws1-krb5`
+(`nfs/ws1.team-a.svc.<clusterDomain>`, plus the `advertiseAddress` host
+when it is a name and each `serverNames` entry), owned by the FlintShare
+so it outlives a hibernation and goes with the share; it waits for the
+keytab Secret `ws1-krb5` before it runs the hub; and it gives the hub the
+RWX servers' settings: the floor (`minSec`, default `krb5i`), the
+allowlist (default the realm's `host/*` and `nfs/*` and the `idmap`
+principals), the idmap and anonymous identity, the directory (`ldap`, as
+`nfs.kerberos.ldap`, its Secret and CA in the share's namespace),
+SP4_MACH_CRED (default on), root squash (default off), and **enforced
+permissions** unless `enforcePermissions: false` is set. `status.kerberos`
+gives `serverName`, the name clients mount by, and the principals.
+
+**It fails closed.** A setting the hub would refuse (a realm that is not
+upper case, `minSec: krb5p`, a bad principal pattern or identity) is
+condition `Kerberos=False`, reason `KerberosInvalid`; a missing keytab is
+`KerberosKeytabPending`; a principal the operator cannot apply is
+`KerberosPrincipalFailed`. In each case no hub is rendered, and a hub
+already running without Kerberos is scaled to zero, so a share that asks
+for Kerberos is never served as `sec=sys`. A Kerberos hub already running
+keeps its key.
+
+**Not behind the NFS proxy.** The proxy refuses RPCSEC_GSS (a GSS context
+is bound to the server principal), so with the operator's `nfsProxy`
+on, a Kerberos share is `KerberosBehindProxy` and runs no hub.
+
+**Clients.** A client node needs what an RWX client node needs (Node
+prerequisites above: a machine keytab from a `KerberosNodeKeytab`,
+`rpc.gssd`, the realm in krb5.conf) and must reach the hub by
+`status.kerberos.serverName`, not its ClusterIP: put that name in the PV's
+`server:` and give the node a hosts entry for it (the kubelet mounts with
+the host's resolver, which does not resolve `*.svc.cluster.local`). Plan
+L3 has the client chart write that entry; until then it is the
+operator's. From another cluster, mount by the `advertiseAddress` name.
+
+**Not for a hub:** attached-nodes-only (a hub's clients are not
+VolumeAttachments, and the hub refuses the setting at startup). The
+per-share `allowedPrincipals` is the control on who reaches a share.
+
 ## Tests
 
 - **Chart defaults:** `tests/system/chart-kerberos-defaults.sh` renders

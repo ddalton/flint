@@ -14,6 +14,19 @@ covered by the stability guarantee.
 
 ### Security
 
+- **flint lite: Kerberos for a share** (2026-10-17; plan
+  `docs/plans/flint-lite-kerberos-plan.md`, L1). FlintShare
+  `spec.security.kerberos` gives the hub its own server principal from
+  krb5-operator (`nfs/<share>.<namespace>.svc.<clusterDomain>`, plus the
+  advertised name), owned by the share, and the RWX servers' settings: a
+  `krb5i` floor, a principal allowlist, an idmap and anonymous identity,
+  LDAP, SP4_MACH_CRED, and enforced permissions by default. It fails
+  closed: a bad setting, a missing keytab or the NFS proxy (which does not
+  end GSS) is a `Kerberos=False` condition and no hub, and a running
+  `sec=sys` hub is scaled to zero. `status.kerberos.serverName` is the name
+  to mount by. Operator chart `kerberos.enabled` grants
+  `kerberosprincipals`; `kerberos.clusterDomain` names the domain.
+
 - **pNFS: per-pod identities on the control path** (2026-10-16; plan
   Phase 5b). TLS (Phase 5a) protected the shared control token on the
   wire, but every holder of it could still register a data server, create
