@@ -222,7 +222,7 @@ spec:
             {{- $pk := .Values.pnfs.kerberos }}
             # Kerberos (pnfs.kerberos.dataServers): this pod's own key and
             # the MDS's server env (floor, allowlist, directory).
-            {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" . "minSec" $pk.minSec "requireMachCred" false "enforcePermissions" "") | nindent 12 }}
+            {{- include "flint-csi-driver-chart.krb5ServerEnv" (dict "root" . "minSec" $pk.minSec "requireMachCred" $pk.requireMachCred "enforcePermissions" "") | nindent 12 }}
             {{- end }}
             {{- if include "flint-csi-driver-chart.pnfsDsAttachedNodesOnly" . }}
             # Only the nodes a pNFS volume is attached to (the union).

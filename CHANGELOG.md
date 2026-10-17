@@ -14,6 +14,18 @@ covered by the stability guarantee.
 
 ### Security
 
+- **pNFS data servers: sessions bound to the machine** (2026-10-17;
+  `docs/plans/pnfs-kerberos-plan.md`, Phase 3b). A data server grants
+  SP4_MACH_CRED to a `krb5i`/`krb5p` client, as the MDS does, where it
+  answered SP4_NONE: such a session is used only on connections its machine
+  bound (CREATE_SESSION, or the new BIND_CONN_TO_SESSION), and its
+  session-management ops need the machine's key (WRONG_CRED, CLID_INUSE
+  otherwise). So a session id seen on the wire no longer lets another node
+  use the session, or the handles signed for that node. The data servers
+  now follow `pnfs.kerberos.requireMachCred` (default true). Fixed on the
+  way: a data server served a compound's I/O without a SEQUENCE, and after
+  a refused one; every op but the session-less five now needs SEQUENCE
+  first (OP_NOT_IN_SESSION), and a compound stops at its first error.
 - **flint lite: Kerberos for a share** (2026-10-17; plan
   `docs/plans/flint-lite-kerberos-plan.md`, L1). FlintShare
   `spec.security.kerberos` gives the hub its own server principal from

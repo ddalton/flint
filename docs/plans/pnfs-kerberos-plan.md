@@ -2,9 +2,9 @@
 
 Status, 2026-10-17: Phases 1 to 5 are built (PRs #22 Phase 1, #25
 Phase 2, #26 Phase 3, #27 DS posture, #28 E4, #29 Phase 4, #30 Phase 5a,
-then Phase 5b, per-pod identities on the control path); each phase below
-says how the build differs from its sketch. Phase 3b (SP4_MACH_CRED on
-the DSes) is deferred. What is built is documented for users in
+then Phase 5b, per-pod identities on the control path, then Phase 3b,
+SP4_MACH_CRED on the DSes); each phase below says how the build differs
+from its sketch. What is built is documented for users in
 [nfs-kerberos.md, "pNFS"](../nfs-kerberos.md#pnfs). The plan assumed the
 RWX Kerberos work was merged (PRs #15 per-volume keys, #18 required
 SP4_MACH_CRED, #19 LDAP identities). Line numbers are `origin/main` at
@@ -255,6 +255,51 @@ both (arm H then keeps every byte on the MDS).
   off as the byte-identical guard; kind with 3 DSes + multipath.
 - Size ~1,500 lines, 2–3 weeks.
 
+## Phase 3b: SP4_MACH_CRED on the data servers
+
+**Built** (2026-10-17). Before it, a DS answered SP4_NONE to an
+SP4_MACH_CRED request, so its sessions were bound to nothing: under
+`krb5i` the session id is on the wire in clear, and any principal the DS
+admits (another attached node, any user) could use it from its own
+connection, and with it the node's signed handles (Phase 4 binds a handle
+to the session's node).
+
+- The DS grants SP4_MACH_CRED to a `krb5i` or `krb5p` EXCHANGE_ID, as the
+  MDS does (`session::mach_cred_grant`: the five must_enforce ops, and an
+  empty must_allow, since the DS serves none of the cleanup ops). Plain
+  `krb5` and AUTH_SYS still get SP4_NONE.
+- Each DS connection has an id; CREATE_SESSION binds its connection, and
+  BIND_CONN_TO_SESSION (new on the DS: the fore channel only, INVAL for
+  BACK) binds another. An SP4_MACH_CRED session's SEQUENCE on an unbound
+  connection is CONN_NOT_BOUND_TO_SESSION, and the Linux client answers
+  by binding. A closed connection's bindings go with it.
+- CREATE_SESSION, DESTROY_SESSION, DESTROY_CLIENTID and
+  BIND_CONN_TO_SESSION from any principal but the client's machine:
+  WRONG_CRED; another principal's EXCHANGE_ID under its owner: CLID_INUSE.
+- `FLINT_NFS_REQUIRE_MACH_CRED` on the DS (chart: the DSes now follow
+  `pnfs.kerberos.requireMachCred`, default true): an EXCHANGE_ID that does
+  not get SP4_MACH_CRED is refused with ACCESS. With no keytab the DS
+  refuses to start.
+- **Found on the way:** the DS ran a compound's ops without a SEQUENCE
+  (and after a failed one), and did not stop at a failed op, so
+  `[PUTFH, READ]` with no session at all reached the data, past the
+  session binding and the attached-nodes check on SEQUENCE. Now every op
+  but the five session-less ones needs a SEQUENCE first
+  (OP_NOT_IN_SESSION), SEQUENCE only first (SEQUENCE_POS), and a compound
+  stops at its first error (RFC 8881 §15.2).
+- Tests: `pnfs::ds::server::mach_cred_tests` (grant only under integrity;
+  binding and BIND_CONN_TO_SESSION; WRONG_CRED and CLID_INUSE; required
+  mode; SP4_NONE unchanged; no I/O outside a session), `pnfs::ds::session`;
+  chart `tests/system/chart-kerberos-defaults.sh`. A mutation control (the
+  SEQUENCE binding check removed) fails two of the six. Kind, 2026-10-17
+  (`tests-pnfs-krb5`, kernel 6.12): both DSes require SP4_MACH_CRED and
+  granted it to 12 and 4 node clients; the kernel met
+  CONN_NOT_BOUND_TO_SESSION 7 and 3 times (multipath and reconnected
+  connections) and bound them itself (BIND_CONN_TO_SESSION), nothing was
+  refused for its credential, and 8 MiB under `krb5i` striped on both
+  DSes with matching md5s. The `sec=sys` suite (`tests-pnfs-sys`) passes
+  under the session-first rule.
+
 ## Phase 4: the DS checks the layout (MAC'd filehandle)
 
 **Built** (2026-10-16, `pnfs::ds_fh`): as below, but version **5** (4 is the
@@ -346,9 +391,9 @@ differentials that guard AUTH_SYS.
    at the DS, is refused, and falls back to the MDS; a DS without a floor
    takes the downgrade (arm H), which is why the MDS withholds GSS layouts
    while any DS lacks its keytab or floor (#27).
-4. SP4_NONE accepted from a DS after asking SP4_MACH_CRED (E2) — the DS
-   answers SP4_NONE today; binding DS sessions to the machine is Phase 3b,
-   deferred.
+4. ~~SP4_NONE accepted from a DS after asking SP4_MACH_CRED (E2)~~ —
+   settled by Phase 3b: the DS grants SP4_MACH_CRED under `krb5i`/`krb5p`
+   and, by default, requires it.
 5. ~~Kernel recovery from a refused DS filehandle (E4)~~ — settled (#28,
    `tests/krb5/results/pnfs-e4-2026-10-16/`): BADHANDLE, STALE, ACCESS and
    FHEXPIRED make the client LAYOUTGET again, then fall back to the MDS;
