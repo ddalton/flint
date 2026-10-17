@@ -1,0 +1,3891 @@
+
+\* TLAPM version bfa9468
+\* launched at 2026-10-16 20:54:05 with command line:
+\* /work/tlaps/tlapm/bin/tlapm --toolbox 2456 2580 --cleanfp --method smt --stretch 12 --threads 1 -k LeanP1ProofM11
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:2571:10:2571:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:2571:13:2571:17
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:2571:19:2571:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:2571:25:2571:30
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:2571:32:2571:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:2459:14:2459:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:2460:62:2460:64
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:2461:14:2461:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:2461:17:2461:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:2461:23:2461:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:2463:80:2463:82
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:2463:83:2463:87
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:2463:89:2463:94
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:2463:96:2463:108
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:2464:47:2464:49
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:2465:18:2465:20
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:2465:21:2465:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:2466:79:2466:81
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:2498:12:2498:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:2498:15:2498:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:2498:21:2498:26
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:2498:28:2498:33
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:2498:35:2498:40
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:25
+@!!loc:2498:42:2498:47
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:26
+@!!loc:2498:49:2498:53
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:27
+@!!loc:2498:55:2498:59
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:28
+@!!loc:2498:61:2498:66
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:29
+@!!loc:2473:37:2473:39
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:30
+@!!loc:2474:112:2474:114
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:31
+@!!loc:2475:114:2475:116
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:32
+@!!loc:2476:110:2476:112
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:33
+@!!loc:2477:112:2477:114
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:34
+@!!loc:2478:109:2478:111
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:35
+@!!loc:2479:52:2479:54
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:36
+@!!loc:2487:14:2487:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:37
+@!!loc:2487:17:2487:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:38
+@!!loc:2487:23:2487:27
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:39
+@!!loc:2484:115:2484:122
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:40
+@!!loc:2485:40:2485:42
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:41
+@!!loc:2485:43:2485:47
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:42
+@!!loc:2485:49:2485:54
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:43
+@!!loc:2485:56:2485:61
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:44
+@!!loc:2486:43:2486:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:45
+@!!loc:2486:46:2486:50
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:46
+@!!loc:2486:52:2486:57
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:47
+@!!loc:2486:59:2486:64
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:48
+@!!loc:2496:14:2496:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:49
+@!!loc:2496:17:2496:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:50
+@!!loc:2496:23:2496:27
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:51
+@!!loc:2496:29:2496:33
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:52
+@!!loc:2496:35:2496:40
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:53
+@!!loc:2496:42:2496:47
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:54
+@!!loc:2491:38:2491:40
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:55
+@!!loc:2491:41:2491:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:56
+@!!loc:2491:47:2491:59
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:57
+@!!loc:2493:87:2493:89
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:58
+@!!loc:2495:7:2495:9
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:59
+@!!loc:2497:46:2497:48
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:60
+@!!loc:2499:60:2499:62
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:61
+@!!loc:2499:63:2499:67
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:62
+@!!loc:2499:69:2499:73
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:63
+@!!loc:2506:3:2506:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:64
+@!!loc:2506:6:2506:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:65
+@!!loc:2506:13:2506:25
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:66
+@!!loc:2507:32:2507:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:67
+@!!loc:2507:35:2507:40
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:68
+@!!loc:2508:89:2508:91
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:69
+@!!loc:2508:92:2508:96
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:70
+@!!loc:2508:98:2508:102
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:71
+@!!loc:2511:12:2511:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:72
+@!!loc:2511:15:2511:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:73
+@!!loc:2511:21:2511:25
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:74
+@!!loc:2511:27:2511:32
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:75
+@!!loc:2511:34:2511:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:76
+@!!loc:2511:43:2511:50
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:77
+@!!loc:2510:64:2510:71
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:78
+@!!loc:2523:3:2523:5
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:79
+@!!loc:2523:6:2523:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:80
+@!!loc:2569:12:2569:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:81
+@!!loc:2569:15:2569:19
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:82
+@!!loc:2569:21:2569:25
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:83
+@!!loc:2569:27:2569:31
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:84
+@!!loc:2569:33:2569:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:85
+@!!loc:2569:39:2569:43
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:86
+@!!loc:2525:19:2525:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:87
+@!!loc:2525:22:2525:26
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:88
+@!!loc:2527:5:2527:7
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:89
+@!!loc:2527:8:2527:12
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:90
+@!!loc:2527:14:2527:18
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:91
+@!!loc:2527:20:2527:26
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:92
+@!!loc:2527:28:2527:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:93
+@!!loc:2528:69:2528:71
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:94
+@!!loc:2528:72:2528:76
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:95
+@!!loc:2528:78:2528:82
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:96
+@!!loc:2528:84:2528:88
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:97
+@!!loc:2564:14:2564:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:98
+@!!loc:2564:17:2564:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:99
+@!!loc:2564:23:2564:27
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:100
+@!!loc:2564:29:2564:33
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:101
+@!!loc:2564:35:2564:39
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:102
+@!!loc:2530:66:2530:73
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:103
+@!!loc:2531:42:2531:44
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:104
+@!!loc:2531:45:2531:49
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:105
+@!!loc:2531:51:2531:55
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:106
+@!!loc:2533:7:2533:9
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:107
+@!!loc:2533:10:2533:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:108
+@!!loc:2533:16:2533:20
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:109
+@!!loc:2533:22:2533:28
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:110
+@!!loc:2533:30:2533:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:111
+@!!loc:2537:16:2537:18
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:112
+@!!loc:2537:19:2537:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:113
+@!!loc:2537:25:2537:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:114
+@!!loc:2537:31:2537:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:115
+@!!loc:2537:37:2537:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:116
+@!!loc:2535:37:2535:44
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:118
+@!!loc:2536:54:2536:56
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:119
+@!!loc:2536:57:2536:61
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:120
+@!!loc:2536:63:2536:67
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:121
+@!!loc:2536:69:2536:73
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:122
+@!!loc:2536:75:2536:79
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:123
+@!!loc:2538:86:2538:88
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:124
+@!!loc:2538:89:2538:93
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:125
+@!!loc:2538:95:2538:99
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:126
+@!!loc:2542:7:2542:9
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:127
+@!!loc:2542:10:2542:14
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:128
+@!!loc:2542:16:2542:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:129
+@!!loc:2542:23:2542:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:130
+@!!loc:2542:31:2542:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:131
+@!!loc:2542:39:2542:44
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:132
+@!!loc:2542:46:2542:50
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:133
+@!!loc:2553:16:2553:18
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:134
+@!!loc:2553:19:2553:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:135
+@!!loc:2553:25:2553:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:136
+@!!loc:2553:31:2553:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:137
+@!!loc:2553:37:2553:42
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:138
+@!!loc:2553:44:2553:48
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:139
+@!!loc:2546:9:2546:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:140
+@!!loc:2546:12:2546:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:141
+@!!loc:2546:18:2546:22
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:142
+@!!loc:2546:24:2546:30
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:143
+@!!loc:2546:32:2546:38
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:144
+@!!loc:2546:40:2546:44
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:145
+@!!loc:2546:46:2546:50
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:146
+@!!loc:2546:52:2546:56
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:147
+@!!loc:2549:9:2549:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:148
+@!!loc:2549:12:2549:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:149
+@!!loc:2549:18:2549:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:150
+@!!loc:2549:25:2549:31
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:151
+@!!loc:2549:33:2549:39
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:152
+@!!loc:2549:41:2549:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:153
+@!!loc:2549:47:2549:51
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:154
+@!!loc:2552:9:2552:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:155
+@!!loc:2552:12:2552:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:156
+@!!loc:2552:18:2552:22
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:157
+@!!loc:2552:24:2552:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:158
+@!!loc:2552:31:2552:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:159
+@!!loc:2552:39:2552:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:160
+@!!loc:2563:16:2563:18
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:161
+@!!loc:2563:19:2563:23
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:162
+@!!loc:2563:25:2563:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:163
+@!!loc:2563:31:2563:35
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:164
+@!!loc:2563:37:2563:42
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:165
+@!!loc:2563:44:2563:48
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:166
+@!!loc:2558:9:2558:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:167
+@!!loc:2558:12:2558:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:168
+@!!loc:2561:9:2561:11
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:169
+@!!loc:2561:12:2561:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:170
+@!!loc:2561:18:2561:22
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:171
+@!!loc:2561:24:2561:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:172
+@!!loc:2561:31:2561:37
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:173
+@!!loc:2561:39:2561:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:174
+@!!loc:2562:39:2562:41
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:175
+@!!loc:2562:42:2562:46
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:176
+@!!loc:2562:48:2562:52
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:177
+@!!loc:2562:54:2562:58
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:178
+@!!loc:2562:60:2562:64
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:179
+@!!loc:2565:53:2565:55
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:180
+@!!loc:2565:56:2565:60
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:181
+@!!loc:2565:62:2565:66
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:182
+@!!loc:2565:68:2565:74
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:183
+@!!loc:2565:76:2565:80
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:184
+@!!loc:2568:14:2568:16
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:185
+@!!loc:2568:17:2568:21
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:186
+@!!loc:2568:23:2568:27
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:187
+@!!loc:2568:29:2568:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:188
+@!!loc:2568:36:2568:43
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:189
+@!!loc:2568:45:2568:56
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:190
+@!!loc:2567:38:2567:40
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:191
+@!!loc:2567:41:2567:45
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:192
+@!!loc:2567:47:2567:51
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:193
+@!!loc:2570:27:2570:29
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:194
+@!!loc:2570:30:2570:34
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:195
+@!!loc:2570:36:2570:40
+@!!status:to be proved
+@!!END
+
+@!!BEGIN
+@!!type:obligationsnumber
+@!!count:193
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:1
+@!!loc:2571:10:2571:12
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:2
+@!!loc:2571:13:2571:17
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:3
+@!!loc:2571:19:2571:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:4
+@!!loc:2571:25:2571:30
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:5
+@!!loc:2571:32:2571:41
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:6
+@!!loc:2459:14:2459:16
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:7
+@!!loc:2460:62:2460:64
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:8
+@!!loc:2461:14:2461:16
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:9
+@!!loc:2461:17:2461:21
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:10
+@!!loc:2461:23:2461:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:11
+@!!loc:2463:80:2463:82
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:12
+@!!loc:2463:83:2463:87
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:13
+@!!loc:2463:89:2463:94
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:14
+@!!loc:2463:96:2463:108
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:15
+@!!loc:2464:47:2464:49
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:16
+@!!loc:2465:18:2465:20
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:17
+@!!loc:2465:21:2465:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:18
+@!!loc:2466:79:2466:81
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:2498:12:2498:14
+@!!status:being proved
+@!!prover:smt
+@!!meth:time-limit: 60
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       IndC ,
+       IndC' ,
+       DInv ,
+       A1IAK1 ,
+       A1LostDead ,
+       NEW CONSTANT s \in Writers,
+       Sync(s) ,
+       Frame ,
+       NEW CONSTANT fail \in SUBSET SyncAll(s),
+       SyncW(s, fail).pc = w[s].pc ,
+       SyncW(s, fail).pend = w[s].pend /\ SyncW(s, fail).dset = w[s].dset
+       /\ SyncW(s, fail).decl = w[s].decl ,
+       SyncW(s, fail).moved = w[s].moved /\ SyncW(s, fail).dMint = w[s].dMint
+       /\ SyncW(s, fail).car = w[s].car ,
+       SyncW(s, fail).bound = w[s].bound /\ SyncW(s, fail).nt = w[s].nt
+       /\ SyncW(s, fail).lost = w[s].lost ,
+       SyncW(s, fail).inst = w[s].inst /\ SyncW(s, fail).cId = w[s].cId
+       /\ SyncW(s, fail).cFold = w[s].cFold ,
+       A1LeftSet(SyncW(s, fail)) = A1LeftSet(w[s]) ,
+       \A q \in Paths :
+          \/ (SyncW(s, fail).local)[q] = (w[s].local)[q]
+             /\ (SyncW(s, fail).baseline)[q] = (w[s].baseline)[q]
+          \/ (SyncW(s, fail).local)[q] = doc[q]
+             /\ (SyncW(s, fail).baseline)[q] = doc[q] /\ Owed(s, q) ,
+       SyncW(s, fail).sStage = w[s].sStage 
+PROVE  /\ SyncW(s, fail).pc = w[s].pc /\ SyncW(s, fail).pend = w[s].pend
+          /\ SyncW(s, fail).dset = w[s].dset
+          /\ SyncW(s, fail).decl = w[s].decl
+          /\ SyncW(s, fail).moved = w[s].moved
+          /\ SyncW(s, fail).dMint = w[s].dMint
+          /\ SyncW(s, fail).car = w[s].car
+          /\ SyncW(s, fail).bound = w[s].bound /\ SyncW(s, fail).nt = w[s].nt
+          /\ SyncW(s, fail).lost = w[s].lost
+          /\ SyncW(s, fail).inst = w[s].inst /\ SyncW(s, fail).cId = w[s].cId
+          /\ SyncW(s, fail).cFold = w[s].cFold
+          /\ A1LeftSet(SyncW(s, fail)) = A1LeftSet(w[s])
+          /\ SyncW(s, fail).sStage = w[s].sStage
+          /\ (\A q \in Paths :
+                 \/ (((SyncW(s, fail).local)[q] = (w[s].local)[q]
+                      /\ (SyncW(s, fail).baseline)[q] = (w[s].baseline)[q])
+                     \/ (SyncW(s, fail).local)[q] = doc[q])
+                    /\ (SyncW(s, fail).baseline)[q] = doc[q] /\ Owed(s, q))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:20
+@!!loc:2498:12:2498:14
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 60.0 (100%)
+@!!reason:timeout
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       IndC ,
+       IndC' ,
+       DInv ,
+       A1IAK1 ,
+       A1LostDead ,
+       NEW CONSTANT s \in Writers,
+       Sync(s) ,
+       Frame ,
+       NEW CONSTANT fail \in SUBSET SyncAll(s),
+       SyncW(s, fail).pc = w[s].pc ,
+       SyncW(s, fail).pend = w[s].pend /\ SyncW(s, fail).dset = w[s].dset
+       /\ SyncW(s, fail).decl = w[s].decl ,
+       SyncW(s, fail).moved = w[s].moved /\ SyncW(s, fail).dMint = w[s].dMint
+       /\ SyncW(s, fail).car = w[s].car ,
+       SyncW(s, fail).bound = w[s].bound /\ SyncW(s, fail).nt = w[s].nt
+       /\ SyncW(s, fail).lost = w[s].lost ,
+       SyncW(s, fail).inst = w[s].inst /\ SyncW(s, fail).cId = w[s].cId
+       /\ SyncW(s, fail).cFold = w[s].cFold ,
+       A1LeftSet(SyncW(s, fail)) = A1LeftSet(w[s]) ,
+       \A q \in Paths :
+          \/ (SyncW(s, fail).local)[q] = (w[s].local)[q]
+             /\ (SyncW(s, fail).baseline)[q] = (w[s].baseline)[q]
+          \/ (SyncW(s, fail).local)[q] = doc[q]
+             /\ (SyncW(s, fail).baseline)[q] = doc[q] /\ Owed(s, q) ,
+       SyncW(s, fail).sStage = w[s].sStage 
+PROVE  /\ SyncW(s, fail).pc = w[s].pc /\ SyncW(s, fail).pend = w[s].pend
+          /\ SyncW(s, fail).dset = w[s].dset
+          /\ SyncW(s, fail).decl = w[s].decl
+          /\ SyncW(s, fail).moved = w[s].moved
+          /\ SyncW(s, fail).dMint = w[s].dMint
+          /\ SyncW(s, fail).car = w[s].car
+          /\ SyncW(s, fail).bound = w[s].bound /\ SyncW(s, fail).nt = w[s].nt
+          /\ SyncW(s, fail).lost = w[s].lost
+          /\ SyncW(s, fail).inst = w[s].inst /\ SyncW(s, fail).cId = w[s].cId
+          /\ SyncW(s, fail).cFold = w[s].cFold
+          /\ A1LeftSet(SyncW(s, fail)) = A1LeftSet(w[s])
+          /\ SyncW(s, fail).sStage = w[s].sStage
+          /\ (\A q \in Paths :
+                 \/ (((SyncW(s, fail).local)[q] = (w[s].local)[q]
+                      /\ (SyncW(s, fail).baseline)[q] = (w[s].baseline)[q])
+                     \/ (SyncW(s, fail).local)[q] = doc[q])
+                    /\ (SyncW(s, fail).baseline)[q] = doc[q] /\ Owed(s, q))
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:21
+@!!loc:2498:15:2498:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:22
+@!!loc:2498:21:2498:26
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:23
+@!!loc:2498:28:2498:33
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:24
+@!!loc:2498:35:2498:40
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:25
+@!!loc:2498:42:2498:47
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:26
+@!!loc:2498:49:2498:53
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:27
+@!!loc:2498:55:2498:59
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:28
+@!!loc:2498:61:2498:66
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:29
+@!!loc:2473:37:2473:39
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:30
+@!!loc:2474:112:2474:114
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:31
+@!!loc:2475:114:2475:116
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:32
+@!!loc:2476:110:2476:112
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:33
+@!!loc:2477:112:2477:114
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:34
+@!!loc:2478:109:2478:111
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:35
+@!!loc:2479:52:2479:54
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:36
+@!!loc:2487:14:2487:16
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:37
+@!!loc:2487:17:2487:21
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:38
+@!!loc:2487:23:2487:27
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:39
+@!!loc:2484:115:2484:122
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:40
+@!!loc:2485:40:2485:42
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:41
+@!!loc:2485:43:2485:47
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:42
+@!!loc:2485:49:2485:54
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:43
+@!!loc:2485:56:2485:61
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:44
+@!!loc:2486:43:2486:45
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:45
+@!!loc:2486:46:2486:50
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:46
+@!!loc:2486:52:2486:57
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:47
+@!!loc:2486:59:2486:64
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:48
+@!!loc:2496:14:2496:16
+@!!status:being proved
+@!!prover:smt
+@!!meth:time-limit: 60
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       IndC ,
+       IndC' ,
+       DInv ,
+       A1IAK1 ,
+       A1LostDead ,
+       NEW CONSTANT s \in Writers,
+       Sync(s) ,
+       Frame ,
+       NEW CONSTANT fail \in SUBSET SyncAll(s),
+       w[s].sDrop \subseteq Paths ,
+       /\ SyncW(s, fail).sDrop = w[s].sDrop
+          /\ SyncW(s, fail).sHeld = w[s].sHeld
+       /\ SyncW(s, fail).sStage = w[s].sStage
+          /\ SyncW(s, fail).sKeep = w[s].sKeep ,
+       \A q \in Paths :
+          q \in SyncOwed(s, fail)
+          => (w[s].local)[q] = (w[s].baseline)[q] \/ (w[s].local)[q] = Nil ,
+       SyncW(s, fail).local
+       = [p \in Paths |->
+            IF p \in SyncOwed(s, fail) THEN doc[p] ELSE (w[s].local)[p]] ,
+       SyncW(s, fail).baseline
+       = [p \in Paths |->
+            IF p \in SyncOwed(s, fail) THEN doc[p] ELSE (w[s].baseline)[p]] 
+PROVE  {p \in SyncW(s, fail).sDrop :
+          /\ (SyncW(s, fail).local)[p] # Nil
+             /\ (SyncW(s, fail).sHeld)[p] # Nil
+             /\ (SyncW(s, fail).local)[p] = (SyncW(s, fail).sHeld)[p]
+          /\ \/ SyncW(s, fail).sStage = "mid"
+                /\ p \notin SyncW(s, fail).sKeep
+             \/ SyncW(s, fail).sStage = "saved"
+                /\ (SyncW(s, fail).baseline)[p] = Nil}
+       = {p \in w[s].sDrop :
+            /\ (w[s].local)[p] # Nil /\ (w[s].sHeld)[p] # Nil
+               /\ (w[s].local)[p] = (w[s].sHeld)[p]
+            /\ \/ w[s].sStage = "mid" /\ p \notin w[s].sKeep
+               \/ w[s].sStage = "saved" /\ (w[s].baseline)[p] = Nil}
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:48
+@!!loc:2496:14:2496:16
+@!!status:failed
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 60.0 (100%)
+@!!reason:timeout
+@!!already:false
+@!!obl:
+ASSUME NEW CONSTANT Nil,
+       NEW CONSTANT Paths,
+       NEW CONSTANT Free,
+       NEW CONSTANT Writers,
+       NEW CONSTANT MaxMint,
+       NEW CONSTANT MaxUI,
+       NEW CONSTANT MaxRemovals,
+       NEW CONSTANT MaxBarriers,
+       NEW CONSTANT MaxRestarts,
+       NEW CONSTANT MaxSyncs,
+       NEW CONSTANT MaxAges,
+       NEW CONSTANT MaxCopies,
+       NEW CONSTANT CommitSurfacesForeign,
+       NEW CONSTANT CommitVerifiesUploads,
+       NEW CONSTANT SweepUnderLease,
+       NEW CONSTANT CollectorSparesCited,
+       NEW CONSTANT CommitRecordsDeleteOverride,
+       NEW CONSTANT DeleteWinsPreserved,
+       NEW CONSTANT ContentConverges,
+       NEW CONSTANT RecheckSkipped,
+       NEW CONSTANT CommitAdvanceGuarded,
+       NEW CONSTANT RetireAge,
+       NEW CONSTANT GatewayIgnoresLease,
+       NEW CONSTANT GatewayJudgesRead,
+       NEW CONSTANT GatewaySweepGrace,
+       NEW CONSTANT RenameAtomic,
+       NEW CONSTANT Scopes,
+       NEW CONSTANT MaxRescopes,
+       NEW CONSTANT ConsumeHonorsScope,
+       NEW CONSTANT RescopeUnciteFirst,
+       NEW CONSTANT RescopeKeepsDirty,
+       NEW CONSTANT WidenKeepsLocal,
+       NEW CONSTANT UnlinkChecksBytes,
+       NEW CONSTANT MaxFetchFails,
+       NEW CONSTANT ConsumeKeepsLeft,
+       NEW CONSTANT SyncKeepsLeft,
+       NEW CONSTANT Readers,
+       NEW CONSTANT ReaderRechecksOwed,
+       NEW CONSTANT MaxTouches,
+       NEW CONSTANT MaxNonces,
+       NEW CONSTANT MaxDeposals,
+       NEW CONSTANT InstallFenced,
+       NEW CONSTANT DeletesUnderLease,
+       NEW VARIABLE live,
+       NEW VARIABLE minted,
+       NEW VARIABLE doc,
+       NEW VARIABLE seq,
+       NEW VARIABLE tomb,
+       NEW VARIABLE base,
+       NEW VARIABLE acked,
+       NEW VARIABLE conflicts,
+       NEW VARIABLE holder,
+       NEW VARIABLE nextGen,
+       NEW VARIABLE ui,
+       NEW VARIABLE reqs,
+       NEW VARIABLE barriers,
+       NEW VARIABLE w,
+       NEW VARIABLE took,
+       NEW VARIABLE gw,
+       NEW VARIABLE mv,
+       NEW VARIABLE udel,
+       NEW VARIABLE restarts,
+       NEW VARIABLE syncs,
+       NEW VARIABLE regressed,
+       NEW VARIABLE rescopes,
+       NEW VARIABLE fails,
+       NEW VARIABLE upped,
+       NEW VARIABLE copies,
+       NEW VARIABLE orig,
+       NEW VARIABLE retiring,
+       NEW VARIABLE aged,
+       NEW VARIABLE ages,
+       NEW VARIABLE rdoc,
+       NEW VARIABLE rlag,
+       NEW VARIABLE anc,
+       IndC ,
+       IndC' ,
+       DInv ,
+       A1IAK1 ,
+       A1LostDead ,
+       NEW CONSTANT s \in Writers,
+       Sync(s) ,
+       Frame ,
+       NEW CONSTANT fail \in SUBSET SyncAll(s),
+       w[s].sDrop \subseteq Paths ,
+       /\ SyncW(s, fail).sDrop = w[s].sDrop
+          /\ SyncW(s, fail).sHeld = w[s].sHeld
+       /\ SyncW(s, fail).sStage = w[s].sStage
+          /\ SyncW(s, fail).sKeep = w[s].sKeep ,
+       \A q \in Paths :
+          q \in SyncOwed(s, fail)
+          => (w[s].local)[q] = (w[s].baseline)[q] \/ (w[s].local)[q] = Nil ,
+       SyncW(s, fail).local
+       = [p \in Paths |->
+            IF p \in SyncOwed(s, fail) THEN doc[p] ELSE (w[s].local)[p]] ,
+       SyncW(s, fail).baseline
+       = [p \in Paths |->
+            IF p \in SyncOwed(s, fail) THEN doc[p] ELSE (w[s].baseline)[p]] 
+PROVE  {p \in SyncW(s, fail).sDrop :
+          /\ (SyncW(s, fail).local)[p] # Nil
+             /\ (SyncW(s, fail).sHeld)[p] # Nil
+             /\ (SyncW(s, fail).local)[p] = (SyncW(s, fail).sHeld)[p]
+          /\ \/ SyncW(s, fail).sStage = "mid"
+                /\ p \notin SyncW(s, fail).sKeep
+             \/ SyncW(s, fail).sStage = "saved"
+                /\ (SyncW(s, fail).baseline)[p] = Nil}
+       = {p \in w[s].sDrop :
+            /\ (w[s].local)[p] # Nil /\ (w[s].sHeld)[p] # Nil
+               /\ (w[s].local)[p] = (w[s].sHeld)[p]
+            /\ \/ w[s].sStage = "mid" /\ p \notin w[s].sKeep
+               \/ w[s].sStage = "saved" /\ (w[s].baseline)[p] = Nil}
+
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:49
+@!!loc:2496:17:2496:21
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:50
+@!!loc:2496:23:2496:27
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:51
+@!!loc:2496:29:2496:33
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:52
+@!!loc:2496:35:2496:40
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:53
+@!!loc:2496:42:2496:47
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:54
+@!!loc:2491:38:2491:40
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:55
+@!!loc:2491:41:2491:45
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:56
+@!!loc:2491:47:2491:59
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:57
+@!!loc:2493:87:2493:89
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:58
+@!!loc:2495:7:2495:9
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:59
+@!!loc:2497:46:2497:48
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:60
+@!!loc:2499:60:2499:62
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:61
+@!!loc:2499:63:2499:67
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:62
+@!!loc:2499:69:2499:73
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:63
+@!!loc:2506:3:2506:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:64
+@!!loc:2506:6:2506:11
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:65
+@!!loc:2506:13:2506:25
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:66
+@!!loc:2507:32:2507:34
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:67
+@!!loc:2507:35:2507:40
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:68
+@!!loc:2508:89:2508:91
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:69
+@!!loc:2508:92:2508:96
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:70
+@!!loc:2508:98:2508:102
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:71
+@!!loc:2511:12:2511:14
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:72
+@!!loc:2511:15:2511:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:73
+@!!loc:2511:21:2511:25
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:74
+@!!loc:2511:27:2511:32
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:75
+@!!loc:2511:34:2511:41
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:76
+@!!loc:2511:43:2511:50
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:77
+@!!loc:2510:64:2510:71
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:78
+@!!loc:2523:3:2523:5
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:79
+@!!loc:2523:6:2523:12
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:80
+@!!loc:2569:12:2569:14
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:81
+@!!loc:2569:15:2569:19
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:82
+@!!loc:2569:21:2569:25
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:83
+@!!loc:2569:27:2569:31
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:84
+@!!loc:2569:33:2569:37
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:85
+@!!loc:2569:39:2569:43
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:86
+@!!loc:2525:19:2525:21
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:87
+@!!loc:2525:22:2525:26
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:88
+@!!loc:2527:5:2527:7
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:89
+@!!loc:2527:8:2527:12
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:90
+@!!loc:2527:14:2527:18
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:91
+@!!loc:2527:20:2527:26
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:92
+@!!loc:2527:28:2527:37
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:93
+@!!loc:2528:69:2528:71
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:94
+@!!loc:2528:72:2528:76
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:95
+@!!loc:2528:78:2528:82
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:96
+@!!loc:2528:84:2528:88
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:97
+@!!loc:2564:14:2564:16
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:98
+@!!loc:2564:17:2564:21
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:99
+@!!loc:2564:23:2564:27
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:100
+@!!loc:2564:29:2564:33
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:101
+@!!loc:2564:35:2564:39
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:102
+@!!loc:2530:66:2530:73
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:103
+@!!loc:2531:42:2531:44
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:104
+@!!loc:2531:45:2531:49
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:105
+@!!loc:2531:51:2531:55
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:106
+@!!loc:2533:7:2533:9
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:107
+@!!loc:2533:10:2533:14
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:108
+@!!loc:2533:16:2533:20
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:109
+@!!loc:2533:22:2533:28
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:110
+@!!loc:2533:30:2533:34
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:111
+@!!loc:2537:16:2537:18
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:112
+@!!loc:2537:19:2537:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:113
+@!!loc:2537:25:2537:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:114
+@!!loc:2537:31:2537:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:115
+@!!loc:2537:37:2537:41
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:116
+@!!loc:2535:37:2535:44
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:118
+@!!loc:2536:54:2536:56
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:119
+@!!loc:2536:57:2536:61
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:120
+@!!loc:2536:63:2536:67
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:121
+@!!loc:2536:69:2536:73
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:122
+@!!loc:2536:75:2536:79
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:123
+@!!loc:2538:86:2538:88
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:124
+@!!loc:2538:89:2538:93
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:125
+@!!loc:2538:95:2538:99
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:126
+@!!loc:2542:7:2542:9
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:127
+@!!loc:2542:10:2542:14
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:128
+@!!loc:2542:16:2542:21
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:129
+@!!loc:2542:23:2542:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:130
+@!!loc:2542:31:2542:37
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:131
+@!!loc:2542:39:2542:44
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:132
+@!!loc:2542:46:2542:50
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:133
+@!!loc:2553:16:2553:18
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:134
+@!!loc:2553:19:2553:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:135
+@!!loc:2553:25:2553:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:136
+@!!loc:2553:31:2553:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:137
+@!!loc:2553:37:2553:42
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:138
+@!!loc:2553:44:2553:48
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:139
+@!!loc:2546:9:2546:11
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:140
+@!!loc:2546:12:2546:16
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:141
+@!!loc:2546:18:2546:22
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:142
+@!!loc:2546:24:2546:30
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:143
+@!!loc:2546:32:2546:38
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:144
+@!!loc:2546:40:2546:44
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:145
+@!!loc:2546:46:2546:50
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:146
+@!!loc:2546:52:2546:56
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:147
+@!!loc:2549:9:2549:11
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:148
+@!!loc:2549:12:2549:16
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:149
+@!!loc:2549:18:2549:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:150
+@!!loc:2549:25:2549:31
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:151
+@!!loc:2549:33:2549:39
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:152
+@!!loc:2549:41:2549:45
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:153
+@!!loc:2549:47:2549:51
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:154
+@!!loc:2552:9:2552:11
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:155
+@!!loc:2552:12:2552:16
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:156
+@!!loc:2552:18:2552:22
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:157
+@!!loc:2552:24:2552:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:158
+@!!loc:2552:31:2552:37
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:159
+@!!loc:2552:39:2552:45
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:160
+@!!loc:2563:16:2563:18
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:161
+@!!loc:2563:19:2563:23
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:162
+@!!loc:2563:25:2563:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:163
+@!!loc:2563:31:2563:35
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:164
+@!!loc:2563:37:2563:42
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:165
+@!!loc:2563:44:2563:48
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:166
+@!!loc:2558:9:2558:11
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:167
+@!!loc:2558:12:2558:16
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:168
+@!!loc:2561:9:2561:11
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:169
+@!!loc:2561:12:2561:16
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:170
+@!!loc:2561:18:2561:22
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:171
+@!!loc:2561:24:2561:29
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:172
+@!!loc:2561:31:2561:37
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:173
+@!!loc:2561:39:2561:45
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:174
+@!!loc:2562:39:2562:41
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:175
+@!!loc:2562:42:2562:46
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:176
+@!!loc:2562:48:2562:52
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:177
+@!!loc:2562:54:2562:58
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:178
+@!!loc:2562:60:2562:64
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:179
+@!!loc:2565:53:2565:55
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:180
+@!!loc:2565:56:2565:60
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:181
+@!!loc:2565:62:2565:66
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:182
+@!!loc:2565:68:2565:74
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:183
+@!!loc:2565:76:2565:80
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:184
+@!!loc:2568:14:2568:16
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:185
+@!!loc:2568:17:2568:21
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:186
+@!!loc:2568:23:2568:27
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:187
+@!!loc:2568:29:2568:34
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:188
+@!!loc:2568:36:2568:43
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:189
+@!!loc:2568:45:2568:56
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:190
+@!!loc:2567:38:2567:40
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:191
+@!!loc:2567:41:2567:45
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:192
+@!!loc:2567:47:2567:51
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:193
+@!!loc:2570:27:2570:29
+@!!status:proved
+@!!prover:smt
+@!!meth:time-limit: 60; time-used: 0.0 (0%)
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:194
+@!!loc:2570:30:2570:34
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+@!!BEGIN
+@!!type:obligation
+@!!id:195
+@!!loc:2570:36:2570:40
+@!!status:trivial
+@!!prover:tlapm
+@!!already:false
+@!!END
+
+(* created new ".tlacache/LeanP1ProofM11.tlaps/LeanP1ProofM11.thy" *)
+(* fingerprints written in ".tlacache/LeanP1ProofM11.tlaps/fingerprints" *)
+File "./LeanP1ProofM11.tla", line 2496, characters 14-15:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  SyncBl(s, fail) ==
+                    [p \in Paths |->
+                       IF p \in SyncOwed(s, fail)
+                         THEN doc[p]
+                         ELSE (w[s].baseline)[p]],
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  A1LeftSet(W) ==
+                    {p \in W.sDrop :
+                       /\ (W.local)[p] # Nil /\ (W.sHeld)[p] # Nil
+                          /\ (W.local)[p] = (W.sHeld)[p]
+                       /\ \/ W.sStage = "mid" /\ p \notin W.sKeep
+                          \/ W.sStage = "saved" /\ (W.baseline)[p] = Nil},
+                  IndC ,
+                  IndC' ,
+                  DInv ,
+                  A1IAK1 ,
+                  A1LostDead ,
+                  NEW CONSTANT s \in Writers,
+                  Sync(s) ,
+                  Frame ,
+                  NEW CONSTANT fail \in 
+                  SUBSET SyncAll(s),
+                  R == SyncW(s, fail),
+                  <3>0 ,
+                  <3>1 ,
+                  <3>2 ,
+                  <2>t1 ,
+                  <2>t2 
+           PROVE  A1LeftSet(SyncW(s, fail)) = A1LeftSet(w[s])
+File "./LeanP1ProofM11.tla", line 2498, characters 12-13:
+[ERROR]: Could not prove or check:
+           ASSUME NEW CONSTANT Nil,
+                  NEW CONSTANT Paths,
+                  NEW CONSTANT Free,
+                  NEW CONSTANT Writers,
+                  NEW CONSTANT MaxMint,
+                  NEW CONSTANT MaxUI,
+                  NEW CONSTANT MaxRemovals,
+                  NEW CONSTANT MaxBarriers,
+                  NEW CONSTANT MaxRestarts,
+                  NEW CONSTANT MaxSyncs,
+                  NEW CONSTANT MaxAges,
+                  NEW CONSTANT MaxCopies,
+                  NEW CONSTANT CommitSurfacesForeign,
+                  NEW CONSTANT CommitVerifiesUploads,
+                  NEW CONSTANT SweepUnderLease,
+                  NEW CONSTANT CollectorSparesCited,
+                  NEW CONSTANT CommitRecordsDeleteOverride,
+                  NEW CONSTANT DeleteWinsPreserved,
+                  NEW CONSTANT ContentConverges,
+                  NEW CONSTANT RecheckSkipped,
+                  NEW CONSTANT CommitAdvanceGuarded,
+                  NEW CONSTANT RetireAge,
+                  NEW CONSTANT GatewayIgnoresLease,
+                  NEW CONSTANT GatewayJudgesRead,
+                  NEW CONSTANT GatewaySweepGrace,
+                  NEW CONSTANT RenameAtomic,
+                  NEW CONSTANT Scopes,
+                  NEW CONSTANT MaxRescopes,
+                  NEW CONSTANT ConsumeHonorsScope,
+                  NEW CONSTANT RescopeUnciteFirst,
+                  NEW CONSTANT RescopeKeepsDirty,
+                  NEW CONSTANT WidenKeepsLocal,
+                  NEW CONSTANT UnlinkChecksBytes,
+                  NEW CONSTANT MaxFetchFails,
+                  NEW CONSTANT ConsumeKeepsLeft,
+                  NEW CONSTANT SyncKeepsLeft,
+                  NEW CONSTANT Readers,
+                  NEW CONSTANT ReaderRechecksOwed,
+                  NEW CONSTANT MaxTouches,
+                  NEW CONSTANT MaxNonces,
+                  NEW CONSTANT MaxDeposals,
+                  NEW CONSTANT InstallFenced,
+                  NEW CONSTANT DeletesUnderLease,
+                  NEW VARIABLE live,
+                  NEW VARIABLE minted,
+                  NEW VARIABLE doc,
+                  NEW VARIABLE seq,
+                  NEW VARIABLE tomb,
+                  NEW VARIABLE base,
+                  NEW VARIABLE acked,
+                  NEW VARIABLE conflicts,
+                  NEW VARIABLE holder,
+                  NEW VARIABLE nextGen,
+                  NEW VARIABLE ui,
+                  NEW VARIABLE reqs,
+                  NEW VARIABLE barriers,
+                  NEW VARIABLE w,
+                  NEW VARIABLE took,
+                  NEW VARIABLE gw,
+                  NEW VARIABLE mv,
+                  NEW VARIABLE udel,
+                  NEW VARIABLE restarts,
+                  NEW VARIABLE syncs,
+                  NEW VARIABLE regressed,
+                  NEW VARIABLE rescopes,
+                  NEW VARIABLE fails,
+                  NEW VARIABLE upped,
+                  NEW VARIABLE copies,
+                  NEW VARIABLE orig,
+                  NEW VARIABLE retiring,
+                  NEW VARIABLE aged,
+                  NEW VARIABLE ages,
+                  NEW VARIABLE rdoc,
+                  NEW VARIABLE rlag,
+                  NEW VARIABLE anc,
+                  ShippedShape == Shipped,
+                  FreePaths == Free \subseteq Paths,
+                  MaxMintNat == MaxMint \in Nat /\ MaxMint >= 1,
+                  ScopesPaths == Scopes \subseteq SUBSET Paths /\ Scopes # {},
+                  ReadersWriters == Readers \subseteq Writers,
+                  NilHandle == Nil \notin Handles,
+                  NoneWriter == "none" \notin Writers,
+                  MaxCopiesNat == MaxCopies \in Nat,
+                  PathsFinite == IsFiniteSet(Paths),
+                  TouchNat ==
+                    MaxTouches \in Nat /\ MaxNonces \in Nat /\ MaxNonces >= 1
+                    /\ MaxDeposals \in Nat,
+                  IndC ,
+                  IndC' ,
+                  DInv ,
+                  A1IAK1 ,
+                  A1LostDead ,
+                  NEW CONSTANT s \in Writers,
+                  Sync(s) ,
+                  Frame ,
+                  NEW CONSTANT fail \in 
+                  SUBSET SyncAll(s),
+                  R == SyncW(s, fail),
+                  <2>p ,
+                  <2>k0 ,
+                  <2>k1 ,
+                  <2>k2 ,
+                  <2>k3 ,
+                  <2>l ,
+                  <2>t ,
+                  <2>st 
+           PROVE  /\ R.pc = w[s].pc /\ R.pend = w[s].pend
+                     /\ R.dset = w[s].dset /\ 
+                     R.decl = w[s].decl /\ 
+                     R.moved = w[s].moved /\ 
+                     R.dMint = w[s].dMint /\ 
+                     R.car = w[s].car /\ 
+                     R.bound = w[s].bound /\ 
+                     R.nt = w[s].nt /\ 
+                     R.lost = w[s].lost /\ 
+                     R.inst = w[s].inst /\ 
+                     R.cId = w[s].cId /\ 
+                     R.cFold = w[s].cFold /\ 
+                     A1LeftSet(R) = A1LeftSet(w[s]) /\ 
+                     R.sStage = w[s].sStage
+                     /\ (\A q \in Paths :
+                            \/ (((R.local)[q] = (w[s].local)[q]
+                                 /\ 
+                                 (R.baseline)[q] = (w[s].baseline)[q])
+                                \/ (R.local)[q] = doc[q])
+                               /\ (R.baseline)[q] = doc[q] /\ 
+                               Owed(s, q))
+File "./LeanP1ProofM11.tla", line 1, character 1 to line 3715, character 78:
+[ERROR]: 2/193 obligations failed.
+There were backend errors processing module `"LeanP1ProofM11"`.
+WALL 1037.27 s rc 0
