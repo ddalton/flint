@@ -399,8 +399,8 @@ covered by the stability guarantee.
   a delete, save or rename's manifest CAS landed but its response was lost,
   the SDK's retry met the object its first attempt wrote and answered 412;
   the edit was judged again against its own result and refused
-  (`NoSuchFile` for a delete, tested; a save naming what it read would meet
-  its own version, `FileChanged`). Nothing was lost --
+  (`NoSuchFile` for a delete or a rename, `FileChanged` naming its own
+  version for a save). Nothing was lost --
   the document held the edit -- but the UI was told it failed. The edit now
   recognises its own document after a 412 and answers committed
   (`manifest::commit_edit`).

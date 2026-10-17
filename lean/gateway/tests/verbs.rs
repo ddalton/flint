@@ -1569,3 +1569,199 @@ async fn a_read_whose_bytes_do_not_match_the_citation_is_refused() {
     let err = w.get_file("a.txt").await.unwrap_err();
     assert_eq!((err.status(), err.code()), (502, "corrupt"), "{err}");
 }
+
+
+/// A store whose next pointer CAS LANDS and then answers 412, once: what a
+/// UI edit sees when the CAS's response is lost and the SDK retries it.
+struct LostReply {
+    inner: Arc<MemoryStore>,
+    pointer: String,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for LostReply {
+    async fn copy_object(
+        &self,
+        src_key: &str,
+        src_if_match: Option<&str>,
+        dst_key: &str,
+        condition: &flint_store::PutCondition,
+        stamps: &flint_store::GenerationStamps,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.copy_object(src_key, src_if_match, dst_key, condition, stamps).await
+    }
+    async fn put_whole(
+        &self,
+        key: &str,
+        body: Bytes,
+        cond: &flint_store::PutCondition,
+        stamps: &flint_store::GenerationStamps,
+        crc: u64,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        let landed = self.inner.put_whole(key, body, cond, stamps, crc).await?;
+        if key == self.pointer && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // The CAS landed; its response is lost, and the SDK's retry of
+            // the same conditional PUT meets the object it wrote.
+            return Err(StoreError::PreconditionFailed(format!("injected: the retry of a PUT that landed on {key}")));
+        }
+        Ok(landed)
+    }
+    async fn compose_generation(
+        &self,
+        spec: &flint_store::ComposeSpec<'_>,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.compose_generation(spec).await
+    }
+    async fn head(&self, key: &str) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head(key).await
+    }
+    async fn get_whole(
+        &self,
+        key: &str,
+        if_match: Option<&str>,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_whole(key, if_match).await
+    }
+    async fn get_range(
+        &self,
+        key: &str,
+        off: u64,
+        len: u64,
+        if_match: &str,
+    ) -> flint_store::StoreResult<Bytes> {
+        self.inner.get_range(key, off, len, if_match).await
+    }
+    fn min_part_size(&self) -> u64 {
+        self.inner.min_part_size()
+    }
+    fn max_parts(&self) -> usize {
+        self.inner.max_parts()
+    }
+    async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        self.inner.list(prefix).await
+    }
+    async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete(key).await
+    }
+    async fn delete_if_match(&self, key: &str, etag: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_if_match(key, etag).await
+    }
+    async fn head_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<flint_store::ObjectMeta> {
+        self.inner.head_version(key, v).await
+    }
+    async fn get_version(
+        &self,
+        key: &str,
+        v: &str,
+    ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        self.inner.get_version(key, v).await
+    }
+    async fn delete_version(&self, key: &str, v: &str) -> flint_store::StoreResult<()> {
+        self.inner.delete_version(key, v).await
+    }
+    async fn list_versions(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::ListedVersion>> {
+        self.inner.list_versions(prefix).await
+    }
+    async fn list_uploads(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<Vec<flint_store::PendingUpload>> {
+        self.inner.list_uploads(prefix).await
+    }
+    async fn abort_upload(&self, key: &str, id: &str) -> flint_store::StoreResult<()> {
+        self.inner.abort_upload(key, id).await
+    }
+    async fn bootstrap(
+        &self,
+        prefix: &str,
+    ) -> flint_store::StoreResult<flint_store::BootstrapReport> {
+        self.inner.bootstrap(prefix).await
+    }
+    async fn epoch_read(
+        &self,
+        key: &str,
+    ) -> flint_store::StoreResult<Option<flint_store::EpochState>> {
+        self.inner.epoch_read(key).await
+    }
+    async fn epoch_acquire(
+        &self,
+        key: &str,
+        holder: &str,
+        observed: Option<&flint_store::EpochState>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_acquire(key, holder, observed).await
+    }
+    async fn epoch_renew(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+        echo: Option<&str>,
+    ) -> flint_store::StoreResult<flint_store::EpochLease> {
+        self.inner.epoch_renew(key, lease, echo).await
+    }
+    async fn epoch_release(
+        &self,
+        key: &str,
+        lease: &flint_store::EpochLease,
+    ) -> flint_store::StoreResult<()> {
+        self.inner.epoch_release(key, lease).await
+    }
+}
+
+/// A workspace whose `a.txt` is published, and a second view of it over a
+/// store whose next pointer CAS loses its response. Returns the etag cited.
+async fn lost_reply_fixture() -> (Arc<MemoryStore>, Arc<LostReply>, Workspace, String) {
+    let mem = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = mem.clone();
+    let w0 = ws(&plain);
+    let create = PutFile { if_none_match: Some("*".into()), ..Default::default() };
+    let e1 = w0.put_file("a.txt", Bytes::from("one"), &create).await.unwrap();
+    let lost = Arc::new(LostReply {
+        inner: mem.clone(),
+        pointer: w0.config().current_key(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    let s: Arc<dyn ObjectStore> = lost.clone();
+    (mem, lost, ws(&s), e1)
+}
+
+/// The 2026-10-17 mutant audit's MN2, through the verbs: an edit whose CAS
+/// landed is answered committed, not judged again against its own result
+/// (`manifest::commit_edit`). Before: the delete answered NoSuchFile, the
+/// save FileChanged naming its own version, the rename NoSuchFile.
+#[tokio::test]
+async fn a_delete_whose_cas_response_was_lost_is_answered_committed() {
+    let (_, lost, w, e1) = lost_reply_fixture().await;
+    let r = w.remove_file("a.txt", None, Some(&e1)).await;
+    assert!(!lost.armed.load(std::sync::atomic::Ordering::SeqCst), "fixture: no CAS lost its response");
+    assert!(w.snapshot().await.unwrap().manifest.entries.get("a.txt").is_none(), "fixture: the delete did not commit");
+    assert!(r.is_ok(), "a committed delete was answered {r:?}");
+}
+
+#[tokio::test]
+async fn a_save_whose_cas_response_was_lost_is_answered_committed() {
+    let (_, lost, w, e1) = lost_reply_fixture().await;
+    let r = w.put_file("a.txt", Bytes::from("two"), &PutFile { if_match: Some(e1), ..Default::default() }).await;
+    assert!(!lost.armed.load(std::sync::atomic::Ordering::SeqCst), "fixture: no CAS lost its response");
+    assert_eq!(w.get_file("a.txt").await.unwrap().body, Bytes::from("two"), "fixture: the save did not commit");
+    let cited = w.snapshot().await.unwrap().manifest.entries["a.txt"].etag.clone();
+    assert_eq!(r.as_ref().ok(), Some(&cited), "a committed save was answered {r:?}");
+}
+
+#[tokio::test]
+async fn a_rename_whose_cas_response_was_lost_is_answered_committed() {
+    let (_, lost, w, _) = lost_reply_fixture().await;
+    let r = w.rename_file("a.txt", "b.txt", None).await;
+    assert!(!lost.armed.load(std::sync::atomic::Ordering::SeqCst), "fixture: no CAS lost its response");
+    let m = w.snapshot().await.unwrap().manifest;
+    assert!(m.entries.get("a.txt").is_none() && m.entries.contains_key("b.txt"), "fixture: the rename did not commit");
+    assert!(r.is_ok(), "a committed rename was answered {r:?}");
+}
