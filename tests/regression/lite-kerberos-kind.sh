@@ -43,6 +43,11 @@ diagnose() {
 }
 cleanup() {
   if [ "$KEEP" = 1 ]; then echo "kept: kind cluster $CLUSTER, KUBECONFIG=$KUBECONFIG"; return; fi
+  # Unmount before the hubs go: a hard NFS mount whose server is deleted
+  # first leaves the node's kubelet in D state, retrying DESTROY_SESSION
+  # into a dead network namespace, and the node container unkillable
+  # until the host reboots (seen on the first runs).
+  kubectl -n default delete pod --all --timeout=2m >/dev/null 2>&1 || true
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
@@ -230,7 +235,8 @@ for _ in $(seq 30); do [ "$(kubectl -n "$NS" get deploy ws3 -o jsonpath='{.spec.
 pass "a share that asked for Kerberos is not served as sec=sys"
 
 step "6. Kerberos turned off: its principal goes"
-kubectl -n default delete pod krb5i sys --wait=false >/dev/null
+# Unmount first: the hub restarts without Kerberos below.
+kubectl -n default delete pod krb5i sys --timeout=2m >/dev/null
 kubectl -n "$NS" patch flintshare ws1 --type=json -p '[{"op":"remove","path":"/spec/security"}]'
 for _ in $(seq 60); do kubectl -n "$NS" get kerberosprincipal ws1-krb5 >/dev/null 2>&1 || break; sleep 2; done
 ! kubectl -n "$NS" get kerberosprincipal ws1-krb5 >/dev/null 2>&1 || fail "KerberosPrincipal ws1-krb5 outlived spec.security.kerberos"
