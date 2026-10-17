@@ -209,8 +209,9 @@ STAMP=$(ka get crd flintshares.chert.us \
 pass "both operators Ready; CRD stamped at schema $STAMP"
 
 # ── helpers that need the cluster ────────────────────────────────────
-mk_share() {  # $1 ctx-fn, $2 name, $3 prefix, $4 endpoint
-  local kc=$1 name=$2 prefix=$3 ep=$4
+mk_share() {  # $1 ctx-fn, $2 name, $3 prefix, $4 endpoint, [$5 = adopt: spec.adoptData]
+  local kc=$1 name=$2 prefix=$3 ep=$4 adopt=""
+  [ "${5:-}" = adopt ] && adopt="adoptData: true"
   $kc apply -f - >/dev/null <<EOF || fail "applying $name failed"
 apiVersion: chert.us/v1alpha1
 kind: FlintShare
@@ -221,6 +222,7 @@ spec:
   endpoint: $ep
   region: us-east-1
   credentialsSecretRef: s3creds
+  ${adopt}
   settings:
     flushFloorSecs: 3
   persistence: { size: 1Gi }
@@ -421,10 +423,12 @@ put_file kb inner "payload.txt" "inner-payload"
 wait_object "n/inner/payload.txt" 60 || fail "the inner hub never published payload.txt"
 wait_object "n/inner/.flint/epoch" 30 || fail "the inner hub has no control objects to be confused by"
 # Force the outer hub to import from scratch: import runs when tier state
-# is FRESH, so it needs a new claim, not a restart.
+# is FRESH, so it needs a new claim, not a restart. A recreated FlintShare
+# is a new uid on a prefix the old one owns, which B12 refuses (leg 5):
+# taking it over is adoptData's job, so this one says so.
 ka -n "$NS" delete flintshare outer --wait=true >/dev/null 2>&1
 ka -n "$NS" delete pvc outer-data --wait=true >/dev/null 2>&1
-mk_share ka outer "n/" "$EP"
+mk_share ka outer "n/" "$EP" adopt
 wait_phase_in ka outer Ready 240
 OPOD=""
 for _ in $(seq 1 60); do OPOD=$(hubpod_in ka outer); [ -n "$OPOD" ] && break; sleep 2; done
