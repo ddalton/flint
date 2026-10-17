@@ -113,7 +113,7 @@ mod tests {
         // The 8-wide per-object upload is the default now that the
         // upload window carries a byte bound; both are stamped together.
         assert_eq!(get("FLINT_SYNC_UPLOAD_PART_PARALLELISM").as_deref(), Some("8"));
-        assert_eq!(get("FLINT_SYNC_UPLOAD_INFLIGHT_MB").as_deref(), Some("256"));
+        assert_eq!(get("FLINT_SYNC_UPLOAD_INFLIGHT_MB").as_deref(), Some("512"));
         // Off unless the CR asks, and stamped either way (the fixed list).
         assert_eq!(get("FLINT_SYNC_EVENT_TRACE").as_deref(), Some("false"));
         for k in ["FLINT_SYNC_FLOOR_SECS", "FLINT_SYNC_MAX_FILES", "FLINT_SYNC_FANOUT", "FLINT_SYNC_FETCH_DRIVERS", "FLINT_SYNC_UPLOAD_PART_PARALLELISM", "FLINT_SYNC_UPLOAD_INFLIGHT_MB", "FLINT_SYNC_EVENT_TRACE", "FLINT_SYNC_RAW_READS", "FLINT_SYNC_SENTINELS", "FLINT_SYNC_METRICS_PORT"] {

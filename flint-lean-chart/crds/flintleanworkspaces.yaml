@@ -347,7 +347,7 @@ spec:
                 nullable: true
                 type: integer
               uploadInflightMb:
-                default: 256
+                default: 512
                 description: |-
                   Ceiling on bytes in flight across the upload window, MiB — the
                   write side's `fetchInflightMb`. `fanout` bounds how MANY objects

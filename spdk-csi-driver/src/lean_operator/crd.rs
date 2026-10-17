@@ -328,7 +328,17 @@ fn default_upload_part_parallelism() -> u64 {
     8
 }
 fn default_upload_inflight_mb() -> u64 {
-    // 256: four 64 MiB parts in flight, and with `fetchInflightMb`'s 128
+    // 256 → 512 (2026-10-17). The gate counts each 64 MiB part, so 256
+    // admitted four of `uploadPartParallelism`'s eight and every publish
+    // ran 4-wide: on EC2 (forge/e2e/partpar/README.md) 8 parts at 256
+    // measured the same as 4 parts, 320-348 MiB/s, and at 512 537-638.
+    // 512 still fits the 1Gi worker below because the syncer never holds
+    // upload and fetch bytes at once: one loop owns it and awaits each
+    // step (flint_sync.rs), and a barrier collects all its upload waves
+    // before it fetches again (barrier.rs). Peak is max(this, the fetch
+    // window), about 530 MiB.
+    //
+    // Was 256: four 64 MiB parts in flight, and with `fetchInflightMb`'s 128
     // and the binary's own footprint still under the plugin-wide 1Gi
     // worker limit that OOM-killed a 512 MiB read window. Loopback A/B
     // 2026-09-13, 4 x 256 MiB objects published parts 8-wide (n=3,
@@ -336,7 +346,7 @@ fn default_upload_inflight_mb() -> u64 {
     // with the bound effectively off (8192) — the predicted
     // 4 objects x 4 parts x 64 MiB — for the same 46 requests and the
     // same bytes; the serial-parts v1.51.0 default peaked at 278 MiB.
-    256
+    512
 }
 fn default_size_limit_gib() -> u64 {
     20

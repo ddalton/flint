@@ -77,7 +77,7 @@
 //!                                 concurrently on publish (default 8)
 //!   FLINT_SYNC_UPLOAD_INFLIGHT_MB upload bytes in flight — every part
 //!                                 and whole body is read into RAM before
-//!                                 its PUT (default 256; 0 = no bound)
+//!                                 its PUT (default 512; 0 = no bound)
 //!   FLINT_SYNC_ACCESS             readWrite (default) | read. `read` runs
 //!                                 a syncer that never writes to the
 //!                                 bucket: no fence, no barrier; the floor
@@ -196,7 +196,14 @@ async fn main() {
     // Bytes the upload path may hold at once, parts and whole bodies
     // alike — the write side's FLINT_SYNC_FETCH_INFLIGHT_MB. A single
     // body or part larger than the whole window still uploads, alone.
-    let upload_inflight = env_u64("FLINT_SYNC_UPLOAD_INFLIGHT_MB", 256) * 1024 * 1024;
+    // It must be sized to the width above: the gate counts each 64 MiB
+    // part, so 256 admitted 4 of the 8 and the publish ran 4-wide
+    // (forge/e2e/partpar/README.md, 2026-10-17: 8 parts at 256 matched 4
+    // parts, 320-348 MiB/s; at 512, 537-638). 512 fits the worker's 1Gi
+    // limit because an upload and a fetch never hold bytes together:
+    // this loop awaits each step, and a barrier collects every upload
+    // wave before its first fetch after them (barrier.rs).
+    let upload_inflight = env_u64("FLINT_SYNC_UPLOAD_INFLIGHT_MB", 512) * 1024 * 1024;
     // The single-request copy ceiling, in MiB. Exists so a drill can
     // drive the MPU + UploadPartCopy arm without a 5 GiB fixture: that
     // arm has never executed anywhere, and an arm only a 5 GiB object

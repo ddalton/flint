@@ -350,6 +350,21 @@ covered by the stability guarantee.
 
 ### Changed
 
+- **lean: a large object now uploads 8 parts at a time, as configured**
+  (2026-10-17). `uploadInflightMb` (`FLINT_SYNC_UPLOAD_INFLIGHT_MB`)
+  defaults to **512**, up from 256. The bound counts 64 MiB parts, so 256
+  let only 4 of `uploadPartParallelism`'s 8 parts upload at once.
+  - **Speed:** on EC2 the 8-part, 256 MiB setting ran as fast as 4 parts
+    (320–348 MiB/s); at 512 it ran 537–638 MiB/s
+    (`forge/e2e/partpar/README.md`, measured with forge's syncer on the
+    same store code).
+  - **Memory:** a publish of a large object now peaks at about 530 MiB,
+    up from about 280 MiB.
+  - **Worker limit:** the worker's 1Gi limit still holds. The syncer never
+    holds upload and checkout bytes at the same time, so the peak is
+    whichever of the two windows is larger, not their sum.
+  - **To keep the old peak:** set `uploadInflightMb: 256`.
+
 - **forge: a large pack uploads its parts 8 at a time** (2026-10-17).
   A pack over 64 MiB is a multipart upload, and the syncer sent its parts
   one at a time, about 89 MiB/s whatever the node. It now sends 8 at once

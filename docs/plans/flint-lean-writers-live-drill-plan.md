@@ -260,7 +260,8 @@ Ozone start-up; the instance is torn down on its own.
 - A CR with no `region` crashloops against a us-west-1 bucket (runcu) —
   set it on every CR and `node.region` on the chart.
 - Worker memory: the 512 window OOM-killed a 1Gi worker; now 128, plus
-  the 256 MiB upload bound; storms still get 2Gi.
+  the upload bound (256 MiB until 2026-10-17, then 512; never held at the
+  same time as the fetch window); storms still get 2Gi.
 - The deployed checkout is disk-bound in the loop image (runcu) —
   irrelevant to correctness; no timing claims from this drill.
 - A pod's image is mutable: unique tags, content check per node.

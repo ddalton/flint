@@ -309,7 +309,7 @@ pub struct LeanConfig {
     /// rig moved, this one is what the publish rig moved. Both paths are
     /// byte-bounded, by different gates — the read side by
     /// `fetch_inflight_max_bytes` here, the upload side by the store's
-    /// own gate (`with_upload_inflight_max_bytes`, 256 MiB from the
+    /// own gate (`with_upload_inflight_max_bytes`, 512 MiB from the
     /// binary), which charges every whole body and every multipart part
     /// from before its read until its PUT returns. So this number sets
     /// request concurrency, not peak RSS.
