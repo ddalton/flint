@@ -127,6 +127,8 @@ else
   check "$TRACES"/a_narrow_then_a_widen.ndjson reject control-scope-ignored --set=ConsumeHonorsScope=FALSE
   # The unlink blind to the bytes: it takes the agent's write the code kept.
   check "$TRACES"/a_narrow_keeps_what_the_agent_wrote_after_the_uncite.ndjson reject control-unlink-blind --set=UnlinkChecksBytes=FALSE
+  # The sync without convergence: it cannot let go of a path both deleted.
+  check "$TRACES"/a_sync_lets_go_of_a_path_both_deleted.ndjson reject control-sync-no-convergence --set=ContentConverges=FALSE
   # A failure recorded as a derive (L-128): the tree is then owed a path the
   # model says it is not (Inv_ShortcutSound).
   check "$TRACES"/a_consume_whose_write_fails_takes_the_path_at_the_next.ndjson unsafe control-consume-keeps-left-off --set=ConsumeKeepsLeft=FALSE

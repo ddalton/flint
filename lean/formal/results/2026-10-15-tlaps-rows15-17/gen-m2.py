@@ -941,7 +941,7 @@ BODY += W('Restart', 'Restart(s)', '', 'RestartW(s)', 'RestartW',
 BODY += W('Sync', 'Sync(s)', '', 'SyncW(s, fail)', 'SyncW',
           f"PICK fail \\in SUBSET SyncAll(s) : w' = [w EXCEPT ![s] = SyncW(s, fail)] /\\ {UNCH7} BY DEF Sync, bucket",
           'On(s) /\\ w[s].pc = "idle"', 'Sync',
-          {'local': '[q \\in Paths |-> IF q \\in SyncOwed(s, fail) THEN doc[q] ELSE w[s].local[q]]'},
+          {'local': '[q \\in Paths |-> IF q \\in SyncTaken(s, fail) THEN doc[q] ELSE w[s].local[q]]'},
           ev_by="<1>1, <1>3, <1>0, <1>d, <1>f DEF DocEv, GwEv, TreeEv, LiveEv, Minted, Opt, CitedSet",
           private_by=DOCLOCAL)
 BODY += '------------------------------------------------------------------------------\n(* The narrow / widen verb.                                                 *)\n\n'
@@ -967,7 +967,7 @@ BODY += W('RPullRead', 'RPullRead(s)', '', 'RPullReadW(s)', 'RPullReadW',
 BODY += W('RPullSync', 'RPullSync(s)', '', 'RPullSyncW(s, fail)', 'RPullSyncW',
           f"PICK fail \\in SUBSET SyncAll(s) : w' = [w EXCEPT ![s] = RPullSyncW(s, fail)] /\\ {UNCH7} BY DEF RPullSync, bucket",
           'On(s) /\\ w[s].pc = "pulling"', 'RPullSync',
-          {'pc': '"idle"', 'local': '[q \\in Paths |-> IF q \\in SyncOwed(s, fail) THEN doc[q] ELSE w[s].local[q]]'},
+          {'pc': '"idle"', 'local': '[q \\in Paths |-> IF q \\in SyncTaken(s, fail) THEN doc[q] ELSE w[s].local[q]]'},
           ev_by="<1>1, <1>3, <1>0, <1>d, <1>f DEF DocEv, GwEv, TreeEv, LiveEv, Minted, Opt, CitedSet",
           private_by=DOCLOCAL)
 

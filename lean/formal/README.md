@@ -66,7 +66,7 @@ action property `NR5`). The gate checks the restatements, and since
   E33; `Inv_NoRegress` for E29; `Inv_AckedNamed` for E38, E39.
 
 Expectations were written before any run (`WORLDS-LeanP1.tsv`). The trace
-check passes 81/81 on 31 traces (2026-10-17; below), was 41/41 on 15
+check passes 83/83 on 31 traces (2026-10-17; below), was 41/41 on 15
 (`results/2026-09-25-tracecore-on-leanp1/`). **The gate
 passed 2026-10-14 on the restated claims** (`results/2026-10-14-leanp1-gate-ec2/`,
 SUMMARY.txt): 68 of 69 worlds as expected — 12 hold, 54 fire, 2 recorded —
@@ -101,11 +101,11 @@ publish (`Sync`, `RPullRead`, `RPullSync`, `HonorReader`); a consume and a
 sync whose write fails (a read-only directory), the path left owed and
 taken by the next (the model's `fail` set, `MaxFetchFails`).
 
-What makes it able to fail: 37 mutations, each one fact of a real trace
-corrupted, must be rejected (`trace/mutate_core.py`), and 13 controls, a
+What makes it able to fail: 38 mutations, each one fact of a real trace
+corrupted, must be rejected (`trace/mutate_core.py`), and 14 controls, a
 shipped rule turned off in the model, must change the verdict (rejected,
-or the code's own run unsafe). On 2026-10-17: 81/81 as required under
-tla-mc (11 s) and TLC (99 s), the same verdicts.
+or the code's own run unsafe). On 2026-10-17: 83/83 as required under
+tla-mc and TLC, the same verdicts.
 
 Not traced: a deposal AFTER the holder's CAS (every hook there follows the
 collector's renew or precedes the `cas` event; the unit test
@@ -116,16 +116,19 @@ no scenario makes one), a lost CAS (the model's commit section has one
 holder), an orphaned-own claim (the model's `Depose` needs another holder),
 and the sync request (`.flint/sync`; only the publish request is modelled).
 
-ONE KNOWN MISMATCH, kept as a trace that must be REJECTED
-(`known_a_sync_lets_go_of_a_path_both_deleted`; a `known_` trace is checked
-as a reject, so a fix to either side shows): a path the agent deleted
-unpublished that a peer's commit deleted too. The code's sync lets go of it
-(the baseline drops the entry); the model's `Sync` has no convergence and
-keeps it, and the replay stops at that sync. The code is the sensible side
-(its consume converges there, and the model's consume does too); the
-model's next scan would publish a delete of a path nothing cites. Closing
-it is a change to `Sync` in `LeanP1.tla`, and so to every proof module's
-`Sync` step.
+THE ONE MISMATCH IT FOUND, CLOSED 2026-10-17: a path the agent deleted
+unpublished that a peer's commit deleted too. The code's sync let go of it
+(the baseline drops the entry, as its consume's convergence does); the
+model's `Sync` and `RPullSync` had no convergence and kept it, and the
+replay stopped at that sync. The code was the sensible side, so the MODEL
+changed: both now take `owed \cup {converging}`, as `Consume` does
+(`sync.rs` step 3's absent-file arm, step 4's phantom-conflict rule). The
+trace (`a_sync_lets_go_of_a_path_both_deleted`) is accepted, its mutation
+`sync-keeps-a-path-both-deleted` rejected, and `ContentConverges=FALSE`
+rejects it. The proofs were re-proved over the changed model
+(`results/2026-10-15-tlaps-rows15-17/STATUS.txt`, "2026-10-17 SYNC
+CONVERGES"). A `known_` trace (checked as a reject) is the mechanism for the
+next one.
 
 The runner's large worlds need a big box: on one c8g.48xlarge (192 vCPU,
 371 GB) phase 1 (62 worlds, 24 at a time, 4 workers each) took 31 min and

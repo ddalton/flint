@@ -236,6 +236,12 @@ def reader_skips_what_it_owes(evs):
     skip_pull(evs, nth(evs, lambda e: e["ev"] == "pull" and not e["skipped"], 1))
 
 
+def sync_keeps_a_path_both_deleted(evs):
+    """the sync keeps the entry of the path the tree and the document both deleted"""
+    i = nth(evs, lambda e: e["ev"] == "sync" and "y.txt" in e["taken"])
+    evs[i]["taken"] = [p for p in evs[i]["taken"] if p != "y.txt"]
+
+
 def retry_forgotten(evs):
     """the barrier after the failed write never takes the path left owed"""
     i = nth(evs, lambda e: e["ev"] == "consume" and e["action"] == "adopted" and e["path"] == "d/x.txt")
@@ -265,6 +271,7 @@ def deposal_as_a_plain_claim(evs):
 
 
 MUTATIONS = [
+    ("a_sync_lets_go_of_a_path_both_deleted", "sync-keeps-a-path-both-deleted", sync_keeps_a_path_both_deleted),
     ("a_consume_whose_write_fails_takes_the_path_at_the_next", "retry-forgotten", retry_forgotten),
     ("a_sync_whose_write_fails_leaves_the_path_owed", "sync-failure-unreported", sync_failure_unreported),
     ("a_writer_syncs_between_barriers", "sync-takes-the-agents-file", sync_takes_the_agents_file),

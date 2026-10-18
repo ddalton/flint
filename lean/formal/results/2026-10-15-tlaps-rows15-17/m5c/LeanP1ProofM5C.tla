@@ -2185,13 +2185,27 @@ LEMMA Next_NR == IndC /\ Next => NRPre
   <2>0. PICK fail \in SUBSET SyncAll(s) : w' = [w EXCEPT ![s] = SyncW(s, fail)] BY <1>sy DEF Sync
   <2>1. \A p \in Paths : (/\ SyncW(s, fail).baseline[p] = doc[p] /\ doc[p] # Nil /\ w[s].baseline[p] # Nil
                           /\ SyncW(s, fail).baseline[p] # w[s].baseline[p]) => TakeWhy(s, p)
-    BY DEF SyncW, SyncBl, SyncOwed, SyncAll, Owed, TakeWhy
+    <3>. SUFFICES ASSUME NEW p \in Paths, SyncW(s, fail).baseline[p] = doc[p], doc[p] # Nil,
+                         w[s].baseline[p] # Nil, SyncW(s, fail).baseline[p] # w[s].baseline[p]
+                  PROVE  TakeWhy(s, p)
+      OBVIOUS
+    <3>1. p \in SyncTaken(s, fail) BY DEF SyncW, SyncBl
+    <3>2. CASE p \in SyncOwed(s, fail) BY <3>2 DEF SyncOwed, SyncAll, Owed, TakeWhy
+    <3>3. CASE p \in SyncConv(s) BY <3>3 DEF SyncConv, Converges, TakeWhy
+    <3>. QED BY <3>1, <3>2, <3>3 DEF SyncTaken
   <2>. QED BY <2>0, <2>1, <1>0, NRWrite
 <1>rs. ASSUME NEW s \in Writers, RPullSync(s) PROVE NRPre
   <2>0. PICK fail \in SUBSET SyncAll(s) : w' = [w EXCEPT ![s] = RPullSyncW(s, fail)] BY <1>rs DEF RPullSync
   <2>1. \A p \in Paths : (/\ RPullSyncW(s, fail).baseline[p] = doc[p] /\ doc[p] # Nil /\ w[s].baseline[p] # Nil
                           /\ RPullSyncW(s, fail).baseline[p] # w[s].baseline[p]) => TakeWhy(s, p)
-    BY DEF RPullSyncW, SyncBl, SyncOwed, SyncAll, Owed, TakeWhy
+    <3>. SUFFICES ASSUME NEW p \in Paths, RPullSyncW(s, fail).baseline[p] = doc[p], doc[p] # Nil,
+                         w[s].baseline[p] # Nil, RPullSyncW(s, fail).baseline[p] # w[s].baseline[p]
+                  PROVE  TakeWhy(s, p)
+      OBVIOUS
+    <3>1. p \in SyncTaken(s, fail) BY DEF RPullSyncW, SyncBl
+    <3>2. CASE p \in SyncOwed(s, fail) BY <3>2 DEF SyncOwed, SyncAll, Owed, TakeWhy
+    <3>3. CASE p \in SyncConv(s) BY <3>3 DEF SyncConv, Converges, TakeWhy
+    <3>. QED BY <3>1, <3>2, <3>3 DEF SyncTaken
   <2>. QED BY <2>0, <2>1, <1>0, NRWrite
 <1>fi. ASSUME NEW s \in Writers, Finish(s) PROVE NRPre
   <2>0. w' = [w EXCEPT ![s] = FinishW(s)] /\ w[s].pc = "cased" BY <1>fi DEF Finish

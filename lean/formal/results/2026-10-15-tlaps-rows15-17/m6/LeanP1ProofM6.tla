@@ -306,20 +306,24 @@ LEMMA Consume_M6 == ASSUME IndC, UI, NEW s \in Writers, Consume(s) PROVE M6Goal
 
 LEMMA Sync_M6 == ASSUME IndC, UI, NEW s \in Writers, Sync(s) PROVE M6Goal
 <1>k. UNCHANGED <<upped, orig, minted>> BY DEF Sync, bucket, aux
-<1>sh. ConsumeHonorsScope BY ShippedShape DEF Shipped
+<1>sh. ConsumeHonorsScope /\ ContentConverges BY ShippedShape DEF Shipped
 <1>1. PICK fail \in SUBSET SyncAll(s) : w' = [w EXCEPT ![s] = SyncW(s, fail)] BY DEF Sync
 <1>w. \A t \in Writers : w'[t] = IF t = s THEN SyncW(s, fail) ELSE w[t] BY <1>1, TypeOKC, WriteAny
 <1>2. AWt(s) /\ SRt(s)
   <2>1. \A q \in SyncOwed(s, fail) : w[s].local[q] = w[s].baseline[q] /\ Held(s, q)
     BY <1>sh DEF SyncOwed, SyncAll, Owed
-  <2>2. \A q \in Paths : w'[s].local[q] = IF q \in SyncOwed(s, fail) THEN doc[q] ELSE w[s].local[q]
+  <2>1c. \A q \in SyncConv(s) :
+           \/ Held(s, q) /\ w[s].local[q] # Nil /\ doc[q] # Nil /\ Content(w[s].local[q]) = Content(doc[q])
+           \/ Held(s, q) /\ w[s].local[q] = doc[q]
+    BY <1>sh DEF SyncConv, Converges
+  <2>2. \A q \in Paths : w'[s].local[q] = IF q \in SyncTaken(s, fail) THEN doc[q] ELSE w[s].local[q]
     BY <1>w DEF SyncW
   <2>3. w'[s].scope = w[s].scope BY <1>w DEF SyncW
-  <2>4. \A q \in SyncOwed(s, fail) :
+  <2>4. \A q \in SyncTaken(s, fail) :
           \/ w[s].local[q] = w[s].baseline[q] /\ Held(s, q)
           \/ Held(s, q) /\ w[s].local[q] # Nil /\ doc[q] # Nil /\ Content(w[s].local[q]) = Content(doc[q])
           \/ Held(s, q) /\ w[s].local[q] = doc[q]
-    BY <2>1
+    BY <2>1, <2>1c DEF SyncTaken
   <2>. QED BY <2>4, <2>2, <2>3, <1>k, TakeAW
 <1>3. \A q \in Paths : SyncW(s, fail).baseline[q] = w[s].baseline[q] \/ SyncW(s, fail).baseline[q] = doc[q]
   BY DEF SyncW, SyncBl
@@ -328,16 +332,25 @@ LEMMA Sync_M6 == ASSUME IndC, UI, NEW s \in Writers, Sync(s) PROVE M6Goal
 
 LEMMA RPullSync_M6 == ASSUME IndC, UI, NEW s \in Writers, RPullSync(s) PROVE M6Goal
 <1>k. UNCHANGED <<upped, orig, minted>> BY DEF RPullSync, bucket, aux
-<1>sh. ConsumeHonorsScope BY ShippedShape DEF Shipped
+<1>sh. ConsumeHonorsScope /\ ContentConverges BY ShippedShape DEF Shipped
 <1>1. PICK fail \in SUBSET SyncAll(s) : w' = [w EXCEPT ![s] = RPullSyncW(s, fail)] BY DEF RPullSync
 <1>w. \A t \in Writers : w'[t] = IF t = s THEN RPullSyncW(s, fail) ELSE w[t] BY <1>1, TypeOKC, WriteAny
 <1>2. AWt(s) /\ SRt(s)
   <2>1. \A q \in SyncOwed(s, fail) : w[s].local[q] = w[s].baseline[q] /\ Held(s, q)
     BY <1>sh DEF SyncOwed, SyncAll, Owed
-  <2>2. \A q \in Paths : w'[s].local[q] = IF q \in SyncOwed(s, fail) THEN doc[q] ELSE w[s].local[q]
+  <2>1c. \A q \in SyncConv(s) :
+           \/ Held(s, q) /\ w[s].local[q] # Nil /\ doc[q] # Nil /\ Content(w[s].local[q]) = Content(doc[q])
+           \/ Held(s, q) /\ w[s].local[q] = doc[q]
+    BY <1>sh DEF SyncConv, Converges
+  <2>2. \A q \in Paths : w'[s].local[q] = IF q \in SyncTaken(s, fail) THEN doc[q] ELSE w[s].local[q]
     BY <1>w DEF RPullSyncW
   <2>3. w'[s].scope = w[s].scope BY <1>w DEF RPullSyncW
-  <2>. QED BY <2>1, <2>2, <2>3, <1>k, TakeAW
+  <2>4. \A q \in SyncTaken(s, fail) :
+          \/ w[s].local[q] = w[s].baseline[q] /\ Held(s, q)
+          \/ Held(s, q) /\ w[s].local[q] # Nil /\ doc[q] # Nil /\ Content(w[s].local[q]) = Content(doc[q])
+          \/ Held(s, q) /\ w[s].local[q] = doc[q]
+    BY <2>1, <2>1c DEF SyncTaken
+  <2>. QED BY <2>4, <2>2, <2>3, <1>k, TakeAW
 <1>3. \A q \in Paths : RPullSyncW(s, fail).baseline[q] = w[s].baseline[q] \/ RPullSyncW(s, fail).baseline[q] = doc[q]
   BY DEF RPullSyncW, SyncBl
 <1>. QED BY <1>w, <1>k, <1>2, <1>3, M6Tree DEF RPullSyncW, Bar

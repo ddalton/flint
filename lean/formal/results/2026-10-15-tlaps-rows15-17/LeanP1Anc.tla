@@ -1477,19 +1477,23 @@ Restart(s) ==
 \* derived as a consume would: the paths it left are the agent's (dirty,
 \* with the document moved) (`sync.rs` step 5).  It does not move `synced`.
 \* A sync does not replay a rescope; it can run after a crash left one
-\* "saved" (the scope it reads is still the old one).
+\* "saved" (the scope it reads is still the old one).  It converges as the
+\* consume does (since 2026-10-17: the code-trace check's one mismatch).
 \* The sync's parts (LeanP1.tla: `Sync`'s and `RPullSync`'s LET): what is
-\* owed, what of it this sync takes (the rest failed to fetch), the baseline
+\* owed, what of it this sync takes (the rest failed to fetch), what it
+\* converges (as the consume, `ConsumeConv`; since 2026-10-17), the baseline
 \* after it.
 SyncAll(s) == {p \in Paths : Owed(s, p)}
 SyncOwed(s, fail) == SyncAll(s) \ fail
-SyncBl(s, fail) == [p \in Paths |-> IF p \in SyncOwed(s, fail) THEN doc[p] ELSE w[s].baseline[p]]
+SyncConv(s) == {p \in Paths : Converges(s, p)}
+SyncTaken(s, fail) == SyncOwed(s, fail) \cup SyncConv(s)
+SyncBl(s, fail) == [p \in Paths |-> IF p \in SyncTaken(s, fail) THEN doc[p] ELSE w[s].baseline[p]]
 SyncW(s, fail) ==
   [st |-> w[s].st,
    pc |-> w[s].pc,
-   local |-> [p \in Paths |-> IF p \in SyncOwed(s, fail) THEN doc[p] ELSE w[s].local[p]],
+   local |-> [p \in Paths |-> IF p \in SyncTaken(s, fail) THEN doc[p] ELSE w[s].local[p]],
    baseline |-> SyncBl(s, fail),
-   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in SyncOwed(s, fail) : doc[q] # Nil}},
+   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in SyncTaken(s, fail) : doc[q] # Nil}},
    uploads |-> w[s].uploads,
    deletes |-> w[s].deletes,
    snap |-> w[s].snap,
@@ -1847,9 +1851,9 @@ RPullRead(s) ==
 RPullSyncW(s, fail) ==
   [st |-> w[s].st,
    pc |-> "idle",
-   local |-> [p \in Paths |-> IF p \in SyncOwed(s, fail) THEN doc[p] ELSE w[s].local[p]],
+   local |-> [p \in Paths |-> IF p \in SyncTaken(s, fail) THEN doc[p] ELSE w[s].local[p]],
    baseline |-> SyncBl(s, fail),
-   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in SyncOwed(s, fail) : doc[q] # Nil}},
+   integrated |-> w[s].integrated \cup {Gen(doc[p]) : p \in {q \in SyncTaken(s, fail) : doc[q] # Nil}},
    uploads |-> w[s].uploads,
    deletes |-> w[s].deletes,
    snap |-> w[s].snap,

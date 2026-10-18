@@ -731,7 +731,8 @@ Restart(s) ==
 \* derived as a consume would: the paths it left are the agent's (dirty,
 \* with the document moved) (`sync.rs` step 5).  It does not move `synced`.
 \* A sync does not replay a rescope; it can run after a crash left one
-\* "saved" (the scope it reads is still the old one).
+\* "saved" (the scope it reads is still the old one).  It converges as the
+\* consume does (since 2026-10-17: the code-trace check's one mismatch).
 Sync(s) ==
   /\ On(s) /\ s \notin Readers /\ w[s].pc = "idle" /\ syncs < MaxSyncs /\ w[s].sStage \in {"none", "saved"}
   /\ \E p \in Paths : Owed(s, p)
@@ -739,11 +740,17 @@ Sync(s) ==
      \E fail \in SUBSET all :
      LET owed == all \ fail
          left == fail # {}
-         bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
+         \* As the consume, it also converges: a dirty path whose bytes ARE
+         \* the document's, or absent in both (`sync.rs`: step 3 lets go of
+         \* a path the tree and the document both deleted, step 4's
+         \* phantom-conflict rule adopts identical bytes).  No fetch: it
+         \* cannot fail.
+         taken == owed \cup {p \in Paths : Converges(s, p)}
+         bl == [p \in Paths |-> IF p \in taken THEN doc[p] ELSE w[s].baseline[p]]
      IN /\ fails + Cardinality(fail) <= MaxFetchFails
-        /\ w' = [w EXCEPT ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
+        /\ w' = [w EXCEPT ![s].local = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
                        ![s].baseline = bl,
-                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
+                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in taken : doc[q] # Nil}},
                        ![s].derived = IF left /\ SyncKeepsLeft THEN 0 ELSE seq,
                        ![s].skipped = IF left /\ SyncKeepsLeft THEN {}
                                       ELSE {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]
@@ -874,12 +881,18 @@ RPullSync(s) ==
      \E fail \in SUBSET all :
      LET owed == all \ fail
          left == fail # {}
-         bl == [p \in Paths |-> IF p \in owed THEN doc[p] ELSE w[s].baseline[p]]
+         \* As the consume, it also converges: a dirty path whose bytes ARE
+         \* the document's, or absent in both (`sync.rs`: step 3 lets go of
+         \* a path the tree and the document both deleted, step 4's
+         \* phantom-conflict rule adopts identical bytes).  No fetch: it
+         \* cannot fail.
+         taken == owed \cup {p \in Paths : Converges(s, p)}
+         bl == [p \in Paths |-> IF p \in taken THEN doc[p] ELSE w[s].baseline[p]]
      IN /\ fails + Cardinality(fail) <= MaxFetchFails
         /\ w' = [w EXCEPT ![s].pc = "idle", ![s].memo = w[s].rnow,
-                       ![s].local = [p \in Paths |-> IF p \in owed THEN doc[p] ELSE @[p]],
+                       ![s].local = [p \in Paths |-> IF p \in taken THEN doc[p] ELSE @[p]],
                        ![s].baseline = bl,
-                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in owed : doc[q] # Nil}},
+                       ![s].integrated = @ \cup {Gen(doc[p]) : p \in {q \in taken : doc[q] # Nil}},
                        ![s].derived = IF left /\ SyncKeepsLeft THEN 0 ELSE seq,
                        ![s].skipped = IF left /\ SyncKeepsLeft THEN {}
                                       ELSE {p \in Paths : doc[p] # bl[p] /\ w[s].local[p] # bl[p] /\ Held(s, p)}]

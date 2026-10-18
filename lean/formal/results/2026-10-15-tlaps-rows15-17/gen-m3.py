@@ -467,8 +467,8 @@ def _syncrec(rec):
     <3>2. ASSUME NEW p \\in Paths, fail = {{}},
                  HeldR({rec}, p), doc'[p] # {rec}.baseline[p]
           PROVE  p \\in {rec}.skipped
-      <4>1. p \\notin SyncOwed(s, fail) BY <3>2, <1>1, <1>3b DEF SyncBl
-      <4>2. ~Owed(s, p) BY <4>1, <3>2 DEF SyncOwed, SyncAll
+      <4>1. p \\notin SyncTaken(s, fail) BY <3>2, <1>1, <1>3b DEF SyncBl
+      <4>2. ~Owed(s, p) BY <4>1, <3>2 DEF SyncTaken, SyncOwed, SyncAll
       <4>3. {rec}.baseline[p] = w[s].baseline[p] BY <4>1, <1>3b DEF SyncBl
       <4>4. Held(s, p) BY <3>2, <4>3, <1>3 DEF HeldR, Held
       <4>5. w[s].local[p] # w[s].baseline[p] BY <4>2, <4>4, <4>3, <3>2, <1>1, <1>s DEF Owed

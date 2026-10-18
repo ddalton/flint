@@ -454,8 +454,8 @@ LEMMA RescopeFirst_A3 ==
   <2>. QED BY <2>1, <2>2, <2>3 DEF A3For
 <1>. QED BY <1>w, <1>u, <1>ck, <1>1, A3One
 
-\* Sync and RPullSync take owed paths only (clean or deleted: a candidate is a
-\* dirty file), and clean after; the narrow's fields are kept.
+\* Sync and RPullSync take owed and converged paths, each clean after (a
+\* candidate is an uncited file); the narrow's fields are kept.
 ''')
 
 for L, W, act, g in [('Sync', 'SyncW', 'Sync', 'w[s].sStage # "mid" BY DEF Sync'),
@@ -473,7 +473,7 @@ LEMMA {L}_A3 ==
 <1>g. {g}
 <1>f. /\\ {W}(s, fail).sStage = w[s].sStage /\\ {W}(s, fail).sDrop = w[s].sDrop
       /\\ {W}(s, fail).sKeep = w[s].sKeep /\\ {W}(s, fail).sHeld = w[s].sHeld
-      /\\ {W}(s, fail).local = [p \\in Paths |-> IF p \\in SyncOwed(s, fail) THEN doc[p] ELSE w[s].local[p]]
+      /\\ {W}(s, fail).local = [p \\in Paths |-> IF p \\in SyncTaken(s, fail) THEN doc[p] ELSE w[s].local[p]]
       /\\ {W}(s, fail).baseline = SyncBl(s, fail)
   BY DEF {W}
 <1>1. A3For(s)
@@ -485,7 +485,7 @@ LEMMA {L}_A3 ==
                   PROVE  (w[s].local[p] = w[s].sHeld[p])'
       OBVIOUS
     \\* a taken path is clean after; a candidate at "saved" is uncited with a file
-    <3>1. p \\notin SyncOwed(s, fail) BY <1>s, <1>f, <1>g DEF A1LeftCand, SyncBl
+    <3>1. p \\notin SyncTaken(s, fail) BY <1>s, <1>f, <1>g DEF A1LeftCand, SyncBl
     <3>2. w'[s].local[p] = w[s].local[p] /\\ w'[s].baseline[p] = w[s].baseline[p] /\\ w'[s].sHeld[p] = w[s].sHeld[p]
       BY <3>1, <1>s, <1>f DEF SyncBl
     <3>3. A1LeftCand(w[s], p) BY <3>2, <1>s, <1>f DEF A1LeftCand

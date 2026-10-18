@@ -460,19 +460,22 @@ rep_span('Restart(s) ==\n', '\\* A sync, between barriers: it takes what is owed
     '\n')
 
 SYNC_FIELDS = {
-    'local': '[p \\in Paths |-> IF p \\in SyncOwed(s, fail) THEN doc[p] ELSE w[s].local[p]]',
+    'local': '[p \\in Paths |-> IF p \\in SyncTaken(s, fail) THEN doc[p] ELSE w[s].local[p]]',
     'baseline': 'SyncBl(s, fail)',
-    'integrated': 'w[s].integrated \\cup {Gen(doc[p]) : p \\in {q \\in SyncOwed(s, fail) : doc[q] # Nil}}',
+    'integrated': 'w[s].integrated \\cup {Gen(doc[p]) : p \\in {q \\in SyncTaken(s, fail) : doc[q] # Nil}}',
     'derived': 'IF fail # {} /\\ SyncKeepsLeft THEN 0 ELSE seq',
     'skipped': 'IF fail # {} /\\ SyncKeepsLeft THEN {}\n'
                '              ELSE {p \\in Paths : doc[p] # SyncBl(s, fail)[p] /\\ w[s].local[p] # SyncBl(s, fail)[p] /\\ Held(s, p)}'}
 rep_span('Sync(s) ==\n', '(* The narrow / widen verb (`checkout.rs::rescope`, scoped-read design',
     '\\* The sync\'s parts (LeanP1.tla: `Sync`\'s and `RPullSync`\'s LET): what is\n'
-    '\\* owed, what of it this sync takes (the rest failed to fetch), the baseline\n'
+    '\\* owed, what of it this sync takes (the rest failed to fetch), what it\n'
+    '\\* converges (as the consume, `ConsumeConv`; since 2026-10-17), the baseline\n'
     '\\* after it.\n'
     'SyncAll(s) == {p \\in Paths : Owed(s, p)}\n'
     'SyncOwed(s, fail) == SyncAll(s) \\ fail\n'
-    'SyncBl(s, fail) == [p \\in Paths |-> IF p \\in SyncOwed(s, fail) THEN doc[p] ELSE w[s].baseline[p]]\n'
+    'SyncConv(s) == {p \\in Paths : Converges(s, p)}\n'
+    'SyncTaken(s, fail) == SyncOwed(s, fail) \\cup SyncConv(s)\n'
+    'SyncBl(s, fail) == [p \\in Paths |-> IF p \\in SyncTaken(s, fail) THEN doc[p] ELSE w[s].baseline[p]]\n'
     + rec('SyncW', 's, fail', SYNC_FIELDS) +
     'Sync(s) ==\n'
     '  /\\ On(s) /\\ s \\notin Readers /\\ w[s].pc = "idle" /\\ syncs < MaxSyncs /\\ w[s].sStage \\in {"none", "saved"}\n'

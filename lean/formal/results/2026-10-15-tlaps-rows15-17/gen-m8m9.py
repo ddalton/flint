@@ -137,8 +137,8 @@ NR_BY = {
  'Edit': '<1>f DEF EditW, Edit',
  'Delete': '<1>f DEF DeleteW',
  'Checkout': '<1>0 DEF Checkout, Off, WriterInit, CheckoutW, CheckoutHeld',
- 'Sync': '<1>f DEF SyncW, SyncOwed, SyncAll, Owed',
- 'RPullSync': '<1>f DEF RPullSyncW, SyncOwed, SyncAll, Owed',
+ 'Sync': '<1>f DEF SyncW, SyncBl, SyncTaken, SyncOwed, SyncConv, SyncAll, Owed, Converges',
+ 'RPullSync': '<1>f DEF RPullSyncW, SyncBl, SyncTaken, SyncOwed, SyncConv, SyncAll, Owed, Converges',
  'RescopeFirst': 'ShippedShape DEF RescopeFirstW, Shipped',
  'RescopeSecond': '<1>f, ShippedShape DEF RescopeSecondW, RescopeFetch, RescopeFetch0, RescopeAdd, RescopeBase1, RescopeLocal1, Shipped',
 }

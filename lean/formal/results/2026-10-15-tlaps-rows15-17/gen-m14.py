@@ -635,16 +635,16 @@ LEMMA {name}_A4 ==
 <1>u. doc' = doc /\\ gw' = gw /\\ minted \\subseteq minted' /\\ orig' = orig BY DEF {act}, bucket
 <1>ck. A3CK BY <1>u, A3CF
 """ + flc(f'{rec}(s, fail)', rec) + f"""<1>l. \\A q \\in Paths :
-        /\\ {rec}(s, fail).local[q] = IF q \\in SyncOwed(s, fail) THEN doc[q] ELSE w[s].local[q]
-        /\\ {rec}(s, fail).baseline[q] = IF q \\in SyncOwed(s, fail) THEN doc[q] ELSE w[s].baseline[q]
+        /\\ {rec}(s, fail).local[q] = IF q \\in SyncTaken(s, fail) THEN doc[q] ELSE w[s].local[q]
+        /\\ {rec}(s, fail).baseline[q] = IF q \\in SyncTaken(s, fail) THEN doc[q] ELSE w[s].baseline[q]
   BY DEF {rec}, SyncBl
 <1>r. /\\ {rec}(s, fail).sStage = w[s].sStage /\\ {rec}(s, fail).sDrop = w[s].sDrop
       /\\ {rec}(s, fail).sKeep = w[s].sKeep /\\ {rec}(s, fail).sHeld = w[s].sHeld
   BY DEF {rec}
 <1>sh. \\A q \\in Paths : A4Shr({rec}(s, fail), w[s], q)
   <2>. SUFFICES ASSUME NEW q \\in Paths PROVE A4Shr({rec}(s, fail), w[s], q) OBVIOUS
-  <2>1. CASE q \\in SyncOwed(s, fail) BY <2>1, <1>l DEF A4Shr
-  <2>2. CASE q \\notin SyncOwed(s, fail)
+  <2>1. CASE q \\in SyncTaken(s, fail) BY <2>1, <1>l DEF A4Shr
+  <2>2. CASE q \\notin SyncTaken(s, fail)
     <3>1. {rec}(s, fail).local[q] = w[s].local[q] /\\ {rec}(s, fail).baseline[q] = w[s].baseline[q] BY <2>2, <1>l
     <3>2. q \\in A1LeftSet({rec}(s, fail)) <=> q \\in A1LeftSet(w[s]) BY <3>1, <1>r DEF A1LeftSet
     <3>. QED BY <3>1, <3>2 DEF A4Shr

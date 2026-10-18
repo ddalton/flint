@@ -406,3 +406,52 @@ M12 c9b4df15, M13 f2f7fe05, M14 786befc3.
   Control: with the barrier's step-0 replay disabled the test FAILS -- the scan
     re-publishes the leftover over the UI's delete (uploaded 1); restored.
   Box: syncer suite 291 passed, 0 failed, 1 ignored.
+
+2026-10-17 SYNC CONVERGES  the code-trace check's one mismatch, closed in the MODEL.
+  The mismatch (known_a_sync_lets_go_of_a_path_both_deleted): the code's sync lets go
+    of a path the agent deleted unpublished and a peer's commit deleted too (sync.rs
+    step 3's absent-file arm; step 4's phantom-conflict rule converges same bytes);
+    LeanP1's Sync and RPullSync had no convergence and kept it.  The code was the
+    sensible side (its consume converges there; so does the model's).
+  The model (LeanP1.tla): Sync and RPullSync take
+    taken == owed \cup {p \in Paths : Converges(s, p)}
+    for local, baseline and integrated; `regressed` stays on owed.  make-anc.py:
+    SyncConv(s), SyncTaken(s, fail) == SyncOwed(s, fail) \cup SyncConv(s); SyncBl
+    and SyncW's local/integrated over SyncTaken; span-md5.txt re-pinned (the Sync
+    and RPullSync spans only).  LeanP1Anc.tla 44ce1543 -> 4280b14e.
+  New subtlety: a sync at sStage "saved" (a restart mid-narrow) can converge onto,
+    and re-cite, a narrow's leftover file, which the barrier's replay uncites again.
+    So M11's `A1LeftSet(R) = A1LeftSet(w[s])` no longer holds; Sync_A1 and
+    RPullSync_A1 now argue per path (owed; converging and in the leftover set, by
+    the old fact; converging and not, as Consume_A1).
+  The proof: sync-conv-patch.py (applied once; kept for the record) edits gen-m0,
+    gen-m1, gen-m2, gen-m3, gen-m8m9, gen-m11, gen-m13, gen-m14 and the maintained
+    m5c/, m6/ texts.  build-chain.sh OUTDIR builds every module from source; on
+    origin/main's sources it reproduces the pinned md5s (Anc 44ce1543, M11 4a618f32,
+    M12 c9b4df15).  sync-ranges.py lists the 36 lemmas that read the sync's parts or
+    expand Sync/RPullSync.  Every changed proof line lies in one of them (diff of
+    the two builds; the two outside are M13 comment lines).
+  Box run p1 (lem-box, 3 at a time, --stretch 24): 36 lemmas, 2,514 obligations, 33
+    clean; 3 with timeouts on record-field steps under box load 17/8 cores
+    (M11-Sync_A1 3, M11-RPullSync_A1 2, M12-Sync_A2 3; RPullSync_A2, the same steps,
+    proved).  Re-run p2 (2 at a time, --stretch 48, load ~2): all three 0 failed 0
+    omitted (M11 491 s / 498 s, M12 117 s).  ALL 36: 0 failed, 0 omitted.
+  New module md5s (all others unchanged from chain/MD5.txt, final/md5.txt):
+    LeanP1Anc 4280b14e, M0 8b4bad10, M1 1e49f30f, M2 df745aa1, M3 fd9057c0,
+    M5C 3dd2b75a, M6 4a47b7cc, M8 99661e7a, M11 a86fc418, M13 943ca7f3,
+    M14 27bdd991.
+  Tie (run-tie, LeanP1 vs LeanP1Anc): ReaderHolds 799,192, FetchHolds 3,524,707,
+    ReaderScopeHolds 19,382,667 distinct -- all EXACT.  (Model md5 ced4bd3b; the
+    committed 702650f9 differs only in the Sync comment, lines 730-735.)
+  Gate (the 26 LeanP1 sync and reader worlds, probes, E27-E39 traces): 26 as
+    expected.  The big worlds were not re-run: the proof decides them.
+  Code-trace check (final model 702650f9): 83/83 as required under tla-mc (10 s)
+    and TLC (211 s).  The trace is accepted (renamed
+    a_sync_lets_go_of_a_path_both_deleted); new mutation
+    sync-keeps-a-path-both-deleted rejected; new control
+    control-sync-no-convergence (ContentConverges=FALSE) rejects it.
+  Syncer suite: 320 passed, 0 failed, 1 ignored.  (A first run under load failed
+    tests_upload_gate::compose_parts_never_exceed_the_budget_and_the_control_blows_past_it
+    at its CONTROL assertion -- the 1 GiB leg's concurrency fell short of 4x the
+    budget; it passed 5/5 alone and on the full re-run.  A timing-sensitive control,
+    not touched here.)

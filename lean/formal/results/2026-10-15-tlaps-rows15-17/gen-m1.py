@@ -482,12 +482,13 @@ M1 += simple('Restart', 'Restart(s)', '', 'RestartW(s)', 'RestartW',
 
 def synclike(name, sig, binders, rec, recdef, restate, holder_defs, guards, pc, dstep):
     return simple(name, sig, binders, rec, recdef, restate, 'holder', holder_defs, guards, name, 'w[s].st', pc,
-                  {'local': f'[q \\in Paths |-> IF q \\in SyncOwed(s, fail) THEN doc[q] ELSE w[s].local[q]]',
+                  {'local': f'[q \\in Paths |-> IF q \\in SyncTaken(s, fail) THEN doc[q] ELSE w[s].local[q]]',
                    'baseline': 'SyncBl(s, fail)'},
                   rescope_proof=f'''<1>9. Rescope'
-  <2>0. \\A q \\in Paths : q \\in SyncOwed(s, fail) => w[s].local[q] = w[s].baseline[q] BY DEF SyncOwed, SyncAll, Owed
+  <2>0. \\A q \\in Paths : q \\in SyncTaken(s, fail) => {rec}.local[q] = doc[q] /\\ {rec}.baseline[q] = doc[q] BY <1>3 DEF SyncBl
   <2>1. \\A q \\in Paths : /\\ (w[s].local[q] = w[s].baseline[q] => {rec}.local[q] = {rec}.baseline[q])
-                        /\\ (q \\notin SyncOwed(s, fail) => {rec}.local[q] = w[s].local[q] /\\ {rec}.baseline[q] = w[s].baseline[q])
+                        /\\ (q \\in SyncTaken(s, fail) => {rec}.local[q] = {rec}.baseline[q])
+                        /\\ (q \\notin SyncTaken(s, fail) => {rec}.local[q] = w[s].local[q] /\\ {rec}.baseline[q] = w[s].baseline[q])
     BY <1>3, <2>0 DEF SyncBl
   <2>2. \\A q \\in Paths : (q \\in {rec}.unlinked /\\ {rec}.sStage = "none") => {rec}.local[q] = {rec}.baseline[q]
     BY <1>3, <1>r, <2>1 DEF R2

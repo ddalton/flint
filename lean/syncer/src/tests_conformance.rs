@@ -866,13 +866,12 @@ async fn conformance_a_sync_whose_write_fails_leaves_the_path_owed() {
     dump("a_sync_whose_write_fails_leaves_the_path_owed", &buf);
 }
 
-/// KNOWN MISMATCH (the trace check REJECTS it, by design; `known_` traces
-/// are checked as rejects): a path the agent deleted unpublished that a
-/// peer's commit deleted too. The code's sync lets go of it (the baseline
-/// drops the entry); the model's `Sync` has no convergence and keeps it,
-/// so its next scan would publish a delete of an uncited path.
+/// A path the agent deleted unpublished that a peer's commit deleted too:
+/// the sync lets go of it (the baseline drops the entry), as the consume's
+/// convergence does (ContentConverges; the model's `Sync` converges since
+/// 2026-10-17 -- before, this trace was the check's one known mismatch).
 #[tokio::test]
-async fn conformance_known_a_sync_lets_go_of_a_path_both_deleted() {
+async fn conformance_a_sync_lets_go_of_a_path_both_deleted() {
     let (store, buf, mut a, mut b, dir_a, dir_b) =
         two_writers(&[("x.txt", "x v1"), ("y.txt", "y")]).await;
     start(&store, &[("A", &a), ("B", &b)]).await;
@@ -884,7 +883,7 @@ async fn conformance_known_a_sync_lets_go_of_a_path_both_deleted() {
     assert_eq!(r.applied, vec!["x.txt".to_string()], "fixture: {r:?}");
     let base = a.state.load_baseline().unwrap();
     assert!(!base.entries.contains_key("y.txt"), "fixture: the sync kept the entry");
-    dump("known_a_sync_lets_go_of_a_path_both_deleted", &buf);
+    dump("a_sync_lets_go_of_a_path_both_deleted", &buf);
 }
 
 /// A UI delete of a clean file: the first writer's barrier performs it (the

@@ -991,9 +991,10 @@ def synclemma(name, recname, other_primed, unch, unch_defs):
                   'fails\' = fails + Cardinality(fail)',
                   'regressed\' = (regressed \\/ \\E p \\in SyncOwed(s, fail) : Back(s, p))']),
                 f'{recname}(s, fail)', f'{recname}, Writer, Opt', other_primed, unch, unch_defs,
-                [('fail \\subseteq Paths /\\ SyncOwed(s, fail) \\subseteq Paths', 'DEF SyncAll, SyncOwed'),
+                [('fail \\subseteq Paths /\\ SyncOwed(s, fail) \\subseteq Paths /\\ SyncTaken(s, fail) \\subseteq Paths',
+                  'DEF SyncAll, SyncOwed, SyncConv, SyncTaken'),
                  ('Cardinality(fail) \\in Nat', '<1>3, CardPaths'),
-                 ('{Gen(doc[p]) : p \\in {q \\in SyncOwed(s, fail) : doc[q] # Nil}} \\subseteq Gens', '<1>a, <1>3, DocGens'),
+                 ('{Gen(doc[p]) : p \\in {q \\in SyncTaken(s, fail) : doc[q] # Nil}} \\subseteq Gens', '<1>a, <1>3, DocGens'),
                  ('SyncBl(s, fail) \\in [Paths -> Opt(Handles)]', '<1>a, <1>0, WriterFields DEF SyncBl, TypeOK, Opt')],
                 *reads_unchanged(f'{recname}(s, fail)', f'{recname}, SyncBl'), extra_typeok='')
 BODY += synclemma('Sync', 'SyncW', '/\\ syncs\' = syncs + 1\n      /\\ ',
