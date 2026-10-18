@@ -494,7 +494,7 @@ def convert(lines):
             steps.append((rec, i))
             steps.append(({"ev": "retire", "w": w}, i))
             standing[w] = False
-        elif ev in ("queue", "release", "handed_off", "conf_touch", "drill_hold", "renew"):
+        elif ev in ("queue", "release", "handed_off", "conf_touch", "drill_hold", "renew", "derive"):
             pass
         else:
             raise Unsupported(f"event {ev}")

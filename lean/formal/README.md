@@ -130,6 +130,38 @@ rejects it. The proofs were re-proved over the changed model
 CONVERGES"). A `known_` trace (checked as a reject) is the mechanism for the
 next one.
 
+#### Several writers, one real run (`trace/storm-check.sh`, 2026-10-18)
+
+A conformance scenario is one process logging in one order. A real run is
+several writers, each logging alone, and their agents journaling apart
+(`lean/e2e/writers-live/storm-local.sh`: WRITERS `flint-sync run` writers
+against a MinIO container on one host, each driven by `agent.sh`).
+`trace/storm2conf.py` writes the conformance trace the same run would have
+made, in ONE order the shared state forces, never a clock: a consume block
+(the `derive` event, the seq it read, to the scan or `barrier_end` that
+closes it) lies after the install of that seq and closes before the next;
+a merge likewise (`theirs_seq`); a claim of lease epoch e follows the
+release of e - 1. A writer's own events keep their order and its agent's
+ops go in by the host's clock; the earliest timestamp breaks only the ties
+these leave, between steps that commute. An agent's write is joined to its
+upload and every peer's consume by the MD5 of its bytes (`agent.sh`'s
+`md5`, a plain PUT's etag). `ndjson2core.py` and `TraceCore.tla` then
+check it unchanged. `trace/mutate_storm.py` corrupts one multi-writer fact
+at a time (a peer's version never adopted, a superseded version adopted,
+an upload naming a peer's bytes, a CAS seq skipped, a merge's foreign count,
+a peer's install inside an open consume, two lease holders), and each must
+not be accepted; the runner names the step each replay stopped at.
+
+On 2026-10-18 (box, `hot` mode: every agent writes the same 30 paths):
+3 writers, 30 s, 630 events: ACCEPTED (344 model steps), 7/7 mutations
+rejected (tla-mc, 5 s). 5 writers, 180 s, 6,343 events: ACCEPTED (2,842
+steps, 188,158 distinct states, 39 min), 7/7 rejected at steps 40-91.
+
+Not yet: the UI actor (the gateway logs no commit seq, so a UI save cannot
+be placed; refused), a writer that restarts or is replaced (refused), the
+agent's move (`churn` mode; refused), a run on S3 or Ozone, and TLC as the
+reference on these.
+
 The runner's large worlds need a big box: on one c8g.48xlarge (192 vCPU,
 371 GB) phase 1 (62 worlds, 24 at a time, 4 workers each) took 31 min and
 the six large worlds 60 min at 192 workers. Its `--out` holds tla-mc's

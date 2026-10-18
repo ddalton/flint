@@ -170,6 +170,10 @@ impl Syncer {
                         && local_dirty(&self.cfg.root.join(path), baseline.entries.get(path))
                 });
                 if d == p.etag && still_theirs {
+                    // The document this consume derived against: a replay of
+                    // several writers' traces (formal/trace/storm2conf.py)
+                    // places the consume after the install that wrote it.
+                    self.trace("derive", serde_json::json!({"seq": p.pointer.seq, "cheap": true}));
                     return Ok((0, Seen::Pointer(p.pointer.seq, p.etag.clone())));
                 }
             }
@@ -181,6 +185,7 @@ impl Syncer {
             return Ok((0, Seen::Nothing));
         };
         let doc = &current.manifest;
+        self.trace("derive", serde_json::json!({"seq": doc.seq, "cheap": false}));
         // H10: whatever this barrier does next — the fast path included —
         // the ack names this document or a later one.
         self.note_carrier_uncited(doc)?;

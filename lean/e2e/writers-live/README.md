@@ -12,6 +12,7 @@ collection layout, and what each oracle reads.
 | `oracle_selftest.py` | on the Mac | synthetic legs it builds | pass/fail per injected fault |
 | `timeline.py` | on the Mac | traces, clock offsets, optional access logs, history | one chronological table, filterable by path/time |
 | `drill.sh` | on the Mac, driving the cluster over SSM | — | runs one leg end to end |
+| `storm-local.sh` | on one Linux host, with Docker | a MinIO container it starts | one multi-writer leg's traces and journals, for `formal/trace/storm-check.sh` |
 
 ## 1. The agent journal
 
@@ -37,6 +38,11 @@ Two line kinds, joined by `nonce`:
 {"k":"ack","agent":"a3","t_ms":1757800019000,"nonce":"a3-10","status":"no-ack"}
 ```
 
+- `md5` (write and mv, when the host has an md5 tool) is the MD5 of the
+  bytes the op put at the path: a plain PUT's etag on S3 and MinIO, which
+  is how a replay of the run against the model
+  (`lean/formal/trace/storm2conf.py`) joins the op to the upload that
+  carried it and to every peer's consume of it.
 - `base` is the sha256 of the path in THIS agent's tree immediately
   before the op (`absent` if missing). It is what lets the oracle tell a
   sequential edit (base = the prior acked content) from a concurrent one.

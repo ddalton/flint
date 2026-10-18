@@ -102,6 +102,25 @@ sha_file() {   # sets H: 64 hex, "absent" (no regular file), or "" (read raced)
     case "$H" in *[!0-9a-f]*) H="" ;; esac
     [ "${#H}" -eq 64 ] || H=""
 }
+# The MD5 of what a write or a move put at the path: a plain PUT's etag on
+# S3 and MinIO, which is how a replay (formal/trace/storm2conf.py) joins
+# this op to the upload that carried it and to every peer's consume of it.
+# Empty when the host has no md5 tool (the field is then left out).
+MD5_CMD=""
+detect_md5() {
+    if command -v md5sum >/dev/null 2>&1; then MD5_CMD="md5sum"
+    elif command -v md5 >/dev/null 2>&1; then MD5_CMD="md5 -q"
+    fi
+}
+M5=""
+md5_file() {   # sets M5: 32 hex, or "" (no tool, or the read raced)
+    M5=""
+    [ -n "$MD5_CMD" ] && [ -f "$1" ] || return 0
+    M5=$( { $MD5_CMD < "$1"; } 2>/dev/null ) || M5=""
+    M5=${M5%% *}
+    case "$M5" in *[!0-9a-f]*) M5="" ;; esac
+    [ "${#M5}" -eq 32 ] || M5=""
+}
 INO=""
 ino_of() {     # sets INO to the inode number at $1, "" when nothing is there
     INO=""
@@ -146,11 +165,12 @@ ack_covers() { # $1 nonce; true iff the parsed ack names it exactly
 jline() { printf '%s\n' "$1" >> "$JOURNAL"; }
 log() { echo "agent[${AGENT_ID:-?}]: $*" >&2; }
 
-journal_op() { # $1 op $2 path $3 sha256|- $4 base $5 t_ms [$6 to $7 to_base]
+journal_op() { # $1 op $2 path $3 sha256|- $4 base $5 t_ms [$6 to $7 to_base]; MD5 for write|mv
+    _m5=""; [ -n "${MD5:-}" ] && _m5=",\"md5\":\"$MD5\""
     case "$1" in
-        write) jline "{\"k\":\"op\",\"agent\":\"$AGENT_ID\",\"n\":$N,\"t_ms\":$5,\"op\":\"write\",\"path\":\"$2\",\"sha256\":\"$3\",\"base\":\"$4\",\"nonce\":\"$NONCE\"}" ;;
+        write) jline "{\"k\":\"op\",\"agent\":\"$AGENT_ID\",\"n\":$N,\"t_ms\":$5,\"op\":\"write\",\"path\":\"$2\",\"sha256\":\"$3\"$_m5,\"base\":\"$4\",\"nonce\":\"$NONCE\"}" ;;
         delete) jline "{\"k\":\"op\",\"agent\":\"$AGENT_ID\",\"n\":$N,\"t_ms\":$5,\"op\":\"delete\",\"path\":\"$2\",\"base\":\"$4\",\"nonce\":\"$NONCE\"}" ;;
-        mv) jline "{\"k\":\"op\",\"agent\":\"$AGENT_ID\",\"n\":$N,\"t_ms\":$5,\"op\":\"mv\",\"path\":\"$2\",\"to\":\"$6\",\"base\":\"$4\",\"to_base\":\"$7\",\"sha256\":\"$3\",\"nonce\":\"$NONCE\"}" ;;
+        mv) jline "{\"k\":\"op\",\"agent\":\"$AGENT_ID\",\"n\":$N,\"t_ms\":$5,\"op\":\"mv\",\"path\":\"$2\",\"to\":\"$6\",\"base\":\"$4\",\"to_base\":\"$7\",\"sha256\":\"$3\"$_m5,\"nonce\":\"$NONCE\"}" ;;
     esac
 }
 journal_skip() { # $1 path $2 reason: an op the base read could not pin
@@ -217,7 +237,7 @@ op_write() {
     _tmp="$_d/.$_b.$AGENT_ID-$N$TMP_SUFFIX"
     if [ "$AGENT_MODE" = vocab ]; then rand_below 8; VOCAB_K=$R; else rand_below 16; PAD=$R; fi
     write_content > "$_tmp"
-    sha_file "$_tmp"; _new=$H
+    sha_file "$_tmp"; _new=$H; md5_file "$_tmp"; MD5=$M5
     _tries=0
     while [ "$_tries" -lt "$RACE_TRIES" ]; do
         _tries=$((_tries + 1))
@@ -263,7 +283,7 @@ op_mv() {      # $1 source, $2 destination (both marked used by the caller)
         _tries=$((_tries + 1))
         ino_of "$_abs"; _i1=$INO
         if [ -z "$_i1" ]; then op_write "$1"; return 0; fi   # nothing to move
-        sha_file "$_abs"; _base=$H
+        sha_file "$_abs"; _base=$H; md5_file "$_abs"; MD5=$M5
         valid_hash "$_base" || continue
         ino_of "$_dst"; _j1=$INO
         if [ -n "$_j1" ]; then
@@ -290,7 +310,7 @@ op_same() {    # rewrite the path's current bytes (a new inode, same content)
         if [ -z "$_i1" ]; then op_write "$1"; return 0; fi
         _tmp="$_d/.$_b.$AGENT_ID-same$TMP_SUFFIX"
         cat "$_abs" > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; continue; }
-        sha_file "$_tmp"; _new=$H
+        sha_file "$_tmp"; _new=$H; md5_file "$_tmp"; MD5=$M5
         valid_hash "$_new" || { rm -f "$_tmp"; continue; }
         now_ms; _t=$NOW
         ino_of "$_abs"; [ "$INO" = "$_i1" ] || { rm -f "$_tmp"; continue; }
@@ -388,7 +408,7 @@ run_agent() {
     RACE_TRIES=${RACE_TRIES:-5}
     setup_mode
     [ "$OPS_PER_BATCH" -le "$NP" ] || OPS_PER_BATCH=$NP
-    detect_time; detect_sha
+    detect_time; detect_sha; detect_md5
     mkdir -p "${JOURNAL%/*}" "$CONTROL_DIR"
 
     _waited=0
