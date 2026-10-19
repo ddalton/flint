@@ -25,6 +25,16 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: a same-size rewrite inside one mtime tick is published, and a
+  peer's version no longer replaces it.** The kernel stamps mtime from a
+  coarse clock, so two same-size writes a few milliseconds apart can
+  leave identical stat. The second one was invisible to the scan until
+  the file changed again, and a consume treated the file as clean and
+  could install a peer's bytes over it. lean now applies git's
+  racy-clean rule: a baseline entry recorded within 2 s of its file's
+  mtime is trusted only after its CRC matches. After a checkout, the
+  first barrier hashes the checked-out files once and then stops.
+  (L-138; found as a test that failed 9 of 20 runs.)
 - **forge: the `flint-forge-git` image now ships `flint-forge-credential`.**
   The forge agent guide tells an agent to configure that helper, which
   turns the pod's projected token into git's basic password. The image

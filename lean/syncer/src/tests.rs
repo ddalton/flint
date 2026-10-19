@@ -1929,6 +1929,7 @@ async fn legacy_flint_citation_survives_upgrade() {
             mtime_unix: 0,
             mtime_nanos: None,
             crc64_b64: meta.crc64_b64.clone(),
+            racy: false,
         },
     );
     b.prev_scan.insert(".flint/legacy.txt".into());
@@ -12743,6 +12744,97 @@ async fn a_commit_section_renews_its_cell_before_the_cas_and_before_it_deletes()
     let (claim, cas, release) = (at("claim"), at("cas"), at("release"));
     assert!(evs[claim..cas].iter().any(|e| e == "renew"), "no renew between the claim and the CAS: {evs:?}");
     assert!(evs[cas..release].iter().any(|e| e == "renew"), "no renew between the CAS and the release: {evs:?}");
+}
+
+/// RACY CLEAN (2026-10-19). Two same-size writes inside one mtime tick
+/// leave identical stat; the second, landing after the barrier read the
+/// first, was invisible to the scan until the file changed again — and
+/// never published if it did not. Forced deterministically here by
+/// putting the recorded mtime back on the rewritten file. The flaky
+/// `a_commit_section_renews_...` above failed 9 of 20 on main for exactly
+/// this: its "v2" landed in "v1"'s tick and the barrier saw no change.
+#[tokio::test]
+async fn a_same_size_rewrite_inside_the_mtime_tick_is_published() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let be = a.state.load_baseline().unwrap().entries["f.txt"].clone();
+    assert!(be.racy, "a file published within the window of its own mtime is recorded racy");
+
+    write(dir.path(), "f.txt", "v2");
+    let at = std::time::UNIX_EPOCH
+        + std::time::Duration::new(be.mtime_unix as u64, be.mtime_nanos.expect("stamped"));
+    std::fs::File::options().write(true).open(dir.path().join("f.txt")).unwrap().set_modified(at).unwrap();
+
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["f.txt".to_string()], "the same-tick rewrite was not published: {r:?}");
+    let got = a.state.load_baseline().unwrap().entries["f.txt"].clone();
+    assert_eq!(got.crc64_b64.as_deref(), Some(flint_store::crc64_to_b64(crc64_nvme(b"v2")).as_str()));
+}
+
+/// The consume's half of RACY CLEAN: `local_dirty` is what keeps a
+/// peer's version from replacing the agent's work. A same-tick rewrite
+/// whose stat still matches the baseline looked CLEAN to it, so the
+/// consume installed the peer's bytes over the agent's — a silent revert,
+/// the property lean exists to rule out.
+#[tokio::test]
+async fn a_same_tick_rewrite_is_not_replaced_by_a_peers_version() {
+    let store = Arc::new(MemoryStore::new());
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, da.path()).await;
+    a.checkout().await.unwrap();
+    write(da.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let mut b = syncer(&store, db.path()).await;
+    b.checkout().await.unwrap();
+    write(db.path(), "f.txt", "peer");
+    b.run_barrier().await.unwrap();
+
+    let be = a.state.load_baseline().unwrap().entries["f.txt"].clone();
+    write(da.path(), "f.txt", "v2");
+    let at = std::time::UNIX_EPOCH
+        + std::time::Duration::new(be.mtime_unix as u64, be.mtime_nanos.expect("stamped"));
+    std::fs::File::options().write(true).open(da.path().join("f.txt")).unwrap().set_modified(at).unwrap();
+
+    a.run_barrier().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(da.path().join("f.txt")).unwrap(),
+        "v2",
+        "the peer's version replaced the agent's same-tick rewrite"
+    );
+}
+
+/// The racy flag is not forever: once a hash has vouched for the bytes
+/// and the mtime is outside the window, the barrier clears the flag and
+/// SAVES it, even on a barrier with nothing to publish. Left set, every
+/// later barrier would hash the file again; and a fresh checkout records
+/// every file racy, so that would be a re-read of the whole tree each tick.
+#[tokio::test]
+async fn a_racy_entry_the_hash_vouches_for_is_cleared_and_saved() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    // Time passes: the file and its baseline stat both ten seconds old,
+    // still agreeing, the entry still racy.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    std::fs::File::options().write(true).open(dir.path().join("f.txt")).unwrap().set_modified(old).unwrap();
+    let st = std::fs::metadata(dir.path().join("f.txt")).unwrap();
+    let mut b = a.state.load_baseline().unwrap();
+    let e = b.entries.get_mut("f.txt").unwrap();
+    e.mtime_unix = super::barrier::mtime_of(&st);
+    e.mtime_nanos = Some(super::barrier::mtime_nanos_of(&st));
+    assert!(e.racy);
+    a.state.save_baseline(&b).unwrap();
+
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty(), "the bytes did not change, nothing to publish: {r:?}");
+    assert!(!a.state.load_baseline().unwrap().entries["f.txt"].racy, "the vouched-for flag was not cleared and saved");
 }
 
 /// Review 2026-09-18, M3, after the CAS: a holder deposed while its

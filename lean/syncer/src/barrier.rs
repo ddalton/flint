@@ -307,6 +307,7 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
+                            racy: super::barrier::racy_stat(&st),
                             crc64_b64: Some(e.crc64_b64.clone()),
                         },
                     );
@@ -394,6 +395,7 @@ impl Syncer {
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
+                    racy: super::barrier::racy_stat(&st),
                     crc64_b64: Some(got),
                 },
             );
@@ -674,6 +676,12 @@ impl Syncer {
         let mut baseline = self.state.load_baseline()?;
         let scanned = scan::scan(&self.cfg.root)?;
         let mut classified = scan::classify(&scanned, &baseline);
+        let racy_cleared = scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
+        for p in &racy_cleared {
+            if let Some(e) = baseline.entries.get_mut(p) {
+                e.racy = false;
+            }
+        }
         if declared {
             report.absences_confirmed = self.confirm_absences(&mut classified)?;
         }
@@ -735,7 +743,10 @@ impl Syncer {
                 // Compare without building the set: both sides iterate
                 // sorted, and the allocation this used to make was the
                 // size of the very document it was trying not to write.
-                if scanned.len() != baseline.prev_scan.len()
+                // ...or when the racy pass cleared a flag: unsaved, every
+                // later barrier would hash that file again.
+                if !racy_cleared.is_empty()
+                    || scanned.len() != baseline.prev_scan.len()
                     || !scanned.keys().eq(baseline.prev_scan.iter())
                 {
                     baseline.prev_scan = scanned.keys().cloned().collect();
@@ -1766,6 +1777,10 @@ impl UploadOutcome {
                 mtime_unix: scanned.mtime_unix,
                 mtime_nanos: Some(scanned.mtime_nanos),
                 crc64_b64: Some(crc64_to_b64(crc)),
+                // Measured from the SCAN's stat, which precedes the read:
+                // an upload can take longer than the window, and the
+                // moment that matters is when the bytes were read.
+                racy: scan::racy(scanned.mtime_unix, scanned.mtime_nanos, scanned.seen_nanos),
             },
         }
     }
@@ -1836,11 +1851,35 @@ pub(super) fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
         (Ok(_), None) => true,                     // local exists, never published
         (Ok(m), Some(b)) => {
             scan::stat_changed(b.size, b.mtime_unix, b.mtime_nanos, m.len(), mtime_of(&m), mtime_nanos_of(&m))
+                // RACY CLEAN: an unchanged stat recorded inside the window
+                // is believed only if the bytes agree (`scan::racy`).
+                || (b.racy && racy_bytes_differ(local, b))
         }
     }
 }
 
-fn file_crc(root: &Path, rel: &str) -> LeanResult<u64> {
+/// `local_dirty`'s content check for a racy entry: dirty unless `local`
+/// is a regular file (not a link) whose CRC is the one the baseline
+/// integrated. Anything that cannot be read to tell is dirty.
+fn racy_bytes_differ(local: &Path, b: &BaselineEntry) -> bool {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(local).is_ok_and(|m| m.is_file()) {
+        return true;
+    }
+    let Ok(mut f) = std::fs::File::open(local) else { return true };
+    let mut crc = flint_store::Crc64Nvme::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => crc.update(&buf[..n]),
+            Err(_) => return true,
+        }
+    }
+    b.crc64_b64.as_deref() != Some(crc64_to_b64(crc.finalize()).as_str())
+}
+
+pub(super) fn file_crc(root: &Path, rel: &str) -> LeanResult<u64> {
     use std::io::Read;
     let mut crc = flint_store::Crc64Nvme::new();
     // No link anywhere on the path (H5): this hashes what a 412 recovery
@@ -1855,6 +1894,13 @@ fn file_crc(root: &Path, rel: &str) -> LeanResult<u64> {
         crc.update(&buf[..n]);
     }
     Ok(crc.finalize())
+}
+
+/// Whether a stat taken just now is racy (`scan::racy`): every site that
+/// records a baseline entry from a fresh stat of bytes it just read or
+/// wrote stamps the entry with this.
+pub(super) fn racy_stat(m: &std::fs::Metadata) -> bool {
+    scan::racy(mtime_of(m), mtime_nanos_of(m), scan::now_nanos())
 }
 
 pub(super) fn mtime_nanos_of(m: &std::fs::Metadata) -> u32 {

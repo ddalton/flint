@@ -133,7 +133,8 @@ impl Syncer {
 
         // 1. The scan comes FIRST; dirt is judged against it alone.
         let scanned = scan::scan(&self.cfg.root)?;
-        let classified = scan::classify(&scanned, &baseline);
+        let mut classified = scan::classify(&scanned, &baseline);
+        scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
         let locally_dirty = |path: &str| {
             classified.uploads.contains(path)
                 || classified.deletes.contains(path)
@@ -296,6 +297,7 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
+                            racy: super::barrier::racy_stat(&st),
                             crc64_b64: local_crc,
                         },
                     );
@@ -411,6 +413,7 @@ impl Syncer {
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
+                    racy: super::barrier::racy_stat(&st),
                     crc64_b64: Some(got),
                 },
             );

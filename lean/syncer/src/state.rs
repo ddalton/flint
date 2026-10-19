@@ -42,6 +42,11 @@ pub struct BaselineEntry {
     /// backend returns none (Ozone). Every writer sets it; `None` only on
     /// a baseline from before it existed.
     pub crc64_b64: Option<String>,
+    /// The stat above was taken within `scan::RACY_WINDOW_NANOS` of the
+    /// file's mtime, so it cannot vouch for the bytes on its own: the next
+    /// scan hashes the file before calling it clean (`scan::confirm_racy`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub racy: bool,
 }
 
 /// The persisted baseline snapshot: what this syncer believes the

@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use super::{state::Baseline, LeanResult, CONTROL_DIR, STATE_DIR};
+use flint_store::crc64_to_b64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
@@ -22,6 +23,35 @@ pub struct ScanEntry {
     /// rewrite inside the recorded second was invisible forever).
     pub mtime_nanos: u32,
     pub mode: u32,
+    /// When this entry was stat'ed, in nanoseconds since the epoch: an
+    /// upper bound on when the scan saw the file and a LOWER bound on
+    /// when anything after it read the file's bytes. The racy-clean test
+    /// measures from here (`racy`).
+    pub seen_nanos: i128,
+}
+
+/// RACY CLEAN (git's rule, `racy-git.txt`). A file's mtime comes from a
+/// coarse kernel clock (a few milliseconds a tick), so two same-size
+/// writes inside one tick leave identical stat. A baseline entry whose
+/// bytes were read within a tick of the file's mtime cannot vouch for
+/// the content: a second write in that tick, after the read, is
+/// invisible to `stat_changed` until the file changes again — if it
+/// never does, that write is never published. Such an entry is recorded
+/// `racy` and is believed only after its content hash agrees
+/// (`confirm_racy`, `barrier::local_dirty`). Two seconds covers every
+/// clock this runs on, coarse-second filesystems included.
+pub const RACY_WINDOW_NANOS: i128 = 2_000_000_000;
+
+pub fn now_nanos() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
+/// Whether a stat with this mtime, observed at `at_nanos`, is racy.
+pub fn racy(mtime_unix: i64, mtime_nanos: u32, at_nanos: i128) -> bool {
+    at_nanos - (mtime_unix as i128 * 1_000_000_000 + mtime_nanos as i128) < RACY_WINDOW_NANOS
 }
 
 /// The consume's temp sibling (`safefs`): a crash between its create and
@@ -89,7 +119,7 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanR
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
                 .unwrap_or((0, 0));
-            out.insert(rel, ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode });
+            out.insert(rel, ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode, seen_nanos: now_nanos() });
         }
     }
     Ok(())
@@ -97,8 +127,9 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanR
 
 #[derive(Debug, Default)]
 pub struct Classified {
-    /// Changed or new vs the baseline (by size/mtime; mtime-granularity
-    /// evasion is a stated v1 residual).
+    /// Changed or new vs the baseline (by size/mtime; an entry whose stat
+    /// is too close to its mtime to vouch for the bytes is settled by
+    /// `confirm_racy`, which callers run next).
     pub uploads: BTreeSet<String>,
     /// Absent this scan AND the previous scan, present in the baseline.
     pub deletes: BTreeSet<String>,
@@ -120,6 +151,39 @@ pub fn is_control_path(path: &str) -> bool {
     [CONTROL_DIR, STATE_DIR].iter().any(|d| {
         path == *d || path.strip_prefix(d).map(|r| r.starts_with('/')).unwrap_or(false)
     })
+}
+
+/// The racy half of `classify`: an entry whose stat is unchanged but was
+/// recorded `racy` is hashed, and is an upload if its bytes are not the
+/// ones the baseline integrated (or cannot be read to tell). Returns the
+/// racy entries the hash vouched for AND whose mtime is now outside the
+/// window — those can no longer hide a same-tick write, and the caller
+/// may clear the flag. Run after `classify`, before anything trusts it.
+pub fn confirm_racy(
+    root: &Path,
+    scan: &BTreeMap<String, ScanEntry>,
+    baseline: &Baseline,
+    c: &mut Classified,
+) -> Vec<String> {
+    let now = now_nanos();
+    let mut cleared = vec![];
+    for (path, s) in scan {
+        let Some(b) = baseline.entries.get(path) else { continue };
+        if !b.racy || c.uploads.contains(path) {
+            continue;
+        }
+        match super::barrier::file_crc(root, path) {
+            Ok(crc) if b.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) => {
+                if !racy(s.mtime_unix, s.mtime_nanos, now) {
+                    cleared.push(path.clone());
+                }
+            }
+            _ => {
+                c.uploads.insert(path.clone());
+            }
+        }
+    }
+    cleared
 }
 
 pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Classified {

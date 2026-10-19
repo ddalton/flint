@@ -468,6 +468,7 @@ impl Syncer {
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
                                 mtime_nanos: Some(mtime_nanos_of(&st)),
+                                racy: super::barrier::racy_stat(&st),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
                             }),
                             skipped: true,
@@ -518,6 +519,7 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
+                            racy: super::barrier::racy_stat(&st),
                             // The fold above equalled it, or we would
                             // not be here.
                             crc64_b64: Some(entry.crc64_b64.clone()),
@@ -653,6 +655,7 @@ impl Syncer {
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
+                        racy: super::barrier::racy_stat(&st),
                         crc64_b64: Some(got),
                     }),
                     skipped: false,
@@ -1060,7 +1063,8 @@ impl Syncer {
         }
         let baseline = self.state.load_baseline()?;
         let scanned = super::scan::scan(&self.cfg.root)?;
-        let c = super::scan::classify(&scanned, &baseline);
+        let mut c = super::scan::classify(&scanned, &baseline);
+        super::scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut c);
         Ok(paths
             .iter()
             .filter(|p| {
