@@ -110,6 +110,7 @@ A claim with unnamed assumptions is a claim about nothing.
 | an etag names the bytes (a content hash), so identical bytes share one | modelled (`MaxSameBytes`), which is what makes finding 13 reachable | the same-bytes findings would not apply; a different set would |
 | the local filesystem gives atomic rename and honest `lstat` | assumed | the scan's two-scan rule and the temp-then-rename writes lose their basis |
 | exactly one syncer owns a workspace tree on a node, and nothing else edits it mid-barrier | the CSI driver's worker-per-volume | a scan can publish a half-written file |
+| no lifecycle rule expires `.flint/lean/conflicts/` before its retention (the guide's "Conflict copies" rule, an operator's choice) | assumed: the bucket's lifecycle configuration is the operator's | AN5's "a record preserving it" holds only for the retention: after it, a version whose sole account was its conflict copy is gone unaccounted (§4.7) |
 | clocks are never used for ordering | by construction: the cell's epoch and the manifest's seq order everything | — |
 
 ## 3. How the claim is checked today
@@ -450,8 +451,17 @@ model: what the model leaves out (§4) it leaves out of the proof too.
 6. **Liveness.** Two runs, and the ticket's fairness is weaker in the code
    than in the model (a waiting writer does not always hold a ticket). No
    starvation has been observed; none is ruled out.
-7. **Storage growth.** Conflict copies under `.flint/lean/conflicts/` are
-   never collected. Not a loss; a cost. (Until immutable handles this row
+7. **Storage growth, and AN5's bound.** Lean never collects conflict
+   copies under `.flint/lean/conflicts/`; the lean guide's "Conflict
+   copies" section expires them with a bucket lifecycle rule. No manifest
+   cites a copy and no verb reads that prefix, so expiring one breaks no
+   citation and no tree. What it bounds is AN5: a conflict copy is one of
+   the records that accounts for an acknowledged version that is gone
+   (`Preserved` in `LeanP1.tla`), so **with a rule of N days, AN5 holds
+   for a version whose only account is its copy for N days after the
+   conflict, and not after.** The proof is of the model without expiry;
+   the rule is a retention policy on top of it, stated here rather than
+   modelled. Without a rule the copies stay forever: not a loss, a cost. (Until immutable handles this row
    also carried the objects the collector gave way on where the store had
    no conditional DELETE. It no longer does: a handle the installed
    document stopped citing can never be cited again, so the collector's
