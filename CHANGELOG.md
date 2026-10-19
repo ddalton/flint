@@ -25,6 +25,12 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **forge: the `flint-forge-git` image now ships `flint-forge-credential`.**
+  The forge agent guide tells an agent to configure that helper, which
+  turns the pod's projected token into git's basic password. The image
+  agents run carried `git propose` but not the helper, so an agent
+  following the guide on it had nothing to point git at. The export
+  cluster drill found it.
 - **forge docs: the lean-shaped export is not a plain tree.** The forge
   guide and design called it "legible". Since 1.57.0 lean stores
   `files/<path>@<flush>`, so it is readable only through lean, lite or

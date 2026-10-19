@@ -23,8 +23,9 @@
 # image tags.
 #
 #   (cd ../forge/syncer && cargo zigbuild --release --features s3,gitcgi \
-#     --target $T-unknown-linux-musl --bin flint-forge-syncer --bin flint-forge-gitcgi)
-#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-{syncer,gitcgi}
+#     --target $T-unknown-linux-musl --bin flint-forge-syncer --bin flint-forge-gitcgi \
+#     --bin flint-forge-credential)
+#   # stage: docker/prebuilt/{amd64,arm64}/flint-forge-{syncer,gitcgi,credential}
 #   docker build --platform linux/$A -f docker/Dockerfile.forge-git \
 #     --build-arg BIN_DIR=docker/prebuilt -t <repo>/flint-forge-git:<tag>-$A .
 #
@@ -68,6 +69,14 @@ COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-gitcgi /usr/local/bin/flint-forge-gitc
 # `refs/for/<target>` (design §6), which nobody writes from memory.
 COPY docker/forge/git-propose.sh /usr/local/bin/git-propose
 RUN chmod +x /usr/local/bin/git-propose
+
+# The agent's credential: the helper the forge guide tells an agent to
+# configure (`credential.<url>.helper /usr/local/bin/flint-forge-credential`).
+# It reads the pod's projected token on every call and prints it as the
+# basic password. Until 2026-10-19 this image shipped `git propose` but
+# not the helper, so an agent following the guide on it had nothing to
+# point git at; the export cluster drill found it.
+COPY ${BIN_DIR}/${TARGETARCH}/flint-forge-credential /usr/local/bin/flint-forge-credential
 
 # One binary, two hooks, dispatching on the name it was invoked as.
 # `core.hooksPath` points every repository at this directory, so a
