@@ -97,6 +97,20 @@ pub async fn ensure_claim(
     }
 }
 
+/// The workspace's subtree as the STORE's prefix-scoped calls take it:
+/// with its separator. `key_prefix` is kept slash-trimmed for the keys
+/// this module builds itself (`{prefix}/.flint/lean/claim`), but the
+/// upload sweep and the bucket bootstrap match by raw string prefix, so
+/// `t/agents` without the slash also matched a sibling `t/agents-out/`:
+/// the sweep aborted another tenant's uploads older than an hour (a long
+/// Spark job's pending commit), the abort rule's filter covered it, and
+/// the bootstrap's probe landed at `t/agentsflint-bootstrap-probe`,
+/// outside the workspace. An empty prefix stays empty: the bucket.
+pub fn store_prefix(prefix: &str) -> String {
+    let p = prefix.trim_end_matches('/');
+    if p.is_empty() { String::new() } else { format!("{p}/") }
+}
+
 /// The operator-side MPU sweep: abort in-progress multipart assemblies
 /// under the prefix older than `min_age_secs` (a crashed syncer's
 /// half-uploaded compose bills until aborted; the lifecycle rule is
@@ -150,7 +164,7 @@ pub async fn verify_workspace(
             ));
         }
         ClaimOutcome::Created => {
-            let report = store.bootstrap(prefix).await?;
+            let report = store.bootstrap(&store_prefix(prefix)).await?;
             if !report.ok() {
                 return Ok((
                     "Error".into(),
@@ -158,11 +172,11 @@ pub async fn verify_workspace(
                     None,
                 ));
             }
-            let swept = sweep_stale_uploads(store, prefix, 3600).await?;
+            let swept = sweep_stale_uploads(store, &store_prefix(prefix), 3600).await?;
             Ok(("Claimed".into(), format!("claim created; {swept} stale uploads swept"), None))
         }
         ClaimOutcome::AdoptedOwn => {
-            let swept = sweep_stale_uploads(store, prefix, 3600).await?;
+            let swept = sweep_stale_uploads(store, &store_prefix(prefix), 3600).await?;
             Ok(("Adopted".into(), format!("standing claim adopted; {swept} stale uploads swept"), None))
         }
     }
@@ -492,6 +506,41 @@ mod tests {
             s.get_whole("t/p1/.flint/lean/claim", None).await.is_err(),
             "the observation pass stamped a claim"
         );
+    }
+
+    /// The sweep takes the workspace's stale uploads and nothing of a
+    /// SIBLING whose name merely starts with the same characters.
+    /// Through `verify_workspace`, the path that runs in production, on
+    /// both arms (Claimed, then Adopted).
+    #[tokio::test]
+    async fn the_sweep_spares_a_sibling_prefix() {
+        let mem = Arc::new(MemoryStore::new());
+        let s: Arc<dyn ObjectStore> = mem.clone();
+        let hour = 3600 + 60;
+        for arm in ["Claimed", "Adopted"] {
+            let own = mem.raw_begin_upload("t/agents/files/a.bin@f1");
+            let sibling = mem.raw_begin_upload("t/agents-out/part-0000.parquet");
+            let young = mem.raw_begin_upload("t/agents/files/b.bin@f2");
+            mem.backdate_upload(&own, hour);
+            mem.backdate_upload(&sibling, hour);
+            let (phase, _, _) = verify_workspace(&s, "t/agents", "proj", "op").await.unwrap();
+            assert_eq!(phase, arm);
+            let left: Vec<String> = s.list_uploads("").await.unwrap().into_iter().map(|u| u.upload_id).collect();
+            assert!(!left.contains(&own), "{arm}: the workspace's stale upload survived");
+            assert!(left.contains(&sibling), "{arm}: the sweep aborted a sibling prefix's upload");
+            assert!(left.contains(&young), "{arm}: the sweep aborted an upload younger than an hour");
+            for u in s.list_uploads("").await.unwrap() {
+                s.abort_upload(&u.key, &u.upload_id).await.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn store_prefix_carries_one_separator() {
+        assert_eq!(store_prefix("t/agents"), "t/agents/");
+        assert_eq!(store_prefix("t/agents/"), "t/agents/");
+        assert_eq!(store_prefix("t/agents//"), "t/agents/");
+        assert_eq!(store_prefix(""), "");
     }
 
     #[tokio::test]

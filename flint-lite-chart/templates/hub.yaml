@@ -24,6 +24,14 @@ sized for the pre-listener epoch claim / DR import.
 {{- fail "tier.enabled needs tier.bucket — the hub has no bucket to publish to (the server refuses the same at boot); set tier.bucket or disable the tier" }}
 {{- end }}
 {{- if .Values.tier.enabled }}
+{{- /* The FlintShare CRD refuses this too (lite_operator/crd.rs): the hub's
+takeover sweep aborts every in-flight upload whose key starts with the
+prefix, so "vol1" without the slash would abort "vol10/"'s publishes. */}}
+{{- with .Values.tier.keyPrefix }}
+{{- if not (hasSuffix "/" .) }}
+{{- fail (printf "tier.keyPrefix %q must end with '/' — a prefix without it also matches sibling names" .) }}
+{{- end }}
+{{- end }}
 {{- /* The server's YAML parser IGNORES unknown keys, so a typo'd knob
 would silently take the default — and the knobs are the economics
 gate's REQUIREMENTS. Refuse at render instead. Kept in sync with

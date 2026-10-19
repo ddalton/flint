@@ -12,6 +12,28 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **lean: the operator's stale-upload sweep no longer reaches a sibling
+  prefix** (2026-10-19). The operator kept a workspace's `keyPrefix`
+  without its trailing slash and handed that to the store, which matches
+  keys by plain string prefix. A workspace at `proj/agents` therefore
+  aborted every multipart upload older than an hour under
+  `proj/agents-out/` too, such as a long Spark job's pending commit
+  sharing the project prefix. The bucket's 3-day abort rule the
+  operator installs had the same filter, and the bootstrap's probe
+  upload landed at `proj/agentsflint-bootstrap-probe`, outside the
+  workspace. The sweep, the rule and the probe now take the prefix with
+  its separator (`store_prefix`). An abort rule an older operator
+  already wrote keeps its wider filter, since a rule covering the
+  prefix is left in place; delete it by hand if a sibling prefix needs
+  multipart uploads older than three days.
+- **flint-lite chart: `tier.keyPrefix` must end with `/`** (2026-10-19).
+  A hub's takeover sweep aborts every in-flight upload under its prefix,
+  so `vol1` without the slash would abort `vol10/`'s publishes. The
+  FlintShare CRD already refused this; the chart now fails the render
+  the same way.
+
 ### Changed
 
 - **crates.io: flint-lean 0.10.0 and flint-lean-gateway 0.8.0**

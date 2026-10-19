@@ -266,6 +266,14 @@ impl MemoryStore {
         }
     }
 
+    /// Age an in-progress multipart upload's initiation stamp, so a
+    /// test of an age-gated sweep need not sleep past its threshold.
+    pub fn backdate_upload(&self, upload_id: &str, secs: u64) {
+        if let Some(m) = self.inner.lock().unwrap().uploads.get_mut(upload_id) {
+            m.initiated_unix = m.initiated_unix.saturating_sub(secs);
+        }
+    }
+
     /// Plant a lifecycle rule the way a customer's own fleet policy
     /// would. D8's destroyer is a rule flint never wrote.
     pub fn plant_lifecycle_rule(&self, rule: LifecycleView) {

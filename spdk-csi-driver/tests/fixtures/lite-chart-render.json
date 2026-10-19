@@ -1723,5 +1723,5 @@
       "values": "tier:\n  enabled: true\n  bucket: my-team-flint\n  keyPrefix: tenant-a/\n  endpoint: http://minio.minio:9000\n  region: us-east-1\n  credentialsSecret: flint-s3\n  importOnStart: true\n"
     }
   },
-  "chartSha256": "24779990b38c173455d1fe8f5e0b9fbf841696857b73a978f73cd353824de2b2"
+  "chartSha256": "38df55921e6de30b818a7c6c79d9e0a9315ee2fefb0b38e0da7848f5be219dfd"
 }
