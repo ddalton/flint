@@ -12,6 +12,19 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.59.1] - 2026-10-19
+
+A patch release for one defect that shipped in 1.59.0 and earlier: the
+lean operator's stale-upload sweep matched a workspace's `keyPrefix`
+without its trailing slash, so it also aborted multipart uploads older
+than an hour under sibling prefixes (`proj/agents` reached
+`proj/agents-out/`). It never deleted stored objects. Two limits remain:
+an abort rule an older operator wrote keeps its wider filter until you
+delete it by hand, and the lite server still accepts a slash-less tier
+`key_prefix` from a hand-written config (the FlintShare CRD and, now, the
+flint-lite chart refuse it). Every chart is a patch bump; appVersion
+1.59.1.
+
 ### Fixed
 
 - **lean: the operator's stale-upload sweep no longer reaches a sibling
@@ -10130,7 +10143,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.59.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.59.1...HEAD
+[1.59.1]: https://github.com/ddalton/flint/compare/v1.59.0...v1.59.1
 [1.59.0]: https://github.com/ddalton/flint/compare/v1.58.0...v1.59.0
 [1.58.0]: https://github.com/ddalton/flint/compare/v1.57.1...v1.58.0
 [1.57.1]: https://github.com/ddalton/flint/compare/v1.57.0...v1.57.1
