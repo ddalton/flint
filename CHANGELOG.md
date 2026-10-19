@@ -12,6 +12,16 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **crates.io: flint-lean 0.10.0 and flint-lean-gateway 0.8.0**
+  (2026-10-19), carrying lean's 1.59.0 fixes (L-132 to L-137, MN2, the
+  8-part upload window). A minor bump, not a patch: `state::Carrier`
+  gained a public field (`published`, the checksum each carried upload
+  published), which breaks a struct literal. The gateway re-exports
+  flint-lean types, so it moves with it; its own source is unchanged.
+  flint-store stays 0.2.0.
+
 ## [1.59.0] - 2026-10-19
 
 Lean's correctness fixes since 1.58.0, and Kerberos for flint lite and
