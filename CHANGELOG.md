@@ -12,6 +12,20 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The lean guide no longer says the `files/` prefix is a plain tree**
+  (2026-10-19; `docs/flint-lean-for-agent-fleets.{md,html,pdf}`). Since
+  immutable object handles shipped in 1.57.0, every write lands at a fresh
+  `files/<path>@<flush>` key and the manifest says which version is the
+  tree. The guide's verify section still showed a bare `files/notes.txt`
+  and said the prefix "is the workspace", and its closing table said all
+  front ends "share one bucket format and are mutually convertible". A
+  plain S3 tool or a passthrough mount pointed at a lean prefix sees every
+  version under its own key, not the tree. The guide now says so, and
+  says to move a workspace to another front end by mounting it in a pod
+  and copying the tree out.
+
 ## [1.59.0] - 2026-10-19
 
 Lean's correctness fixes since 1.58.0, and Kerberos for flint lite and
@@ -569,6 +583,14 @@ the lite render-parity fixture regenerated.
 
 ### Documentation
 
+- **lean: expiring conflict copies with a bucket lifecycle rule, and
+  AN5's bound** (2026-10-19). The lean guide gains "Conflict copies": what
+  `.flint/lean/conflicts/` holds, why nothing in lean collects it, and a
+  read-merge-write recipe for a per-workspace expiration rule (one rule
+  per bucket, whatever the number of clusters). SAFETY.md states the
+  assumption and restates AN5: with a rule of N days, a version whose
+  only account is its conflict copy is accounted for N days after the
+  conflict. No code changed.
 - **Kerberos and pNFS, and where Kerberos has been tested**
   (2026-10-16). `docs/nfs-kerberos.md` gains a "pNFS" section. The MDS
   shares the RWX server's RPC and GSS layer, so the floor, allowlist,

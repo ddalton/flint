@@ -320,11 +320,19 @@ aws s3 ls s3://my-bucket/tenants/proj1/ --recursive
 # tenants/proj1/.flint/lean/claim
 # tenants/proj1/.flint/lean/current            ← the manifest POINTER
 # tenants/proj1/.flint/lean/epoch              ← the writers' publish fence
-# tenants/proj1/.flint/lean/inbox
-# tenants/proj1/files/notes.txt                ← your tree lives here
+# tenants/proj1/.flint/lean/inbox              ← "please publish" / "please pull" requests
+# tenants/proj1/.flint/lean/retired/…          ← what a commit stopped citing, kept 10 min
+# tenants/proj1/files/notes.txt@6f1c…          ← your tree lives here, one object per version
 ```
 
-The `files/` prefix is the workspace. `.flint/lean/` is control state.
+The `files/` prefix holds the workspace's bytes, one object per version:
+every write lands at a fresh `<path>@<flush>` key, and nothing overwrites
+one. The manifest, not the listing, says which version is the tree. The
+prefix also holds versions a commit stopped citing, kept 10 minutes for
+readers still on the previous boundary, and uploads no commit has cited
+yet. So `aws s3 cp` of a bare path finds nothing, and a plain S3 tool or a
+passthrough mount pointed at `files/` does not see the tree: read it
+through a pod that mounts the workspace. `.flint/lean/` is control state.
 To see which clock installed the current boundary:
 
 ```sh
@@ -373,6 +381,55 @@ the loopback floors: 100k files check out in 49.5 s (first publish 65 s,
 idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at
 ~277 B/entry.
 
+### Conflict copies, and a lifecycle rule to expire them
+
+When two writers, or a writer and the UI, change one file between
+boundaries, the boundary that lands second keeps its own bytes and first
+copies the other version to `<keyPrefix>/.flint/lean/conflicts/<id>/<path>`.
+The publish ack names the copy. Nothing in lean reads that prefix again:
+no manifest cites a copy, and checkout, sync and the collector never touch
+it. So nothing collects it either, and a workload that contends hard grows
+it (a six-writer drill over 30 shared paths left 4,985 copies in 300 s).
+
+Expire them with a bucket lifecycle rule on that prefix. Deleting a copy
+cannot break a workspace; it only ends the window in which a person can
+recover the losing version, so pick a retention long enough to act on a
+conflict. The rule belongs to the bucket: set it once, however many
+clusters mount workspaces from it. Nothing runs in any cluster.
+
+```sh
+# A lifecycle write REPLACES the bucket's whole configuration, so start
+# from what is there (the flint-lean operator installs an abort rule for
+# stale multipart uploads; your own rules may be there too).
+aws s3api get-bucket-lifecycle-configuration --bucket my-bucket > lc.json \
+  || echo '{"Rules":[]}' > lc.json
+
+# Append one rule per workspace prefix (30 days here), then write it back.
+python3 - lc.json tenants/proj1 30 <<'PY'
+import json, sys
+path, prefix, days = sys.argv[1], sys.argv[2], int(sys.argv[3])
+lc = json.load(open(path))
+lc["Rules"].append({
+    "ID": f"flint-lean-conflicts-{prefix.replace('/', '-')}",
+    "Status": "Enabled",
+    "Filter": {"Prefix": f"{prefix}/.flint/lean/conflicts/"},
+    "Expiration": {"Days": days},
+    "NoncurrentVersionExpiration": {"NoncurrentDays": 1},
+})
+json.dump(lc, open(path, "w"), indent=1)
+PY
+aws s3api put-bucket-lifecycle-configuration --bucket my-bucket \
+  --lifecycle-configuration file://lc.json
+```
+
+The filter is a prefix, not a pattern, so it is one rule per workspace,
+and S3 allows 1,000 rules per bucket. **Never shorten the filter to a
+common parent** such as `tenants/`: that rule expires every workspace's
+files, not only its conflict copies. Past the rule limit, use one bucket
+per group of workspaces. `NoncurrentVersionExpiration` matters only on a
+versioned bucket, where an expired copy otherwise lingers as a
+noncurrent version.
+
 
 ---
 
@@ -384,8 +441,10 @@ idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at
 | two pods writing one tree and seeing each other live; byte-range locks; shared sqlite/git across pods | the hub (flint-lite) |
 | readers that cannot tolerate seeing the last boundary instead of the last write | the hub |
 
-All three front ends share one bucket format and are mutually
-convertible, so choosing lean now does not strand the data.
+Choosing lean does not strand the data, but its prefix is not a plain
+tree: another front end or a passthrough mount pointed at it sees every
+version under its own key, and none of them reads the manifest. To move a
+workspace to the hub or to FUSE, mount it in a pod and copy the tree out.
 
 For agents collaborating on code, do **not** reach for a git-over-S3
 remote: use plain `git` against a real git host and let flint-lean keep
