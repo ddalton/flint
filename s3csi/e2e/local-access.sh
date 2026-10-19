@@ -90,31 +90,53 @@ esac
 # ── setup ─────────────────────────────────────────────────────────────
 if [ "${1:-}" = setup ]; then
     set -e
-    if ! onnode "grep -q 'runtimes.runsc' /etc/containerd/config.toml"; then
-        echo "installing runsc ($GARCH) into $NODE"
+    # Binaries and handler are separate steps, each idempotent. Current
+    # gVisor releases run the sentry as a sidecar binary
+    # (/usr/local/bin/gvisor-bin/gvisor_sentry): installing only runsc and
+    # the shim fails at pod start with "sidecar gvisor_sentry not usable",
+    # so the whole tarball goes in (found on trove's AL2023 nodes with
+    # release-20261012.0, the forge export drill of 2026-10-19).
+    if ! onnode "test -x /usr/local/bin/runsc && test -x /usr/local/bin/gvisor-bin/gvisor_sentry"; then
+        echo "installing gVisor ($GARCH) into $NODE"
         if [ "$NODE_EXEC" = nodesh ]; then
-            nodex "$GVISOR_URL/$GARCH" <<'EOF' || { echo "runsc download on $NODE failed" >&2; exit 1; }
+            nodex "$GVISOR_URL/$GARCH" <<'EOF' || { echo "gVisor download on $NODE failed" >&2; exit 1; }
 set -e
-mkdir -p /opt/gvisor && cd /opt/gvisor
+mkdir -p /opt/gvisor && cd /opt/gvisor && rm -rf x && mkdir x
 curl -fsSLO "$1/gvisor.tar.bz2" && curl -fsSLO "$1/gvisor.tar.bz2.sha512"
 sha512sum -c gvisor.tar.bz2.sha512
-tar xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1 2>/dev/null \
-    || python3 -c "import tarfile; t = tarfile.open('gvisor.tar.bz2'); [t.extract(n, '.') for n in ('runsc', 'containerd-shim-runsc-v1')]"
-install -m 0755 runsc containerd-shim-runsc-v1 /usr/local/bin/
-rm -f gvisor.tar.bz2
+tar xjf gvisor.tar.bz2 -C x 2>/dev/null \
+    || python3 -c "import tarfile; tarfile.open('gvisor.tar.bz2').extractall('x')"
+install -m 0755 x/runsc x/containerd-shim-runsc-v1 /usr/local/bin/
+if [ -d x/gvisor-bin ]; then rm -rf /usr/local/bin/gvisor-bin && cp -a x/gvisor-bin /usr/local/bin/gvisor-bin; fi
+rm -rf x gvisor.tar.bz2
 EOF
         else
-            ( cd "$WORK" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2.sha512" \
-                && shasum -a 512 -c gvisor.tar.bz2.sha512 && tar xjf gvisor.tar.bz2 runsc containerd-shim-runsc-v1 )
-            docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/runsc && chmod +x /usr/local/bin/runsc' < "$WORK/runsc"
-            docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/containerd-shim-runsc-v1 && chmod +x /usr/local/bin/containerd-shim-runsc-v1' < "$WORK/containerd-shim-runsc-v1"
+            ( cd "$WORK" && rm -rf gvisor-x && mkdir gvisor-x \
+                && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2" && curl -fsSLO "$GVISOR_URL/$GARCH/gvisor.tar.bz2.sha512" \
+                && shasum -a 512 -c gvisor.tar.bz2.sha512 && tar xjf gvisor.tar.bz2 -C gvisor-x )
+            docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/runsc && chmod +x /usr/local/bin/runsc' < "$WORK/gvisor-x/runsc"
+            docker exec -i "$NODE" sh -c 'cat > /usr/local/bin/containerd-shim-runsc-v1 && chmod +x /usr/local/bin/containerd-shim-runsc-v1' < "$WORK/gvisor-x/containerd-shim-runsc-v1"
+            if [ -d "$WORK/gvisor-x/gvisor-bin" ]; then
+                docker exec "$NODE" rm -rf /usr/local/bin/gvisor-bin
+                docker cp "$WORK/gvisor-x/gvisor-bin" "$NODE:/usr/local/bin/gvisor-bin"
+            fi
         fi
-        # containerd's config format decides the CRI plugin's name: version 3
-        # (containerd 2.x's own) moved runtimes under io.containerd.cri.v1.runtime.
+    fi
+    # Judged on what containerd LOADED (`config dump`), not on the file: a
+    # handler an older run of this script wrote under the wrong plugin name
+    # is in the file and ignored by containerd, and must be written again.
+    if ! onnode "containerd config dump 2>/dev/null | grep -q 'runtimes.runsc'"; then
+        # containerd's config format decides the CRI plugin's name: from
+        # version 3 (containerd 2.x) runtimes live under
+        # io.containerd.cri.v1.runtime. containerd 2.3 writes version 4,
+        # which uses the same name; testing for "= 3" alone put the handler
+        # under the old name, which containerd ignores ("no runtime for
+        # runsc is configured").
         nodex <<'EOF'
 set -e
 cfg=/etc/containerd/config.toml
-if grep -q '^version *= *3' "$cfg"; then plug='io.containerd.cri.v1.runtime'; else plug='io.containerd.grpc.v1.cri'; fi
+v=$(sed -n 's/^version *= *\([0-9]*\).*/\1/p' "$cfg" | head -1)
+if [ "${v:-2}" -ge 3 ]; then plug='io.containerd.cri.v1.runtime'; else plug='io.containerd.grpc.v1.cri'; fi
 cat >> "$cfg" <<TOML
 
 [plugins."$plug".containerd.runtimes.runsc]

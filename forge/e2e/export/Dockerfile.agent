@@ -1,0 +1,16 @@
+# The drill's AGENT image: the forge git image plus the credential helper
+# the agent guide tells every agent to use. flint-forge-git images built
+# before d5441a78 do NOT carry `flint-forge-credential` (the 2026-10-19
+# drill ran on drill-be41f1e, one of those, and found it), so an agent
+# following docs/flint-forge-for-agents.md had no helper to point git at.
+# From d5441a78 the git image ships it and this layer is a no-op; it stays
+# so the drill can run against an older tag.
+#
+#   docker build -f forge/e2e/export/Dockerfile.agent \
+#     --build-arg TAG=<tag> --build-arg BIN=<dir holding flint-forge-credential> \
+#     -t dilipdalton/flint-forge-agent-drill:<tag> <that dir>
+ARG TAG
+FROM dilipdalton/flint-forge-git:${TAG}
+COPY flint-forge-credential /usr/local/bin/flint-forge-credential
+RUN chmod 0755 /usr/local/bin/flint-forge-credential
+ENTRYPOINT []
