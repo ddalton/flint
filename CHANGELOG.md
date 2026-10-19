@@ -12,20 +12,6 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
-### Fixed
-
-- **The lean guide no longer says the `files/` prefix is a plain tree**
-  (2026-10-19; `docs/flint-lean-for-agent-fleets.{md,html,pdf}`). Since
-  immutable object handles shipped in 1.57.0, every write lands at a fresh
-  `files/<path>@<flush>` key and the manifest says which version is the
-  tree. The guide's verify section still showed a bare `files/notes.txt`
-  and said the prefix "is the workspace", and its closing table said all
-  front ends "share one bucket format and are mutually convertible". A
-  plain S3 tool or a passthrough mount pointed at a lean prefix sees every
-  version under its own key, not the tree. The guide now says so, and
-  says to move a workspace to another front end by mounting it in a pod
-  and copying the tree out.
-
 ## [1.59.0] - 2026-10-19
 
 Lean's correctness fixes since 1.58.0, and Kerberos for flint lite and
@@ -490,6 +476,17 @@ the lite render-parity fixture regenerated.
 
 ### Fixed
 
+- **The lean guide no longer says the `files/` prefix is a plain tree**
+  (2026-10-19; `docs/flint-lean-for-agent-fleets.{md,html,pdf}`). Since
+  immutable object handles shipped in 1.57.0, every write lands at a fresh
+  `files/<path>@<flush>` key and the manifest says which version is the
+  tree. The guide's verify section still showed a bare `files/notes.txt`
+  and said the prefix "is the workspace", and its closing table said all
+  front ends "share one bucket format and are mutually convertible". A
+  plain S3 tool or a passthrough mount pointed at a lean prefix sees every
+  version under its own key, not the tree. The guide now says so, and
+  says to move a workspace to another front end by mounting it in a pod
+  and copying the tree out.
 - **lean: a UI edit that committed is never answered as failed** (2026-10-17;
   found by auditing the LeanP1 model's mutants against the tests, MN2). When
   a delete, save or rename's manifest CAS landed but its response was lost,
