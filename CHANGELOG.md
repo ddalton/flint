@@ -12,6 +12,26 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **forge: a plain export for consumers that read S3 keys.**
+  `FlintRepo.spec.export.format: plain` publishes the exported ref as
+  `commits/<sha>/<path>`, a `manifests/<sha>.json` per commit, and a
+  `CURRENT` pointer written last by compare-and-swap. Spark, Airflow,
+  NiFi or a Snowflake stage can resolve `CURRENT` and read the tree with
+  no flint code. A superseded commit stays readable for `graceSecs`
+  (default 3600), and the newest `keep` (default 5) are never collected.
+  `format: lean` stays the default.
+
+### Fixed
+
+- **forge docs: the lean-shaped export is not a plain tree.** The forge
+  guide and design called it "legible". Since 1.57.0 lean stores
+  `files/<path>@<flush>`, so it is readable only through lean, lite or
+  passthrough's `lean` mode. The guide also said a foreign write into
+  the export prefix is overwritten by the next export, which composition
+  drill C3 had already shown to be false.
+
 ## [1.59.1] - 2026-10-19
 
 A patch release for one defect that shipped in 1.59.0 and earlier: the

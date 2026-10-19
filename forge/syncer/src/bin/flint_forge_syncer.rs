@@ -41,7 +41,13 @@
 //!   FLINT_FORGE_PROTECTED        comma-separated globs, no direct push
 //!   FLINT_FORGE_ALLOW_NON_FF     comma-separated globs, force allowed
 //!   FLINT_FORGE_EXPORT_REF       the ref whose tree is exported
-//!   FLINT_FORGE_EXPORT_PREFIX    the lean workspace prefix it goes to
+//!   FLINT_FORGE_EXPORT_PREFIX    the prefix it goes to
+//!   FLINT_FORGE_EXPORT_FORMAT    `lean` (default) or `plain`: a lean
+//!                                workspace, or commits/<sha>/ plus a
+//!                                CURRENT pointer any S3 reader can use
+//!   FLINT_FORGE_EXPORT_KEEP      plain: newest exports always kept (5)
+//!   FLINT_FORGE_EXPORT_GRACE_SECS  plain: how long a superseded export
+//!                                stays readable (3600)
 //!   FLINT_FORGE_EXPORT_EVERY_SECS  floor between exports (default 300)
 //!   FLINT_FORGE_EXPORT_TIMEOUT_SECS  how long one export barrier may
 //!                                run before it is killed (default 300).
@@ -62,7 +68,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use flint_forge::bundle::BundleConfig;
-use flint_forge::export::ExportConfig;
+use flint_forge::export::{ExportConfig, Format};
 use flint_forge::prune::PruneConfig;
 use flint_forge::policy::Policy;
 use flint_forge::server::{self, LfsOpts, ServerOpts};
@@ -266,6 +272,22 @@ async fn serve() {
                 std::process::exit(EXIT_REFUSED);
             }
             let base = cfg.state_dir.join("export");
+            // An unknown shape is refused, not defaulted: a typo here
+            // would otherwise publish a lean workspace to a consumer
+            // that reads plain keys, and it would see nothing at all.
+            let format = match std::env::var("FLINT_FORGE_EXPORT_FORMAT").ok().as_deref() {
+                None | Some("") | Some("lean") => Format::Lean,
+                Some("plain") => Format::Plain {
+                    keep: env_u64("FLINT_FORGE_EXPORT_KEEP", 5).max(1) as usize,
+                    grace_secs: env_u64("FLINT_FORGE_EXPORT_GRACE_SECS", 3600),
+                },
+                Some(other) => {
+                    eprintln!(
+                        "flint-forge-syncer: FLINT_FORGE_EXPORT_FORMAT={other:?} is neither `lean` nor `plain`"
+                    );
+                    std::process::exit(EXIT_REFUSED);
+                }
+            };
             Some(ExportConfig {
                 reference,
                 prefix,
@@ -280,6 +302,7 @@ async fn serve() {
                 root: base.join("tree"),
                 index: base.join("index"),
                 project_id: cfg.project_id.clone(),
+                format,
             })
         }
         (None, None) => None,

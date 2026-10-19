@@ -600,6 +600,20 @@ RSS ~2.4 MB per clone; the rest is shared page cache).
 
 ## 9. The legible export — the shipped lean binary
 
+> **2026-10-19: no longer legible, and a second shape added.** This
+> section was written when lean stored one object per path at
+> `files/<path>`. Lean's immutable handles (1.57.0) moved every version
+> to `files/<path>@<flush>`, so a lean-shaped export is readable only
+> through flint (lean, lite, passthrough's `lean` mode), not by a bare
+> GET — which is what the consumers outside the family (Spark, Airflow,
+> NiFi, Snowflake stages) need. `export.format: plain` publishes
+> `commits/<sha>/<path>`, `manifests/<sha>.json` and a `CURRENT` pointer
+> written last by CAS, with collection past a grace; the ordering
+> argument is in `forge/syncer/src/export.rs` ("The plain export"). The
+> lean shape stays the default. Below is the original text; its
+> "foreign write is overwritten" sentence was already wrong before
+> this (drill C3, recorded in `export.rs`).
+
 Per repo, optional: `export: {refs: [main], prefix: …, everySecs: …}`.
 After a batch that moved an exported ref, the syncer runs `git
 archive <ref> | tar -x -C <scratch>` and then **`flint-sync barrier`**

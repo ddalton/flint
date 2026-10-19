@@ -631,6 +631,21 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
                 ..Default::default()
             });
         }
+        if ex.format == Some(crate::forge_operator::crd::ExportFormat::Plain) {
+            env.push(EnvVar {
+                name: "FLINT_FORGE_EXPORT_FORMAT".into(),
+                value: Some("plain".into()),
+                ..Default::default()
+            });
+            for (name, v) in [
+                ("FLINT_FORGE_EXPORT_KEEP", ex.keep.map(u64::from)),
+                ("FLINT_FORGE_EXPORT_GRACE_SECS", ex.grace_secs),
+            ] {
+                if let Some(v) = v {
+                    env.push(EnvVar { name: name.into(), value: Some(v.to_string()), ..Default::default() });
+                }
+            }
+        }
     }
 
     // The fleet levers (§8), both opt-in and both off by default.
@@ -1324,11 +1339,26 @@ mod tests {
             refs: vec!["main".into()],
             prefix: "tenant/proj-export/".into(),
             every_secs: Some(120),
+            ..Default::default()
         });
         let env = env_of(&deployment(&r, &RenderDefaults::default(), 1));
         assert_eq!(env["FLINT_FORGE_EXPORT_REF"], "main");
         assert_eq!(env["FLINT_FORGE_EXPORT_PREFIX"], "tenant/proj-export");
         assert_eq!(env["FLINT_FORGE_EXPORT_EVERY_SECS"], "120");
+        assert!(!env.contains_key("FLINT_FORGE_EXPORT_FORMAT"), "lean is the syncer's default");
+
+        r.spec.export = Some(ExportSpec {
+            refs: vec!["main".into()],
+            prefix: "tenant/proj-deploy/".into(),
+            format: Some(crate::forge_operator::crd::ExportFormat::Plain),
+            keep: Some(3),
+            grace_secs: Some(600),
+            ..Default::default()
+        });
+        let env = env_of(&deployment(&r, &RenderDefaults::default(), 1));
+        assert_eq!(env["FLINT_FORGE_EXPORT_FORMAT"], "plain");
+        assert_eq!(env["FLINT_FORGE_EXPORT_KEEP"], "3");
+        assert_eq!(env["FLINT_FORGE_EXPORT_GRACE_SECS"], "600");
     }
 
     /// Both fleet levers are off unless asked for, and both reach the
@@ -1401,6 +1431,7 @@ mod tests {
             refs: vec!["main".into()],
             prefix: "tenant/proj-export/".into(),
             every_secs: None,
+            ..Default::default()
         });
         let claims = crate::forge_operator::reconcile::claims(&r);
         assert_eq!(claims.len(), 2);

@@ -277,20 +277,57 @@ There is one rung, not lite's three: the cache is an `emptyDir`, so
 scaling to zero already destroys it and waking is a restore from the
 bucket either way.
 
-## The legible export
+## The export
+
+A ref's tree, published outside the repository for things that do not
+speak git. Exactly one ref per export, refused at admission otherwise.
+Two shapes:
 
 ```yaml
-spec:
+spec:   # lean, the default
   export: { refs: [main], prefix: team-a/proj-export/, everySecs: 300 }
+---
+spec:   # plain
+  export: { refs: [main], prefix: team-a/proj-deploy/, format: plain, keep: 5, graceSecs: 3600 }
 ```
 
-Publishes that ref's tree as a **lean workspace**, so lite, lean and
-passthrough readers can mount what forge holds without any forge code
-in them. Exactly one ref, refused at admission otherwise: a lean
-workspace is one tree.
+**`lean`** publishes a lean workspace. Read it through flint: a lean
+workspace, lite, or passthrough's `lean` mode, which build the tree from
+the manifest. It is **not** a plain tree in the bucket: since 1.57.0 lean
+stores each version at `files/<path>@<flush>` and only the manifest says
+which versions make up the tree, so a bare `aws s3 cp` or an Airflow DAG
+bucket pointed at it sees nothing usable.
 
-The export is a mirror derived from git, never a source of truth. A
-foreign write into its prefix is overwritten by the next export.
+**`plain`** is for anything that reads S3 keys itself — `spark-submit
+s3://…`, a DAG bucket, a NiFi or Snowflake stage:
+
+```
+<prefix>/commits/<sha>/<path>      the tree at that commit, written once
+<prefix>/manifests/<sha>.json      the file list; present = complete
+<prefix>/CURRENT                   "<sha>\n", written LAST
+```
+
+Resolve `CURRENT`, then read `commits/<sha>/`. Every file of a commit
+is uploaded before its manifest, and the manifest before `CURRENT`, so a
+reader never sees a mix of two commits or a pointer to a half-written
+one. `CURRENT` moves by a compare-and-swap, so a second writer cannot
+move it backwards. A superseded commit stays readable for `graceSecs`
+after it is replaced, and the newest `keep` are kept regardless; older
+ones are collected. Pinning a run to `commits/<sha>/` rather than to
+`CURRENT` ties it to the exact commit it ran.
+
+What `plain` does not have: per-file verification and incremental
+upload. Every commit uploads its whole tree, which is right for
+definitions (DAGs, job specs, configs) and wrong for datasets. Symlinks
+and submodules are skipped and listed in the manifest's `skipped`.
+
+**Either shape is a mirror derived from git, never a source of truth,
+and the prefix must be read-only to everyone but forge.** A foreign
+write is NOT repaired by the next export (composition drill C3 measured
+it). A lean export marks itself `sole_writer`, so a lean reader refuses
+a moved object instead of serving it; a plain reader has nothing to
+check against and takes the foreign bytes. Enforce read-only with the
+bucket policy.
 
 ## The trust boundary
 

@@ -1427,6 +1427,7 @@ fn export_cfg(dir: &std::path::Path) -> super::export::ExportConfig {
         root: dir.join("export/tree"),
         index: dir.join("export/index"),
         project_id: Some("proj".into()),
+        format: super::export::Format::Lean,
     }
 }
 
@@ -1455,6 +1456,164 @@ async fn the_exported_tree_is_the_refs_tree() {
         let from_git = rig.git(&["show", &format!("{c}:{name}")], None).await;
         assert_eq!(on_disk, from_git, "{name} must be byte-identical to what git holds");
     }
+}
+
+// ── the plain export ────────────────────────────────────────────────
+
+fn plain_cfg(dir: &std::path::Path, keep: usize, grace_secs: u64) -> super::export::ExportConfig {
+    let mut cfg = export_cfg(dir);
+    cfg.format = super::export::Format::Plain { keep, grace_secs };
+    cfg
+}
+
+async fn get_text(store: &MemoryStore, key: &str) -> Option<String> {
+    match store.get_whole(key, None).await {
+        Ok((_, b)) => Some(String::from_utf8(b.to_vec()).expect("utf8")),
+        Err(flint_store::StoreError::NotFound(_)) => None,
+        Err(e) => panic!("get {key}: {e}"),
+    }
+}
+
+/// A plain export is a tree any S3 reader can use: CURRENT names a
+/// commit, and `commits/<sha>/<path>` is byte-identical to the ref's
+/// file. A path the next commit deletes is absent from ITS prefix, and
+/// the superseded prefix is left whole for the grace.
+#[tokio::test]
+async fn a_plain_export_is_the_refs_tree_under_a_pointer() {
+    use super::export::{maybe_run, plain_manifest_key, PlainManifest};
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "alpha\n"), ("b.txt", "beta\n")], "one").await;
+    rig.run(vec![push(1, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1.clone() }])])
+        .await;
+    let cfg = plain_cfg(rig._dir.path(), 5, 3600);
+    let store = rig.store.clone();
+
+    let got = maybe_run(&rig.sc.git, store.as_ref(), &cfg, 1_000, 1).await.expect("export");
+    assert_eq!(got.as_deref(), Some(c1.as_str()));
+    assert_eq!(get_text(&store, "tenant/export/CURRENT").await.as_deref(), Some(format!("{c1}\n").as_str()));
+    for (name, content) in [("a.txt", "alpha\n"), ("b.txt", "beta\n")] {
+        let key = format!("tenant/export/commits/{c1}/{name}");
+        assert_eq!(get_text(&store, &key).await.as_deref(), Some(content), "{key}");
+    }
+    let m: PlainManifest = serde_json::from_str(
+        &get_text(&store, &plain_manifest_key("tenant/export", &c1)).await.expect("manifest"),
+    )
+    .unwrap();
+    assert_eq!(m.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["a.txt", "b.txt"]);
+
+    // Already exported: no work, no repoint.
+    assert!(maybe_run(&rig.sc.git, store.as_ref(), &cfg, 5_000, 1).await.unwrap().is_none());
+
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "ALPHA\n")], "two").await;
+    rig.run(vec![push(2, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1.clone(), new_oid: c2.clone() }])])
+        .await;
+    let got = maybe_run(&rig.sc.git, store.as_ref(), &cfg, 5_000, 1).await.expect("export 2");
+    assert_eq!(got.as_deref(), Some(c2.as_str()));
+    assert_eq!(get_text(&store, "tenant/export/CURRENT").await.as_deref(), Some(format!("{c2}\n").as_str()));
+    assert_eq!(get_text(&store, &format!("tenant/export/commits/{c2}/a.txt")).await.as_deref(), Some("ALPHA\n"));
+    assert!(get_text(&store, &format!("tenant/export/commits/{c2}/b.txt")).await.is_none(), "deleted in c2");
+    assert_eq!(
+        get_text(&store, &format!("tenant/export/commits/{c1}/b.txt")).await.as_deref(),
+        Some("beta\n"),
+        "the superseded export stays readable for the grace"
+    );
+}
+
+/// CURRENT moves only by a CAS. A pointer some other writer moved is
+/// not overwritten by a stale export, and a pointer that already names
+/// the commit is not rewritten.
+#[tokio::test]
+async fn a_plain_export_never_repoints_over_a_pointer_it_did_not_read() {
+    use super::export::publish_plain;
+    let mut rig = Rig::new().await;
+    rig.start().await;
+    let c1 = rig.stage_commit(None, &[("a.txt", "alpha\n")], "one").await;
+    rig.run(vec![push(1, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: zero(), new_oid: c1.clone() }])])
+        .await;
+    let cfg = plain_cfg(rig._dir.path(), 5, 3600);
+    let store = rig.store.clone();
+    publish_plain(&rig.sc.git, store.as_ref(), &cfg, &c1, 100, 1).await.expect("first");
+    let (meta1, _) = store.get_whole("tenant/export/CURRENT", None).await.unwrap();
+    publish_plain(&rig.sc.git, store.as_ref(), &cfg, &c1, 200, 1).await.expect("again");
+    let (meta2, _) = store.get_whole("tenant/export/CURRENT", None).await.unwrap();
+    assert_eq!(meta1.etag, meta2.etag, "publishing the commit CURRENT already names must not rewrite it");
+
+    // The race: this export reads CURRENT, another writer moves it, and
+    // this export's CAS must lose rather than move it back.
+    let c2 = rig.stage_commit(Some(&c1), &[("a.txt", "two\n")], "two").await;
+    rig.run(vec![push(2, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c1.clone(), new_oid: c2.clone() }])])
+        .await;
+    let cond = super::export::pointer_condition(store.as_ref(), "tenant/export", &c2)
+        .await
+        .unwrap()
+        .expect("CURRENT names c1, so there is a move to make");
+    super::packio::put_small(store.as_ref(), "tenant/export/CURRENT", b"someone-else\n".to_vec(), 9)
+        .await
+        .unwrap();
+    let err = super::export::publish_plain_under(&rig.sc.git, store.as_ref(), &cfg, &c2, 300, 1, cond)
+        .await
+        .expect_err("a pointer moved since it was read must not be overwritten");
+    assert!(err.to_string().contains("moved while"), "{err}");
+    assert_eq!(get_text(&store, "tenant/export/CURRENT").await.as_deref(), Some("someone-else\n"));
+}
+
+/// Collection: CURRENT's commit is never taken, nor the newest `keep`,
+/// nor one superseded less than the grace ago; a manifest-less commit
+/// prefix is taken only once all of it is older than the grace.
+#[tokio::test]
+async fn plain_collection_spares_the_pointer_the_newest_and_the_grace() {
+    use super::export::{collect_plain, plain_commit_prefix, plain_manifest_key, PlainManifest};
+    let store = Arc::new(MemoryStore::new());
+    let p = "t/x";
+    let put = |key: String, body: Vec<u8>| {
+        let store = store.clone();
+        async move {
+            super::packio::put_small(store.as_ref(), &key, body, 1).await.expect("put");
+        }
+    };
+    // The orphan pass reads the store's own (wall-clock) timestamps, so
+    // the test's clock is anchored to it. Four exports, CURRENT = "d".
+    let t0 = super::now_unix();
+    for (sha, unix) in [("a", t0 - 400), ("b", t0 - 300), ("c", t0 - 100), ("d", t0 - 50)] {
+        put(format!("{}f.txt", plain_commit_prefix(p, sha)), b"x".to_vec()).await;
+        let m = PlainManifest { commit: sha.into(), reference: "refs/heads/main".into(), unix, files: vec![], skipped: vec![] };
+        put(plain_manifest_key(p, sha), serde_json::to_vec(&m).unwrap()).await;
+    }
+    // An orphan (no manifest), young.
+    put(format!("{}f.txt", plain_commit_prefix(p, "z")), b"x".to_vec()).await;
+    let present = |sha: &'static str| {
+        let store = store.clone();
+        async move { get_text(&store, &format!("{}f.txt", plain_commit_prefix("t/x", sha))).await.is_some() }
+    };
+
+    // keep=1, grace=150, now=t0: a was superseded 300 s ago (taken),
+    // b 100 s ago and c 50 s ago (within the grace).
+    let n = collect_plain(store.as_ref(), p, "d", 1, 150, t0).await.expect("collect");
+    assert_eq!(n, 1);
+    assert!(!present("a").await && get_text(&store, &plain_manifest_key(p, "a")).await.is_none());
+    assert!(present("b").await && present("c").await && present("d").await);
+    assert!(present("z").await, "a young orphan may be an export still uploading");
+
+    // Much later: everything but CURRENT goes, even with keep=1 — and
+    // CURRENT goes nowhere even though it is the oldest survivor's peer.
+    store.backdate_epoch(&format!("{}f.txt", plain_commit_prefix(p, "z")), 10_000);
+    let n = collect_plain(store.as_ref(), p, "d", 1, 150, t0 + 10_000).await.expect("collect");
+    assert_eq!(n, 2);
+    assert!(!present("b").await && !present("c").await);
+    assert!(present("d").await, "CURRENT's commit is never collected");
+    assert!(!present("z").await, "an old orphan is taken");
+
+    // CURRENT is honoured even when it is NOT the newest manifest (a
+    // newer export wrote its manifest and then lost its CAS): the newer
+    // one is the newest `keep`, and the pointer's own is spared outright.
+    put(format!("{}f.txt", plain_commit_prefix(p, "e")), b"x".to_vec()).await;
+    let m = PlainManifest { commit: "e".into(), reference: "refs/heads/main".into(), unix: t0 + 10_100, files: vec![], skipped: vec![] };
+    put(plain_manifest_key(p, "e"), serde_json::to_vec(&m).unwrap()).await;
+    let n = collect_plain(store.as_ref(), p, "d", 1, 0, t0 + 99_999).await.expect("collect");
+    assert_eq!(n, 0);
+    assert!(present("d").await, "the pointer's commit, though no longer the newest");
+    assert!(present("e").await);
 }
 
 /// The half of falsifier 9 that the design's own first draft got
@@ -1914,6 +2073,7 @@ async fn the_export_baseline_survives_a_pod_that_does_not() {
         root: dir.path().join("tree"),
         index: dir.path().join("index"),
         project_id: None,
+        format: super::export::Format::Lean,
     };
     let key = "p/git/export-baseline.json";
     let bp = cfg.root.join(".flint-sync").join("baseline.json");

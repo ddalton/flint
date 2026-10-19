@@ -95,19 +95,20 @@ pub struct PackRules {
     .message("spec.keyPrefix must end with '/' — a prefix without it also matches sibling names"))]
 #[x_kube(validation = Rule::new("!self.keyPrefix.startsWith('/')")
     .message("spec.keyPrefix must not start with '/'"))]
-// The export publishes a lean workspace, and a lean workspace's control
-// objects live under `<prefix>/.flint/`. Pointing an export at the
-// repository's own prefix would put a second writer's manifest beside
-// `git/`; pointing it at another repo's export prefix would have two
-// servers publishing one workspace.
+// The export has control objects of its own under its prefix — lean's
+// `.flint/`, or plain's `CURRENT` and `manifests/`. Pointing an export at
+// the repository's own prefix would put a second writer beside `git/`;
+// pointing it at another repo's export prefix would have two servers
+// publishing one tree.
 #[x_kube(validation = Rule::new("!has(self.export) || self.export.prefix != self.keyPrefix")
-    .message("spec.export.prefix must differ from spec.keyPrefix — the export is a separate lean workspace"))]
-// ONE ref per export prefix. A lean workspace is one tree, so two refs
-// published into one prefix would be two writers of one manifest, each
-// deleting what the other just wrote. Refused at admission rather than
-// discovered as a workspace that flickers between two histories.
+    .message("spec.export.prefix must differ from spec.keyPrefix — the export is a separate prefix with its own control objects"))]
+// ONE ref per export prefix, in either shape. A lean workspace is one
+// tree and a plain export has one CURRENT, so two refs published into
+// one prefix would be two writers of one pointer, each moving it off
+// the other's history. Refused at admission rather than discovered as
+// an export that flickers between two histories.
 #[x_kube(validation = Rule::new("!has(self.export) || size(self.export.refs) == 1")
-    .message("spec.export.refs must name exactly one ref — a lean workspace is one tree, and two refs in one prefix would be two writers of one manifest"))]
+    .message("spec.export.refs must name exactly one ref — an export is one tree, and two refs in one prefix would be two writers of one pointer"))]
 pub struct FlintRepoSpec {
     /// The durable, user-declared identity the claim cell carries —
     /// stable across CR delete/recreate, and NEVER the CR UID. A
@@ -189,8 +190,9 @@ pub struct FlintRepoSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syncer_env: Option<std::collections::BTreeMap<String, String>>,
 
-    /// The legible export (design §9): `git archive` of a ref,
-    /// published as a lean workspace by the shipped `flint-sync`.
+    /// The export (design §9): a ref's tree, published as a lean
+    /// workspace (`format: lean`, the default) or as plain objects under
+    /// a per-commit prefix with a `CURRENT` pointer (`format: plain`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<ExportSpec>,
     /// The REST file API (`docs/plans/forge-file-api-design.md`).
@@ -310,14 +312,36 @@ pub struct ExportSpec {
     /// Refs whose trees are published, e.g. `["main"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<String>,
-    /// Where the exported workspace lives. A separate prefix from the
-    /// repository's own — it is a lean workspace with lean's control
-    /// objects, not a second directory in the bare repo.
+    /// Where the export lives. A separate prefix from the repository's
+    /// own — it carries the export's control objects, not a second
+    /// directory in the bare repo.
     pub prefix: String,
     /// A floor, not a schedule: the export runs after a batch that
     /// moved an exported ref, no more often than this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_secs: Option<u64>,
+    /// `lean` (default): a lean workspace, readable through lean, lite
+    /// or passthrough's `lean` mode — NOT by a bare S3 GET, since its
+    /// objects are `files/<path>@<flush>`. `plain`:
+    /// `commits/<sha>/<path>`, `manifests/<sha>.json` and a `CURRENT`
+    /// pointer written last, readable by anything that reads S3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ExportFormat>,
+    /// Plain only: the newest exports kept regardless of age (default 5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep: Option<u32>,
+    /// Plain only: how long a superseded export stays readable, for a
+    /// reader that resolved `CURRENT` just before it moved (default 3600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grace_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    #[default]
+    Lean,
+    Plain,
 }
 
 /// The browser's door onto a repository. Agents keep using git; this is

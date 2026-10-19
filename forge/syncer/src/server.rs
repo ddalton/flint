@@ -42,7 +42,7 @@ pub struct ServerOpts {
     /// that cannot be made Holds.
     pub status_addr: Option<String>,
     pub policy: Policy,
-    /// The legible export (§9). `None` = off, which is the default: a
+    /// The export (§9), lean or plain. `None` = off, which is the default: a
     /// repository that nobody mounts as a workspace pays nothing for
     /// the option.
     pub export: Option<super::export::ExportConfig>,
@@ -589,26 +589,35 @@ pub async fn run(mut sc: Syncer, opts: ServerOpts) -> ForgeResult<()> {
                     // without one every object in the export prefix
                     // looks like a stranger's: lean parks all of them
                     // and the published workspace freezes for good.
+                    // The plain shape has no baseline: it never reads
+                    // back what it wrote.
+                    let lean = ex.format == super::export::Format::Lean;
                     let bkey = sc.cfg.export_baseline_key();
-                    if let Err(e) =
-                        super::export::rehydrate_baseline(sc.store.as_ref(), &bkey, ex).await
-                    {
-                        eprintln!("flint-forge: export baseline not rehydrated: {e}");
+                    if lean {
+                        if let Err(e) =
+                            super::export::rehydrate_baseline(sc.store.as_ref(), &bkey, ex).await
+                        {
+                            eprintln!("flint-forge: export baseline not rehydrated: {e}");
+                        }
                     }
-                    match super::export::maybe_run(&sc.git, ex, super::now_unix()).await {
+                    let ep = sc.lease().map(|l| l.epoch).unwrap_or(0);
+                    match super::export::maybe_run(&sc.git, sc.store.as_ref(), ex, super::now_unix(), ep)
+                        .await
+                    {
                         // Stashed, not written: the NEXT batch's single
                         // CAS carries it (see `Syncer::pending_exported_commit`).
                         Ok(Some(commit)) => {
-                            let ep = sc.lease().map(|l| l.epoch).unwrap_or(0);
-                            if let Err(e) = super::export::preserve_baseline(
-                                sc.store.as_ref(),
-                                &bkey,
-                                ex,
-                                ep,
-                            )
-                            .await
-                            {
-                                eprintln!("flint-forge: export baseline not preserved: {e}");
+                            if lean {
+                                if let Err(e) = super::export::preserve_baseline(
+                                    sc.store.as_ref(),
+                                    &bkey,
+                                    ex,
+                                    ep,
+                                )
+                                .await
+                                {
+                                    eprintln!("flint-forge: export baseline not preserved: {e}");
+                                }
                             }
                             sc.pending_exported_commit = Some(commit)
                         }

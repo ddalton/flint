@@ -1,6 +1,17 @@
-//! The legible export (design §9): a chosen ref's tree, published as a
-//! lean workspace so lite, lean and passthrough readers can mount what
-//! forge holds without any forge code in them.
+//! The export (design §9): a chosen ref's tree, published in one of two
+//! shapes.
+//!
+//! - **`lean`** (the default): a lean workspace, so lite, lean and
+//!   passthrough's `lean` mode can mount what forge holds without any
+//!   forge code in them. Since lean's immutable handles (1.57.0) the
+//!   objects are `files/<path>@<flush>` and only the manifest names the
+//!   tree, so this shape is readable THROUGH FLINT, not by a bare GET.
+//! - **`plain`**: one immutable prefix per commit and a pointer written
+//!   last (see "The plain export" below), for consumers that read S3
+//!   keys themselves — `spark-submit s3://…`, an Airflow DAG bucket, a
+//!   NiFi or Snowflake stage.
+//!
+//! What follows up to "The plain export" is the lean shape.
 //!
 //! **Forge writes no manifest.** It materialises the tree and then runs
 //! the shipped `flint-sync barrier` over it — the same binary a lean
@@ -109,6 +120,18 @@ pub struct ExportConfig {
     /// Stamped into the export's claim cell check, so a prefix another
     /// project claims is refused rather than overwritten.
     pub project_id: Option<String>,
+    /// Which shape is published.
+    pub format: Format,
+}
+
+/// The two shapes an export can take (see the module comment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Format {
+    Lean,
+    /// `keep`: the newest exports kept regardless of age (at least 1).
+    /// `grace_secs`: how long a superseded export stays readable, for a
+    /// reader that resolved `CURRENT` just before it moved.
+    Plain { keep: usize, grace_secs: u64 },
 }
 
 /// What the syncer last published, and when. Persisted beside the
@@ -402,8 +425,6 @@ pub async fn run_barrier(cfg: &ExportConfig) -> ForgeResult<()> {
     Ok(())
 }
 
-/// One export, if one is due. Returns the commit published, which the
-/// caller stashes for the NEXT snapshot CAS.
 /// `flint-sync`'s baseline — the etag it last published for each file.
 ///
 /// WHY THIS HAS TO BE IN THE BUCKET. lean protects a workspace from a
@@ -477,7 +498,17 @@ pub async fn preserve_baseline(
     super::packio::put_small(store, key, body, epoch).await
 }
 
-pub async fn maybe_run(git: &Git, cfg: &ExportConfig, now: u64) -> ForgeResult<Option<String>> {
+/// One export, if one is due. Returns the commit published, which the
+/// caller stashes for the NEXT snapshot CAS. `store` and `epoch` are
+/// used only by the plain shape; the lean shape publishes through
+/// `flint-sync`, which brings its own client.
+pub async fn maybe_run(
+    git: &Git,
+    store: &dyn flint_store::ObjectStore,
+    cfg: &ExportConfig,
+    now: u64,
+    epoch: u64,
+) -> ForgeResult<Option<String>> {
     let head = git.ref_oid(&cfg.reference).await?;
     let last = load_record(cfg);
     match plan(cfg, head.as_deref(), &last, now) {
@@ -487,6 +518,19 @@ pub async fn maybe_run(git: &Git, cfg: &ExportConfig, now: u64) -> ForgeResult<O
             // the thing an operator needs to be able to see.
             eprintln!("flint-forge: export skipped — {why}");
             Ok(None)
+        }
+        Plan::Run { to, .. } if matches!(cfg.format, Format::Plain { .. }) => {
+            let Format::Plain { keep, grace_secs } = cfg.format else { unreachable!() };
+            publish_plain(git, store, cfg, &to, now, epoch).await?;
+            // Collection is housekeeping: a failure costs storage, never
+            // a reader, so it is logged and retried on the next export.
+            match collect_plain(store, &cfg.prefix, &to, keep, grace_secs, now).await {
+                Ok(n) if n > 0 => eprintln!("flint-forge: plain export — collected {n} superseded export(s)"),
+                Ok(_) => {}
+                Err(e) => eprintln!("flint-forge: plain export collection deferred: {e}"),
+            }
+            save_record(cfg, &Record { commit: Some(to.clone()), unix: now, ..Record::default() })?;
+            Ok(Some(to))
         }
         Plan::Run { from, to } => {
             materialize(git, cfg, from.as_deref(), &to).await?;
@@ -524,4 +568,257 @@ pub async fn maybe_run(git: &Git, cfg: &ExportConfig, now: u64) -> ForgeResult<O
             Ok(Some(to))
         }
     }
+}
+
+// ── The plain export ─────────────────────────────────────────────────
+//
+//   <prefix>/commits/<sha>/<path>      the tree, written once, never modified
+//   <prefix>/manifests/<sha>.json      what was written; present = complete
+//   <prefix>/CURRENT                   "<sha>\n", written LAST
+//
+// The order is the whole design, and it is the same rule lean's model
+// proves for its own manifest: everything a pointer names exists before
+// the pointer names it, and nothing it names is deleted while it does.
+//
+// - Every file of a commit is uploaded, then its manifest, then CURRENT.
+//   A crash anywhere before CURRENT leaves CURRENT on the previous
+//   commit, whose objects are untouched — a reader never sees a mix of
+//   two commits, and never a pointer to a half-written one.
+// - CURRENT is moved by a CAS on the etag read at the start. A second
+//   writer (a deposed pod still finishing) makes this one fail and
+//   retry on the next batch, instead of the two racing the pointer
+//   backwards.
+// - Collection never takes the commit CURRENT names, nor the newest
+//   `keep`, nor one superseded less than `grace_secs` ago: a reader
+//   that resolved CURRENT just before it moved keeps a readable tree
+//   for that long. It deletes the manifest FIRST, so a manifest never
+//   names objects that are gone; a crash between the two leaves files
+//   with no manifest, which the orphan pass takes once they are older
+//   than the grace.
+//
+// What this shape does NOT have, unlike the lean one: per-file
+// verification (a foreign write under `commits/` is not detected — the
+// prefix must be read-only to everyone but forge, by bucket policy) and
+// incremental upload (each commit uploads its whole tree; this is for
+// definitions, not datasets). Symlinks and submodules are skipped and
+// logged: an object store has neither.
+
+pub fn plain_current_key(prefix: &str) -> String {
+    format!("{prefix}/CURRENT")
+}
+
+pub fn plain_commit_prefix(prefix: &str, sha: &str) -> String {
+    format!("{prefix}/commits/{sha}/")
+}
+
+pub fn plain_manifest_key(prefix: &str, sha: &str) -> String {
+    format!("{prefix}/manifests/{sha}.json")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlainManifest {
+    pub commit: String,
+    pub reference: String,
+    /// When this export was written. Collection measures a superseded
+    /// export's grace from its SUCCESSOR's `unix`.
+    pub unix: u64,
+    pub files: Vec<PlainFile>,
+    /// Tree entries that have no object-store form, by path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlainFile {
+    pub path: String,
+    pub size: u64,
+    /// The git blob id, so a consumer can check what it read against
+    /// `git cat-file`.
+    pub blob: String,
+}
+
+async fn put_with(
+    store: &dyn flint_store::ObjectStore,
+    key: &str,
+    body: Vec<u8>,
+    condition: &flint_store::PutCondition,
+    epoch: u64,
+) -> ForgeResult<()> {
+    let crc = flint_store::crc64_nvme(&body);
+    let stamps = flint_store::GenerationStamps {
+        generation: 0,
+        epoch,
+        flush_uuid: uuid::Uuid::new_v4().to_string(),
+        boundary_source: None,
+        posix: None,
+    };
+    store
+        .put_whole(key, bytes::Bytes::from(body), condition, &stamps, crc)
+        .await
+        .map_err(ForgeError::from)?;
+    Ok(())
+}
+
+/// Publish `to` as `commits/<to>/`, its manifest, and then CURRENT.
+pub async fn publish_plain(
+    git: &Git,
+    store: &dyn flint_store::ObjectStore,
+    cfg: &ExportConfig,
+    to: &str,
+    now: u64,
+    epoch: u64,
+) -> ForgeResult<()> {
+    // Read the pointer FIRST: its etag is what the final CAS is against,
+    // so anything that moves it while this export runs makes this one
+    // lose rather than overwrite.
+    match pointer_condition(store, &cfg.prefix, to).await? {
+        None => Ok(()),
+        Some(condition) => publish_plain_under(git, store, cfg, to, now, epoch, condition).await,
+    }
+}
+
+/// The CAS condition CURRENT will be moved under, or `None` when it
+/// already names `to`.
+pub async fn pointer_condition(
+    store: &dyn flint_store::ObjectStore,
+    prefix: &str,
+    to: &str,
+) -> ForgeResult<Option<flint_store::PutCondition>> {
+    use flint_store::PutCondition;
+    match store.get_whole(&plain_current_key(prefix), None).await {
+        Ok((_, body)) if String::from_utf8_lossy(&body).trim() == to => Ok(None),
+        Ok((meta, _)) => Ok(Some(PutCondition::IfMatch(meta.etag))),
+        Err(flint_store::StoreError::NotFound(_)) => Ok(Some(PutCondition::IfNoneMatchAny)),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The publish proper, under a pointer condition read beforehand.
+/// Separate so a test can move the pointer between the read and the
+/// CAS, which is the race the condition exists for.
+pub async fn publish_plain_under(
+    git: &Git,
+    store: &dyn flint_store::ObjectStore,
+    cfg: &ExportConfig,
+    to: &str,
+    now: u64,
+    epoch: u64,
+    condition: flint_store::PutCondition,
+) -> ForgeResult<()> {
+    use flint_store::PutCondition;
+    let current_key = plain_current_key(&cfg.prefix);
+    let base = plain_commit_prefix(&cfg.prefix, to);
+    let mut files = Vec::new();
+    let mut skipped = Vec::new();
+    for e in git.ls_tree(to, "", true).await? {
+        if e.kind != "blob" || e.mode == "120000" {
+            skipped.push(e.path);
+            continue;
+        }
+        let body = git.cat_blob(&e.oid).await?;
+        let size = body.len() as u64;
+        put_with(store, &format!("{base}{}", e.path), body, &PutCondition::Unconditional, epoch).await?;
+        files.push(PlainFile { path: e.path, size, blob: e.oid });
+    }
+    for p in &skipped {
+        eprintln!("flint-forge: plain export of {to} skips {p:?} — a symlink or submodule has no object form");
+    }
+
+    let manifest = PlainManifest {
+        commit: to.to_string(),
+        reference: cfg.reference.clone(),
+        unix: now,
+        files,
+        skipped,
+    };
+    let body = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| ForgeError::State(format!("plain manifest will not serialise: {e}")))?;
+    put_with(store, &plain_manifest_key(&cfg.prefix, to), body, &PutCondition::Unconditional, epoch)
+        .await?;
+
+    // LAST.
+    put_with(store, &current_key, format!("{to}\n").into_bytes(), &condition, epoch)
+        .await
+        .map_err(|e| match e {
+            ForgeError::Store(flint_store::StoreError::PreconditionFailed(_)) => ForgeError::State(format!(
+                "{current_key} moved while {to} was being exported — another writer is publishing \
+                 this prefix. Nothing was repointed; the export retries on the next batch."
+            )),
+            other => other,
+        })
+}
+
+/// Take superseded exports past their grace, and orphaned commit
+/// prefixes (files with no manifest) past theirs. Returns how many
+/// exports were taken.
+pub async fn collect_plain(
+    store: &dyn flint_store::ObjectStore,
+    prefix: &str,
+    current: &str,
+    keep: usize,
+    grace_secs: u64,
+    now: u64,
+) -> ForgeResult<usize> {
+    let keep = keep.max(1);
+    let mdir = format!("{prefix}/manifests/");
+    let mut manifests = Vec::new();
+    for o in store.list(&mdir).await? {
+        let Some(sha) = o.key.strip_prefix(&mdir).and_then(|k| k.strip_suffix(".json")) else {
+            continue;
+        };
+        let (_, body) = store.get_whole(&o.key, None).await?;
+        match serde_json::from_slice::<PlainManifest>(&body) {
+            Ok(m) if m.commit == sha => manifests.push(m),
+            // Not ours to judge: a manifest forge cannot read is left
+            // alone, and so are the files it names.
+            _ => eprintln!("flint-forge: plain export — {} is unreadable; left alone", o.key),
+        }
+    }
+    manifests.sort_by(|a, b| a.unix.cmp(&b.unix).then_with(|| a.commit.cmp(&b.commit)));
+
+    let n = manifests.len();
+    let mut taken = 0;
+    for (i, m) in manifests.iter().enumerate() {
+        if m.commit == current || i + keep >= n {
+            continue;
+        }
+        let superseded_at = manifests[i + 1].unix;
+        if now.saturating_sub(superseded_at) < grace_secs {
+            continue;
+        }
+        store.delete(&plain_manifest_key(prefix, &m.commit)).await?;
+        let keys: Vec<String> = store
+            .list(&plain_commit_prefix(prefix, &m.commit))
+            .await?
+            .into_iter()
+            .map(|o| o.key)
+            .collect();
+        store.delete_many(&keys).await?;
+        taken += 1;
+    }
+
+    // Orphans: a commit prefix with no manifest is a crashed export or
+    // a collection that died between its two deletes. Taken only once
+    // EVERY object under it is older than the grace, so a writer still
+    // uploading one is never cut off mid-tree.
+    let cdir = format!("{prefix}/commits/");
+    let named: std::collections::BTreeSet<&str> = manifests.iter().map(|m| m.commit.as_str()).collect();
+    let mut orphans: std::collections::BTreeMap<String, (bool, Vec<String>)> = Default::default();
+    for o in store.list(&cdir).await? {
+        let Some(sha) = o.key.strip_prefix(&cdir).and_then(|k| k.split('/').next()) else { continue };
+        if sha == current || named.contains(sha) {
+            continue;
+        }
+        let old = o.last_modified_unix.is_some_and(|t| now.saturating_sub(t) >= grace_secs);
+        let entry = orphans.entry(sha.to_string()).or_insert((true, Vec::new()));
+        entry.0 &= old;
+        entry.1.push(o.key);
+    }
+    for (sha, (old, keys)) in orphans {
+        if old {
+            eprintln!("flint-forge: plain export — taking orphaned commits/{sha}/ ({} objects)", keys.len());
+            store.delete_many(&keys).await?;
+        }
+    }
+    Ok(taken)
 }

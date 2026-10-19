@@ -567,7 +567,7 @@ mod tests {
     fn two_repositories_may_not_export_to_one_prefix() {
         let mut a = repo("a", "tenant/a/", "uid-a", "2026-09-01T00:00:00Z");
         let mut b = repo("b", "tenant/b/", "uid-b", "2026-09-02T00:00:00Z");
-        let ex = |p: &str| ExportSpec { refs: vec!["main".into()], prefix: p.into(), every_secs: None };
+        let ex = |p: &str| ExportSpec { refs: vec!["main".into()], prefix: p.into(), ..Default::default() };
         a.spec.export = Some(ex("tenant/shared/"));
         b.spec.export = Some(ex("tenant/shared/"));
         let all = vec![a.clone(), b.clone()];
@@ -587,6 +587,7 @@ mod tests {
             refs: vec!["main".into()],
             prefix: "tenant/x/".into(),
             every_secs: None,
+            ..Default::default()
         });
         let all = vec![owner.clone(), squatter.clone()];
         assert_eq!(arbitrate(&owner, &all), None);

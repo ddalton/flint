@@ -117,8 +117,9 @@ spec:
                 type: string
               export:
                 description: |-
-                  The legible export (design §9): `git archive` of a ref,
-                  published as a lean workspace by the shipped `flint-sync`.
+                  The export (design §9): a ref's tree, published as a lean
+                  workspace (`format: lean`, the default) or as plain objects under
+                  a per-commit prefix with a `CURRENT` pointer (`format: plain`).
                 nullable: true
                 properties:
                   everySecs:
@@ -129,11 +130,38 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  format:
+                    description: |-
+                      `lean` (default): a lean workspace, readable through lean, lite
+                      or passthrough's `lean` mode — NOT by a bare S3 GET, since its
+                      objects are `files/<path>@<flush>`. `plain`:
+                      `commits/<sha>/<path>`, `manifests/<sha>.json` and a `CURRENT`
+                      pointer written last, readable by anything that reads S3.
+                    enum:
+                    - lean
+                    - plain
+                    - null
+                    nullable: true
+                    type: string
+                  graceSecs:
+                    description: |-
+                      Plain only: how long a superseded export stays readable, for a
+                      reader that resolved `CURRENT` just before it moved (default 3600).
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  keep:
+                    description: 'Plain only: the newest exports kept regardless of age (default 5).'
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                   prefix:
                     description: |-
-                      Where the exported workspace lives. A separate prefix from the
-                      repository's own — it is a lean workspace with lean's control
-                      objects, not a second directory in the bare repo.
+                      Where the export lives. A separate prefix from the repository's
+                      own — it carries the export's control objects, not a second
+                      directory in the bare repo.
                     type: string
                   refs:
                     description: Refs whose trees are published, e.g. `["main"]`.
@@ -390,9 +418,9 @@ spec:
               rule: self.keyPrefix.endsWith('/')
             - message: spec.keyPrefix must not start with '/'
               rule: '!self.keyPrefix.startsWith(''/'')'
-            - message: spec.export.prefix must differ from spec.keyPrefix — the export is a separate lean workspace
+            - message: spec.export.prefix must differ from spec.keyPrefix — the export is a separate prefix with its own control objects
               rule: '!has(self.export) || self.export.prefix != self.keyPrefix'
-            - message: spec.export.refs must name exactly one ref — a lean workspace is one tree, and two refs in one prefix would be two writers of one manifest
+            - message: spec.export.refs must name exactly one ref — an export is one tree, and two refs in one prefix would be two writers of one pointer
               rule: '!has(self.export) || size(self.export.refs) == 1'
           status:
             nullable: true
