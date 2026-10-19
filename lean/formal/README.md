@@ -457,6 +457,24 @@ code holds the HITL window across both).
 - The scan is ATOMIC: the rename-vs-walk race and the
   two-consecutive-scans deletion rule are UNREPRESENTABLE here. The
   implementation carries the rule; only the drill can exercise it.
+- The scan judges dirt by comparing VERSIONS (`LeanP1.tla` `Scan`:
+  `W.local[p] # W.baseline[p]`), a perfect oracle; the code compares a
+  coarse-clock stat. That hid L-138 (2026-10-19): a same-size write in
+  the tick of a recorded stat was never published, and a consume could
+  install a peer's bytes over it. **`LeanScanRacy.tla` now checks the
+  refinement** — with the racy-clean rule as shipped, the code never
+  calls clean what the oracle calls dirty (`Inv_NoMissedChange`):
+  HOLDS at 3,438 distinct (`LeanScanRacy.cfg`) and 156,048
+  (`LeanScanRacyWide.cfg`, 6 writes, 6 ticks, a 2-tick window); the
+  probe `ProbeNoSameTickRewrite` is reached at depth 3; and each part of
+  the rule is a mutation that loses a change — no rule
+  (`LeanScanRacyNoRule`, depth 3), racy measured when the entry is
+  built rather than when the bytes were read (`LeanScanRacyMeasureLate`:
+  read at tick 0, a rewrite in tick 0, the upload records at tick 1 "not
+  racy"), and the flag cleared inside the window
+  (`LeanScanRacyClearEarly`). TLC 2.19, `-workers 1`, model md5
+  18f15bfe. `LeanP1.tla` is unchanged: its oracle is now a checked
+  abstraction, not an assumption.
 - The 6-quiet-poll takeover observation is one `ClaimB` action; the
   poll protocol itself is machine-checked in flint's
   `FlintTierEpoch.tla`, and lean's claim loop mirrors it.

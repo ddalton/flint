@@ -285,7 +285,7 @@ of HEAD `86d731b3` plus the working tree of 2026-09-15.
 
 | hid | abstraction | source |
 |-----|-------------|--------|
-| L-138 (2026-10-19) | `Scan` and the consume judge dirt by comparing VERSIONS (`LeanP1.tla` `Scan`: `W.local[p] # W.baseline[p]`), a perfect oracle; the code judges it by size + mtime, which a same-size write inside one clock tick leaves unchanged. Every proof and gate run inherited the oracle, and the trace check sees only events the code emits — a missed edit emits none | `lean/syncer/src/scan.rs` `confirm_racy` |
+| L-138 (2026-10-19) | `Scan` and the consume judge dirt by comparing VERSIONS (`LeanP1.tla` `Scan`: `W.local[p] # W.baseline[p]`), a perfect oracle; the code judges it by size + mtime, which a same-size write inside one clock tick leaves unchanged. Every proof and gate run inherited the oracle, and the trace check sees only events the code emits — a missed edit emits none. Closed by `LeanScanRacy.tla`: the code's judgment refines the oracle under the racy-clean rule, and each part of the rule is a mutation that loses a change | `lean/syncer/src/scan.rs` `confirm_racy`; `lean/formal/LeanScanRacy.tla` |
 | F1 | `GCDelete` was one atomic step; the shipped GC is HEAD then unconditional DELETE | README:541 |
 | finding 13 | every write minted a unique generation; real etags are content hashes ("the abstraction was the bug, again") | README:646 |
 | finding 12 | `HitlWrite` (gateway PUT + inbox append) was one atomic step | CHANGELOG.md:588; assessment:628 |
