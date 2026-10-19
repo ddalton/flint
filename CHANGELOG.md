@@ -12,6 +12,19 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.59.0] - 2026-10-19
+
+Lean's correctness fixes since 1.58.0, and Kerberos for flint lite and
+pNFS. Lean: the publish ack no longer says `ok` for bytes a later barrier
+lost track of (L-133 to L-137), a live holder is no longer deposed during
+a long commit section (L-132), a UI edit whose CAS landed behind a lost
+response is answered committed (MN2), and a large object uploads 8 parts
+at a time. Charts: flint-lite 0.7.0, flint-lite-operator 0.6.0 and
+flint-nfs-client 0.2.0 are minor bumps (new Kerberos values); flint-lean
+0.14.3, flint-s3-csi 0.5.1, flint-passthrough 0.5.3 and flint-forge 0.7.4
+are patch bumps; flint-csi-driver 1.59.0. Guides and their PDFs re-pinned;
+the lite render-parity fixture regenerated.
+
 ### Security
 
 - **pNFS: a detach revokes a node's layouts at the data servers**
@@ -10066,7 +10079,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.58.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.59.0...HEAD
+[1.59.0]: https://github.com/ddalton/flint/compare/v1.58.0...v1.59.0
 [1.58.0]: https://github.com/ddalton/flint/compare/v1.57.1...v1.58.0
 [1.57.1]: https://github.com/ddalton/flint/compare/v1.57.0...v1.57.1
 [1.57.0]: https://github.com/ddalton/flint/compare/v1.56.0...v1.57.0
