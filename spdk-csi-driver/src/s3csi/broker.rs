@@ -946,6 +946,13 @@ impl Broker {
 
     /// Serve. Blocks.
     pub async fn serve(self: Arc<Self>) {
+        let (_, listener) = crate::httpserve::listener(self.cfg.listen)
+            .unwrap_or_else(|e| panic!("flint-s3-broker: bind {}: {e}", self.cfg.listen));
+        self.serve_on(listener).await
+    }
+
+    /// Serve on an already-bound listener (the test's ephemeral port).
+    pub async fn serve_on(self: Arc<Self>, listener: tokio::net::TcpListener) {
         if self.cfg.backend.read_enforcement() == "cooperative" {
             tracing::warn!(
                 "backend static has no read key (FLINT_S3B_STATIC_READ_*): a read-only pod gets the one key, \
@@ -992,15 +999,24 @@ impl Broker {
         let b = self.clone();
         let status = warp::get().and(warp::path!("v1" / "status")).map(move || warp::reply::json(&b.status()));
         let healthz = warp::get().and(warp::path("healthz")).map(|| "ok");
-        let routes = assume.or(register).or(deregister).or(status).or(healthz).with(warp::log("flint_s3_broker"));
+        // Boxed: erases the closure types, without which the future this
+        // returns is not `Send` for every lifetime and cannot be spawned
+        // (warp 0.4 + `tokio::spawn(broker.serve_on(..))` in the tests).
+        let routes = assume.or(register).or(deregister).or(status).or(healthz).with(warp::log("flint_s3_broker")).boxed();
+        let bound = listener.local_addr().map(|a| a.to_string()).unwrap_or_else(|_| self.cfg.listen.to_string());
         match (&self.cfg.tls_cert, &self.cfg.tls_key) {
             (Some(c), Some(k)) => {
-                tracing::info!("flint-s3-broker serving https on {}", self.cfg.listen);
-                warp::serve(routes).tls().cert_path(c).key_path(k).run(self.cfg.listen).await
+                // warp 0.4 has no TLS: tokio-rustls + hyper-util serve the
+                // same filter (crate::httpserve). A bad cert or key is fatal
+                // at start, as it was under warp 0.3.
+                let acceptor = crate::httpserve::tls_acceptor(c, k)
+                    .unwrap_or_else(|e| panic!("flint-s3-broker: tls: {e}"));
+                tracing::info!("flint-s3-broker serving https on {bound}");
+                crate::httpserve::serve_tls(listener, acceptor, warp::service(routes)).await
             }
             _ => {
-                tracing::info!("flint-s3-broker serving http on {}", self.cfg.listen);
-                warp::serve(routes).run(self.cfg.listen).await
+                tracing::info!("flint-s3-broker serving http on {bound}");
+                warp::serve(routes).incoming(listener).run().await
             }
         }
     }
@@ -1456,10 +1472,15 @@ mod tests {
     /// A broker over `backend`, for `mint`. Its kube client points at
     /// nothing: `mint` never calls the apiserver.
     fn broker(backend: Backend) -> Arc<Broker> {
+        broker_tls(backend, None)
+    }
+
+    fn broker_tls(backend: Backend, tls: Option<(String, String)>) -> Arc<Broker> {
+        let (tls_cert, tls_key) = tls.map(|(c, k)| (Some(c), Some(k))).unwrap_or((None, None));
         let cfg = BrokerConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
-            tls_cert: None,
-            tls_key: None,
+            tls_cert,
+            tls_key,
             backend,
             audience: DRIVER_NAME.into(),
             node_principal: "system:serviceaccount:flint-system:node".into(),
@@ -1474,6 +1495,45 @@ mod tests {
         crate::install_crypto_provider();
         let client = Client::try_from(kube::Config::new("http://127.0.0.1:9".parse().unwrap())).unwrap();
         Broker::new(cfg, client)
+    }
+
+    /// The broker's HTTPS listener. warp 0.4 has no TLS, so this is
+    /// crate::httpserve's tokio-rustls path serving the broker's own
+    /// routes: a client that trusts the broker's certificate reads
+    /// /healthz over TLS; one that does not is refused at the handshake;
+    /// plain HTTP to the TLS port gets no answer.
+    #[tokio::test]
+    async fn the_broker_answers_over_https_with_its_certificate() {
+        let ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (crt, key) = (dir.path().join("tls.crt"), dir.path().join("tls.key"));
+        std::fs::write(&crt, ck.cert.pem()).unwrap();
+        std::fs::write(&key, ck.key_pair.serialize_pem()).unwrap();
+        let b = broker_tls(
+            static_backend(),
+            Some((crt.to_string_lossy().into_owned(), key.to_string_lossy().into_owned())),
+        );
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(b.serve_on(listener));
+        let url = format!("https://localhost:{}/healthz", addr.port());
+
+        let trusting = reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(ck.cert.pem().as_bytes()).unwrap())
+            .resolve("localhost", addr)
+            .build()
+            .unwrap();
+        let res = trusting.get(&url).send().await.expect("https to the broker");
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.text().await.unwrap(), "ok");
+
+        let stranger = reqwest::Client::builder().resolve("localhost", addr).build().unwrap();
+        assert!(stranger.get(&url).send().await.is_err(), "an untrusted certificate must fail the handshake");
+
+        let plain = reqwest::Client::new().get(format!("http://{addr}/healthz")).send().await;
+        assert!(
+            plain.as_ref().map(|r| !r.status().is_success()).unwrap_or(true),
+            "plain HTTP to the TLS port must not be served: {plain:?}"
+        );
     }
 
     fn target() -> Target {
@@ -1492,8 +1552,8 @@ mod tests {
             s2.lock().unwrap().push(String::from_utf8_lossy(&b).into_owned());
             reply.clone()
         });
-        let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(server);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         (format!("http://{addr}/"), seen)
     }
 

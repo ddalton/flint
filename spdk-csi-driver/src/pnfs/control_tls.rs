@@ -257,9 +257,11 @@ fn connector(
     config: Arc<rustls::ClientConfig>,
 ) -> impl tower::Service<
     tonic::transport::Uri,
-    Response = TlsConn<tokio_rustls::client::TlsStream<TcpStream>>,
+    Response = hyper_util::rt::TokioIo<TlsConn<tokio_rustls::client::TlsStream<TcpStream>>>,
     Error = std::io::Error,
-    Future = impl std::future::Future<Output = std::io::Result<TlsConn<tokio_rustls::client::TlsStream<TcpStream>>>> + Send,
+    Future = impl std::future::Future<
+        Output = std::io::Result<hyper_util::rt::TokioIo<TlsConn<tokio_rustls::client::TlsStream<TcpStream>>>>,
+    > + Send,
 > + Clone
        + Send
        + 'static {
@@ -272,7 +274,8 @@ fn connector(
             tcp.set_nodelay(true)?;
             let name = ServerName::try_from(SERVER_NAME).expect("a valid DNS name");
             let tls = tokio_rustls::TlsConnector::from(config).connect(name, tcp).await?;
-            Ok::<_, std::io::Error>(TlsConn { inner: tls, remote: None })
+            // hyper 1 (tonic 0.12+) speaks its own IO traits; TokioIo adapts.
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(TlsConn { inner: tls, remote: None }))
         }
     })
 }

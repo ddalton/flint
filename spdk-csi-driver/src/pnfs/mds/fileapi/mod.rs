@@ -1098,7 +1098,7 @@ fn streaming_download(
         }
     });
 
-    let mut res = warp::reply::Response::new(warp::hyper::Body::wrap_stream(body));
+    let mut res = crate::httpserve::stream_response(body);
     let h = res.headers_mut();
     h.insert(
         "content-type",
@@ -1803,7 +1803,7 @@ mod tests {
             .expect("the route must answer");
         assert_eq!(res.status(), 200);
 
-        let mut body = res.into_body();
+        let mut body = http_body_util::BodyDataStream::new(res.into_body());
 
         // One chunk out of the door — the status line is now committed.
         let first = body.next().await.expect("a first chunk").expect("it must be Ok");

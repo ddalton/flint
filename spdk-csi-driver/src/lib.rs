@@ -58,6 +58,7 @@ pub mod dashboard_auth;  // Bearer-token auth for the dashboard backend (fronten
 pub mod snapshot;  // Volume snapshot support (isolated module)
 pub mod capacity_cache;  // Capacity caching for scalability
 pub mod raid;  // RAID support for multi-replica volumes
+pub mod httpserve;  // warp 0.4 serving: a bind that reports its port, and TLS (tokio-rustls + hyper-util)
 pub mod netaddr;  // host:port joining that brackets IPv6 literals — the derived `status.address` path had no bracketing while the CRD's CEL rule demanded it
 pub mod nfs;  // NFSv4.2 server for RWX volume support
 pub mod rwx_nfs;  // ReadWriteMany (RWX) support via NFS pods (isolated module - zero regression)

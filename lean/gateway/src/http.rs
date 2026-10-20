@@ -703,7 +703,7 @@ mod tests {
             let hdr = if is_file_changed { "etag" } else { "x-flint-current-etag" };
             let etag_hdr = res.headers().get(hdr).map(|v| v.to_str().unwrap().to_string());
             assert_eq!(etag_hdr.as_deref(), etag, "{code} {hdr}");
-            let body = warp::hyper::body::to_bytes(res.into_body()).await.unwrap();
+            let body = http_body_util::BodyExt::collect(res.into_body()).await.unwrap().to_bytes();
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(v["error"], code);
             assert_eq!(v["message"], message);

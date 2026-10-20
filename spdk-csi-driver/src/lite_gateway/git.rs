@@ -1315,13 +1315,12 @@ fn relay(res: reqwest::Response, idle: Option<(Activity, Duration)>) -> Response
     let stream = res
         .bytes_stream()
         .map_err(|e| std::io::Error::other(e.to_string()));
-    let body = match idle {
+    let mut out = match idle {
         Some((activity, idle)) => {
-            warp::hyper::Body::wrap_stream(Idle::new(Box::pin(stream), activity, idle))
+            crate::httpserve::stream_response(Idle::new(Box::pin(stream), activity, idle))
         }
-        None => warp::hyper::Body::wrap_stream(stream),
+        None => crate::httpserve::stream_response(stream),
     };
-    let mut out = Response::new(body);
     *out.status_mut() = status;
     *out.headers_mut() = headers;
     out
@@ -1391,8 +1390,8 @@ mod tests {
                     )
                 },
             );
-        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         format!("http://{addr}/tenant/proj.git")
     }
 
@@ -2414,15 +2413,15 @@ mod tests {
                 tokio::time::sleep(every).await;
                 Some((Ok::<_, std::io::Error>(Bytes::from_static(b"0008\x01x")), i + 1))
             });
-            let mut res = Response::new(warp::hyper::Body::wrap_stream(stream));
+            let mut res = crate::httpserve::stream_response(stream);
             res.headers_mut().insert(
                 "content-type",
                 warp::http::HeaderValue::from_static("application/x-git-receive-pack-result"),
             );
             Ok::<_, Rejection>(res)
         });
-        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         format!("http://{addr}/tenant/proj.git")
     }
 

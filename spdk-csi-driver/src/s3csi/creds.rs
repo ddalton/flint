@@ -1061,8 +1061,8 @@ mod tests {
                 s2.lock().unwrap().push((auth, String::from_utf8_lossy(&b).into_owned()));
                 reply
             });
-        let (addr, server) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(server);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         let dir = std::env::temp_dir().join(format!("flint-exchange-registered-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let node_token_file = dir.join("token");

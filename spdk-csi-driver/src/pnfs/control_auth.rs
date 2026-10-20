@@ -258,7 +258,7 @@ pub struct AuthService<S> {
 
 impl<S, B> tower::Service<tonic::codegen::http::Request<B>> for AuthService<S>
 where
-    S: tower::Service<tonic::codegen::http::Request<B>, Response = tonic::codegen::http::Response<tonic::body::BoxBody>>
+    S: tower::Service<tonic::codegen::http::Request<B>, Response = tonic::codegen::http::Response<tonic::body::Body>>
         + Clone
         + Send
         + 'static,
@@ -288,7 +288,7 @@ where
                 }
                 Err(denied) => {
                     tracing::warn!("🔒 control call {path} refused: {denied:?}");
-                    Ok(denied.status().to_http())
+                    Ok(denied.status().into_http())
                 }
             }
         })

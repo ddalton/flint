@@ -636,11 +636,15 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                 )
             });
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            match warp::serve(route).try_bind_ephemeral(addr) {
-                Ok((bound, fut)) => {
+            // warp 0.4 binds only infallibly (it panics on a taken port), so
+            // the listener is bound here and handed over: a bind failure
+            // must degrade, not kill the syncer.
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    let bound = listener.local_addr().unwrap_or(addr);
                     eprintln!("flint-sync: /metrics on {bound}");
                     posture.bound = true;
-                    tokio::spawn(fut);
+                    tokio::spawn(warp::serve(route).incoming(listener).run());
                 }
                 Err(e) => {
                     eprintln!(

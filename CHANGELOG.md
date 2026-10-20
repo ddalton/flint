@@ -12,6 +12,44 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Security
+
+- **Every image moves to current Chainguard bases**: `wolfi-base` to
+  `sha256:c2a4815b…` and `static` to `sha256:fe55470f…`, from the pins of
+  2026-09-16. The old `wolfi-base` carried glibc 2.44-r6 with four
+  medium CVEs (CVE-2026-8674, CVE-2026-86805, CVE-2026-89092,
+  CVE-2026-95818), reported against `glibc`, `glibc-locale-posix`,
+  `ld-linux` and `libcrypt1`; the new base carries 2.44-r8, which fixes
+  them. Trivy 0.75.0 on the seven Wolfi-based 1.59.1 images: 16 medium
+  each; the same binaries rebuilt on the new base: 0. The two `static`
+  images had none before and none after. Trivy sees OS packages only:
+  our Rust binaries are not built with `cargo auditable`, so their
+  dependencies were checked separately with `cargo audit` (next entry).
+- **No known advisories left in the Rust dependencies.** `cargo audit`
+  reports 0 vulnerabilities in every shipped lockfile, down from 22 in
+  the driver and 10–11 in each of the others (rustls 0.21, 0.22 and
+  0.23.x, rustls-webpki, h2 0.3, tracing-subscriber, crossbeam-epoch).
+  - **The AWS SDK uses its current HTTPS client** (`default-https-client`:
+    hyper 1, rustls 0.23 on aws-lc-rs) for every S3 and STS call, in
+    place of the legacy hyper 0.14 / rustls 0.21 client.
+  - **gRPC moves to tonic 0.14 and prost 0.14** (hyper 1, h2 0.4) for the
+    CSI and pNFS control servers and clients. The wire protocol is
+    unchanged.
+  - **warp 0.4** serves every HTTP endpoint: health, dashboard, hub and
+    lean gateways, metrics, and the MDS status and file API.
+  - **reqwest 0.12.** HTTP/2 stays off, and roots are still the bundled
+    webpki set.
+  - **The S3 broker's HTTPS listener** is now tokio-rustls 0.26 (rustls
+    0.23 on aws-lc-rs; it was rustls 0.22 on ring), with the same ALPN
+    (`h2`, `http/1.1`) and the same cert and key paths. A client must
+    now finish the TLS handshake within 10 seconds.
+
+  - **aws-sdk-s3 1.152**, which moves its S3 Express session cache to
+    `lru` 0.18 and clears RUSTSEC-2026-0253 (`lru` 0.16.4, unsound).
+
+  Still flagged, with no fix published: `unsafe-libyaml` (unmaintained,
+  through `serde_yaml`).
+
 ### Added
 
 - **forge: a plain export for consumers that read S3 keys.**

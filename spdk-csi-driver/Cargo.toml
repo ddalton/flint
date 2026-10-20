@@ -194,9 +194,8 @@ serde_urlencoded = "0.7"
 # Pure Rust TLS, no OpenSSL. `stream`: flint-hub-gateway proxies file
 # bodies without buffering them — a GiB download must not be held in
 # memory per concurrent reader (Body::wrap_stream / Response::bytes_stream).
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"], default-features = false }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+tower = { version = "0.5", features = ["util"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
@@ -214,10 +213,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clap = { version = "4.0", features = ["derive", "env"] }  # env: the operator takes its fleet defaults from the pod env
-warp = { version = "0.3", features = ["tls"] }
-tonic = "0.10"
-prost = "0.12"
-prost-types = "0.12"
+# warp 0.4 (hyper 1) has no TLS of its own: the S3 broker's HTTPS listener
+# is tokio-rustls + hyper-util serving the warp filter (crate::httpserve).
+warp = { version = "0.4", features = ["server"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "service"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+# Makes a Send body stream Sync for warp 0.4's reply::stream (crate::httpserve).
+sync_wrapper = { version = "1", features = ["futures"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 regex = "1.0"
 futures = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
@@ -246,8 +255,8 @@ utoipa = { version = "5.5.0", default-features = false, features = ["macros"] }
 # CRC64NVME FULL_OBJECT checksums across multipart, and
 # x-amz-copy-source-if-match on UploadPartCopy. rustls (no OpenSSL),
 # explicit BehaviorVersion in code (no behavior-version-latest feature).
-aws-config = { version = "1.10.1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process"] }
-aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-config = { version = "1.10.1", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process"] }
+aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
 # The extracted store layer (ObjectStore + stamps + memory double + S3
 # backend); re-exported at the old path via `tier::store`. flint-lean
 # depends on the same crate WITHOUT this crate's build.
@@ -275,10 +284,11 @@ rcgen = "0.13"
 # the timeout that "crashes" a hung flow fires in virtual time, so the
 # whole sweep runs in milliseconds of wall clock.
 tokio = { version = "1.0", features = ["full", "test-util"] }
+# warp::test drives filters without a socket in the unit tests.
+warp = { version = "0.4", features = ["server", "test"] }
 
 [build-dependencies]
-tonic-build = "0.10"
-prost-build = "0.12"
+tonic-prost-build = "0.14"
 
 [lib]
 name = "spdk_csi_driver"

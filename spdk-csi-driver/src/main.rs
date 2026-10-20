@@ -34,7 +34,12 @@ async fn start_health_server() {
             // Simple health check - always return OK for liveness probe
             // The fact that the container is running means it's healthy
             warp::reply::with_status("OK", warp::http::StatusCode::OK)
-        });
+        })
+        // Boxed, and the reply made a Response: over the unboxed filter
+        // warp 0.4's server future is not `Send` for every lifetime (the
+        // `&'static str` path and body), and this one is spawned.
+        .map(warp::Reply::into_response)
+        .boxed();
 
     let health_port = std::env::var("HEALTH_PORT")
         .unwrap_or("9809".to_string())

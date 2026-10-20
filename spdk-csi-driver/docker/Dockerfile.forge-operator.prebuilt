@@ -33,7 +33,7 @@
 # with the service account's mounted CA; an out-of-cluster kubeconfig
 # needs the system store), and musl-static binaries on top. Pinned by
 # the multi-arch index digest; override with --build-arg BASE_IMAGE.
-ARG BASE_IMAGE=cgr.dev/chainguard/static:latest@sha256:bf639cba19ba56329e6907ac26a7afcdde57a80b6aa66d5100da6883196e6b82
+ARG BASE_IMAGE=cgr.dev/chainguard/static:latest@sha256:fe55470f22d3259488d9d3739168d8f04da67755f0b69382bc26eda4a7d3d327
 FROM ${BASE_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt

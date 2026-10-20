@@ -438,10 +438,10 @@ pub fn spawn(
         }
         None => base,
     };
-    match warp::serve(combined).try_bind_ephemeral(addr) {
-        Ok((bound, server)) => {
+    match crate::httpserve::listener(addr) {
+        Ok((bound, listener)) => {
             tracing::info!("🩺 hub status endpoint listening on {}", bound);
-            Some(tokio::spawn(server))
+            Some(tokio::spawn(warp::serve(combined).incoming(listener).run()))
         }
         Err(e) => {
             tracing::warn!(

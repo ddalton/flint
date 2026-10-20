@@ -646,7 +646,7 @@ fn relay(res: reqwest::Response) -> Response {
     // Streamed, not buffered: a download is as large as the file, and
     // the door must not hold one in memory per concurrent reader.
     let stream = res.bytes_stream().map_err(std::io::Error::other);
-    let mut out = Response::new(warp::hyper::Body::wrap_stream(stream));
+    let mut out = crate::httpserve::stream_response(stream);
     *out.status_mut() = status;
     *out.headers_mut() = headers;
     out
@@ -723,8 +723,8 @@ mod tests {
                     )
                 },
             );
-        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         format!("http://{addr}")
     }
 
@@ -1531,8 +1531,8 @@ mod tests {
             *r.status_mut() = StatusCode::UNAUTHORIZED;
             r
         });
-        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         let endpoint = format!("http://{addr}");
 
         let mut r = repo(Some(&endpoint), vec!["app-backend"], RepoPhase::Ready);

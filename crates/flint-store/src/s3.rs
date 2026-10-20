@@ -312,7 +312,7 @@ impl S3Store {
 /// status + S3 error code.
 fn map_err<E>(ctx: &str, err: aws_sdk_s3::error::SdkError<E>) -> StoreError
 where
-    E: ProvideErrorMetadata + std::fmt::Debug + 'static,
+    E: ProvideErrorMetadata + std::error::Error + 'static,
 {
     if let aws_sdk_s3::error::SdkError::ServiceError(ref se) = err {
         let status = se.raw().status().as_u16();
@@ -323,7 +323,10 @@ where
             None => StoreError::Other(format!("{}: {}", msg, err)),
         };
     }
-    StoreError::Other(format!("{}: {}", ctx, err))
+    // DisplayErrorContext, not Display: an SdkError's Display is its
+    // category alone ("dispatch failure", "timeout", "io error"), and the
+    // cause that says what actually failed is in its source chain.
+    StoreError::Other(format!("{}: {}", ctx, aws_sdk_s3::error::DisplayErrorContext(&err)))
 }
 
 /// The status/code decision table, split out of `map_err` so it can be

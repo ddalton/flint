@@ -1162,8 +1162,7 @@ fn relay(res: reqwest::Response) -> warp::reply::Response {
     }
     // Streamed, not buffered. A hub download can be gigabytes and the
     // gateway must not hold one in memory per concurrent reader.
-    let body = warp::hyper::Body::wrap_stream(res.bytes_stream());
-    let mut out = warp::reply::Response::new(body);
+    let mut out = crate::httpserve::stream_response(res.bytes_stream());
     *out.status_mut() = status;
     *out.headers_mut() = headers;
     out
@@ -1360,8 +1359,8 @@ mod tests {
                 reply(m, p, q, h, b, log.clone())
             });
 
-        let (addr, srv) = warp::serve(hub).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(hub).incoming(listener).run());
         format!("http://{addr}")
     }
 
@@ -2155,8 +2154,8 @@ mod tests {
             ready: Arc::new(AtomicBool::new(true)),
         });
 
-        let (addr, srv) = warp::serve(routes(gw)).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(routes(gw)).incoming(listener).run());
         TwoHubs { base: format!("http://{addr}"), a: la, b: lb }
     }
 
@@ -2600,8 +2599,8 @@ mod tests {
             http: upstream_client(Duration::from_secs(2)).expect("http"),
             ready: Arc::new(AtomicBool::new(true)),
         });
-        let (addr, srv) = warp::serve(routes(gw)).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(routes(gw)).incoming(listener).run());
         TwoHubs { base: format!("http://{addr}"), a: la, b: lb }
     }
 
@@ -2816,8 +2815,8 @@ mod tests {
             http: upstream_client(Duration::from_secs(2)).unwrap(),
             ready: Arc::new(AtomicBool::new(true)),
         });
-        let (addr, srv) = warp::serve(routes(gw)).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(routes(gw)).incoming(listener).run());
         let c = outside();
         let res = c
             .get(format!("http://{addr}/v1/projects/volumes/files?path=/"))
@@ -2890,8 +2889,8 @@ mod tests {
                     .insert("content-type", "application/json".parse().unwrap());
                 res
             });
-        let (addr, srv) = warp::serve(route).bind_ephemeral(([127, 0, 0, 1], 0));
-        tokio::spawn(srv);
+        let (addr, listener) = crate::httpserve::listener(([127, 0, 0, 1], 0)).unwrap();
+        tokio::spawn(warp::serve(route).incoming(listener).run());
         format!("http://{addr}")
     }
 
