@@ -454,6 +454,23 @@ pub async fn run_batch(
     } else {
         sc.listed_packs()?
     };
+    // NAMING UNRETAINS (2026-10-19; the batch twin of ce2a1af6, the
+    // model's `NamingUnretains`). Pass 3 of `needed_packs` names a pack
+    // retention holds when it alone has what a push needs — a retry that
+    // reproduces a folded pack's name. A pack this batch is about to name
+    // is no longer on its way out, so it leaves retention HERE, before
+    // the upload, not when the snapshot happens to name it.
+    // `unlink_retained` refuses a NAMED pack and runs only between
+    // batches, and together those keep the code safe today; but that is
+    // two guards and a scheduling argument, and `ForgeSync.tla` without
+    // them found the loss at MaxRenews = 4 (a re-sent push's pack unlinked
+    // mid-batch, uploaded without its index, then named). With this rule
+    // no listed pack is retained at all.
+    let before = sc.retained.len();
+    sc.retained.retain(|r| !named_set.contains(&r.name));
+    if sc.retained.len() != before {
+        super::fold::save_retained(sc)?;
+    }
     let known: BTreeSet<&String> = cell.snap.packs.iter().collect();
     let epoch = sc.lease()?.epoch;
     // Pack siblings are independent, immutable, content-named keys

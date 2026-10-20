@@ -63,6 +63,14 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **forge: a pack a batch names leaves retention when it is listed.** A
+  client retry can reproduce a pack whose name retention already holds,
+  and the batch's needed listing then names that retained pack. Its safety
+  rested on two guards: `unlink_retained` never runs mid-batch, and it
+  never deletes a pack the snapshot names. Without those guards the TLA+
+  model lost a landed push one lease renewal beyond the gate's bound. The
+  batch now takes the pack off retention as soon as it lists it, so that
+  safety no longer depends on when unlinks are scheduled.
 - **lean: a same-size rewrite inside one mtime tick is published, and a
   peer's version no longer replaces it.** The kernel stamps mtime from a
   coarse clock, so two same-size writes a few milliseconds apart can

@@ -3959,6 +3959,35 @@ async fn a_re_push_the_roll_up_already_holds_names_no_retained_pack() {
     assert_eq!(heir.sc.git.refs().await.unwrap().get("refs/heads/main"), Some(&c1));
 }
 
+/// NAMING UNRETAINS (2026-10-19): a batch whose push's objects are only
+/// in a pack retention holds names that pack (needed packs, pass 3) and
+/// takes it OFF retention, persisted, before the snapshot names it. Left
+/// retained, the pack's safety rested on `unlink_retained` refusing named
+/// packs and never running mid-batch; `ForgeSync.tla` without those two
+/// guards lost a landed push at MaxRenews = 4.
+#[tokio::test]
+async fn a_batch_that_names_a_retained_pack_takes_it_off_retention() {
+    let mut rig = Rig::new().await;
+    rig.tiers_only();
+    rig.start().await;
+    let c0 = rig.push_commit("refs/heads/main", None, "c0").await;
+    let c1 = rig.stage_commit(Some(&c0), &[("f.txt", "c1\n")], "c1").await;
+    let named = rig.sc.cell().unwrap().snap.packs.clone();
+    let p: Vec<String> =
+        rig.sc.git.local_packs().unwrap().into_iter().filter(|q| !named.contains(q)).collect();
+    assert_eq!(p.len(), 1, "fixture: c1's pack is the one unnamed pack");
+    rig.sc.retained.push(fold::Retained { name: p[0].clone(), unlink_after_unix: u64::MAX });
+    fold::save_retained(&rig.sc).unwrap();
+
+    let reports = rig.run(vec![push(2, vec![RefUpdate { name: "refs/heads/main".into(), old_oid: c0.clone(), new_oid: c1.clone() }])]).await;
+    assert!(is_ok(&reports[0].results[0]), "{:?}", reports[0].results[0]);
+    assert!(rig.sc.cell().unwrap().snap.packs.contains(&p[0]), "the retained pack holding c1 is named");
+    assert!(rig.sc.retained.iter().all(|r| r.name != p[0]), "a named pack stayed retained: {:?}", rig.sc.retained);
+    let saved: Vec<fold::Retained> =
+        serde_json::from_slice(&std::fs::read(fold::retained_path(&rig.sc)).unwrap()).unwrap();
+    assert!(saved.iter().all(|r| r.name != p[0]), "the unretain was not persisted: {saved:?}");
+}
+
 /// NEEDED PACKS (`ForgeSyncRewind`'s shape, 2026-10-02): a rewind, a base
 /// rebuild that cannot reach the rewound commit, and a re-push of it. The
 /// rebuild keeps the input pack holding it NAMED (strict coverage), so the
