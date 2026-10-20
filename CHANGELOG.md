@@ -12,6 +12,22 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.60.0] - 2026-10-20
+
+A minor release: forge's plain export, and every known advisory cleared.
+The images move to current Chainguard bases (glibc's four medium CVEs:
+16 Trivy findings per Wolfi image, now 0), and the Rust dependencies to
+versions with no RustSec vulnerability (tonic 0.14, warp 0.4, reqwest
+0.12, the AWS SDK's current HTTPS client). Three fixes found while
+testing: lean published a same-size rewrite late or lost it to a peer
+(L-138), forge's git image lacked the credential helper its guide
+configures, and a forge batch now takes a pack it names off retention.
+No deployment exists, so nothing here is an upgrade step. Charts:
+flint-csi-driver 1.60.0, flint-forge 0.8.0 (its CRD gained
+`export.format`, `keep`, `graceSecs`), and patch bumps for the rest:
+flint-lean 0.14.5, flint-lite 0.7.2, flint-lite-operator 0.6.2,
+flint-nfs-client 0.2.2, flint-passthrough 0.5.5, flint-s3-csi 0.5.3.
+
 ### Security
 
 - **Every image moves to current Chainguard bases**: `wolfi-base` to
@@ -10225,7 +10241,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.59.1...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.0...HEAD
+[1.60.0]: https://github.com/ddalton/flint/compare/v1.59.1...v1.60.0
 [1.59.1]: https://github.com/ddalton/flint/compare/v1.59.0...v1.59.1
 [1.59.0]: https://github.com/ddalton/flint/compare/v1.58.0...v1.59.0
 [1.58.0]: https://github.com/ddalton/flint/compare/v1.57.1...v1.58.0
