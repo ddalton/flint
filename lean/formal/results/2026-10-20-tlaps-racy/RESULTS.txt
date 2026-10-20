@@ -1,0 +1,36 @@
+LeanScanRacyProof (TLAPS), 2026-10-20 -- the racy-clean refinement for every bound
+
+THEOREM NoMissedChange == Spec => []Inv_NoMissedChange   (LeanScanRacy.tla)
+under Shipped (RacyClean, MeasureAtRead, ClearOutsideWindow TRUE) and
+Const (MaxVer, MaxTime \in Nat; Window \in Nat \ {0}): any number of writes,
+any number of ticks, any racy window of at least one tick.
+
+Inductive invariant Ind == TypeOK /\ mtime <= clock /\ ReadOK /\ BaseOK
+  ReadOK: an upload in flight read size \in Sizes, mtime <= at <= clock, and
+          either the file is still the bytes read or a later write stamped
+          mtime >= at;
+  BaseOK: an entry not flagged racy has base.mtime + Window <= clock, and
+          either the file is the entry's bytes or mtime > base.mtime.
+
+Inputs (md5, asserted by run-racy.sh before tlapm runs):
+  18f15bfea9508c581f459ed625dd71ff  LeanScanRacy.tla       (= the TLC runs' model)
+  ed635d32feaf08f59b14a8d24a3ee7c1  LeanScanRacyProof.tla
+Box 10.0.0.249, /mnt/nvme/lean-racy-proof; tlapm (/mnt/nvme/tlaps/unpack),
+  --toolbox 0 0 --cleanfp --stretch 4 --threads 1, under nice -n 10.
+
+RECORD: "All 35 obligations proved." 0.64 s wall, 33 MB peak RSS.
+
+CONTROLS (the one Shipped line set FALSE; lines are LeanScanRacyProof.tla's):
+  RacyClean = FALSE           3/35 failed: 47 IndInit, 60 Record, 69 IndSafe
+                              (an entry the checkout records in its own tick
+                              is believed clean)
+  MeasureAtRead = FALSE       1/35 failed: 60 Record (racy measured at the
+                              record, after a long upload)
+  ClearOutsideWindow = FALSE  1/35 failed: 62 ClearRacy (the flag cleared
+                              inside the window)
+  Each fails exactly the step that relies on its rule detail; TLC's three
+  mutation worlds (LeanScanRacy{NoRule,MeasureLate,ClearEarly}.cfg) are the
+  same three, refuted with traces.
+  (tlapm --toolbox exits 0 on failed obligations; read the [ERROR] line.)
+
+Logs (record.out, ctl-*.out) stay on the box; they are generated output.

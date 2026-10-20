@@ -473,8 +473,13 @@ code holds the HITL window across both).
   read at tick 0, a rewrite in tick 0, the upload records at tick 1 "not
   racy"), and the flag cleared inside the window
   (`LeanScanRacyClearEarly`). TLC 2.19, `-workers 1`, model md5
-  18f15bfe. `LeanP1.tla` is unchanged: its oracle is now a checked
-  abstraction, not an assumption.
+  18f15bfe. **Proved for every bound** (2026-10-20,
+  `LeanScanRacyProof.tla`, TLAPS: `THEOREM NoMissedChange == Spec =>
+  []Inv_NoMissedChange`, any writes, ticks and window >= 1, 35
+  obligations); each rule detail set FALSE fails exactly the step that
+  relies on it (`results/2026-10-20-tlaps-racy/RESULTS.txt`).
+  `LeanP1.tla` is unchanged: its oracle is now a proved abstraction, not
+  an assumption.
 - The 6-quiet-poll takeover observation is one `ClaimB` action; the
   poll protocol itself is machine-checked in flint's
   `FlintTierEpoch.tla`, and lean's claim loop mirrors it.

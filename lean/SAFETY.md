@@ -312,6 +312,17 @@ every rule constant TRUE):
 | M6 `AgentWorkKept`, `ScopeRespected` | `Prop_AgentWorkKept`, `Prop_ScopeRespected` | 789 |
 | L1 `UISaveCompletes` | `LSpec => Prop_UISaveCompletes` (G1: every save the gateway starts is answered) | 27 |
 
+**The scan's oracle (2026-10-20):** every claim above reads dirt through
+`LeanP1.tla`'s `Scan`, which compares versions — what L-138 showed the code
+cannot see. `formal/LeanScanRacyProof.tla` proves the code's stat-based
+judgment never misses a change the oracle sees, for every number of writes,
+clock ticks and racy window (`NoMissedChange`, `Spec =>
+[]Inv_NoMissedChange` of `LeanScanRacy.tla`, 35 obligations, the
+racy-clean rule as shipped). Its controls: dropping the rule, measuring
+racy when the entry is built, or clearing the flag inside the window each
+fails the one step that relies on it
+(`formal/results/2026-10-20-tlaps-racy/RESULTS.txt`).
+
 **Rows 15-17 (2026-10-15 to 2026-10-16):** the model gained the publish
 request and its answer (`Touch`, `Honor`, `HonorReader`, `RetireByAck`),
 a claim for the restart, and deposal (`Depose`, `Fence`), and the whole
