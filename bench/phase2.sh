@@ -12,6 +12,8 @@
 #   DRIVERS    order (default: "flint mayastor longhorn rook-ceph flint")
 #   PASS_B     1 = after a driver's Pass A, reinstall it pinned to 1 polling
 #              core and run again (drivers whose DEFAULT_CORES > 1)
+#   FLINT_VERSION  released chart for the flint arm (default 1.58.0)
+#   R_LIST     replica counts to run (default "1 3")
 #   CEILINGS   1 = run ceilings.sh first, on the raw disks (default 1)
 #   RUNTIME RAMP REPS SIZE FILE_SIZE  passed through to run-fio.sh
 #
@@ -31,7 +33,7 @@ trap 'status "FAILED at line $LINENO (rc=$?)"' ERR
 # (bash 3.2 on macOS: no associative arrays)
 version_of() {
   case "$1" in
-    flint) echo 1.58.0 ;; mayastor) echo 4.6.2 ;; longhorn) echo 1.13.0 ;; rook-ceph) echo v1.21.0 ;;
+    flint) echo "${FLINT_VERSION:-1.58.0}" ;; mayastor) echo 4.6.2 ;; longhorn) echo 1.13.0 ;; rook-ceph) echo v1.21.0 ;;
     *) echo "unknown driver $1" >&2; return 1 ;;
   esac
 }
@@ -46,7 +48,7 @@ install_driver() {  # <driver> <cores or "">
 run_driver() {  # <driver> <label> <cores or "">
   local d=$1 label=$2 cores=$3 sc
   ( . "$HERE/drivers/$d/env.sh"
-    for r in 1 3; do
+    for r in ${R_LIST:-1 3}; do
       sc=$([ $r = 1 ] && echo "$SC_R1" || echo "$SC_R3")
       local out="$OUT/$label-r$r"
       [ ! -e "$out" ] || { echo "$out exists" >&2; exit 1; }

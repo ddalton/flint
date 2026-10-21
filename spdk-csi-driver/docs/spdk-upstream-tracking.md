@@ -59,6 +59,12 @@ master 58e2d77bb. The stock-master ports and the md0 reproducer
     `bs_allocate_and_copy_cluster`;
   - a `blob_sync_md` failure after `*extent_page` is set leaves the cluster
     mapped while the caller releases it.
+- `blob_serialize_add_page()` allocates `md_page_size` bytes per md page but
+  zeroes only `sizeof(struct spdk_blob_md_page)`, so an md page larger than
+  the struct is written with uninitialized bytes after it (found when
+  patch set 1 of 29555 failed SPDK's valgrind unit-test job, 2026-10-21; it
+  also indexes the page array by the struct size, which looks wrong when
+  `md_page_size` is larger -- unverified).
 - Thin lvols: blocks of a newly allocated cluster that were never written
   read back data from deleted volumes (cross-tenant exposure). If reported,
   it may belong in SPDK's CVE process (https://spdk.io/cve_threat/), not a
