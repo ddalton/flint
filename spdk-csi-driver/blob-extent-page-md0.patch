@@ -1,0 +1,421 @@
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 9e3b28eb1..64d20b982 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -9124,6 +9124,10 @@ struct spdk_blob_cluster_op_ctx {
+ 	/* for serializing concurrent cluster alloc/release operations on the same extent page */
+ 	spdk_msg_fn		msg_fn;
+ 	TAILQ_ENTRY(spdk_blob_cluster_op_ctx) link;
++
++	/* extent_page was claimed by blob_insert_cluster_msg on the md thread (not by
++	 * the allocating thread), so this ctx releases it if the insert fails. */
++	bool			extent_page_claimed_on_md;
+ };
+ 
+ static void
+@@ -9220,18 +9224,57 @@ blob_op_cluster_msg_cb(void *arg, int bserrno)
+ 	spdk_thread_send_msg(ctx->thread, blob_op_cluster_msg_cpl, ctx);
+ }
+ 
++/* Undo blob_insert_cluster() for an insert that failed after it: the caller
++ * (blob_insert_cluster_cpl -> blob_insert_cluster_revert) releases the cluster
++ * on error, so the blob must not keep mapping it. */
++static void
++blob_insert_cluster_undo(struct spdk_blob_cluster_op_ctx *ctx)
++{
++	ctx->blob->active.clusters[ctx->cluster_num] = 0;
++	assert(ctx->blob->active.num_allocated_clusters > 0);
++	ctx->blob->active.num_allocated_clusters--;
++	if (ctx->extent_page_claimed_on_md) {
++		spdk_spin_lock(&ctx->blob->bs->used_lock);
++		bs_release_md_page(ctx->blob->bs, ctx->extent_page);
++		spdk_spin_unlock(&ctx->blob->bs->used_lock);
++		ctx->extent_page_claimed_on_md = false;
++	}
++	ctx->extent_page = 0;
++}
++
+ static void
+ blob_insert_new_ep_cb(void *arg, int bserrno)
+ {
+ 	struct spdk_blob_cluster_op_ctx *ctx = arg;
+ 	uint32_t *extent_page;
+ 
++	if (bserrno != 0) {
++		/* The extent page was not written (or was refused): do not point the
++		 * extent table at it. A page the allocating thread claimed is
++		 * released by the caller's revert; one claimed here, by the undo. */
++		blob_insert_cluster_undo(ctx);
++		blob_op_cluster_msg_cb(ctx, bserrno);
++		return;
++	}
++
+ 	extent_page = bs_cluster_to_extent_page(ctx->blob, ctx->cluster_num);
+ 	*extent_page = ctx->extent_page;
+ 	ctx->blob->state = SPDK_BLOB_STATE_DIRTY;
+ 	blob_sync_md(ctx->blob, blob_op_cluster_msg_cb, ctx);
+ }
+ 
++static void
++blob_insert_existing_ep_cb(void *arg, int bserrno)
++{
++	struct spdk_blob_cluster_op_ctx *ctx = arg;
++
++	if (bserrno != 0) {
++		/* The caller releases the cluster on error: unmap it first. */
++		blob_insert_cluster_undo(ctx);
++	}
++	blob_op_cluster_msg_cb(ctx, bserrno);
++}
++
+ struct spdk_blob_write_extent_page_ctx {
+ 	struct spdk_blob_store		*bs;
+ 
+@@ -9301,6 +9344,18 @@ blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint64_t cluster
+ 	spdk_bs_sequence_t			*seq;
+ 	struct spdk_bs_cpl			cpl;
+ 
++	/* md page 0 is never an extent page: it holds the first blob's metadata
++	 * (the lvstore super blob). Writing an extent page there destroyed the
++	 * lvstore on bench4 2026-10-21 (stale extent_page 0 from a racing
++	 * snapshot, see blob_insert_cluster_msg). Refuse it with an error,
++	 * never write; asserts are compiled out in release builds. */
++	if (extent == 0) {
++		SPDK_ERRLOG("Refusing to write an extent page of blob 0x%" PRIx64
++			    " to md page 0\n", blob->id);
++		cb_fn(cb_arg, -EINVAL);
++		return;
++	}
++
+ 	ctx = calloc(1, sizeof(*ctx));
+ 	if (!ctx) {
+ 		cb_fn(cb_arg, -ENOMEM);
+@@ -9359,7 +9414,31 @@ blob_insert_cluster_msg(void *arg)
+ 	extent_page = bs_cluster_to_extent_page(ctx->blob, ctx->cluster_num);
+ 	if (*extent_page == 0) {
+ 		/* Extent page requires allocation.
+-		 * It was already claimed in the used_md_pages map and placed in ctx. */
++		 * Normally it was already claimed in the used_md_pages map and placed in ctx.
++		 *
++		 * But the allocating thread claims one only if the slot was 0 when IT
++		 * looked (bs_allocate_cluster). If the slot was occupied then and is 0
++		 * now, a snapshot swapped the blob's extent table out in between
++		 * (bs_snapshot_swap_cluster_maps; blob_freeze_io does not wait for
++		 * cluster allocations already in flight), and ctx->extent_page is 0.
++		 * Writing to it overwrote md page 0, the lvstore super blob, and the
++		 * lvstore failed to load (bench4 2026-10-21). Claim a fresh page here,
++		 * on the md thread, where the slot cannot change under us. */
++		if (ctx->extent_page == 0) {
++			spdk_spin_lock(&ctx->blob->bs->used_lock);
++			/* Extent page shall never occupy md_page 0, so search from 1 */
++			ctx->extent_page = spdk_bit_array_find_first_clear(ctx->blob->bs->used_md_pages, 1);
++			if (ctx->extent_page == UINT32_MAX) {
++				spdk_spin_unlock(&ctx->blob->bs->used_lock);
++				ctx->extent_page = 0;
++				blob_insert_cluster_undo(ctx);
++				blob_op_cluster_msg_cb(ctx, -ENOSPC);
++				return;
++			}
++			bs_claim_md_page(ctx->blob->bs, ctx->extent_page);
++			spdk_spin_unlock(&ctx->blob->bs->used_lock);
++			ctx->extent_page_claimed_on_md = true;
++		}
+ 		assert(ctx->extent_page != 0);
+ 		assert(spdk_bit_array_get(ctx->blob->bs->used_md_pages, ctx->extent_page) == true);
+ 		blob_write_extent_page(ctx->blob, ctx->extent_page, ctx->cluster_num, ctx->page,
+@@ -9378,7 +9457,7 @@ blob_insert_cluster_msg(void *arg)
+ 		/* Extent page already allocated.
+ 		 * Every cluster allocation, requires just an update of single extent page. */
+ 		blob_write_extent_page(ctx->blob, *extent_page, ctx->cluster_num, ctx->page,
+-				       blob_op_cluster_msg_cb, ctx);
++				       blob_insert_existing_ep_cb, ctx);
+ 	}
+ }
+ 
+diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+index 2b11f442b..af5307123 100644
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -4573,6 +4573,272 @@ blob_insert_cluster_msg_test(void)
+ 	ut_blob_close_and_delete(bs, blob);
+ }
+ 
++/*
++ * bench4 2026-10-21: an lvstore failed to load ("Blobid (0x100000000) doesn't
++ * match what's in metadata (0x100000001)") because an extent page was written
++ * over md page 0, the lvstore super blob. bs_allocate_cluster (I/O thread)
++ * claims an extent page only if the blob's extent-table slot is 0 when it
++ * looks; a snapshot taken while that cluster allocation was in flight swapped
++ * the clone's extent table for an empty one, and blob_insert_cluster_msg (md
++ * thread) then found the slot 0 and wrote the extent page to the allocation's
++ * extent_page, which was 0. Release builds compile the assert out.
++ *
++ * ut_md0_race_setup reproduces it deterministically: super blob A on md page
++ * 0; thin blob B with its extent page for clusters 0..n allocated; cluster 1
++ * allocated as the I/O thread would (slot occupied -> extent page 0); then B
++ * snapshotted before the insert.
++ */
++static void
++ut_md0_race_setup(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
++		  spdk_blob_id *super_id, struct spdk_blob **blob_b, spdk_blob_id *snap_id,
++		  uint64_t *new_cluster)
++{
++	struct spdk_blob_opts opts;
++	struct spdk_blob *a, *b;
++	uint8_t payload[BLOCKLEN];
++	uint32_t extent_page = 0;
++
++	/* A: the "lvstore super blob", the first blob, so on md page 0. */
++	ut_spdk_blob_opts_init(&opts);
++	a = ut_blob_create_and_open(bs, &opts);
++	*super_id = spdk_blob_get_id(a);
++	SPDK_CU_ASSERT_FATAL(bs_blobid_to_page(*super_id) == 0);
++	spdk_bs_set_super(bs, *super_id, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	spdk_blob_close(a, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++
++	/* B: thin, with an extent table; writing cluster 0 allocates the extent
++	 * page that also covers cluster 1. */
++	ut_spdk_blob_opts_init(&opts);
++	opts.thin_provision = true;
++	opts.num_clusters = 4;
++	b = ut_blob_create_and_open(bs, &opts);
++	SPDK_CU_ASSERT_FATAL(b->use_extent_table);
++	SPDK_CU_ASSERT_FATAL(bs_cluster_to_extent_table_id(1) == bs_cluster_to_extent_table_id(0));
++	memset(payload, 0xC3, sizeof(payload));
++	spdk_blob_io_write(b, channel, payload, 0, 1, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(b->active.extent_pages[0] != 0);
++
++	/* Allocate cluster 1 as bs_allocate_and_copy_cluster does: the slot is
++	 * occupied, so no extent page is claimed. */
++	spdk_spin_lock(&bs->used_lock);
++	CU_ASSERT(bs_allocate_cluster(b, 1, new_cluster, &extent_page, false) == 0);
++	spdk_spin_unlock(&bs->used_lock);
++	CU_ASSERT(extent_page == 0);
++
++	/* The snapshot lands while that allocation is in flight: B's extent
++	 * table is now the snapshot's empty one. */
++	spdk_bs_create_snapshot(bs, spdk_blob_get_id(b), NULL, blob_op_with_id_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blobid != SPDK_BLOBID_INVALID);
++	*snap_id = g_blobid;
++	CU_ASSERT(b->active.extent_pages[0] == 0);
++
++	*blob_b = b;
++}
++
++static void
++blob_insert_cluster_after_snapshot_md0(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel;
++	struct spdk_blob *b;
++	struct {
++		struct spdk_blob_md_page page;
++		uint8_t pad[DEV_MAX_PHYS_BLOCKLEN - sizeof(struct spdk_blob_md_page)];
++	} md = {};
++	spdk_blob_id super_id, b_id, snap_id;
++	uint64_t new_cluster = 0;
++	uint8_t payload[BLOCKLEN], rbuf[BLOCKLEN];
++	uint64_t cluster_io = spdk_bs_get_cluster_size(bs) / spdk_bs_get_io_unit_size(bs);
++
++	if (!g_use_extent_table) {
++		return;
++	}
++	channel = spdk_bs_alloc_io_channel(bs);
++	SPDK_CU_ASSERT_FATAL(channel != NULL);
++
++	ut_md0_race_setup(bs, channel, &super_id, &b, &snap_id, &new_cluster);
++	b_id = spdk_blob_get_id(b);
++
++	/* The in-flight allocation's insert, extent_page 0. */
++	g_bserrno = -1;
++	blob_insert_cluster_on_md_thread(b, 1, new_cluster, 0, &md.page, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(b->active.clusters[1] != 0);
++	CU_ASSERT(b->active.extent_pages[0] != 0);
++
++	/* Data written to the cluster must survive the reload. */
++	memset(payload, 0x5A, sizeof(payload));
++	spdk_blob_io_write(b, channel, payload, cluster_io, 1, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++
++	spdk_blob_close(b, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++
++	ut_bs_reload(&bs, NULL);
++
++	/* The super blob is intact: what failed on bench4. */
++	spdk_bs_get_super(bs, blob_op_with_id_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(g_blobid == super_id);
++	g_blob = NULL;
++	spdk_bs_open_blob(bs, super_id, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(g_blob != NULL);
++	if (g_blob != NULL) {
++		spdk_blob_close(g_blob, blob_op_complete, NULL);
++		poll_threads();
++	}
++
++	/* B's new cluster is mapped and holds what was written; cluster 0 still
++	 * reads through to the snapshot. */
++	g_blob = NULL;
++	spdk_bs_open_blob(bs, b_id, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
++	b = g_blob;
++	CU_ASSERT(b->active.clusters[1] != 0);
++	channel = spdk_bs_alloc_io_channel(bs);
++	SPDK_CU_ASSERT_FATAL(channel != NULL);
++	memset(rbuf, 0, sizeof(rbuf));
++	spdk_blob_io_read(b, channel, rbuf, cluster_io, 1, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(memcmp(rbuf, payload, sizeof(rbuf)) == 0);
++	memset(payload, 0xC3, sizeof(payload));
++	spdk_blob_io_read(b, channel, rbuf, 0, 1, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	CU_ASSERT(memcmp(rbuf, payload, sizeof(rbuf)) == 0);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++
++	ut_blob_close_and_delete(bs, b);
++	spdk_bs_delete_blob(bs, snap_id, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++}
++
++/* Same race, but no md page is free when the insert claims one: the insert
++ * fails with -ENOSPC, leaves the cluster unmapped and claims nothing. */
++static void
++blob_insert_cluster_after_snapshot_enospc(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel;
++	struct spdk_blob *b;
++	struct {
++		struct spdk_blob_md_page page;
++		uint8_t pad[DEV_MAX_PHYS_BLOCKLEN - sizeof(struct spdk_blob_md_page)];
++	} md = {};
++	spdk_blob_id super_id, snap_id;
++	uint64_t new_cluster = 0;
++	uint32_t *filled, nfilled = 0, i, cap, used_before;
++
++	if (!g_use_extent_table) {
++		return;
++	}
++	channel = spdk_bs_alloc_io_channel(bs);
++	SPDK_CU_ASSERT_FATAL(channel != NULL);
++
++	ut_md0_race_setup(bs, channel, &super_id, &b, &snap_id, &new_cluster);
++
++	/* Use up every md page. */
++	cap = spdk_bit_array_capacity(bs->used_md_pages);
++	filled = calloc(cap, sizeof(*filled));
++	SPDK_CU_ASSERT_FATAL(filled != NULL);
++	used_before = spdk_bit_array_count_set(bs->used_md_pages);
++	for (i = spdk_bit_array_find_first_clear(bs->used_md_pages, 0); i < cap;
++	     i = spdk_bit_array_find_first_clear(bs->used_md_pages, i + 1)) {
++		spdk_bit_array_set(bs->used_md_pages, i);
++		filled[nfilled++] = i;
++	}
++
++	g_bserrno = 0;
++	blob_insert_cluster_on_md_thread(b, 1, new_cluster, 0, &md.page, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == -ENOSPC);
++	CU_ASSERT(b->active.clusters[1] == 0);
++	CU_ASSERT(b->active.extent_pages[0] == 0);
++
++	for (i = 0; i < nfilled; i++) {
++		spdk_bit_array_clear(bs->used_md_pages, filled[i]);
++	}
++	free(filled);
++	CU_ASSERT(spdk_bit_array_count_set(bs->used_md_pages) == used_before);
++
++	/* What blob_insert_cluster_revert does for the caller. */
++	spdk_spin_lock(&bs->used_lock);
++	bs_release_cluster(bs, new_cluster);
++	spdk_spin_unlock(&bs->used_lock);
++
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++	ut_blob_close_and_delete(bs, b);
++	spdk_bs_delete_blob(bs, snap_id, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++}
++
++/* The extent-page writer refuses md page 0 with an error and writes nothing. */
++static void
++blob_write_extent_page_refuses_md0(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_blob *a;
++	struct spdk_blob_opts opts;
++	struct {
++		struct spdk_blob_md_page page;
++		uint8_t pad[DEV_MAX_PHYS_BLOCKLEN - sizeof(struct spdk_blob_md_page)];
++	} md = {};
++	uint8_t *page0, *before;
++	spdk_blob_id super_id;
++
++	ut_spdk_blob_opts_init(&opts);
++	a = ut_blob_create_and_open(bs, &opts);
++	super_id = spdk_blob_get_id(a);
++	SPDK_CU_ASSERT_FATAL(bs_blobid_to_page(super_id) == 0);
++
++	page0 = &g_dev_buffer[bs_md_page_to_lba(bs, 0) * bs->dev->blocklen];
++	before = malloc(bs->md_page_size);
++	SPDK_CU_ASSERT_FATAL(before != NULL);
++	memcpy(before, page0, bs->md_page_size);
++
++	g_bserrno = 0;
++	blob_write_extent_page(a, 0, 0, &md.page, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == -EINVAL);
++	CU_ASSERT(memcmp(before, page0, bs->md_page_size) == 0);
++	free(before);
++
++	/* A still loads from md page 0. */
++	spdk_blob_close(a, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	ut_bs_reload(&bs, NULL);
++	g_blob = NULL;
++	spdk_bs_open_blob(bs, super_id, blob_op_with_handle_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	SPDK_CU_ASSERT_FATAL(g_blob != NULL);
++	ut_blob_close_and_delete(bs, g_blob);
++}
++
+ static void
+ blob_thin_prov_rw(void)
+ {
+@@ -10955,6 +11221,9 @@ main(int argc, char **argv)
+ 		CU_ADD_TEST(suite_bs, blob_set_xattrs_test);
+ 		CU_ADD_TEST(suite_bs, blob_thin_prov_alloc);
+ 		CU_ADD_TEST(suite_bs, blob_insert_cluster_msg_test);
++		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_md0);
++		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_enospc);
++		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);
+ 		CU_ADD_TEST(suite_bs, blob_thin_prov_rw);
+ 		CU_ADD_TEST(suite, blob_thin_prov_write_count_io);
+ 		CU_ADD_TEST(suite, blob_thin_prov_unmap_cluster);

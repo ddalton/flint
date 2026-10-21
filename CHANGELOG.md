@@ -12,6 +12,104 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.60.1] - 2026-10-21
+
+A patch release for three defects in the spdk-tgt image. The first is
+a metadata corruption that makes a node's whole lvstore fail to load at
+the next restart; the second let the replicas of a volume end up
+holding different data for the same block. spdk-tgt 1.7.1 fixes both
+(races in stock SPDK v26.05's blobstore, reported upstream) and, third,
+finally carries F74 change 2: 1.59.0 and 1.60.0 pinned spdk-tgt 1.7.0,
+built before it. Every chart is a
+patch bump; appVersion 1.60.1. Guides and their PDFs re-pinned; the
+lite render-parity fixture regenerated.
+
+### Fixed
+
+- **An epoch snapshot could overwrite the lvstore's super blob, and the
+  lvstore then failed to load** (2026-10-21). A race in stock SPDK
+  v26.05 (`lib/blob/blobstore.c`, still in upstream master): a
+  copy-on-write cluster allocation claims a new extent page only if the
+  blob's extent-table slot is empty when it starts; when a snapshot's
+  map swap (`bs_snapshot_swap_cluster_maps`) empties the slot while the
+  allocation is in flight -- `blob_freeze_io` does not wait for
+  allocations already running -- the insert on the metadata thread
+  wrote the extent page to page number 0, the lvstore super blob,
+  guarded only by an assert that release builds compile out. Nothing
+  shows while running; at the next spdk-tgt restart the lvstore fails
+  to load (`blob_parse: Blobid (0x100000000) doesn't match what's in
+  metadata (0x100000001)`) and every replica on the node is gone. Seen
+  on EC2 (3 x i4i.2xlarge, 1.60.0 as released, one r3 volume under
+  random writes, four 300 s epoch cuts): two of three nodes' lvstores
+  failed to load after a graceful restart; their md page 0 held an
+  extent page of the replica lvol with exactly one entry. The race
+  predates 1.59.0 -- every release since epoch snapshots (1.5.0) is
+  exposed -- but 1.59.0's 128 KiB clusters made it common: most writes
+  after a cut are copy-on-write allocations, so many are in flight when
+  the next cut lands. New `blob-extent-page-md0.patch`: the metadata
+  thread claims a fresh extent page (searching from 1) when the slot and
+  the allocation's page are both 0, the extent-page writer refuses page
+  0 with an error, and a failed extent-page write no longer leaves a
+  cluster mapped in memory but unpersisted. Three new blob unit tests
+  reproduce the race deterministically (they fail on the unpatched tree
+  with the exact error above); blob_ut 540/540, lvol_ut 37/37,
+  vbdev_lvol_ut 23/23. Reported upstream on spdk/spdk#3113 (closed in 2024 as
+  unreproducible), with a stock-master reproducer and a fix for review
+  (https://review.spdk.io/c/spdk/spdk/+/29555).
+- **Replicas could end up with different data for the same block**
+  (2026-10-21). Another race in stock SPDK's blobstore, also in upstream
+  master: a cluster allocation maps the new cluster in memory before it
+  persists the extent page, and re-runs the write that triggered it only
+  after that persist. A second write to the same cluster arriving in
+  between went straight to disk -- ahead of the earlier write, which
+  then landed on top of it. Because each replica runs its own
+  allocations, a replica that hit this window kept the older of two
+  overlapping writes while the others kept the newer, and the volume's
+  replicas disagreed on that block from then on (which one a read
+  returned depended on the leg it was served from). The same window also
+  acknowledged the second write before the cluster mapping was on disk,
+  so a crash at that moment lost a completed write (spdk/spdk#2144).
+  Seen on EC2 (3 x i4i.2xlarge, r3, 30 s epoch cuts, 4 fio jobs of 4K
+  random writes on a fresh volume): one 4 KiB block differed between
+  replicas in about one run in three; in every case the divergent
+  replica's spdk-tgt had logged the overtaking write at exactly that
+  block, and that replica held the earlier write. Every release with
+  epoch snapshots is exposed; F74 change 2's concurrent allocations make
+  it more frequent. New `blob-alloc-window-order.patch`: a write to a
+  cluster whose allocation is still in flight on the channel waits
+  behind it, so writes apply in arrival order and none completes before
+  the mapping is persisted. A write that overlaps a parked one is logged
+  (`alloc-window write overlaps a parked write ... queued behind it`).
+  `SPDK_BS_ORDER_ALLOC_WINDOW=0` on the spdk-tgt container restores the
+  old order, for diagnosis only. A blob unit test reproduces the race
+  deterministically on both write paths; on EC2, 0 differing blocks in
+  8 runs with the fix (the overtakes were logged as queued)
+  against differences in 2 of 5 runs without it. Reported upstream on
+  spdk/spdk#2144 (closed in 2024 as stale), with a fix for review
+  (https://review.spdk.io/c/spdk/spdk/+/29556).
+- **The spdk-tgt image now actually carries F74 change 2**
+  (2026-10-21). `blob-parallel-cluster-alloc.patch` (a blobstore channel
+  runs up to 32 copy-on-write cluster allocations at once instead of
+  one) landed on 2026-10-08 and `Dockerfile.spdk` applies it, but the
+  chart's `images.spdkTarget.tag` stayed at 1.7.0, published on
+  2026-09-28, and `scripts/release.sh` never rebuilds a tag that is
+  already published. So 1.59.0 and 1.60.0 shipped change 1 (128 KiB
+  clusters) alone, and every replicated volume (r >= 2) on them still
+  had the collapsed copy-on-write write path. The 1.59.0 entry's
+  statement that "the spdk-tgt image gains
+  `blob-parallel-cluster-alloc.patch`" was wrong for the released
+  images; it described the test images. Measured on EC2 (3 x
+  i4i.2xlarge, r3, 300 s epochs, 4K random writes at QD32 x 4 jobs):
+  1.60.0 as released did 3,464 IOPS (p50 49 ms) in a rep whose epoch
+  cut fell 50 s before the end (2026-10-21); with change 2 (test image
+  `1.7.0-f74c2`, bench3, 2026-10-08), a rep with the same cut timing
+  did 35,675 IOPS, and change 2's best rep 68,997. `images.spdkTarget.tag`
+  is now 1.7.1.
+- **`release.sh check` refuses a stale spdk-tgt pin** (2026-10-21). It
+  fails when `Dockerfile.spdk` or a patch it applies changed after the
+  commit that set the chart's pinned spdk-tgt tag, so an SPDK image
+  change can no longer ship as a claim without its image.
+
 ## [1.60.0] - 2026-10-20
 
 A minor release: forge's plain export, and every known advisory cleared.
@@ -10241,7 +10339,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.1...HEAD
+[1.60.1]: https://github.com/ddalton/flint/compare/v1.60.0...v1.60.1
 [1.60.0]: https://github.com/ddalton/flint/compare/v1.59.1...v1.60.0
 [1.59.1]: https://github.com/ddalton/flint/compare/v1.59.0...v1.59.1
 [1.59.0]: https://github.com/ddalton/flint/compare/v1.58.0...v1.59.0

@@ -1,0 +1,240 @@
+diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+--- a/lib/blob/blobstore.c	2026-10-21 19:51:52.161218251 +0000
++++ b/lib/blob/blobstore.c	2026-10-21 19:51:52.164218301 +0000
+@@ -2695,6 +2695,80 @@
+ 	return NULL;
+ }
+ 
++/* The insert window (Flint, blob-alloc-window-order.patch): an allocation's
++ * insert maps the new cluster (blob_insert_cluster) BEFORE it persists the
++ * extent page, and only after that persist does the slot re-execute its
++ * waiters -- the write that started the allocation first. A write to the
++ * same cluster that arrives inside that window sees the cluster allocated and
++ * would go straight to the device, AHEAD of the earlier writes still parked
++ * on the slot; an earlier one to the same units then lands on top of it. One
++ * replica of a raid1 that hits the window ends with the older data, the
++ * others with the newer. Queue such a write on the slot instead, so writes to
++ * a cluster being allocated apply in arrival order.
++ * SPDK_BS_ORDER_ALLOC_WINDOW=0 restores the old behaviour (A/B, and the unit
++ * test's control). A write overlapping a parked write is logged every time
++ * ("overlaps a parked write": the divergence case); other window hits are
++ * counted and logged sparsely. */
++static uint64_t g_bs_alloc_window_hits;
++static uint64_t g_bs_alloc_window_overlaps;
++
++static bool
++bs_write_in_alloc_window(struct spdk_io_channel *_ch, struct spdk_blob *blob, uint64_t offset,
++			 uint64_t length, struct spdk_bs_cpl *cpl, enum spdk_blob_op_type op_type,
++			 void *payload, int iovcnt, struct spdk_blob_ext_io_opts *ext_io_opts)
++{
++	struct spdk_bs_channel *ch = spdk_io_channel_get_ctx(_ch);
++	struct spdk_bs_cluster_alloc_slot *slot;
++	spdk_bs_user_op_t *op, *parked = NULL;
++	const char *env;
++	bool order;
++
++	if (ch->alloc_slots_used == 0) {
++		return false;
++	}
++	slot = bs_find_alloc_slot(ch, blob, bs_io_unit_to_cluster_number(blob, offset));
++	if (slot == NULL) {
++		return false;
++	}
++	env = getenv("SPDK_BS_ORDER_ALLOC_WINDOW");
++	order = env == NULL || strcmp(env, "0") != 0;
++	g_bs_alloc_window_hits++;
++	TAILQ_FOREACH(op, &slot->waiters, link) {
++		if (op->u.user_op.offset < offset + length &&
++		    offset < op->u.user_op.offset + op->u.user_op.length) {
++			parked = op;
++			break;
++		}
++	}
++	if (parked != NULL) {
++		g_bs_alloc_window_overlaps++;
++		SPDK_NOTICELOG("alloc-window write overlaps a parked write: blob 0x%" PRIx64
++			       " io_unit %" PRIu64 "+%" PRIu64 " parked %" PRIu64 "+%" PRIu64
++			       " cluster %u: %s (overlap %" PRIu64 ", window hits %" PRIu64 ")\n",
++			       blob->id, offset, length, parked->u.user_op.offset,
++			       parked->u.user_op.length, slot->cluster_number,
++			       order ? "queued behind it" : "BYPASS, overtakes it",
++			       g_bs_alloc_window_overlaps, g_bs_alloc_window_hits);
++	} else if (g_bs_alloc_window_hits <= 20 || (g_bs_alloc_window_hits & 65535) == 0) {
++		SPDK_NOTICELOG("alloc-window write: blob 0x%" PRIx64 " io_unit %" PRIu64 "+%" PRIu64
++			       " cluster %u: %s (window hits %" PRIu64 ", overlaps %" PRIu64 ")\n",
++			       blob->id, offset, length, slot->cluster_number,
++			       order ? "queued" : "bypass", g_bs_alloc_window_hits,
++			       g_bs_alloc_window_overlaps);
++	}
++	if (!order) {
++		return false;
++	}
++	op = bs_user_op_alloc(_ch, cpl, op_type, blob, payload, iovcnt, offset, length);
++	if (!op) {
++		cpl->u.blob_basic.cb_fn(cpl->u.blob_basic.cb_arg, -ENOMEM);
++		return true;
++	}
++	op->ext_io_opts = ext_io_opts;
++	TAILQ_INSERT_TAIL(&slot->waiters, op, link);
++	return true;
++}
++
+ static void
+ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+ {
+@@ -3289,6 +3363,10 @@
+ 	}
+ 	case SPDK_BLOB_WRITE:
+ 	case SPDK_BLOB_WRITE_ZEROES: {
++		if (is_allocated &&
++		    bs_write_in_alloc_window(_ch, blob, offset, length, &cpl, op_type, payload, 0, NULL)) {
++			break;
++		}
+ 		if (is_allocated) {
+ 			/* Write to the blob */
+ 			spdk_bs_batch_t *batch;
+@@ -3619,6 +3697,11 @@
+ 							 rw_iov_done, NULL);
+ 			}
+ 		} else {
++			if (is_allocated &&
++			    bs_write_in_alloc_window(_channel, blob, offset, length, &cpl, SPDK_BLOB_WRITEV,
++						     iov, iovcnt, ext_io_opts)) {
++				return;
++			}
+ 			if (is_allocated) {
+ 				spdk_bs_sequence_t *seq;
+ 
+diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+--- a/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 19:51:52.167218351 +0000
++++ b/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 19:51:52.170218400 +0000
+@@ -6035,6 +6035,121 @@
+ 	poll_threads();
+ }
+ 
++/* The insert window (blob-alloc-window-order.patch): write A starts the
++ * allocation of cluster 0; step the threads until the insert has MAPPED the
++ * cluster but A has not yet re-executed (the extent page persist is still in
++ * flight); then write B to the same unit. Returns the byte read back. */
++static int g_win_seq, g_win_a, g_win_b;
++
++static void
++win_a_cpl(void *arg, int bserrno)
++{
++	CU_ASSERT(bserrno == 0);
++	g_win_a = ++g_win_seq;
++}
++
++static void
++win_b_cpl(void *arg, int bserrno)
++{
++	CU_ASSERT(bserrno == 0);
++	g_win_b = ++g_win_seq;
++}
++
++static uint8_t
++ut_alloc_window_race(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
++		     struct spdk_blob *blob, bool use_iov, bool *in_window)
++{
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint8_t *a = malloc(iou), *b = malloc(iou), *r = malloc(iou), got;
++	struct iovec iov_a, iov_b;
++	int i;
++
++	SPDK_CU_ASSERT_FATAL(a != NULL && b != NULL && r != NULL);
++	memset(a, 0xA1, iou);
++	memset(b, 0xB2, iou);
++	iov_a.iov_base = a;
++	iov_a.iov_len = iou;
++	iov_b.iov_base = b;
++	iov_b.iov_len = iou;
++	g_win_seq = g_win_a = g_win_b = 0;
++	CU_ASSERT(blob->active.clusters[0] == 0);
++	if (use_iov) {
++		spdk_blob_io_writev(blob, channel, &iov_a, 1, 1, 1, win_a_cpl, NULL);
++	} else {
++		spdk_blob_io_write(blob, channel, a, 1, 1, win_a_cpl, NULL);
++	}
++	for (i = 0; i < 100000 && blob->active.clusters[0] == 0; i++) {
++		poll_thread_times(0, 1);
++	}
++	*in_window = blob->active.clusters[0] != 0 && g_win_a == 0;
++	if (use_iov) {
++		spdk_blob_io_writev(blob, channel, &iov_b, 1, 1, 1, win_b_cpl, NULL);
++	} else {
++		spdk_blob_io_write(blob, channel, b, 1, 1, win_b_cpl, NULL);
++	}
++	poll_threads();
++	CU_ASSERT(g_win_a != 0 && g_win_b != 0);
++	memset(r, 0, iou);
++	spdk_blob_io_read(blob, channel, r, 1, 1, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	got = r[0];
++	CU_ASSERT(r[iou - 1] == got);
++	free(a);
++	free(b);
++	free(r);
++	return got;
++}
++
++/* write and writev (vbdev_lvol's path), thin (zeroes backing) and
++ * copy-on-write (snapshot backing), each with the ordering on (B, the later
++ * write, wins) and off (the control: A re-executes on top of B -- the replica
++ * divergence seen on bench4). */
++static void
++blob_alloc_window_keeps_write_order(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel = spdk_bs_alloc_io_channel(bs);
++	struct spdk_blob_opts opts;
++	struct spdk_blob *blob, *snapshot;
++	bool in_window;
++	int iov, cow, order;
++	uint8_t got;
++
++	SPDK_CU_ASSERT_FATAL(channel != NULL);
++	for (iov = 0; iov < 2; iov++) {
++		for (cow = 0; cow < 2; cow++) {
++			for (order = 1; order >= 0; order--) {
++				setenv("SPDK_BS_ORDER_ALLOC_WINDOW", order ? "1" : "0", 1);
++				snapshot = NULL;
++				if (cow) {
++					ut_cow_blob_with_snapshot(bs, channel, 1, &blob, &snapshot);
++				} else {
++					ut_spdk_blob_opts_init(&opts);
++					opts.thin_provision = true;
++					opts.num_clusters = 1;
++					blob = ut_blob_create_and_open(bs, &opts);
++				}
++				got = ut_alloc_window_race(bs, channel, blob, iov, &in_window);
++				CU_ASSERT(in_window);
++				if (order) {
++					CU_ASSERT(got == 0xB2);
++					CU_ASSERT(g_win_a < g_win_b);
++				} else {
++					CU_ASSERT(got == 0xA1);
++				}
++				ut_blob_close_and_delete(bs, blob);
++				if (snapshot != NULL) {
++					ut_blob_close_and_delete(bs, snapshot);
++				}
++			}
++		}
++	}
++	unsetenv("SPDK_BS_ORDER_ALLOC_WINDOW");
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++}
++
+ static void
+ blob_cow_same_cluster_waits(void)
+ {
+@@ -11224,6 +11339,7 @@
+ 		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_md0);
+ 		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_enospc);
+ 		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);
++		CU_ADD_TEST(suite_bs, blob_alloc_window_keeps_write_order);
+ 		CU_ADD_TEST(suite_bs, blob_thin_prov_rw);
+ 		CU_ADD_TEST(suite, blob_thin_prov_write_count_io);
+ 		CU_ADD_TEST(suite, blob_thin_prov_unmap_cluster);

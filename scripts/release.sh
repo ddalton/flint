@@ -283,6 +283,42 @@ done <<EOF
 $images_table
 EOF
 
+# A PUBLISHED tag is never rebuilt, so a chart that keeps pinning one after
+# the image's build inputs changed ships the OLD image. 1.59.0 and 1.60.0 did
+# exactly that: spdk-tgt stayed at 1.7.0 (published 2026-09-28) while
+# Dockerfile.spdk gained blob-parallel-cluster-alloc.patch (2026-10-08), and
+# the CHANGELOG said the image had it. Refuse: for spdk-tgt, the inputs are
+# Dockerfile.spdk and every patch it COPYs; any commit touching them after
+# the commit that set the pinned tag means the pin is stale -- bump it.
+# (The driver images move with the release version, so they cannot go stale.)
+stale=""
+while read -r name tag ctx file; do
+    [ "$file" = docker/Dockerfile.spdk ] || continue
+    tag_exists "$name" "$tag" || continue      # unpublished: 'images' builds it from today's inputs
+    set_at=$(git -C "$repo_root" log -1 --format=%H -S"tag: \"$tag\"" -- flint-csi-driver-chart/values.yaml)
+    if [ -z "$set_at" ]; then
+        stale="$stale  $hub_ns/$name:$tag -- cannot find the commit that set this pin in values.yaml
+"
+        continue
+    fi
+    inputs="$ctx/$file"
+    for p in $(sed -n 's/^COPY \([^ ]*\.patch\) .*/\1/p' "$repo_root/$ctx/$file"); do inputs="$inputs $ctx/$p"; done
+    # shellcheck disable=SC2086
+    later=$(git -C "$repo_root" log --format='%h %ad %s' --date=short "$set_at..HEAD" -- $inputs)
+    if [ -n "$later" ]; then
+        stale="$stale  $hub_ns/$name:$tag (pinned in ${set_at%"${set_at#????????}"}) predates changes to its build inputs:
+$(echo "$later" | sed 's/^/      /')
+"
+    fi
+done <<EOF
+$images_table
+EOF
+if [ -n "$stale" ]; then
+    echo "STALE image pin(s) -- the published tag does not contain these changes; bump the tag in values.yaml:" >&2
+    printf '%s' "$stale" >&2
+    exit 1
+fi
+
 if [ "$cmd" = check ]; then
     [ -z "$missing_table" ] && exit 0
     echo "missing image(s): run '$0 images' to build and push them." >&2
