@@ -50,6 +50,12 @@ csiSidecars:
   externalProvisioner:
     name: csi-provisioner
     tag: v3.6.0  # Upgraded from v3.1.0 for better ephemeral volume support
+    # CreateVolume deadline. A thick volume is zeroed as it is created and
+    # can take longer: the call then answers ABORTED and the provisioner's
+    # retry joins the running create. retryIntervalMax must stay well under
+    # the orphan sweep's ~3 min window for a PV-less lvol.
+    timeout: "60s"
+    retryIntervalMax: "30s"
   externalAttacher:
     name: csi-attacher
     tag: v4.4.0  # Upgraded from v3.4.0 for latest features
@@ -82,6 +88,12 @@ driver:
   # Ephemeral volumes are automatically created on Pod start and deleted on Pod termination
   # Requires Kubernetes v1.25+ (or v1.21-v1.24 with CSIInlineVolume feature gate)
   enableEphemeral: true
+
+  # thinProvision "false": spdk-tgt zeroes a thick volume as it is created or
+  # grown (so it never shows a deleted volume's data). Create and resize
+  # deadlines scale with the size at this floor rate, MiB/s -- a bound, not
+  # an estimate (FLINT_THICK_ZERO_MIBPS).
+  thickZeroFloorMiBps: 256
 
   # F36c last-writer-set degraded-assembly gate (docs/f36c-assembly-freshness-gate.md).
   # "disabled" restores pre-F36c serve-anything assembly. Tuning knobs are
@@ -238,7 +250,7 @@ storageClass:
   parameters:
     numReplicas: "1"  # Single replica (default). "2"/"3" = RAID1 multi-replica HA (r2/r3 chaos-validated 2026-07: node loss serves from survivors; keep replication.orchestrators on)
     autoRebuild: "true"  # "false" opts this SC's volumes out of automatic replica re-placement after permanent node loss (U11); rebuild-on-return (catch-up) is unaffected
-    thinProvision: "true"  # Thin provisioning (space allocated on write). Set to "false" for thick (full allocation up front; note: the first snapshot converts the head to thin and pins the full image — see docs/incremental-replica-rebuild.md §5)
+    thinProvision: "true"  # Thin provisioning (space allocated on write). Set to "false" for thick (full allocation up front, zeroed as it is created -- creation takes about as long as writing the volume; note: the first snapshot converts the head to thin and pins the full image — see docs/incremental-replica-rebuild.md §5)
     nfsEmptyDir: "false"  # Set to "true" for Kind/dev clusters (bypasses kernel block device requirement)
 
 # VolumeSnapshotClass configuration

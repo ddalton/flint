@@ -57,6 +57,7 @@ pub mod spdk_dashboard_backend_minimal;
 pub mod dashboard_auth;  // Bearer-token auth for the dashboard backend (frontend Phase 0)
 pub mod snapshot;  // Volume snapshot support (isolated module)
 pub mod capacity_cache;  // Capacity caching for scalability
+pub mod single_flight;  // CreateVolume as one detached flight per name: a CO deadline cancels the RPC, not the (thick-zeroing) create; the retry joins it
 pub mod raid;  // RAID support for multi-replica volumes
 pub mod httpserve;  // warp 0.4 serving: a bind that reports its port, and TLS (tokio-rustls + hyper-util)
 pub mod netaddr;  // host:port joining that brackets IPv6 literals — the derived `status.address` path had no bracketing while the CRD's CEL rule demanded it

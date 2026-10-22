@@ -476,13 +476,55 @@ impl MinimalDiskService {
             }
         });
 
-        self.call_spdk_rpc(&resize_params).await
-            .map_err(|e| MinimalStateError::SpdkRpcError { 
-                message: format!("Failed to resize lvol: {}", e) 
-            })?;
+        // A THICK lvol zeroes what it grows by before the resize returns
+        // (blob-zero-new-clusters.patch): budget the RPC for it. Unreadable
+        // lvol = the normal budget, as before.
+        let thick_growth_deadline = self
+            .lvol_growth(lvol_uuid, size_mib * 1048576)
+            .await
+            .filter(|&(grow, thin)| !thin && grow > 0)
+            .map(|(grow, _)| crate::spdk_native::lvol_alloc_deadline("bdev_lvol_resize", grow, false));
+
+        let resized = match thick_growth_deadline {
+            Some(deadline) => {
+                info!(lvol_uuid, deadline_s = deadline.as_secs(), "[MINIMAL_DISK] Thick lvol grows: resize zeroes the new clusters");
+                self.call_spdk_rpc_with_deadline("bdev_lvol_resize", resize_params["params"].clone(), deadline).await
+            }
+            None => self.call_spdk_rpc(&resize_params).await,
+        };
+        resized.map_err(|e| MinimalStateError::SpdkRpcError {
+            message: format!("Failed to resize lvol: {}", e)
+        })?;
 
         info!(lvol_uuid, size_mib, "[MINIMAL_DISK] Successfully resized lvol");
         Ok(())
+    }
+
+    /// `(bytes the lvol grows by to reach new_size_bytes, thin)`; None when
+    /// the lvol cannot be read.
+    async fn lvol_growth(&self, lvol_uuid: &str, new_size_bytes: u64) -> Option<(u64, bool)> {
+        let resp = self
+            .call_spdk_rpc(&json!({"method": "bdev_get_bdevs", "params": {"name": lvol_uuid}}))
+            .await
+            .ok()?;
+        let bdev = resp["result"].as_array()?.iter().find(|b| b["name"] == lvol_uuid)?;
+        let current = bdev["num_blocks"].as_u64()? * bdev["block_size"].as_u64()?;
+        let thin = bdev["driver_specific"]["lvol"]["thin_provision"].as_bool()?;
+        Some((new_size_bytes.saturating_sub(current), thin))
+    }
+
+    /// One SPDK RPC under an explicit deadline (call_spdk_rpc applies the
+    /// method's fixed budget).
+    async fn call_spdk_rpc_with_deadline(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: std::time::Duration,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let socket = self.spdk_socket_path.trim_start_matches("unix://");
+        let spdk = crate::spdk_native::SpdkNative::new(Some(socket.to_string())).await?;
+        let result = spdk.call_method_with_deadline(method, Some(params), deadline).await?;
+        Ok(json!({ "result": result }))
     }
 
     /// Check if a logical volume exists by UUID

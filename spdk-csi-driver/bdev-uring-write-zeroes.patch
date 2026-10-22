@@ -1,0 +1,135 @@
+diff --git a/module/bdev/uring/bdev_uring.c b/module/bdev/uring/bdev_uring.c
+index ca2dbcf89..4d419bb66 100644
+--- a/module/bdev/uring/bdev_uring.c
++++ b/module/bdev/uring/bdev_uring.c
+@@ -21,6 +21,9 @@
+ #include "spdk/log.h"
+ #include "spdk_internal/uring.h"
+ 
++#include <linux/falloc.h>
++#include <sys/sysmacros.h>
++
+ #ifdef SPDK_CONFIG_URING_ZNS
+ #include <linux/blkzoned.h>
+ #define SECTOR_SHIFT 9
+@@ -83,6 +86,8 @@ struct bdev_uring {
+ 	TAILQ_ENTRY(bdev_uring)  link;
+ 
+ 	bool			hot_remove_in_progress;
++	/* WRITE_ZEROES via fallocate(FALLOC_FL_ZERO_RANGE): see bdev_uring_detect_write_zeroes() */
++	bool			write_zeroes;
+ };
+ 
+ static int bdev_uring_init(void);
+@@ -287,6 +292,68 @@ bdev_uring_writev(struct bdev_uring *uring, struct spdk_io_channel *ch,
+ 	return nbytes;
+ }
+ 
++/* WRITE_ZEROES (2026-10-22). On a block device, fallocate(FALLOC_FL_ZERO_RANGE)
++ * becomes blkdev_issue_zeroout(): the drive's Write Zeroes command, with no
++ * data transferred. Blobstore zeroes every cluster before mapping it unwritten
++ * (blob-zero-new-clusters.patch); this makes that a command instead of a
++ * cluster of zero-buffer writes. io_uring runs the fallocate in a kernel
++ * worker, so the reactor never waits on it. Advertised only when the queue
++ * takes Write Zeroes (write_zeroes_max_bytes > 0): elsewhere the kernel would
++ * fall back to writing zero pages itself, so the bdev layer's emulation is kept
++ * -- as it is for regular files, where not every filesystem has ZERO_RANGE. */
++static bool
++bdev_uring_detect_write_zeroes(struct bdev_uring *uring)
++{
++	unsigned long long max_bytes = 0;
++	char *val = NULL;
++	struct stat st;
++	int rc;
++
++	if (fstat(uring->fd, &st) != 0 || !S_ISBLK(st.st_mode)) {
++		return false;
++	}
++	rc = spdk_read_sysfs_attribute(&val, "/sys/dev/block/%u:%u/queue/write_zeroes_max_bytes",
++				       major(st.st_rdev), minor(st.st_rdev));
++	if (rc != 0) {
++		/* a partition: the queue is its disk's */
++		rc = spdk_read_sysfs_attribute(&val,
++					       "/sys/dev/block/%u:%u/../queue/write_zeroes_max_bytes",
++					       major(st.st_rdev), minor(st.st_rdev));
++	}
++	if (rc == 0) {
++		max_bytes = strtoull(val, NULL, 10);
++	}
++	free(val);
++	return max_bytes > 0;
++}
++
++static int64_t
++bdev_uring_write_zeroes(struct bdev_uring *uring, struct spdk_io_channel *ch,
++			struct bdev_uring_task *uring_task, uint64_t nbytes, uint64_t offset)
++{
++	struct bdev_uring_io_channel *uring_ch = spdk_io_channel_get_ctx(ch);
++	struct bdev_uring_group_channel *group_ch = uring_ch->group_ch;
++	struct io_uring_sqe *sqe;
++
++	sqe = io_uring_get_sqe(&group_ch->uring);
++	if (!sqe) {
++		URING_DEBUGLOG(uring, "get sqe failed as out of resource\n");
++		return -ENOMEM;
++	}
++
++	io_uring_prep_fallocate(sqe, uring->fd, FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE,
++				offset, nbytes);
++	io_uring_sqe_set_data(sqe, uring_task);
++	/* fallocate completes with 0, not a byte count (bdev_uring_reap) */
++	uring_task->len = 0;
++	uring_task->ch = uring_ch;
++
++	URING_DEBUGLOG(uring, "write_zeroes size %lu at off: %#lx\n", nbytes, offset);
++
++	group_ch->io_pending++;
++	return nbytes;
++}
++
+ static int
+ bdev_uring_destruct(void *ctx)
+ {
+@@ -716,6 +783,14 @@ _bdev_uring_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev
+ 		spdk_bdev_io_get_buf(bdev_io, bdev_uring_get_buf_cb,
+ 				     bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen);
+ 		return 0;
++	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
++		if (bdev_uring_write_zeroes(uring_from_bdev(bdev_io->bdev), ch,
++					    (struct bdev_uring_task *)bdev_io->driver_ctx,
++					    bdev_io->u.bdev.num_blocks * bdev_io->bdev->blocklen,
++					    bdev_io->u.bdev.offset_blocks * bdev_io->bdev->blocklen) == -ENOMEM) {
++			spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
++		}
++		return 0;
+ 	default:
+ 		return -1;
+ 	}
+@@ -732,6 +807,8 @@ bdev_uring_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_
+ static bool
+ bdev_uring_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
+ {
++	struct bdev_uring *uring = ctx;
++
+ 	switch (io_type) {
+ #ifdef SPDK_CONFIG_URING_ZNS
+ 	case SPDK_BDEV_IO_TYPE_GET_ZONE_INFO:
+@@ -740,6 +817,8 @@ bdev_uring_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type)
+ 	case SPDK_BDEV_IO_TYPE_READ:
+ 	case SPDK_BDEV_IO_TYPE_WRITE:
+ 		return true;
++	case SPDK_BDEV_IO_TYPE_WRITE_ZEROES:
++		return uring->write_zeroes;
+ 	default:
+ 		return false;
+ 	}
+@@ -882,6 +961,9 @@ create_uring_bdev(const struct bdev_uring_opts *opts)
+ 	}
+ 
+ 	bdev_size = spdk_fd_get_size(uring->fd);
++	uring->write_zeroes = bdev_uring_detect_write_zeroes(uring);
++	URING_NOTICELOG(uring, "write_zeroes: %s\n", uring->write_zeroes ?
++			"kernel zeroout (the queue takes Write Zeroes)" : "emulated by the bdev layer");
+ 
+ 	uring->bdev.product_name = "URING bdev";
+ 	uring->bdev.module = &uring_if;

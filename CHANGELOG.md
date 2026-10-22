@@ -12,6 +12,52 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Security
+
+- **A new volume could read a deleted volume's data** where it had never
+  written. On EC2 the node agent attaches each disk as an SPDK `uring` bdev,
+  which cannot unmap; SPDK then completes the "clear" of a deleted volume's
+  clusters (`clear_method: unmap`) as a no-op, and a new thin volume maps
+  such a cluster on its first write without zeroing the rest of it. The
+  same held for a retired epoch snapshot's clusters, for a thick volume
+  (never zeroed at all), and for a disk holding data from before Flint.
+  Reproduced on the build box in all four cases (2026-10-22); it also made
+  replicas disagree on never-written blocks, which the bench4 scrub read as
+  divergence. Fixed in spdk-tgt (next tag, after the release gates): a
+  cluster is zeroed before it is mapped unwritten, thin on its first write,
+  thick when the volume is created or grown (series patch 0010,
+  `SPDK_BS_ZERO_NEW_CLUSTERS=0` restores the old behaviour for A/B). The
+  `uring` bdev now zeroes through the kernel (the drive's Write Zeroes
+  command, no data transferred) where the disk supports it (0011). Cost on
+  the build box's consumer NVMe, before 0011: a new volume's first pass of
+  4K random writes ran slower for about 20 s per 32 GiB, a first sequential
+  pass 44% slower; nothing after a cluster's first write. EC2 numbers and
+  i4i's Write Zeroes support are measured at the release gate.
+
+### Changed
+
+- **Thick volumes (`thinProvision: "false"`) are zeroed as they are
+  created**, so creating one takes about as long as writing it. The node's
+  SPDK deadline and the controller's request to it now scale with the size
+  at a floor rate (chart `driver.thickZeroFloorMiBps`, 256 MiB/s;
+  `FLINT_THICK_ZERO_MIBPS`); growing a thick volume scales the same way.
+- **csi-provisioner `--timeout` 60s and `--retry-interval-max` 30s** (chart
+  `csiSidecars.externalProvisioner.timeout` / `.retryIntervalMax`; they were
+  the sidecar's defaults, 10s and 5m).
+
+### Fixed
+
+- **A CreateVolume that outlived the provisioner's deadline never
+  finished.** The provisioner cancels the call at its `--timeout` and
+  retries the same name; the retry did not look for the volume already
+  being created, so on the same lvstore it failed `File exists` on every
+  retry until the orphan sweep deleted the half-made volume and the cycle
+  began again, and on another node it created a duplicate. CreateVolume
+  now runs one detached create per volume name: a cancelled call leaves the
+  create running, a retry waits on it, and a retry that finds the volume
+  still being created by an earlier controller answers `ABORTED` (in
+  progress) or adopts the finished lvol after checking its size.
+
 ## [1.60.2] - 2026-10-22
 
 A patch release for six defects and two defaults. spdk-tgt 1.7.2 closes

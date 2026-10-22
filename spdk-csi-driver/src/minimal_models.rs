@@ -128,7 +128,7 @@ impl StorageClassParams {
 }
 
 /// Error types for minimal state operations
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MinimalStateError {
     DiskNotFound { node: String, pci: String },
     VolumeNotFound { volume_id: String },
@@ -143,6 +143,10 @@ pub enum MinimalStateError {
     DeserializationError { message: String },
     HttpError { message: String },
     InternalError { message: String },
+    /// The operation is already running -- a create that a CO deadline cut
+    /// off, still zeroing a thick volume -- and the CO should retry
+    /// (CreateVolume answers ABORTED).
+    InProgress { message: String },
 }
 
 impl std::fmt::Display for MinimalStateError {
@@ -174,6 +178,8 @@ impl std::fmt::Display for MinimalStateError {
                     write!(f, "HTTP error: {}", message),
                 MinimalStateError::InternalError { message } => 
                     write!(f, "Internal error: {}", message),
+                MinimalStateError::InProgress { message } =>
+                    write!(f, "In progress: {}", message),
         }
     }
 }

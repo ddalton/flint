@@ -1,0 +1,346 @@
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 76925dcb4..720628380 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -1820,6 +1820,37 @@ bs_batch_clear_dev(struct spdk_blob *blob, spdk_bs_batch_t *batch, uint64_t lba,
+ 	}
+ }
+ 
++/* Zero-on-allocate (2026-10-22). A blob must read zeroes where it never wrote.
++ * A thin blob reads them from its zeroes back device until a write allocates
++ * the cluster, and from then on reads the cluster itself; a thick blob reads
++ * its clusters from the moment it is created. Both rely on a free cluster
++ * already holding zeroes, because the clear method zeroed it when it was freed
++ * or when the blobstore was created. That does not hold when the clear is an
++ * unmap and the bdev cannot unmap (uring completes it as a no-op) or does not
++ * read zeroes after one, nor for a disk with data from before the blobstore: a
++ * new blob then reads a deleted blob's data, and raid1 replicas disagree
++ * wherever nothing was written. So zero a cluster before it is mapped
++ * unwritten: a thin blob's new cluster over zeroes (bs_allocate_and_copy_cluster)
++ * and a thick blob's new clusters before the metadata that maps them is
++ * persisted (blob_persist_zero_new_clusters). SPDK_BS_ZERO_NEW_CLUSTERS=0
++ * restores the old behaviour (A/B, and the unit test's control). */
++static bool
++bs_zero_new_clusters(void)
++{
++	static bool warned;
++	const char *env = getenv("SPDK_BS_ZERO_NEW_CLUSTERS");
++
++	if (env != NULL && strcmp(env, "0") == 0) {
++		if (!warned) {
++			SPDK_WARNLOG("SPDK_BS_ZERO_NEW_CLUSTERS=0: new clusters are not zeroed; a blob "
++				     "may read a deleted blob's data where it never wrote\n");
++			warned = true;
++		}
++		return false;
++	}
++	return true;
++}
++
+ static int
+ bs_super_validate(struct spdk_bs_super_block *super, struct spdk_blob_store *bs)
+ {
+@@ -2484,6 +2515,64 @@ blob_persist_write_extent_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
+ 	blob_persist_generate_new_md(ctx);
+ }
+ 
++static void blob_persist_start_md(spdk_bs_sequence_t *seq, struct spdk_blob_persist_ctx *ctx);
++
++static void
++blob_persist_zero_new_clusters_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
++{
++	struct spdk_blob_persist_ctx *ctx = cb_arg;
++
++	if (bserrno != 0) {
++		blob_persist_complete(seq, ctx, bserrno);
++		return;
++	}
++	blob_persist_start_md(seq, ctx);
++}
++
++/* A thick blob maps its clusters as soon as it is created or grown: zero the
++ * new ones (from clean.num_clusters up to active.num_clusters, contiguous runs
++ * in one request) before the metadata that maps them is written. Returns false
++ * when there is nothing to zero. A thin blob is left alone: its clusters are
++ * zeroed one by one as writes allocate them. */
++static bool
++blob_persist_zero_new_clusters(spdk_bs_sequence_t *seq, struct spdk_blob_persist_ctx *ctx)
++{
++	struct spdk_blob *blob = ctx->blob;
++	struct spdk_blob_store *bs = blob->bs;
++	uint64_t cluster_lba_count = bs_cluster_to_lba(bs, 1);
++	uint64_t i, lba = 0, lba_count = 0;
++	spdk_bs_batch_t *batch;
++
++	if (spdk_blob_is_thin_provisioned(blob) ||
++	    blob->clean.num_clusters >= blob->active.num_clusters ||
++	    !bs_zero_new_clusters()) {
++		return false;
++	}
++
++	batch = bs_sequence_to_batch(seq, blob_persist_zero_new_clusters_cpl, ctx);
++	for (i = blob->clean.num_clusters; i < blob->active.num_clusters; i++) {
++		uint64_t next_lba = blob->active.clusters[i];
++
++		if (next_lba == 0) {
++			continue;
++		}
++		if (lba_count > 0 && lba + lba_count == next_lba) {
++			lba_count += cluster_lba_count;
++			continue;
++		}
++		if (lba_count > 0) {
++			bs_batch_write_zeroes_dev(batch, lba, lba_count);
++		}
++		lba = next_lba;
++		lba_count = cluster_lba_count;
++	}
++	if (lba_count > 0) {
++		bs_batch_write_zeroes_dev(batch, lba, lba_count);
++	}
++	bs_batch_close(batch);
++	return true;
++}
++
+ static void
+ blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ {
+@@ -2505,6 +2594,18 @@ blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+ 
+ 	}
+ 
++	if (blob_persist_zero_new_clusters(seq, ctx)) {
++		/* blob_persist_start_md() runs once the zeroes are written */
++		return;
++	}
++	blob_persist_start_md(seq, ctx);
++}
++
++static void
++blob_persist_start_md(spdk_bs_sequence_t *seq, struct spdk_blob_persist_ctx *ctx)
++{
++	struct spdk_blob *blob = ctx->blob;
++
+ 	if (blob->clean.num_clusters < blob->active.num_clusters) {
+ 		/* Blob was resized up */
+ 		assert(blob->clean.num_extent_pages <= blob->active.num_extent_pages);
+@@ -3116,6 +3217,10 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 						blob_write_copy, ctx);
+ 		}
+ 
++	} else if (bs_zero_new_clusters()) {
++		/* Mapped over zeroes: zero the cluster first (see bs_zero_new_clusters) */
++		bs_sequence_write_zeroes_dev(ctx->seq, bs_cluster_to_lba(blob->bs, ctx->new_cluster),
++					     bs_cluster_to_lba(blob->bs, 1), blob_write_copy_cpl, ctx);
+ 	} else {
+ 		blob_insert_cluster_on_md_thread(ctx->blob, cluster_number, ctx->new_cluster,
+ 						 ctx->new_extent_page, ctx->new_cluster_page, blob_insert_cluster_cpl, ctx);
+diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+index 3ed17a70c..91e540868 100644
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -4918,8 +4918,10 @@ blob_thin_prov_rw(void)
+ 	CU_ASSERT(free_clusters - 1 == spdk_bs_free_cluster_count(bs));
+ 	CU_ASSERT(spdk_blob_get_num_allocated_clusters(blob) == 1);
+ 	/* For thin-provisioned blob we need to write 20 io_units plus one page metadata and
+-	 * read 0 bytes */
+-	expected_bytes = 20 * io_unit_size + spdk_bs_get_page_size(bs);
++	 * read 0 bytes, plus two zeroed clusters: both racing allocations zero theirs
++	 * before mapping it (zero-on-allocate); the loser's is then released */
++	expected_bytes = 20 * io_unit_size + spdk_bs_get_page_size(bs) +
++			 2 * spdk_bs_get_cluster_size(bs);
+ 	if (g_use_extent_table) {
+ 		/* Add one more page for EXTENT_PAGE write */
+ 		expected_bytes += spdk_bs_get_page_size(bs);
+@@ -5033,6 +5035,8 @@ blob_thin_prov_write_count_io(void)
+ 			 */
+ 			expected_bytes = io_unit_size + 2 * spdk_bs_get_page_size(bs);
+ 		}
++		/* plus the new cluster, zeroed before it is mapped (zero-on-allocate) */
++		expected_bytes += spdk_bs_get_cluster_size(bs);
+ 		CU_ASSERT((g_dev_write_bytes - write_bytes) == expected_bytes);
+ 
+ 		/* The write should have synced the metadata already.  Do another sync here
+@@ -5064,8 +5068,9 @@ blob_thin_prov_write_count_io(void)
+ 		/*
+ 		 * For legacy metadata, we should have written the I/O and the primary metadata page.
+ 		 * For extent table metadata, we should have written the I/O and the extent metadata page.
++		 * Both: plus the new cluster, zeroed before it is mapped (zero-on-allocate).
+ 		 */
+-		expected_bytes = io_unit_size + spdk_bs_get_page_size(bs);
++		expected_bytes = io_unit_size + spdk_bs_get_page_size(bs) + spdk_bs_get_cluster_size(bs);
+ 		CU_ASSERT((g_dev_write_bytes - write_bytes) == expected_bytes);
+ 
+ 		/* Send unmap aligned to the whole cluster - should free it up */
+@@ -5414,8 +5419,8 @@ blob_thin_prov_rle(void)
+ 	CU_ASSERT(g_bserrno == 0);
+ 	CU_ASSERT(free_clusters - 1 == spdk_bs_free_cluster_count(bs));
+ 	/* For thin-provisioned blob we need to write 10 pages plus one page metadata and
+-	 * read 0 bytes */
+-	expected_bytes = 10 * io_unit_size + spdk_bs_get_page_size(bs);
++	 * read 0 bytes, plus the new cluster, zeroed before it is mapped (zero-on-allocate) */
++	expected_bytes = 10 * io_unit_size + spdk_bs_get_page_size(bs) + spdk_bs_get_cluster_size(bs);
+ 	if (g_use_extent_table) {
+ 		/* Add one more page for EXTENT_PAGE write */
+ 		expected_bytes += spdk_bs_get_page_size(bs);
+@@ -6155,6 +6160,152 @@ blob_alloc_window_keeps_write_order(void)
+ 	poll_threads();
+ }
+ 
++/* Leave n free clusters holding a deleted blob's data: a thick blob filled
++ * with 0xA5 and deleted with BLOB_CLEAR_WITH_NONE (a stand-in for a bdev that
++ * cannot unmap). The lowest free cluster is allocated first, so the next blob
++ * gets them back; their LBAs are returned in lbas[]. */
++static void
++ut_dirty_free_clusters(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
++		       uint64_t n, uint64_t *lbas)
++{
++	uint64_t i, iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t units = n * spdk_bs_get_cluster_size(bs) / iou;
++	struct spdk_blob_opts opts;
++	struct spdk_blob *blob;
++	uint8_t *buf = malloc(units * iou);
++
++	SPDK_CU_ASSERT_FATAL(buf != NULL);
++	memset(buf, 0xA5, units * iou);
++	ut_spdk_blob_opts_init(&opts);
++	opts.num_clusters = n;
++	opts.clear_method = BLOB_CLEAR_WITH_NONE;
++	blob = ut_blob_create_and_open(bs, &opts);
++	spdk_blob_io_write(blob, channel, buf, 0, units, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++	for (i = 0; i < n; i++) {
++		lbas[i] = blob->active.clusters[i];
++	}
++	ut_blob_close_and_delete(bs, blob);
++	free(buf);
++}
++
++static bool
++ut_buf_is(const uint8_t *buf, uint64_t len, uint8_t v)
++{
++	uint64_t i;
++
++	for (i = 0; i < len; i++) {
++		if (buf[i] != v) {
++			return false;
++		}
++	}
++	return true;
++}
++
++static void
++ut_read_cluster(struct spdk_blob *blob, struct spdk_io_channel *channel, uint64_t cluster,
++		uint8_t *buf)
++{
++	uint64_t upc = spdk_bs_get_cluster_size(blob->bs) / spdk_bs_get_io_unit_size(blob->bs);
++
++	spdk_blob_io_read(blob, channel, buf, cluster * upc, upc, blob_op_complete, NULL);
++	poll_threads();
++	CU_ASSERT(g_bserrno == 0);
++}
++
++/* Zero-on-allocate: a blob reads zeroes where it never wrote, although the
++ * free clusters it is given hold a deleted blob's data -- a thin blob (zeroes
++ * back device), a clone writing over a cluster its snapshot never allocated,
++ * and a thick blob, also after it grows; the thick blob's data survives the
++ * grow. SPDK_BS_ZERO_NEW_CLUSTERS=0 is the control: the deleted blob's 0xA5
++ * shows through (the leak seen on EC2 with uring bdevs). */
++static void
++blob_new_clusters_read_zeroes(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *channel = spdk_bs_alloc_io_channel(bs);
++	uint64_t cluster_sz = spdk_bs_get_cluster_size(bs);
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t upc = cluster_sz / iou, lbas[4], c;
++	uint8_t *one = malloc(iou), *buf = malloc(cluster_sz);
++	uint8_t stale;
++	struct spdk_blob_opts opts;
++	struct spdk_blob *blob, *snapshot;
++	int zero, kind;
++
++	SPDK_CU_ASSERT_FATAL(channel != NULL && one != NULL && buf != NULL);
++	memset(one, 0xC3, iou);
++	for (zero = 1; zero >= 0; zero--) {
++		setenv("SPDK_BS_ZERO_NEW_CLUSTERS", zero ? "1" : "0", 1);
++		stale = zero ? 0x00 : 0xA5;
++		/* kind 0: thin; 1: clone over an unallocated snapshot cluster; 2: thick */
++		for (kind = 0; kind < 3; kind++) {
++			ut_dirty_free_clusters(bs, channel, 4, lbas);
++			snapshot = NULL;
++			ut_spdk_blob_opts_init(&opts);
++			opts.thin_provision = kind != 2;
++			opts.num_clusters = kind == 2 ? 2 : 4;
++			blob = ut_blob_create_and_open(bs, &opts);
++			c = 0;
++			if (kind == 1) {
++				spdk_blob_io_write(blob, channel, one, 0, 1, blob_op_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++				spdk_bs_create_snapshot(bs, spdk_blob_get_id(blob), NULL,
++							blob_op_with_id_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++				spdk_bs_open_blob(bs, g_blobid, blob_op_with_handle_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++				SPDK_CU_ASSERT_FATAL(g_blob != NULL);
++				snapshot = g_blob;
++				g_blob = NULL;
++				c = 1;
++			}
++			if (kind != 2) {
++				spdk_blob_io_write(blob, channel, one, c * upc, 1, blob_op_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++			}
++			/* the setup's own check: the cluster read was the deleted blob's */
++			CU_ASSERT(blob->active.clusters[c] == lbas[c]);
++			ut_read_cluster(blob, channel, c, buf);
++			if (kind != 2) {
++				CU_ASSERT(ut_buf_is(buf, iou, 0xC3));
++				CU_ASSERT(ut_buf_is(buf + iou, cluster_sz - iou, stale));
++			} else {
++				CU_ASSERT(ut_buf_is(buf, cluster_sz, stale));
++				/* grow: the written unit survives, the new clusters read zeroes */
++				spdk_blob_io_write(blob, channel, one, 0, 1, blob_op_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++				spdk_blob_resize(blob, 4, blob_op_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++				spdk_blob_sync_md(blob, blob_op_complete, NULL);
++				poll_threads();
++				CU_ASSERT(g_bserrno == 0);
++				CU_ASSERT(blob->active.clusters[3] == lbas[3]);
++				ut_read_cluster(blob, channel, 0, buf);
++				CU_ASSERT(ut_buf_is(buf, iou, 0xC3));
++				ut_read_cluster(blob, channel, 3, buf);
++				CU_ASSERT(ut_buf_is(buf, cluster_sz, stale));
++			}
++			ut_blob_close_and_delete(bs, blob);
++			if (snapshot != NULL) {
++				ut_blob_close_and_delete(bs, snapshot);
++			}
++		}
++	}
++	unsetenv("SPDK_BS_ZERO_NEW_CLUSTERS");
++	free(one);
++	free(buf);
++	spdk_bs_free_io_channel(channel);
++	poll_threads();
++}
++
+ static void
+ blob_cow_same_cluster_waits(void)
+ {
+@@ -11345,6 +11496,7 @@ main(int argc, char **argv)
+ 		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_enospc);
+ 		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);
+ 		CU_ADD_TEST(suite_bs, blob_alloc_window_keeps_write_order);
++		CU_ADD_TEST(suite_bs, blob_new_clusters_read_zeroes);
+ 		CU_ADD_TEST(suite_bs, blob_thin_prov_rw);
+ 		CU_ADD_TEST(suite, blob_thin_prov_write_count_io);
+ 		CU_ADD_TEST(suite, blob_thin_prov_unmap_cluster);

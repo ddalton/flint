@@ -51,6 +51,8 @@ COPY raid-skip-rebuild.patch /tmp/
 COPY blob-parallel-cluster-alloc.patch /tmp/
 COPY blob-extent-page-md0.patch /tmp/
 COPY blob-alloc-window-order.patch /tmp/
+COPY blob-zero-new-clusters.patch /tmp/
+COPY bdev-uring-write-zeroes.patch /tmp/
 
 # Clone, configure, and build SPDK v26.05 with full NVMe-oF and ublk support.
 # v26.05 is required for `bdev_raid_delete clear_sb` (phase 0 superblock
@@ -110,6 +112,18 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # in the window queue too (1.7.2).
     patch -p1 < /tmp/blob-alloc-window-order.patch && \
     echo "✅ alloc window write-order fix applied" && \
+    # 2026-10-22: a new volume read a DELETED volume's data where it never
+    # wrote (EC2: uring bdevs cannot unmap, so the clear on delete was a
+    # no-op, and a new thin cluster was mapped unzeroed). Blobstore now zeroes
+    # a cluster before mapping it unwritten: thin on first write, thick at
+    # create/grow (SPDK_BS_ZERO_NEW_CLUSTERS=0 restores the old behaviour).
+    patch -p1 < /tmp/blob-zero-new-clusters.patch && \
+    echo "✅ zero-new-clusters fix applied" && \
+    # ...and uring zeroes through the kernel (fallocate ZERO_RANGE = the
+    # drive's Write Zeroes) where the disk's queue takes Write Zeroes, so the
+    # zeroing above is a command, not a cluster of data writes.
+    patch -p1 < /tmp/bdev-uring-write-zeroes.patch && \
+    echo "✅ uring write-zeroes patch applied" && \
     rm /tmp/*.patch && \
     # --target-arch is NOT cosmetic. SPDK's configure defaults it to
     # `native`, which compiles DPDK for the BUILD MACHINE's CPU and bakes

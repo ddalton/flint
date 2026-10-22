@@ -93,6 +93,13 @@ pub struct SpdkCsiDriver {
     // must classify a bare handle (RWO block consumer vs RWX/ROX NFS
     // client) goes through this instead of site-local heuristics.
     pub role_resolver: crate::identity::RoleResolver,
+
+    // CreateVolume runs as one detached flight per volume name, keyed with
+    // (size, replicas, thin): see create_volume_once.
+    create_flights: crate::single_flight::SingleFlight<
+        (u64, u32, bool),
+        Result<VolumeCreationResult, MinimalStateError>,
+    >,
 }
 
 impl SpdkCsiDriver {
@@ -116,6 +123,7 @@ impl SpdkCsiDriver {
             spdk_node_urls: Arc::new(Mutex::new(HashMap::new())),
             capacity_cache: CapacityCache::new(30), // 30 second TTL
             clear_sb_support: Arc::new(tokio::sync::OnceCell::new()),
+            create_flights: Default::default(),
         }
     }
     
@@ -507,6 +515,45 @@ impl SpdkCsiDriver {
         })
     }
 
+    /// CreateVolume's entry: [`Self::create_volume`] as one detached flight
+    /// per volume name (crate::single_flight). The external-provisioner
+    /// cancels CreateVolume at its --timeout; a thick volume is zeroed as it
+    /// is created and can outlast many such deadlines. The cancelled RPC
+    /// leaves the create running, and its retry joins it.
+    pub async fn create_volume_once(
+        &self,
+        volume_id: &str,
+        size_bytes: u64,
+        replica_count: u32,
+        thin_provision: bool,
+        preferred_nodes: &[String],
+    ) -> Result<VolumeCreationResult, MinimalStateError> {
+        use crate::single_flight::Joined;
+        let driver = self.clone();
+        let (vid, nodes) = (volume_id.to_string(), preferred_nodes.to_vec());
+        let work = move || async move {
+            driver
+                .create_volume(&vid, size_bytes, replica_count, thin_provision, &nodes)
+                .await
+        };
+        match self
+            .create_flights
+            .run(volume_id, (size_bytes, replica_count, thin_provision), work)
+            .await
+        {
+            Joined::Done(result) => result,
+            Joined::ParamsDiffer => Err(MinimalStateError::InvalidParameter {
+                message: format!(
+                    "a create of {volume_id} with a different size, replica count or \
+                     thinProvision is already running"
+                ),
+            }),
+            Joined::Lost => Err(MinimalStateError::InternalError {
+                message: format!("the create task for {volume_id} ended without a result"),
+            }),
+        }
+    }
+
     /// Create volume using minimal state architecture (routing to single or multi-replica).
     ///
     /// `preferred_nodes` is the CSI topology hint (WaitForFirstConsumer's
@@ -691,6 +738,19 @@ impl SpdkCsiDriver {
     }
 
     pub async fn call_node_agent(&self, node_name: &str, endpoint: &str, payload: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        self.call_node_agent_timeout(node_name, endpoint, payload, None).await
+    }
+
+    /// [`Self::call_node_agent`] with a request timeout of its own, for a
+    /// call whose node-side work scales with its arguments (a thick lvol is
+    /// zeroed as it is created); None = the client's default.
+    pub async fn call_node_agent_timeout(
+        &self,
+        node_name: &str,
+        endpoint: &str,
+        payload: &Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         debug!(node_name, endpoint, "[CONTROLLER_HTTP] Calling node agent");
         
         // Get the node agent URL (HTTP, not direct SPDK socket)
@@ -700,7 +760,11 @@ impl SpdkCsiDriver {
         let http_client = node_agent_http_client()?;
 
         // All endpoints use POST (RPC-style communication)
-        let response = http_client.post(&full_url).json(payload).send().await?;
+        let mut request = http_client.post(&full_url).json(payload);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = request.send().await?;
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
@@ -793,10 +857,30 @@ impl SpdkCsiDriver {
             "thin_provision": thin_provision
         });
 
-        let response = self.call_node_agent(node_name, "/api/volumes/create_lvol", &payload).await
-            .map_err(|e| MinimalStateError::SpdkRpcError { 
-                message: format!("Failed to create lvol via node agent: {}", e) 
-            })?;
+        // A thick lvol is zeroed as it is created: the node's RPC deadline
+        // scales with the size (spdk_native::lvol_alloc_deadline), and this
+        // request outlives it by a margin for the agent's own calls.
+        let timeout = (!thin_provision).then(|| {
+            crate::spdk_native::lvol_alloc_deadline("bdev_lvol_create", size_bytes, false)
+                + std::time::Duration::from_secs(60)
+        });
+        let response = match self
+            .call_node_agent_timeout(node_name, "/api/volumes/create_lvol", &payload, timeout)
+            .await
+        {
+            Ok(response) => response,
+            // An lvol of this name already exists or is still being created:
+            // a create that ran before -- this controller restarted mid-create,
+            // or a retry's flight was lost. Never a second volume.
+            Err(e) if e.to_string().contains("File exists") => {
+                return self.adopt_existing_lvol(node_name, lvs_name, volume_id, size_bytes).await;
+            }
+            Err(e) => {
+                return Err(MinimalStateError::SpdkRpcError {
+                    message: format!("Failed to create lvol via node agent: {}", e)
+                })
+            }
+        };
 
         let lvol_uuid = response["lvol_uuid"].as_str()
             .ok_or_else(|| MinimalStateError::SpdkRpcError { 
@@ -806,6 +890,40 @@ impl SpdkCsiDriver {
 
         info!(lvol_uuid, "[CONTROLLER] Lvol created via node agent");
         Ok(lvol_uuid)
+    }
+
+    /// The lvol `volume_id` names on `lvs_name`, which a create found already
+    /// there: its uuid when it is a finished lvol of at least `size_bytes`;
+    /// [`MinimalStateError::InProgress`] when SPDK still holds it pending (a
+    /// thick create zeroing) -- the CO retries.
+    async fn adopt_existing_lvol(
+        &self,
+        node_name: &str,
+        lvs_name: &str,
+        volume_id: &str,
+        size_bytes: u64,
+    ) -> Result<String, MinimalStateError> {
+        let alias = format!("{}/{}", lvs_name, crate::identity::lvol_name(volume_id));
+        let payload = json!({ "method": "bdev_get_bdevs", "params": { "name": alias } });
+        // The entry that carries this alias -- never "the first one": an
+        // unfiltered answer must not adopt another volume's lvol.
+        let found = self
+            .call_node_agent(node_name, "/api/spdk/rpc", &payload)
+            .await
+            .ok()
+            .and_then(|r| bdev_with_alias(&r["result"], &alias).cloned());
+        match found.as_ref().and_then(existing_lvol_fits(size_bytes)) {
+            Some(uuid) => {
+                info!(node_name, alias, uuid, "[CONTROLLER] Lvol already created (an earlier create of this volume): adopting it");
+                Ok(uuid)
+            }
+            None if found.is_some() => Err(MinimalStateError::InvalidParameter {
+                message: format!("{alias} exists on {node_name} but is smaller than the {size_bytes} bytes requested"),
+            }),
+            None => Err(MinimalStateError::InProgress {
+                message: format!("{alias} on {node_name} is still being created (a thick volume is zeroed as it is created); retry"),
+            }),
+        }
     }
 
     /// Delete logical volume (CONTROLLER calls Node Agent via HTTP)
@@ -4164,3 +4282,51 @@ mod pv_name_of_handle_tests {
     }
 }
 
+
+/// The entry of a `bdev_get_bdevs` answer that carries `alias`.
+fn bdev_with_alias<'a>(bdevs: &'a Value, alias: &str) -> Option<&'a Value> {
+    bdevs.as_array()?.iter().find(|b| {
+        b["aliases"].as_array().is_some_and(|al| al.iter().any(|x| x == alias))
+    })
+}
+
+/// The uuid of `bdev` -- a `bdev_get_bdevs` entry for an lvol a create found
+/// already there -- when it holds at least `size_bytes` (SPDK rounds a create
+/// up to MiB and clusters, never down). Smaller is not this request's lvol.
+fn existing_lvol_fits(size_bytes: u64) -> impl Fn(&Value) -> Option<String> {
+    move |bdev| {
+        let bytes = bdev["num_blocks"].as_u64()?.checked_mul(bdev["block_size"].as_u64()?)?;
+        (bytes >= size_bytes).then(|| bdev["uuid"].as_str().map(str::to_string)).flatten()
+    }
+}
+
+#[cfg(test)]
+mod create_adoption_tests {
+    use super::*;
+
+    #[test]
+    fn an_existing_lvol_is_adopted_only_when_it_holds_the_request() {
+        let gib = 1u64 << 30;
+        let bdev = json!({"uuid": "u-1", "aliases": ["lvs_n/vol_pvc-1"], "num_blocks": 2 * gib / 512, "block_size": 512});
+        assert_eq!(existing_lvol_fits(gib)(&bdev), Some("u-1".to_string()));
+        assert_eq!(existing_lvol_fits(2 * gib)(&bdev), Some("u-1".to_string()));
+        // smaller than asked: not this request's volume
+        assert_eq!(existing_lvol_fits(2 * gib + 1)(&bdev), None);
+        // unreadable size or uuid: never adopted
+        assert_eq!(existing_lvol_fits(1)(&json!({"uuid": "u-1", "block_size": 512})), None);
+        assert_eq!(existing_lvol_fits(1)(&json!({"num_blocks": 8, "block_size": 512})), None);
+    }
+
+    // An answer the name filter did not narrow must not adopt the first
+    // lvol in it -- another volume's.
+    #[test]
+    fn adoption_reads_the_entry_with_the_alias_not_the_first() {
+        let answer = json!([
+            {"uuid": "other", "aliases": ["lvs_n/vol_pvc-0"], "num_blocks": 8, "block_size": 512},
+            {"uuid": "mine", "aliases": ["lvs_n/vol_pvc-1"], "num_blocks": 8, "block_size": 512},
+        ]);
+        assert_eq!(bdev_with_alias(&answer, "lvs_n/vol_pvc-1").unwrap()["uuid"], "mine");
+        assert!(bdev_with_alias(&answer, "lvs_n/vol_pvc-2").is_none());
+        assert!(bdev_with_alias(&json!({"code": -19}), "lvs_n/vol_pvc-1").is_none());
+    }
+}

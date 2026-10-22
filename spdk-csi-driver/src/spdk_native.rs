@@ -54,6 +54,29 @@ pub fn rpc_deadline(method: &str) -> Duration {
     deadline_for(method, default_secs, slow_secs)
 }
 
+/// Pure: `base` plus the time to zero `zero_bytes` at `floor_mibps`.
+fn zeroing_deadline(base: Duration, zero_bytes: u64, floor_mibps: u64) -> Duration {
+    let mib = zero_bytes.div_ceil(1 << 20);
+    base + Duration::from_secs(mib.div_ceil(floor_mibps.max(1)))
+}
+
+/// Deadline for an RPC that allocates `bytes` to an lvol (`bdev_lvol_create`,
+/// or `bdev_lvol_resize` growing it). spdk-tgt zeroes a THICK lvol's clusters
+/// as it creates or grows it (blob-zero-new-clusters.patch: never-written
+/// blocks must not show a deleted volume's data), so that RPC lasts as long
+/// as writing the bytes; a thin lvol zeroes on first write instead and keeps
+/// the method's normal budget. FLINT_THICK_ZERO_MIBPS (default 256) is the
+/// slowest zeroing rate waited for: a bound, not an estimate.
+pub fn lvol_alloc_deadline(method: &str, bytes: u64, thin_provision: bool) -> Duration {
+    let base = rpc_deadline(method);
+    if thin_provision {
+        return base;
+    }
+    static FLOOR_MIBPS: OnceLock<u64> = OnceLock::new();
+    let floor = *FLOOR_MIBPS.get_or_init(|| rpc_timeout_env("FLINT_THICK_ZERO_MIBPS", 256));
+    zeroing_deadline(base, bytes, floor)
+}
+
 // SPDK v25.05.x uses RPC calls for all operations
 // This implementation follows the official SPDK Go client pattern
 
@@ -185,6 +208,18 @@ impl SpdkNative {
     
     /// Call SPDK RPC method (matches the Call method from Go client)
     async fn call_rpc(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        self.call_rpc_with_deadline(method, params, rpc_deadline(method)).await
+    }
+
+    /// `call_rpc` under an explicit deadline, for an RPC whose duration
+    /// scales with its arguments: a thick lvol is zeroed as it is created or
+    /// grown ([`lvol_alloc_deadline`]).
+    async fn call_rpc_with_deadline(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        deadline: Duration,
+    ) -> Result<Value> {
         tracing::trace!("[SPDK_NATIVE] call_rpc('{}') incoming params: {:?}", method, params);
 
         // Handle empty parameters like official SPDK CGO bridge
@@ -217,7 +252,7 @@ impl SpdkNative {
         // per-method deadline. On expiry the error deliberately matches NO
         // benign classifier (is_missing/is_busy/is_claim_blocked), so guarded
         // callers treat it as transport-unknown and fail closed.
-        self.call_rpc_bounded(method, normalized_params, rpc_deadline(method))
+        self.call_rpc_bounded(method, normalized_params, deadline)
             .await
     }
 
@@ -473,7 +508,8 @@ impl SpdkNative {
             "clear_method": "unmap"
         });
         
-        let result = self.call_rpc("bdev_lvol_create", Some(params)).await?;
+        let deadline = lvol_alloc_deadline("bdev_lvol_create", size, thin_provision);
+        let result = self.call_rpc_with_deadline("bdev_lvol_create", Some(params), deadline).await?;
         Ok(result.as_str().unwrap_or(&format!("{}/{}", lvs_name, lvol_name)).to_string())
     }
     
@@ -539,6 +575,16 @@ impl SpdkNative {
     /// Generic RPC call for any method
     pub async fn call_method(&self, method: &str, params: Option<Value>) -> Result<Value> {
         self.call_rpc(method, params).await
+    }
+
+    /// Generic RPC call under an explicit deadline ([`lvol_alloc_deadline`]).
+    pub async fn call_method_with_deadline(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        deadline: Duration,
+    ) -> Result<Value> {
+        self.call_rpc_with_deadline(method, params, deadline).await
     }
 }
 
@@ -702,6 +748,26 @@ mod tests {
         assert_eq!(deadline_for("bdev_get_bdevs", 30, 180), Duration::from_secs(30));
         assert_eq!(deadline_for("nvmf_delete_subsystem", 30, 180), Duration::from_secs(30));
         assert_eq!(deadline_for("bdev_lvol_check_shallow_copy", 30, 180), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn thick_lvol_deadline_scales_with_the_bytes_zeroed() {
+        let base = Duration::from_secs(30);
+        // nothing to zero: the method's own budget
+        assert_eq!(zeroing_deadline(base, 0, 256), base);
+        // 1 GiB at 256 MiB/s: +4 s; 100 GiB: +400 s; a partial MiB rounds up
+        assert_eq!(zeroing_deadline(base, 1 << 30, 256), Duration::from_secs(34));
+        assert_eq!(zeroing_deadline(base, 100 << 30, 256), Duration::from_secs(430));
+        assert_eq!(zeroing_deadline(base, (1 << 20) + 1, 1), Duration::from_secs(32));
+        // a zero floor cannot divide by zero
+        assert_eq!(zeroing_deadline(base, 1 << 20, 0), Duration::from_secs(31));
+        // thin never zeroes at create: the normal budget, whatever the size
+        assert_eq!(
+            lvol_alloc_deadline("bdev_lvol_create", 100 << 40, true),
+            rpc_deadline("bdev_lvol_create")
+        );
+        assert!(lvol_alloc_deadline("bdev_lvol_create", 100 << 30, false)
+            > rpc_deadline("bdev_lvol_create") + Duration::from_secs(60));
     }
 
     #[tokio::test]

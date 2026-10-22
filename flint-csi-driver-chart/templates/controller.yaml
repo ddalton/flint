@@ -46,6 +46,11 @@ spec:
               value: "unix:///csi/csi.sock"
             - name: USE_HOSTNAME_TOPOLOGY
               value: "{{ .Values.driver.useHostnameTopology }}"
+            # thinProvision "false": spdk-tgt zeroes a thick volume as it is
+            # created or grown, so those deadlines scale with the size at this
+            # floor rate (MiB/s; a bound, not an estimate)
+            - name: FLINT_THICK_ZERO_MIBPS
+              value: {{ .Values.driver.thickZeroFloorMiBps | default 256 | quote }}
             - name: FLINT_NAMESPACE
               value: "{{ include "flint-csi-driver-chart.customResourceNamespace" . }}"
             - name: HEALTH_PORT
@@ -305,6 +310,12 @@ spec:
             - "--feature-gates=Topology=true"
             - "--strict-topology"
             - "--immediate-topology=false"
+            # A thick volume is zeroed as it is created: CreateVolume answers
+            # ABORTED (in progress) until it is done, and a cancelled
+            # CreateVolume does not cancel the create. Keep the retry interval
+            # well under the orphan sweep's ~3 min PV-less window.
+            - "--timeout={{ .Values.csiSidecars.externalProvisioner.timeout | default "60s" }}"
+            - "--retry-interval-max={{ .Values.csiSidecars.externalProvisioner.retryIntervalMax | default "30s" }}"
             - "--v=5"
           volumeMounts:
             - name: socket-dir

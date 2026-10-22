@@ -1915,8 +1915,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             );
         }
 
-        // Call the driver's create volume method
-        match self.driver.create_volume(&volume_id, size_bytes, replica_count, thin_provision, &preferred_nodes).await {
+        // Call the driver's create volume method -- as one detached flight per
+        // name: the provisioner's deadline cancels this RPC, not the create
+        // (a thick volume is zeroed as it is created), and its retry joins it.
+        match self.driver.create_volume_once(&volume_id, size_bytes, replica_count, thin_provision, &preferred_nodes).await {
             Ok(result) => {
                 println!("✅ [CONTROLLER] Volume {} created successfully with {} replica(s)", 
                          volume_id, result.replicas.len());
@@ -2027,6 +2029,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                     }),
                 };
                 Ok(tonic::Response::new(response))
+            }
+            Err(spdk_csi_driver::minimal_models::MinimalStateError::InProgress { message }) => {
+                println!("⏳ [CONTROLLER] Volume {} still being created: {}", volume_id, message);
+                Err(tonic::Status::aborted(format!("Volume creation in progress: {}", message)))
             }
             Err(e) => {
                 println!("❌ [CONTROLLER] Volume creation failed: {}", e);
