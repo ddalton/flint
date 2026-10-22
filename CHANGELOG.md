@@ -28,11 +28,16 @@ covered by the stability guarantee.
   thick when the volume is created or grown (series patch 0010,
   `SPDK_BS_ZERO_NEW_CLUSTERS=0` restores the old behaviour for A/B). The
   `uring` bdev now zeroes through the kernel (the drive's Write Zeroes
-  command, no data transferred) where the disk supports it (0011). Cost on
-  the build box's consumer NVMe, before 0011: a new volume's first pass of
-  4K random writes ran slower for about 20 s per 32 GiB, a first sequential
-  pass 44% slower; nothing after a cluster's first write. EC2 numbers and
-  i4i's Write Zeroes support are measured at the release gate.
+  command, no data transferred) where the disk supports it (0011); i4i's
+  instance store does not (bench8: `write_zeroes_max_bytes` 0, DLFEAT 0),
+  so there the zeroing is data writes. A write that covers the whole new
+  cluster needs no zeroes: its data goes into the cluster before the
+  cluster is mapped, and it is the cluster's only write (0012), so
+  sequential writes of 128 KiB and up, bulk loads and replica rebuilds pay
+  nothing. What remains is a new volume's first small random writes: on
+  bench8 (i4i, thin, 3 replicas, 4 KiB QD32) they ran at 20-25% of normal
+  for about a minute per 48 GiB of first writes, then at normal speed;
+  nothing after a cluster's first write.
 
 ### Changed
 

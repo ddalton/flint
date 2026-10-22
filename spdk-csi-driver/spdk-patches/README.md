@@ -48,6 +48,7 @@ to this directory or the Dockerfile.
 | 0009 | blob: ops that reach a cluster during its allocation wait their turn | fix | [Gerrit 29556](https://review.spdk.io/c/spdk/spdk/+/29556), spdk/spdk#2144 (the unmap part is Flint's) |
 | 0010 | blob: zero a cluster before mapping it unwritten | fix (data exposure) | candidate, not filed |
 | 0011 | bdev/uring: WRITE_ZEROES through the kernel's zeroout | performance | candidate, not filed; see Gerrit 28716 |
+| 0012 | blob: a write that covers a new cluster is the cluster's only write | performance (0010's cost) | candidate with 0010, not filed |
 
 The order is the order the patches were written in. Several touch
 `lib/blob/blobstore.c` and depend on the ones before them, so the numbers

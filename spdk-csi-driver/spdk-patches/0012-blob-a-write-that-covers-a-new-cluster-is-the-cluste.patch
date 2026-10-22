@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 22:55:50 +0000
+Subject: [PATCH] blob: a write that covers a new cluster is the cluster's only
+ write
+
+Zero-on-allocate (the previous blob patch) writes a cluster of zeroes before
+it maps a new cluster. When the write that allocates the cluster covers all
+of it, those zeroes are overwritten at once. Write that data into the new
+cluster before the cluster is mapped instead, and complete the write once
+the mapping is persisted rather than executing it again: the cluster is
+written once, and a read that finds it mapped finds the data. A write to
+part of a cluster still zeroes it first. If another channel mapped the
+cluster first (-EEXIST), the write runs again on that cluster, as before.
+The write's ext_io_opts (memory domain) travel with its data.
+
+On EC2 i4i (no Write Zeroes: zeroing is real data writes) zero-on-allocate
+held a new volume's first fill of 4 KiB random writes to 20-25% of normal
+for about a minute per 48 GiB. Writes that cover whole clusters --
+sequential writes of 128 KiB and up, bulk loads, replica rebuild and
+catch-up -- now pay nothing for it. SPDK_BS_ZERO_COVERED_BY_WRITE=0 restores
+the previous patch's behaviour (A/B, and the unit test's control).
+
+Upstream candidate (with the previous patch), not filed. New in the series
+2026-10-22.
+---
+ lib/blob/blobstore.c                |  75 +++++++++++++++++-
+ test/unit/lib/blob/blob.c/blob_ut.c | 114 ++++++++++++++++++++++++++++
+ 2 files changed, 185 insertions(+), 4 deletions(-)
+
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 720628380..493d039b5 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -2752,6 +2752,10 @@ struct spdk_blob_copy_cluster_ctx {
+ 	spdk_bs_sequence_t *seq;
+ 	struct spdk_blob_md_page *new_cluster_page;
+ 	struct spdk_bs_cluster_alloc_slot *slot;
++	/* the user op whose data was written into new_cluster before the insert
++	 * (blob_write_op_to_new_cluster), and whether that insert mapped it */
++	spdk_bs_user_op_t *op_written;
++	bool op_done;
+ };
+ 
+ struct spdk_blob_free_cluster_ctx {
+@@ -2898,7 +2902,11 @@ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+ 	while (!TAILQ_EMPTY(&requests)) {
+ 		op = TAILQ_FIRST(&requests);
+ 		TAILQ_REMOVE(&requests, op, link);
+-		if (bserrno == 0) {
++		if (bserrno == 0 && op == ctx->op_written && ctx->op_done) {
++			/* Its data went into the cluster before the cluster was
++			 * mapped (blob_write_op_to_new_cluster): it is done. */
++			bs_user_op_abort(op, 0);
++		} else if (bserrno == 0) {
+ 			bs_user_op_execute(op);
+ 		} else {
+ 			bs_user_op_abort(op, bserrno);
+@@ -3030,6 +3038,9 @@ blob_insert_cluster_cpl(void *cb_arg, int bserrno)
+ 		blob_insert_cluster_revert(ctx);
+ 	}
+ 
++	/* Mapped: a write already in the cluster is done (never on -EEXIST
++	 * above: it must then run again on the cluster the other thread mapped). */
++	ctx->op_done = bserrno == 0 && ctx->op_written != NULL;
+ 	bs_sequence_finish(ctx->seq, bserrno);
+ }
+ 
+@@ -3091,6 +3102,57 @@ blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_
+ 			     blob_write_copy_cpl, ctx);
+ }
+ 
++/* Zero-on-allocate, refined (2026-10-22): a write that covers the whole cluster
++ * it allocates needs no zeroes under it. Write its data into the new cluster
++ * BEFORE the cluster is mapped, and complete it once the mapping is persisted
++ * instead of executing it again: the cluster is written once, and a read that
++ * finds it mapped finds the data. Sequential writes, bulk loads and replica
++ * rebuilds stop paying for the zeroing; a write to part of a cluster still
++ * zeroes it first. The triggering op never spans clusters (writes are split
++ * per cluster before they allocate). SPDK_BS_ZERO_COVERED_BY_WRITE=0 zeroes
++ * under covering writes too (A/B, and the unit test's control). */
++static bool
++bs_op_covers_new_cluster(struct spdk_blob *blob, spdk_bs_user_op_t *op,
++			 uint64_t cluster_start_io_unit)
++{
++	struct spdk_bs_user_op_args *args = &((struct spdk_bs_request_set *)op)->u.user_op;
++	const char *env = getenv("SPDK_BS_ZERO_COVERED_BY_WRITE");
++
++	if (env != NULL && strcmp(env, "0") == 0) {
++		return false;
++	}
++	return (args->type == SPDK_BLOB_WRITE || args->type == SPDK_BLOB_WRITEV) &&
++	       args->offset == cluster_start_io_unit && args->length == bs_io_units_per_cluster(blob);
++}
++
++static void
++blob_write_op_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
++{
++	/* the op's ext opts served its data write only */
++	((struct spdk_bs_request_set *)seq)->ext_io_opts = NULL;
++	blob_write_copy_cpl(seq, cb_arg, bserrno);
++}
++
++static void
++blob_write_op_to_new_cluster(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op)
++{
++	struct spdk_bs_request_set *op_set = (struct spdk_bs_request_set *)op;
++	struct spdk_bs_user_op_args *args = &op_set->u.user_op;
++	struct spdk_blob_store *bs = ctx->blob->bs;
++	uint64_t lba = bs_cluster_to_lba(bs, ctx->new_cluster);
++	uint32_t lba_count = bs_cluster_to_lba(bs, 1);
++
++	ctx->op_written = op;
++	if (args->type == SPDK_BLOB_WRITE) {
++		bs_sequence_write_dev(ctx->seq, args->payload, lba, lba_count, blob_write_op_cpl, ctx);
++	} else {
++		/* the op's ext opts (memory domain) describe its iovs */
++		((struct spdk_bs_request_set *)ctx->seq)->ext_io_opts = op_set->ext_io_opts;
++		bs_sequence_writev_dev(ctx->seq, args->payload, args->iovcnt, lba, lba_count,
++				       blob_write_op_cpl, ctx);
++	}
++}
++
+ static void
+ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 			     struct spdk_io_channel *_ch,
+@@ -3218,9 +3280,14 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+ 		}
+ 
+ 	} else if (bs_zero_new_clusters()) {
+-		/* Mapped over zeroes: zero the cluster first (see bs_zero_new_clusters) */
+-		bs_sequence_write_zeroes_dev(ctx->seq, bs_cluster_to_lba(blob->bs, ctx->new_cluster),
+-					     bs_cluster_to_lba(blob->bs, 1), blob_write_copy_cpl, ctx);
++		if (bs_op_covers_new_cluster(blob, op, cluster_start_io_unit)) {
++			/* nothing of the cluster stays unwritten: no zeroes needed */
++			blob_write_op_to_new_cluster(ctx, op);
++		} else {
++			/* Mapped over zeroes: zero the cluster first (see bs_zero_new_clusters) */
++			bs_sequence_write_zeroes_dev(ctx->seq, bs_cluster_to_lba(blob->bs, ctx->new_cluster),
++						     bs_cluster_to_lba(blob->bs, 1), blob_write_copy_cpl, ctx);
++		}
+ 	} else {
+ 		blob_insert_cluster_on_md_thread(ctx->blob, cluster_number, ctx->new_cluster,
+ 						 ctx->new_extent_page, ctx->new_cluster_page, blob_insert_cluster_cpl, ctx);
+diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+index 91e540868..e1ecdde68 100644
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -6306,6 +6306,119 @@ blob_new_clusters_read_zeroes(void)
+ 	poll_threads();
+ }
+ 
++/* Zero-on-allocate, refined: a write that covers the whole cluster it
++ * allocates lands there before the cluster is mapped, with no zeroes under it
++ * (one cluster of device writes, not two), its data is there the moment the
++ * cluster is mapped, writev_ext's options travel with it, and when another
++ * channel mapped the cluster first the write runs again on that cluster.
++ * SPDK_BS_ZERO_COVERED_BY_WRITE=0 is the control: zeroes first, then the write
++ * (a read inside the window sees zeroes). Never the deleted blob's 0xA5. */
++static void
++blob_write_covering_new_cluster_skips_zeroes(void)
++{
++	struct spdk_blob_store *bs = g_bs;
++	struct spdk_io_channel *ch0 = spdk_bs_alloc_io_channel(bs), *ch1;
++	uint64_t cluster_sz = spdk_bs_get_cluster_size(bs);
++	uint64_t iou = spdk_bs_get_io_unit_size(bs);
++	uint64_t upc = cluster_sz / iou, lbas[4], bytes[2][2], before;
++	uint8_t *a = malloc(2 * cluster_sz), *b = malloc(cluster_sz), *r = malloc(2 * cluster_sz);
++	struct spdk_blob_ext_io_opts ext = {.size = sizeof(ext)};
++	struct spdk_blob_opts opts;
++	struct spdk_blob *blob;
++	struct iovec iov[4];
++	bool in_window;
++	int direct, i;
++
++	SPDK_CU_ASSERT_FATAL(ch0 != NULL && a != NULL && b != NULL && r != NULL);
++	memset(a, 0xA1, 2 * cluster_sz);
++	memset(b, 0xB2, cluster_sz);
++	for (direct = 1; direct >= 0; direct--) {
++		setenv("SPDK_BS_ZERO_COVERED_BY_WRITE", direct ? "1" : "0", 1);
++		ut_dirty_free_clusters(bs, ch0, 4, lbas);
++		ut_spdk_blob_opts_init(&opts);
++		opts.thin_provision = true;
++		opts.num_clusters = 4;
++		blob = ut_blob_create_and_open(bs, &opts);
++
++		/* 1. write: device bytes, and a read the moment the cluster is mapped */
++		g_win_seq = g_win_a = 0;
++		before = g_dev_write_bytes;
++		spdk_blob_io_write(blob, ch0, a, 0, upc, win_a_cpl, NULL);
++		for (i = 0; i < 100000 && blob->active.clusters[0] == 0; i++) {
++			poll_thread_times(0, 1);
++		}
++		in_window = blob->active.clusters[0] != 0 && g_win_a == 0;
++		CU_ASSERT(in_window);
++		CU_ASSERT(blob->active.clusters[0] == lbas[0]);
++		memset(r, 0x5A, cluster_sz);
++		spdk_blob_io_read(blob, ch0, r, 0, upc, blob_op_complete, NULL);
++		poll_threads();
++		CU_ASSERT(g_bserrno == 0);
++		CU_ASSERT(g_win_a != 0);
++		CU_ASSERT(ut_buf_is(r, cluster_sz, direct ? 0xA1 : 0x00));
++		bytes[direct][0] = g_dev_write_bytes - before;
++		ut_read_cluster(blob, ch0, 0, r);
++		CU_ASSERT(ut_buf_is(r, cluster_sz, 0xA1));
++
++		/* 2. writev_ext over two clusters in four iovs: two covering children */
++		for (i = 0; i < 4; i++) {
++			iov[i].iov_base = a + i * (cluster_sz / 2);
++			iov[i].iov_len = cluster_sz / 2;
++		}
++		g_dev_writev_ext_called = false;
++		before = g_dev_write_bytes;
++		spdk_blob_io_writev_ext(blob, ch0, iov, 4, upc, 2 * upc, blob_op_complete, NULL, &ext);
++		poll_threads();
++		CU_ASSERT(g_bserrno == 0);
++		CU_ASSERT(g_dev_writev_ext_called);
++		bytes[direct][1] = g_dev_write_bytes - before;
++		spdk_blob_io_read(blob, ch0, r, upc, 2 * upc, blob_op_complete, NULL);
++		poll_threads();
++		CU_ASSERT(g_bserrno == 0);
++		CU_ASSERT(ut_buf_is(r, 2 * cluster_sz, 0xA1));
++
++		/* 3. another channel maps cluster 3 first: this channel's covering
++		 * write must run again there, not stay in its released cluster.
++		 * Thread 1 runs until its insert is queued on the md thread (0),
++		 * so it maps first and thread 0's insert finds the cluster taken. */
++		set_thread(1);
++		ch1 = spdk_bs_alloc_io_channel(bs);
++		SPDK_CU_ASSERT_FATAL(ch1 != NULL);
++		spdk_blob_io_write(blob, ch1, a, 3 * upc, upc, blob_op_complete, NULL);
++		poll_thread(1);
++		set_thread(0);
++		spdk_blob_io_write(blob, ch0, b, 3 * upc, upc, blob_op_complete, NULL);
++		poll_threads();
++		CU_ASSERT(g_bserrno == 0);
++		ut_read_cluster(blob, ch0, 3, r);
++		if (direct) {
++			/* the winner's data went in before its mapping, and the loser
++			 * ran again after it */
++			CU_ASSERT(ut_buf_is(r, cluster_sz, 0xB2));
++		} else {
++			/* control: both writes run after their allocations, in no set
++			 * order -- one of them, whole */
++			CU_ASSERT(ut_buf_is(r, cluster_sz, 0xB2) || ut_buf_is(r, cluster_sz, 0xA1));
++		}
++		CU_ASSERT(spdk_blob_get_num_allocated_clusters(blob) == 4);
++		set_thread(1);
++		spdk_bs_free_io_channel(ch1);
++		set_thread(0);
++		poll_threads();
++
++		ut_blob_close_and_delete(bs, blob);
++	}
++	/* the covering writes skipped exactly one cluster of zeroes each */
++	CU_ASSERT(bytes[0][0] - bytes[1][0] == cluster_sz);
++	CU_ASSERT(bytes[0][1] - bytes[1][1] == 2 * cluster_sz);
++	unsetenv("SPDK_BS_ZERO_COVERED_BY_WRITE");
++	free(a);
++	free(b);
++	free(r);
++	spdk_bs_free_io_channel(ch0);
++	poll_threads();
++}
++
+ static void
+ blob_cow_same_cluster_waits(void)
+ {
+@@ -11497,6 +11610,7 @@ main(int argc, char **argv)
+ 		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);
+ 		CU_ADD_TEST(suite_bs, blob_alloc_window_keeps_write_order);
+ 		CU_ADD_TEST(suite_bs, blob_new_clusters_read_zeroes);
++		CU_ADD_TEST(suite_bs, blob_write_covering_new_cluster_skips_zeroes);
+ 		CU_ADD_TEST(suite_bs, blob_thin_prov_rw);
+ 		CU_ADD_TEST(suite, blob_thin_prov_write_count_io);
+ 		CU_ADD_TEST(suite, blob_thin_prov_unmap_cluster);
