@@ -413,6 +413,11 @@ case "$DRILL" in
 
 3.4) # csi-node POD delete on the CLIENT node — no local block dependency
   pre_rwx
+  # disk-follows-pod usually puts the nfs server on pg's node; then this
+  # kill is 3.3b (server-node csi-node delete, the F8 shape), not a client
+  # kill. Refuse rather than mislabel it -- run 3.1 first to split them.
+  [ "$NFS_NODE" != "$PRE_NODE" ] \
+    || fail "3.4 invalid: pg-0 is co-located with the nfs server on $PRE_NODE -- run 3.1 first (moves the client off)"
   CNP=$(csi_node_pod "$PRE_NODE")
   kubectl delete pod -n "$DRIVER_NS" "$CNP" --wait=false
   note "csi-node POD on client node $PRE_NODE deleted"
@@ -873,7 +878,9 @@ case "$DRILL" in
 
   # (b) the EPERM signature itself — the pre-fix loop, in the driver's words.
   EPERM_HITS=$(driver_log_hits "$T0" "Operation not permitted")
-  RAIDFAIL=$(driver_log_hits "$T0" "bdev_raid_create failed")
+  # "bdev_raid_create failed" is logged nowhere in 1.60.0 (always 0); the
+  # current message is driver.rs "Failed to create RAID bdev <name>: <err>".
+  RAIDFAIL=$(driver_log_hits "$T0" "bdev_raid_create failed\\|Failed to create RAID bdev")
   [ "$EPERM_HITS" = "0" ] && [ "$RAIDFAIL" = "0" ] \
     && ok "no bdev_raid_create EPERM anywhere in the fleet since T0" \
     || note "EPERM signature present: 'Operation not permitted'=$EPERM_HITS 'bdev_raid_create failed'=$RAIDFAIL"
@@ -1041,6 +1048,11 @@ case "$DRILL" in
       # the server node (the stage-side reap owns the dup), acks must stay
       # fresh (no EIO from reaping a live device), witness clean.
   pre_rwx
+  # F37 is a ublk-id race. With BLOCK_DEVICE_BACKEND=nvmeof (chart 1.60.0
+  # default) flint_ublk_disks returns nothing, so dups_max=0 is VACUOUS --
+  # say so in the row; only the force-delete/ack-freshness half is tested.
+  F37_GATE=$([ "$(backend_mode)" = "ublk" ] && echo live || echo "N/A-$(backend_mode)")
+  [ "$F37_GATE" = live ] || note "backend=$(backend_mode): the ublk duplicate-id gate is vacuous on this cluster"
   DUPS_MAX=0; REAPS_TOTAL=0
   for i in $(seq 1 3); do
     C0=$(epoch); CUR_NODE=$(nfs_node); CUR_UID=$(nfs_pod_uid)
@@ -1072,7 +1084,7 @@ case "$DRILL" in
   REFUSALS=$(driver_log_hits "$T0" "F37: ublk id .* still holds")
   note "F37 reap lines since T0: $REAPS_TOTAL; busy-refusals: $REFUSALS"
   witness_verdict "$T0"
-  NOTES="F37 force-delete x3: dups_max=$DUPS_MAX reaps=$REAPS_TOTAL refusals=$REFUSALS" verify
+  NOTES="F37 force-delete x3: f37_gate=$F37_GATE dups_max=$DUPS_MAX reaps=$REAPS_TOTAL refusals=$REFUSALS" verify
   [ "$DUPS_MAX" -eq 0 ] || fail "3.10 FAIL: duplicate ublk id persisted past the settle window"
   ;;
 

@@ -186,7 +186,8 @@ case "$DRILL" in
 1.10) # churn ×20 — leak detection
   pre
   : > "$ARTIFACTS/churn-cycles.txt"
-  for i in $(seq 1 20); do
+  # CHURN_N (default 20): the 2026-10-21 stage has a 2 h wall-clock cap.
+  for i in $(seq 1 "${CHURN_N:-20}"); do
     CUR_NODE=$(pg_node); CUR_UID=$(pg_uid); C0=$(epoch)
     if [ $(( i % 2 )) -eq 0 ]; then
       kubectl cordon "$CUR_NODE" >/dev/null; CORDONED="$CUR_NODE"
@@ -203,7 +204,7 @@ case "$DRILL" in
   N_VA=$(kubectl get volumeattachments --no-headers 2>/dev/null | wc -l | tr -d ' ')
   [ "$TOT_GM" -eq 1 ] || note "LEAK? total globalmounts=$TOT_GM (want 1)"
   [ "$N_VA" -eq 1 ] || note "LEAK? volumeattachments=$N_VA (want 1)"
-  NOTES="churn x20; tot_gm=$TOT_GM vas=$N_VA" verify
+  NOTES="churn x${CHURN_N:-20}; tot_gm=$TOT_GM vas=$N_VA" verify
   ;;
 
 1.11) # kubelet stop, NO taint — measure the organic slow path

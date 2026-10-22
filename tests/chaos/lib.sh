@@ -45,6 +45,17 @@ csi_node_pod() { # <node>
     --field-selector "spec.nodeName=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
 worker_nodes() {
+  # bench4 (2026-10-21): the control plane is a STORAGE node (taint removed,
+  # csi-node tolerates everything), so "!control-plane" drops one of three
+  # replica legs -- 2.7 then sees 1 remote leg, 2.11 expects base=2/3, and
+  # orphan/globalmount/log scans go blind on that node. The storage set is
+  # the set of nodes the csi-node DaemonSet runs on (DS pods are bound at
+  # creation, so a pod being replaced mid-drill still names its node).
+  # Old selector kept as the fallback when no csi-node pod is listed.
+  local n
+  n=$(kubectl get pods -n "$DRIVER_NS" -l app=flint-csi-node \
+        -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | grep . | sort -u)
+  if [ -n "$n" ]; then echo "$n"; return; fi
   kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
 }
@@ -109,6 +120,15 @@ warm_load() { # [secs]
 # START it, so this only works for stop; restore goes via SSM).
 kubelet_stop() { # <node>
   local n=$1
+  # bench4: the CP is also a storage node and can host pg / a leg / the nfs
+  # server. A stopped kubelet there plus the NoExecute out-of-service taint
+  # the drills apply next puts the API server's own node in play; refuse
+  # unless explicitly allowed (re-place the target off the CP instead).
+  if [ "${ALLOW_CP_KUBELET_STOP:-0}" != "1" ] && \
+     kubectl get node "$n" -o json 2>/dev/null \
+       | jq -e '.metadata.labels | has("node-role.kubernetes.io/control-plane")' >/dev/null; then
+    fail "kubelet_stop: $n is the control plane -- move the target off it (or ALLOW_CP_KUBELET_STOP=1)"
+  fi
   kubectl run "kubelet-kill-$$" --image=busybox:1.36 --restart=Never \
     --overrides="{\"spec\":{\"nodeName\":\"${n}\",\"hostPID\":true,\"containers\":[{\"name\":\"k\",\"image\":\"busybox:1.36\",\"command\":[\"nsenter\",\"-t\",\"1\",\"-m\",\"-u\",\"-i\",\"-n\",\"--\",\"sh\",\"-c\",\"systemctl stop kubelet && echo STOPPED\"],\"securityContext\":{\"privileged\":true}}]}}" >/dev/null
   sleep 8
@@ -235,7 +255,13 @@ nvme_subsys() { # <node> — nvme list-subsys from the csi driver container
 # node's EBS/instance-store pcie controllers).
 flint_sessions() { # <node>
   nvme_subsys "$1" | awk '
-    /com\.flint:volume:/ { split($0, a, "com.flint:volume:"); pv=a[2]; next }
+    /com\.flint:volume:/ { split($0, a, "com.flint:volume:"); pv=a[2];
+      # nvmeof RWX: the nfs server stages the BACKING handle, so its kernel
+      # session NQN is ...:volume:nfs-server-<pv> (identity::volume_nqn of
+      # the staged handle, driver.rs create_nvmeof_block_device). Normalize
+      # to the storage id = user PV name, or verify-drill 4/7 reports the
+      # live RWX volume "absent" AND counts its session as an orphan leak.
+      sub(/^nfs-server-/, "", pv); next }
     pv && /[[:space:]](live|connecting|resetting|deleting)$/ { print pv "\t" $NF; pv="" }'
 }
 

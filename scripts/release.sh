@@ -374,6 +374,29 @@ if [ "$cmd" = chart ] || [ "$cmd" = all ]; then
     done <<EOF
 $images_table
 EOF
+    # RESTART GATE (2026-10-22). The kernel fail-fast bound of 2026-08-02
+    # passed every check this script and the unit tests make, and turned
+    # every slow spdk-tgt restart under a mounted volume into a read-only
+    # filesystem for almost three months, because nothing restarted a real
+    # target before a release. tests/chaos/restart-gate.sh does, on a
+    # cluster, and writes the record checked here. A release that touches
+    # nothing on the restart path (see that script's header) may waive it:
+    # RESTART_GATE_WAIVER="<why>" — printed, so the waiver is on record in
+    # the release log. Skipped when this chart version is already published.
+    gate_record="$repo_root/tests/chaos/gate-records/flint-csi-driver-chart-$chart_version.txt"
+    if [ "$force_republish" = 1 ] || ! tag_exists flint-csi-driver-chart "$chart_version"; then
+        if grep -q "^RESTART-GATE PASS flint-csi-driver-chart $chart_version " "$gate_record" 2>/dev/null; then
+            echo "  restart gate: $(head -1 "$gate_record")"
+        elif [ -n "${RESTART_GATE_WAIVER:-}" ]; then
+            echo "  restart gate WAIVED for $chart_version: $RESTART_GATE_WAIVER"
+        else
+            echo "REFUSING to push flint-csi-driver-chart $chart_version: no restart-gate" \
+                 "record ($gate_record). Run tests/chaos/restart-gate.sh $chart_version" \
+                 "on a cluster with this release installed and commit the record, or set" \
+                 "RESTART_GATE_WAIVER=\"<why this release cannot affect a restart>\"." >&2
+            exit 1
+        fi
+    fi
     helm package "$chart_dir" --destination "$pkg_dir" >/dev/null
     pkg="$pkg_dir/flint-csi-driver-chart-$chart_version.tgz"
     push_chart "all" flint-csi-driver-chart "$chart_version" "$pkg"

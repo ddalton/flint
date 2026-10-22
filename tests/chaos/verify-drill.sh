@@ -161,7 +161,11 @@ LOG_OK=Y
   for n in $(worker_nodes); do
     p=$(csi_node_pod "$n"); [ -n "$p" ] && kubectl logs -n "$DRIVER_NS" "$p" -c flint-csi-driver --since-time="$SINCE" 2>/dev/null
   done
-} > "$ART/driver-logs.txt"
+} | deansi > "$ART/driver-logs.txt"
+# deansi: the driver logs with_ansi(true) (main.rs), so each line starts with
+# an escape sequence and the '^[0-9T:.-]+Z' timestamp match below never hit
+# -- LAST_TS was always empty and the "still erroring in final 60s" gate
+# could not fire.
 # RWX: the flint-nfs SERVER log is the authoritative record of restart
 # behavior (fh.key load, state-DB restore counts, EXCHANGE_ID/session
 # decisions, per-op error replies). Its absence blocked the 3.2 fsync-

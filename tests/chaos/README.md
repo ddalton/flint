@@ -6,6 +6,36 @@ pod-lifecycle gaps flagged HIGH-PRIORITY in
 `tests/system/MISSING_CRITICAL_TESTS.md`. Campaign writeup:
 `spdk-csi-driver/docs/attach-detach-campaign-2026-07.md`.
 
+## Release gate: `restart-gate.sh`
+
+A flint-csi-driver chart is not pushed without a restart-gate record:
+`scripts/release.sh` refuses unless
+`gate-records/flint-csi-driver-chart-<version>.txt` starts with
+`RESTART-GATE PASS flint-csi-driver-chart <version>`, or
+`RESTART_GATE_WAIVER="<why>"` is set (printed into the release log).
+
+```sh
+# Flint <version> installed with the candidate images, chaos SCs applied
+KUBECONFIG=~/.kube/<cluster>.yaml AWS_REGION=<region> AWS_PROFILE=rolesanywhere \
+  tests/chaos/restart-gate.sh <version>      # ~45 min; writes the record on PASS
+```
+
+It runs `kernel-deadline-test.sh` (a same-node kernel controller waits out a
+target outage; the `ctrl_loss_tmo` backstop fails it; `delete_controller`
+releases a blocked unmount), then RWO r3 2.2a, 1.9 twice, 2.7, 2.11 and RWX
+3.1, 3.2, 3.3a twice, 3.8 — every drill that restarts or kills spdk-tgt or a
+csi-node pod under a mounted volume. Needs 3 storage nodes (the control plane
+may be one) and SSM access for the kill drills.
+
+**Why it is a gate.** These drills last ran on 2026-07-21. On 2026-08-02 the
+consumer's kernel initiator got a 20 s fail-fast bound; it passed every unit
+test and every check, and made every slower restart end in a read-only
+filesystem until the drills ran again on 2026-10-22 (fixed in 1.60.2). Run it
+for any release that touches the node agent, the kernel connect/reconnect
+policy, NodeStage/Unstage/Publish, the raid or export recovery, the spdk-tgt
+image, or the csi-node DaemonSet's chart values; waive it only for a release
+that changes none of those.
+
 ## Oracle
 
 - `pg` StatefulSet (postgres:16, `--data-checksums`, `synchronous_commit=on`,

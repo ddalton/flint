@@ -1,0 +1,24 @@
+RESTART-GATE PASS flint-csi-driver-chart 1.60.2 2026-10-22T19:35:45Z
+cluster: bench7 (trove, 3 x i4i.2xlarge spot, us-east-2; torn down 19:38:57Z, zero set verified)
+run by: bench/results/2026-10-22-ec2-1602c/chaos/run-sdl.sh, the drill set restart-gate.sh was then written from
+candidate: flint-driver:1.60.2-rc3 sha256:8792ebc5b6864e8c607505c6d7530f5283b7f39e7eff38b18f3fe8dba873c8dd (amd64,
+  built from the spdk-csi-driver source tagged v1.60.2, e96f4466); spdk-tgt:1.7.2-rc1 = 1.7.2
+  sha256:20b27ebe7d75d0ddfbeef0118e154847bb636965eeb6a7ea3c9c667607f753ed
+results:
+  2026-10-22T18:57:54Z run-sdl: connected nvme2 /dev/nvme2n1 fast_io_fail_tmo=off ctrl_loss_tmo=40
+  2026-10-22T18:57:54Z run-sdl: SDL-KERNEL A PASS: target gone 30 s (controller connecting), 0 failed writes, resumed 4 s after the export returned
+  2026-10-22T18:57:54Z run-sdl: SDL-KERNEL B PASS: writes failed 43 s after the target went (ctrl_loss_tmo 40), controller removed
+  2026-10-22T18:57:54Z run-sdl: SDL-KERNEL C PASS: umount blocked 10 s with the target gone; finished 4 s after delete_controller (rc=0)
+  2026-10-22T18:57:54Z run-sdl: SDL-KERNEL PASS
+  2026-10-22T18:59:44Z run-sdl: kernel controllers (rwo): bench7-aws-1 nvme2 127.0.0.1 fio=off cl=300 rd=2;
+  2026-10-22T19:01:32Z run-sdl: done 2.2a -> verdict=PASS | 2026-10-22T19:00:00Z,2,2.2a,25,13,0,bench7-aws-1,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"RAID-host spdk-tgt kill; io_resume=20s; raid=raid_pvc-60703231-bc1a-49ce-9b34-d3ab09ebf93c state=online base=3/3"
+  2026-10-22T19:03:30Z run-sdl: done 1.9-r3 -> verdict=PASS | 2026-10-22T19:01:46Z,1r3,1.9,37,28,0,bench7-aws-1,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=36s"
+  2026-10-22T19:05:41Z run-sdl: done 1.9-r3-again -> verdict=PASS | 2026-10-22T19:03:44Z,1r3,1.9,49,39,0,bench7-aws-1,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=48s"
+  2026-10-22T19:09:51Z run-sdl: done 2.7 -> verdict=PASS | 2026-10-22T19:06:00Z,2,2.7,160,6,0,bench7-aws-1,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"r3 DOUBLE remote-leg kill; worst_ack_age=3s; raid=raid_pvc-60703231-bc1a-49ce-9b34-d3ab09ebf93c state=online base=3/3"
+  2026-10-22T19:19:57Z run-sdl: done 2.11 -> verdict=PASS | 2026-10-22T19:10:09Z,2,2.11,511,125,0,bench7-aws-1,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"all-at-once 3-node csi-node kill incl raid host; degraded_direct=none; acked_tail_risk=none; torn=25s; base_back=100s
+  2026-10-22T19:22:09Z run-sdl: kernel controllers (rwx): bench7-aws-1 nvme2 127.0.0.1 fio=off cl=300 rd=2;
+  2026-10-22T19:23:49Z run-sdl: done 3.1 -> verdict=PASS | 2026-10-22T19:22:18Z,3,3.1,30,22,new:0,bench7-aws-1,bench7-aws-2,Y,Y,Y,PASS,Y,PASS,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y"
+  2026-10-22T19:25:46Z run-sdl: done 3.2 -> verdict=PASS | 2026-10-22T19:24:04Z,3,3.2,41,20,0,bench7-aws-2,bench7-aws-2,Y,Y,Y,PASS,Y,PASS,"nfs pod delete: recreate=16s io_resume=23s estale=0"
+  2026-10-22T19:27:24Z run-sdl: done 3.3a -> verdict=PASS | 2026-10-22T19:25:59Z,3,3.3a,26,11,0,bench7-aws-2,bench7-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt kill on nfs node: io_resume=21s nfs_restarts=0"
+  2026-10-22T19:32:58Z run-sdl: done 3.8 -> verdict=PASS | 2026-10-22T19:27:38Z,3,3.8,259,23,new:0,bench7-aws-2,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"RWX churn x10; nfs_uid_same=Y"
+  2026-10-22T19:34:51Z run-sdl: done 3.3a-again -> verdict=PASS | 2026-10-22T19:33:12Z,3,3.3a,38,23,0,bench7-aws-1,bench7-aws-1,Y,Y,Y,PASS,Y,PASS,"spdk-tgt kill on nfs node: io_resume=32s nfs_restarts=0"
