@@ -58,6 +58,20 @@ covered by the stability guarantee.
   still being created by an earlier controller answers `ABORTED` (in
   progress) or adopts the finished lvol after checking its size.
 
+### Internal
+
+- **Flint's SPDK patches are a series**: `spdk-csi-driver/spdk-patches/`
+  holds `BASE` (the upstream tag) and the numbered patches in `git
+  format-patch` form, applied by `Dockerfile.spdk` with `git apply`, which
+  fails on a patch that no longer applies exactly instead of applying it
+  with fuzz. `scripts/spdk-patches.sh` builds a scratch clone of upstream
+  SPDK with the series as commits (`tree`), runs the unit tests the series
+  touches (`test`), writes the series back (`export`), and checks it applies
+  (`check`); an SPDK upgrade is `tree DIR <tag>` and a rebase. The
+  conversion is byte-identical (v26.05 + the series == v26.05 + the old
+  loose patches). `release.sh` counts the whole directory as spdk-tgt's
+  build input.
+
 ## [1.60.2] - 2026-10-22
 
 A patch release for six defects and two defaults. spdk-tgt 1.7.2 closes

@@ -1,9 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:50 +0000
+Subject: [PATCH] ublk: log whether the bdev takes FLUSH
+ (UBLK_ATTR_VOLATILE_CACHE)
+
+Flint-only (diagnostics).
+
+Formerly spdk-csi-driver/ublk-debug.patch.
+---
+ lib/ublk/ublk.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
 diff --git a/lib/ublk/ublk.c b/lib/ublk/ublk.c
-index 6edcced92..23c81dbb6 100644
+index fc5762e64..5e09579d2 100644
 --- a/lib/ublk/ublk.c
 +++ b/lib/ublk/ublk.c
-@@ -1724,8 +1724,12 @@ ublk_info_param_init(struct spdk_ublk_dev *ublk)
-
+@@ -1723,8 +1723,12 @@ ublk_info_param_init(struct spdk_ublk_dev *ublk)
+ 
  	if (spdk_bdev_io_type_supported(bdev, SPDK_BDEV_IO_TYPE_FLUSH)) {
  		uparams.basic.attrs = UBLK_ATTR_VOLATILE_CACHE;
 +		SPDK_NOTICELOG("ublk%d: bdev '%s' supports FLUSH - setting UBLK_ATTR_VOLATILE_CACHE\n",

@@ -1,3 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:51 +0000
+Subject: [PATCH] blob: never write an extent page over md page 0
+
+bench4 2026-10-21: an extent page landed on md page 0 (the lvolstore's
+super blob) and the lvolstore failed to load. A snapshot emptied the
+clone's extent table while a cluster allocation was in flight; the insert
+then wrote to the allocation's extent_page, 0. The md thread now claims a
+fresh page there, the extent-page writer refuses page 0, and the
+write-failure paths unmap.
+
+Upstream: Gerrit 29555, spdk/spdk#3113.
+
+Formerly spdk-csi-driver/blob-extent-page-md0.patch.
+---
+ lib/blob/blobstore.c                |  83 ++++++++-
+ test/unit/lib/blob/blob.c/blob_ut.c | 269 ++++++++++++++++++++++++++++
+ 2 files changed, 350 insertions(+), 2 deletions(-)
+
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 index 9e3b28eb1..64d20b982 100644
 --- a/lib/blob/blobstore.c

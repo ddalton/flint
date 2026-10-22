@@ -1,7 +1,8 @@
 # SPDK upstream tracking
 
 What Flint has reported to SPDK, what each report is waiting on, and which
-local patch in `docker/Dockerfile.spdk` it lets us drop. **Check this list
+patch of Flint's series (`spdk-patches/`, applied by `docker/Dockerfile.spdk`)
+it lets us drop. **Check this list
 periodically** (at least before every release that bumps the spdk-tgt image)
 and update the Status column.
 
@@ -32,8 +33,8 @@ ones, and amend the commits' `Fixes` lines (keep the Change-Ids).
 
 | # | What | GitHub issue | Gerrit change | Local patch | Status (date) |
 |---|------|--------------|---------------|-------------|---------------|
-| 1 | Snapshot during a cluster allocation writes an extent page over md page 0; the lvolstore fails to load. | spdk/spdk#3113 (closed 2024, unreproducible; reopen requested) | [29555](https://review.spdk.io/c/spdk/spdk/+/29555) (`I452a0154469e29772040eed147e9ef6099709755`) | `blob-extent-page-md0.patch` | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/3113#issuecomment-6327105627) asks @jimharris to reopen |
-| 2 | A write to a cluster being allocated completes before the mapping is persisted and can be overtaken (raid1 legs diverge; crash loses an acked write). | spdk/spdk#2144 (closed 2024, stale; reopen requested) | [29556](https://review.spdk.io/c/spdk/spdk/+/29556) (`Iedd02cdb146a4af3cd6aaa778006fbc9fa410f48`) | `blob-alloc-window-order.patch` | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/2144#issuecomment-6327106023) asks @tomzawadzki to reopen |
+| 1 | Snapshot during a cluster allocation writes an extent page over md page 0; the lvolstore fails to load. | spdk/spdk#3113 (closed 2024, unreproducible; reopen requested) | [29555](https://review.spdk.io/c/spdk/spdk/+/29555) (`I452a0154469e29772040eed147e9ef6099709755`) | `spdk-patches/0008-*` (was `blob-extent-page-md0.patch`) | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/3113#issuecomment-6327105627) asks @jimharris to reopen |
+| 2 | A write to a cluster being allocated completes before the mapping is persisted and can be overtaken (raid1 legs diverge; crash loses an acked write). | spdk/spdk#2144 (closed 2024, stale; reopen requested) | [29556](https://review.spdk.io/c/spdk/spdk/+/29556) (`Iedd02cdb146a4af3cd6aaa778006fbc9fa410f48`) | `spdk-patches/0009-*` (was `blob-alloc-window-order.patch`) | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/2144#issuecomment-6327106023) asks @tomzawadzki to reopen |
 
 Evidence for both: bench4, 2026-10-21
 (`bench/results/2026-10-21-ec2-phase3/`: `lvs-load-failure/ANALYSIS.md`,
@@ -46,26 +47,28 @@ master 58e2d77bb. The stock-master ports and the md0 reproducer
 Flint's patches are written against Flint's SPDK tree (v26.05 + the
 concurrent-allocation patch), so they differ from the Gerrit changes:
 
-- `blob-alloc-window-order.patch` vs 29556. Flint queues window ops on the
+- 0009 (`blob-alloc-window-order`) vs 29556. Flint queues window ops on the
   allocation slot (up to 32 in flight per channel); upstream records the one
   in-flight cluster per channel. Flint keeps the overlap logging and
   `SPDK_BS_ORDER_ALLOC_WINDOW=0`; upstream has neither. Unmaps are queued in
   both since spdk-tgt 1.7.2 (2026-10-21): 1.7.1 covered writes and
   write_zeroes only.
-- `blob-extent-page-md0.patch` vs 29555. Same fix; the upstream test compares
+- 0008 (`blob-extent-page-md0`) vs 29555. Same fix; the upstream test compares
   only the md page struct (valgrind), and Flint's copy still compares the
   whole page (harmless: the image builds no unit tests).
 
 **TODO when the changes merge (or review changes them):** re-port the final
-upstream versions into Flint's patches, and re-run the bench4 divergence and
-reload checks before shipping them.
+upstream versions into Flint's patches (`scripts/spdk-patches.sh tree`, amend,
+`test`, `export`), and re-run the bench4 divergence and reload checks before
+shipping them.
 
 ## When an item lands upstream
 
 1. Note the SPDK release that first contains it.
-2. When Flint moves its SPDK base to that release, delete the local patch and
-   its `COPY`/`patch -p1` lines from `docker/Dockerfile.spdk`, and bump the
-   spdk-tgt tag (`scripts/release.sh` refuses a stale pin).
+2. When Flint moves its SPDK base to that release (`scripts/spdk-patches.sh
+   tree DIR <tag>`), the patch applies empty: `git am --skip` drops it, and
+   `export` writes the series without it. Bump the spdk-tgt tag
+   (`scripts/release.sh` refuses a stale pin).
 3. If upstream changed the fix, re-run the bench4 divergence and reload checks
    on the new image before shipping it.
 

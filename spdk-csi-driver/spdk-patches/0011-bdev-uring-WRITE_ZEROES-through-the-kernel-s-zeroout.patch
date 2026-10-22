@@ -1,3 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:51 +0000
+Subject: [PATCH] bdev/uring: WRITE_ZEROES through the kernel's zeroout
+
+On a block device, fallocate(FALLOC_FL_ZERO_RANGE) becomes
+blkdev_issue_zeroout(): the drive's Write Zeroes command, with no data
+transferred, run by io_uring in a kernel worker. Advertised only when the
+device's queue takes Write Zeroes (write_zeroes_max_bytes > 0, checked
+through sysfs at create); elsewhere, and for regular files, the bdev
+layer's zero-buffer emulation stays. This makes the zeroing of the
+previous patch a command instead of a cluster of data writes.
+
+Upstream candidate, not filed. Related: Gerrit 28716 (uring UNMAP as a
+punch hole) fails every unmap on a drive without Write Zeroes.
+
+Formerly spdk-csi-driver/bdev-uring-write-zeroes.patch.
+---
+ module/bdev/uring/bdev_uring.c | 82 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 82 insertions(+)
+
 diff --git a/module/bdev/uring/bdev_uring.c b/module/bdev/uring/bdev_uring.c
 index ca2dbcf89..4d419bb66 100644
 --- a/module/bdev/uring/bdev_uring.c

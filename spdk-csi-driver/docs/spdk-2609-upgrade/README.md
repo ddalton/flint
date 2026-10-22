@@ -1,5 +1,13 @@
 # SPDK v26.05 to v26.09: upgrade assessment and replica catch-up review
 
+> **2026-10-22:** Flint's patches are now a series in `spdk-csi-driver/spdk-patches/`
+> (applied by `docker/Dockerfile.spdk` with `git apply`), and the loose
+> crate-root `*.patch` files this assessment's Dockerfiles copy are gone. The
+> upgrade path is now `scripts/spdk-patches.sh tree DIR v26.09` (see
+> `spdk-patches/README.md`); the ports here (`raid-skip-rebuild-2609.patch`,
+> `write-cache-advertise.patch`, the corrected `nvmf-hostlog.patch`) are the
+> inputs for resolving that rebase.
+
 Date: 2026-09-27. Base today: SPDK v26.05 plus six patches (`docker/Dockerfile.spdk`).
 Candidate: SPDK v26.09 (tag `0bbb7fe4d`, 347 commits after v26.05, same DPDK submodule).
 

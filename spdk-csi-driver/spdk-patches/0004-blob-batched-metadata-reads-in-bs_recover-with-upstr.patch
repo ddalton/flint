@@ -1,3 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:50 +0000
+Subject: [PATCH] blob: batched metadata reads in bs_recover, with upstream
+ page semantics
+
+Recovery after a hard kill reads the metadata region in batches instead
+of page by page. An earlier version (blob-recovery-optimized) dropped
+valid blobs: it skipped chains and extent pages and freed buffers early,
+so recovery silently emptied the lvolstore (Flint F5). This version keeps
+the batched reads and processes every page exactly as upstream does.
+
+Formerly spdk-csi-driver/blob-recovery-batched.patch.
+---
+ lib/blob/blobstore.c | 174 ++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 163 insertions(+), 11 deletions(-)
+
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 index 08b79153d..85569bd21 100644
 --- a/lib/blob/blobstore.c

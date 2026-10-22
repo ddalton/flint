@@ -1,3 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:50 +0000
+Subject: [PATCH] lvol: FLUSH persists the blob's metadata
+
+A FLUSH used to be acknowledged as a no-op, so a hard spdk-tgt death lost
+every cluster allocation and size change since the last clean unload
+(Flint F5, docs/attach-detach-campaign-2026-07.md). FLUSH now runs
+spdk_blob_sync_md() on the lvolstore's md thread and completes the bdev
+I/O back on the submitting thread; a clean blob completes at once, so
+steady-state flushes stay cheap.
+
+Formerly spdk-csi-driver/lvol-flush-sync.patch.
+---
+ module/bdev/lvol/vbdev_lvol.c                 | 72 +++++++++++++++++++
+ .../lib/bdev/vbdev_lvol.c/vbdev_lvol_ut.c     | 17 ++++-
+ 2 files changed, 86 insertions(+), 3 deletions(-)
+
 diff --git a/module/bdev/lvol/vbdev_lvol.c b/module/bdev/lvol/vbdev_lvol.c
 index 470b0628f..123c390f2 100644
 --- a/module/bdev/lvol/vbdev_lvol.c

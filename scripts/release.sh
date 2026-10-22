@@ -288,8 +288,9 @@ EOF
 # exactly that: spdk-tgt stayed at 1.7.0 (published 2026-09-28) while
 # Dockerfile.spdk gained blob-parallel-cluster-alloc.patch (2026-10-08), and
 # the CHANGELOG said the image had it. Refuse: for spdk-tgt, the inputs are
-# Dockerfile.spdk and every patch it COPYs; any commit touching them after
-# the commit that set the pinned tag means the pin is stale -- bump it.
+# Dockerfile.spdk and everything it COPYs from the context (the
+# spdk-patches/ series); any commit touching them after the commit that set
+# the pinned tag means the pin is stale -- bump it.
 # (The driver images move with the release version, so they cannot go stale.)
 stale=""
 while read -r name tag ctx file; do
@@ -302,9 +303,11 @@ while read -r name tag ctx file; do
         continue
     fi
     inputs="$ctx/$file"
-    for p in $(sed -n 's/^COPY \([^ ]*\.patch\) .*/\1/p' "$repo_root/$ctx/$file"); do inputs="$inputs $ctx/$p"; done
+    # every COPY source from the context (a file or a directory; not --from=)
+    for p in $(sed -n 's/^COPY \([^ -][^ ]*\) .*/\1/p' "$repo_root/$ctx/$file"); do inputs="$inputs $ctx/${p%/}"; done
     # shellcheck disable=SC2086
-    later=$(git -C "$repo_root" log --format='%h %ad %s' --date=short "$set_at..HEAD" -- $inputs)
+    # *.md never reaches the image (.dockerignore): a README edit is no pin bump
+    later=$(git -C "$repo_root" log --format='%h %ad %s' --date=short "$set_at..HEAD" -- $inputs ':(exclude)*.md')
     if [ -n "$later" ]; then
         stale="$stale  $hub_ns/$name:$tag (pinned in ${set_at%"${set_at#????????}"}) predates changes to its build inputs:
 $(echo "$later" | sed 's/^/      /')

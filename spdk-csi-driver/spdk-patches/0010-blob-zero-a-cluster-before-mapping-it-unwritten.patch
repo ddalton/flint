@@ -1,3 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:51 +0000
+Subject: [PATCH] blob: zero a cluster before mapping it unwritten
+
+2026-10-22: a new volume read a deleted volume's data where it never
+wrote, and raid1 replicas disagreed there. Blobstore assumes a free
+cluster holds zeroes because the clear method zeroed it when it was
+freed or when the blobstore was created. That fails when the clear is an
+unmap and the bdev cannot unmap (uring completes it as a no-op) or does
+not read zeroes after one, and on a disk with data from before the
+blobstore. Zero the cluster before it is mapped instead: a thin blob's
+new cluster over a zeroes back device, and a thick blob's new clusters
+before the metadata that maps them is persisted (create and grow).
+SPDK_BS_ZERO_NEW_CLUSTERS=0 restores the old behaviour (A/B, and the
+unit test's control).
+
+Upstream candidate, not filed.
+
+Formerly spdk-csi-driver/blob-zero-new-clusters.patch.
+---
+ lib/blob/blobstore.c                | 105 ++++++++++++++++++
+ test/unit/lib/blob/blob.c/blob_ut.c | 162 +++++++++++++++++++++++++++-
+ 2 files changed, 262 insertions(+), 5 deletions(-)
+
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 index 76925dcb4..720628380 100644
 --- a/lib/blob/blobstore.c

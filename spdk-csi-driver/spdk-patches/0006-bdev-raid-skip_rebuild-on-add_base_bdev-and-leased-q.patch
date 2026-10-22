@@ -1,3 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:51 +0000
+Subject: [PATCH] bdev/raid: skip_rebuild on add_base_bdev, and leased quiesce
+ RPCs
+
+For Flint's hot rejoin (docs/tier2-evaluation-2026-06-12.md): a
+skip_rebuild flag on bdev_raid_add_base_bdev, and a leased
+bdev_raid_quiesce / bdev_raid_unquiesce pair. The lease carries a
+lease_id (1.7.0): naming it makes a quiesce renew-only (-ENOENT lapsed,
+-ESTALE superseded), and skip_rebuild add and unquiesce refuse a lease
+that is not the caller's. A plain add behaves as before.
+
+Flint-only: SPDK 26.09 still has no quiesce / assume-clean RPC.
+
+Formerly spdk-csi-driver/raid-skip-rebuild.patch.
+---
+ module/bdev/raid/bdev_raid.c     | 103 +++++-
+ module/bdev/raid/bdev_raid.h     |  14 +-
+ module/bdev/raid/bdev_raid_rpc.c | 566 ++++++++++++++++++++++++++++++-
+ python/spdk/cli/bdev.py          |  33 +-
+ schema/schema.json               |  51 +++
+ 5 files changed, 763 insertions(+), 4 deletions(-)
+
 diff --git a/module/bdev/raid/bdev_raid.c b/module/bdev/raid/bdev_raid.c
 index a62b49150..eee9a38e2 100644
 --- a/module/bdev/raid/bdev_raid.c

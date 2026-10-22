@@ -1,7 +1,29 @@
-diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
---- a/lib/blob/blobstore.c	2026-10-21 23:05:52.334520612 +0000
-+++ b/lib/blob/blobstore.c	2026-10-21 23:05:52.337521093 +0000
-@@ -2695,6 +2695,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dilip Dalton <dilipdalton@hotmail.com>
+Date: Thu, 22 Oct 2026 21:59:51 +0000
+Subject: [PATCH] blob: ops that reach a cluster during its allocation wait
+ their turn
+
+bench4 2026-10-21: a write that reached a cluster inside its
+allocation's insert window (mapped, extent page not yet persisted)
+overtook the earlier write parked on the allocation, and raid1 replicas
+diverged. Such writes, write_zeroes and (1.7.2) unmaps now queue behind
+the allocation. SPDK_BS_ORDER_ALLOC_WINDOW=0 restores the old order, for
+A/B; every overlap with a parked write is logged.
+
+Upstream: Gerrit 29556, spdk/spdk#2144 (the unmap part is Flint's).
+
+Formerly spdk-csi-driver/blob-alloc-window-order.patch.
+---
+ lib/blob/blobstore.c                |  92 +++++++++++++++++++++
+ test/unit/lib/blob/blob.c/blob_ut.c | 121 ++++++++++++++++++++++++++++
+ 2 files changed, 213 insertions(+)
+
+diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
+index 64d20b982..76925dcb4 100644
+--- a/lib/blob/blobstore.c
++++ b/lib/blob/blobstore.c
+@@ -2695,6 +2695,84 @@ bs_claim_alloc_slot(struct spdk_bs_channel *ch, struct spdk_blob *blob, uint32_t
  	return NULL;
  }
  
@@ -86,7 +108,7 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  static void
  blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
  {
-@@ -3289,6 +3367,10 @@
+@@ -3289,6 +3367,10 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
  	}
  	case SPDK_BLOB_WRITE:
  	case SPDK_BLOB_WRITE_ZEROES: {
@@ -97,7 +119,7 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  		if (is_allocated) {
  			/* Write to the blob */
  			spdk_bs_batch_t *batch;
-@@ -3329,6 +3411,11 @@
+@@ -3329,6 +3411,11 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
  		struct spdk_blob_free_cluster_ctx *ctx = NULL;
  		spdk_bs_batch_t *batch;
  
@@ -109,7 +131,7 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  		/* if aligned with cluster release cluster,
  		 * but if blob locked_operation_in_progress has been set
  		 * because of some specical cases, such as doing inflate,
-@@ -3619,6 +3706,11 @@
+@@ -3619,6 +3706,11 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_chan
  							 rw_iov_done, NULL);
  			}
  		} else {
@@ -121,10 +143,11 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  			if (is_allocated) {
  				spdk_bs_sequence_t *seq;
  
-diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
---- a/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 23:05:52.341521735 +0000
-+++ b/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 23:05:52.344522217 +0000
-@@ -6035,6 +6035,126 @@
+diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
+index af5307123..3ed17a70c 100644
+--- a/test/unit/lib/blob/blob.c/blob_ut.c
++++ b/test/unit/lib/blob/blob.c/blob_ut.c
+@@ -6035,6 +6035,126 @@ blob_cow_parallel_clusters(void)
  	poll_threads();
  }
  
@@ -251,7 +274,7 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
  static void
  blob_cow_same_cluster_waits(void)
  {
-@@ -11224,6 +11344,7 @@
+@@ -11224,6 +11344,7 @@ main(int argc, char **argv)
  		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_md0);
  		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_enospc);
  		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);
