@@ -106,7 +106,8 @@ RUN git clone https://github.com/spdk/spdk.git . && \
     # allocation's insert window (mapped, extent page not yet persisted)
     # overtook the earlier write parked on the allocation; raid1 replicas
     # diverged. Such writes now queue behind the allocation
-    # (SPDK_BS_ORDER_ALLOC_WINDOW=0 restores the old order, for A/B).
+    # (SPDK_BS_ORDER_ALLOC_WINDOW=0 restores the old order, for A/B). Unmaps
+    # in the window queue too (1.7.2).
     patch -p1 < /tmp/blob-alloc-window-order.patch && \
     echo "✅ alloc window write-order fix applied" && \
     rm /tmp/*.patch && \

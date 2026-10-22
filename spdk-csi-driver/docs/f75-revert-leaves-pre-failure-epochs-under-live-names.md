@@ -1,10 +1,14 @@
 # F75 — the catch-up revert leaves a stale replica's pre-failure epochs under live names
 
 Status: **FOUND 2026-10-08 by code review** (while checking, for F74,
-whether old epoch snapshots are reaped). **Not observed live. NOT FIXED.**
-Pinned by `catchup.rs`
-`revert_reaps_the_stale_replicas_epochs_newer_than_its_base` (ignored
-until the fix lands; run with `--ignored`). Interacts with F74: the raised
+whether old epoch snapshots are reaped). Not observed live. **FIXED
+2026-10-21 (1.60.2)** as §5 specifies: `catchup.rs`
+`reap_epochs_newer_than_base`, called in the revert branch after
+`revert_head` and before `record_revert`. Pinned by `catchup.rs`
+`revert_reaps_the_stale_replicas_epochs_newer_than_its_base` (no longer
+ignored; with the call removed it fails at the "must be reaped" assert).
+Shipped together with the raised epoch interval (F74 §5.2 #4), as F74 §5.4
+item 6 requires. Interacts with F74: the raised
 epoch interval makes the common form of this (§3a) the normal case.
 
 ## 1. The mechanism

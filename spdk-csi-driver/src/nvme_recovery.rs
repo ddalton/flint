@@ -21,6 +21,12 @@
 //!   controller as usable when it is `live`; a stale/dead one is disconnected
 //!   and reconnected fresh instead of remounting the dead device (which
 //!   otherwise CrashLoops the consumer). See [`controller_state_is_live`].
+//! * **#4 state-driven deadline** (2026-10-22) — a controller whose target is
+//!   on the SAME node waits out a target restart instead of failing queued
+//!   I/O on a clock; it fails it when there is evidence the wait is pointless
+//!   (the consumer has left: [`must_fail_queued_io_at_unstage`]), and the
+//!   kernel's `ctrl_loss_tmo` is the backstop for when no Flint process is
+//!   alive to decide. See [`ReconnectPolicy::same_node_from_lookup`].
 
 use std::collections::HashSet;
 
@@ -46,15 +52,85 @@ pub struct ReconnectPolicy {
 
 impl Default for ReconnectPolicy {
     fn default() -> Self {
+        // The REMOTE-target policy (#4 gives a same-node target its own).
         // 30 min of reconnecting at 5s intervals (~360 attempts), with I/O
-        // failing after 20s. 20s matches LegTransportPolicy: long enough to
-        // ride a target restart + export reconcile (#1), short enough that a
-        // consumer faults instead of parking in D-state.
-        Self { ctrl_loss_tmo_secs: 1800, reconnect_delay_secs: 5, fast_io_fail_tmo_secs: 20 }
+        // failing after 60s: long enough to ride an spdk-tgt restart,
+        // short enough that a consumer faults instead of parking in D-state
+        // for the whole ctrl_loss_tmo. It was 20s (matching
+        // LegTransportPolicy) until bench5 (2026-10-22): a restart of the
+        // target under a mounted volume costs the container restart (7-21 s
+        // measured, kubelet backoff included), the blobstore's dirty-load
+        // recovery (~10 s), the raid re-create, and up to one 5 s reconnect
+        // delay, so 20s turned every slower restart into EIO and an ext4
+        // remounted read-only (drills 1.9 and 3.3a). A raid LEG keeps 20s:
+        // there a fault degrades one replica, here it fails the consumer.
+        Self { ctrl_loss_tmo_secs: 1800, reconnect_delay_secs: 5, fast_io_fail_tmo_secs: 60 }
     }
 }
 
 impl ReconnectPolicy {
+    /// #4: the policy for a controller whose target is spdk-tgt on THIS node
+    /// (the loopback export a RWO raid host or an RWX volume's NFS server
+    /// mounts). No `fast_io_fail`: queued I/O waits for the target to come
+    /// back however long the restart takes, instead of racing a timer.
+    ///
+    /// WHY NOT A LONGER TIMER. Linux arms the fail-fast work ONCE, when the
+    /// controller goes RESETTING -> CONNECTING, with the value set at that
+    /// instant; a later sysfs write only changes the stored option, and a
+    /// connecting controller cannot be sent back through RESETTING (6.12
+    /// `nvme_change_ctrl_state`, `nvme_ctrl_fast_io_fail_tmo_store`). So no
+    /// agent can extend the deadline of an outage already under way — it
+    /// can only end it early (`delete_controller`). Any fixed value is a
+    /// race against a restart whose length depends on kubelet's restart
+    /// backoff, the disk size (the dirty blobstore load reads the whole
+    /// metadata region) and whether the agent itself was restarted: bench5
+    /// and bench6 (2026-10-22) measured 27-42 s for a target kill and 95 s
+    /// when every csi-node pod was killed at once (drill 2.11).
+    ///
+    /// The bound that remains is `ctrl_loss_tmo` (default 300 s,
+    /// `FLINT_NVME_SAME_NODE_CTRL_LOSS_TMO`): when no Flint process recovers
+    /// the target within it, the kernel deletes the controller and the
+    /// consumer gets EIO — the D-state guard of 2026-08-02 (runay) for the
+    /// case where nobody is alive to decide. The reconnect delay is 2 s
+    /// (`FLINT_NVME_SAME_NODE_RECONNECT_DELAY`): a same-node reconnect is
+    /// cheap, and it bounds how long I/O stays paused after the export is
+    /// back.
+    pub fn same_node_from_lookup<F: Fn(&str) -> Option<String>>(get: F) -> Self {
+        let ctrl_loss_tmo_secs = get("FLINT_NVME_SAME_NODE_CTRL_LOSS_TMO")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .filter(|&v| v >= 1)
+            .unwrap_or(300);
+        let reconnect_delay_secs = get("FLINT_NVME_SAME_NODE_RECONNECT_DELAY")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&v| v >= 1)
+            .unwrap_or(2);
+        Self { ctrl_loss_tmo_secs, reconnect_delay_secs, fast_io_fail_tmo_secs: 0 }
+    }
+
+    /// The policy for a kernel connect to `target_ip`: [`Self::same_node_from_lookup`]
+    /// when the target is this node's own spdk-tgt (a loopback address —
+    /// every same-node export listens on 127.0.0.1), else the fixed-bound
+    /// policy, because the local agent cannot observe a remote target's
+    /// restart and so has no state to drive the deadline from.
+    pub fn for_target(target_ip: &str) -> Self {
+        if target_is_same_node(target_ip) {
+            Self::same_node_from_lookup(|k| std::env::var(k).ok())
+        } else {
+            Self::from_env()
+        }
+    }
+
+    /// What to write to `fast_io_fail_tmo` after connect. A same-node
+    /// controller gets an explicit `-1` (off), not silence: a controller
+    /// reused across an upgrade may still carry an older finite value.
+    pub fn fast_io_fail_sysfs_for(&self, same_node: bool) -> Option<String> {
+        if same_node {
+            Some("-1".to_string())
+        } else {
+            self.fast_io_fail_sysfs()
+        }
+    }
+
     /// Reads `FLINT_NVME_CTRL_LOSS_TMO` (seconds, or `-1` for infinite),
     /// `FLINT_NVME_RECONNECT_DELAY` and `FLINT_NVME_FAST_IO_FAIL` (seconds,
     /// `0` to disable); unset/garbage → the defaults.
@@ -369,6 +445,133 @@ impl DeadTargetTimeouts {
     }
 }
 
+/// Identity of the spdk-tgt RPC socket file, `(device, inode)`, or `None`
+/// when it does not exist. spdk-tgt creates a fresh socket each time it
+/// starts, so a changed identity is a restart, observed for the cost of a
+/// `stat` and with no RPC against a target that may not be answering yet.
+pub fn socket_identity(path: &str) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Turns successive [`socket_identity`] samples into restart events
+/// (bench5 drills 1.9 / 3.3a, 2026-10-22: recovery waited for a 30 s
+/// discovery tick while the consumer's I/O timed out).
+///
+/// The first socket seen is the target the agent started with, not a
+/// restart. After that, any socket that differs from the last one seen is
+/// a new target: replaced in place, or reappearing after a gap. A vanished
+/// socket alone is not an event (the target is down; the new one will be).
+#[derive(Debug, Default)]
+pub struct TgtSocketWatch {
+    last: Option<(u64, u64)>,
+    seen_any: bool,
+}
+
+impl TgtSocketWatch {
+    /// Feed one sample; true when it shows a restarted target.
+    pub fn observe(&mut self, now: Option<(u64, u64)>) -> bool {
+        let Some(id) = now else {
+            self.last = None;
+            return false;
+        };
+        let restarted = self.seen_any && self.last != Some(id);
+        self.last = Some(id);
+        self.seen_any = true;
+        restarted
+    }
+}
+
+/// #4: whether a kernel connect to `target_ip` reaches spdk-tgt on this
+/// node. Same-node exports listen on loopback (127.0.0.1) unless the
+/// operator moved them with `NVMEOF_LOCAL_TARGET_IP`; anything else is
+/// treated as remote, which keeps the fixed bound — the safe side.
+pub fn target_is_same_node(target_ip: &str) -> bool {
+    target_is_same_node_with(target_ip, std::env::var("NVMEOF_LOCAL_TARGET_IP").ok().as_deref())
+}
+
+/// [`target_is_same_node`] with the override passed in (testable).
+pub fn target_is_same_node_with(target_ip: &str, local_override: Option<&str>) -> bool {
+    let strip = |s: &str| s.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    let ip = strip(target_ip);
+    if ip.is_empty() {
+        return false;
+    }
+    ip.eq_ignore_ascii_case("localhost")
+        || ip.parse::<std::net::IpAddr>().map(|a| a.is_loopback()).unwrap_or(false)
+        || local_override.is_some_and(|o| strip(o) == ip)
+}
+
+/// `traddr` out of a kernel controller's `address` attribute
+/// (`traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1`).
+pub fn traddr_of(address: &str) -> Option<&str> {
+    address
+        .trim()
+        .split(',')
+        .find_map(|kv| kv.trim().strip_prefix("traddr="))
+}
+
+/// #4 evidence: at NodeUnstage the consumer has LEFT (kubelet unstages only
+/// after every publish of the volume on this node is gone), so I/O still
+/// queued on a same-node controller that is not live has no one waiting
+/// for it, and waiting for the target only parks `umount` in D-state (the
+/// runay wedge). Such a controller is failed at once. A live controller,
+/// or one whose target is remote, is left alone.
+pub fn must_fail_queued_io_at_unstage(state: &str, address: &str) -> bool {
+    !controller_state_is_live(state) && traddr_of(address).is_some_and(target_is_same_node)
+}
+
+/// #4 side effect: for the kernel device mounted at `mount_path`, delete
+/// every flint controller of its subsystem that [`must_fail_queued_io_at_unstage`]
+/// selects (`delete_controller` fails its queued and future I/O at once, so
+/// the unmount that follows cannot hang). Returns the controllers deleted.
+pub fn fail_queued_io_for_departed_consumer(mount_path: &str) -> Vec<String> {
+    let Some(dev) = std::process::Command::new("findmnt")
+        .args(["-no", "SOURCE", mount_path])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .and_then(|s| s.strip_prefix("/dev/").map(str::to_string))
+    else {
+        return Vec::new();
+    };
+    // Controller and multipath-head devices both expose their subsystem's
+    // NQN at device/subsysnqn.
+    let Ok(nqn) = std::fs::read_to_string(format!("/sys/block/{dev}/device/subsysnqn")) else {
+        return Vec::new();
+    };
+    let nqn = nqn.trim().to_string();
+    if !nqn.starts_with(crate::identity::VOLUME_NQN_PREFIX) {
+        return Vec::new();
+    }
+    let mut failed = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/class/nvme") else { return failed };
+    for e in entries.flatten() {
+        let p = e.path();
+        let read = |f: &str| std::fs::read_to_string(p.join(f)).unwrap_or_default();
+        if read("subsysnqn").trim() != nqn {
+            continue;
+        }
+        let (state, address) = (read("state"), read("address"));
+        if must_fail_queued_io_at_unstage(&state, &address) {
+            let name = e.file_name().to_string_lossy().to_string();
+            match std::fs::write(p.join("delete_controller"), "1") {
+                Ok(()) => {
+                    eprintln!(
+                        "🧯 [NODE] {name} ({}) is {} and its consumer has left — failing its queued I/O \
+                         now so the unmount cannot hang (state-driven deadline)",
+                        nqn,
+                        state.trim()
+                    );
+                    failed.push(name);
+                }
+                Err(err) => eprintln!("⚠️ [NODE] could not delete {name}: {err} — the unmount may wait for ctrl_loss_tmo"),
+            }
+        }
+    }
+    failed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,10 +594,10 @@ mod tests {
     #[test]
     fn the_kernel_initiator_bounds_queued_io_by_default() {
         let p = ReconnectPolicy::default();
-        assert_eq!(p.fast_io_fail_tmo_secs, 20);
+        assert_eq!(p.fast_io_fail_tmo_secs, 60);
         assert_eq!(
             p.fast_io_fail_sysfs().as_deref(),
-            Some("20"),
+            Some("60"),
             "a consumer's controller must fail I/O rather than queue it forever"
         );
         assert!(
@@ -439,7 +642,7 @@ mod tests {
         let infinite = ReconnectPolicy { ctrl_loss_tmo_secs: -1, ..Default::default() };
         assert_eq!(
             infinite.fast_io_fail_sysfs().as_deref(),
-            Some("20"),
+            Some("60"),
             "bounded I/O alongside infinite reconnect is the whole point of the split"
         );
     }
@@ -484,6 +687,94 @@ mod tests {
         // Non-numeric also falls back.
         let p2 = ReconnectPolicy::from_lookup(|_| Some("abc".to_string()));
         assert_eq!(p2, ReconnectPolicy::default());
+    }
+
+    /// #4: a same-node controller has no fail-fast clock — it waits for the
+    /// target — and keeps a finite ctrl_loss_tmo as the backstop for when
+    /// no Flint process is alive to decide; a remote one keeps its bound.
+    #[test]
+    fn a_same_node_target_is_waited_for_and_a_remote_one_is_bounded() {
+        let local = ReconnectPolicy::same_node_from_lookup(|_| None);
+        assert_eq!(local.fast_io_fail_tmo_secs, 0);
+        assert_eq!(local.fast_io_fail_sysfs_for(true).as_deref(), Some("-1"), "explicitly off, not left as is");
+        assert_eq!(local.ctrl_loss_tmo_secs, 300, "the backstop must stay finite (runay D-state)");
+        assert_eq!(local.reconnect_delay_secs, 2);
+        let remote = ReconnectPolicy::default();
+        assert_eq!(remote.fast_io_fail_sysfs_for(false).as_deref(), Some("60"));
+
+        assert!(target_is_same_node_with("127.0.0.1", None));
+        assert!(target_is_same_node_with("::1", None));
+        assert!(target_is_same_node_with("[::1]", None));
+        assert!(!target_is_same_node_with("10.0.1.5", None));
+        assert!(!target_is_same_node_with("", None), "unknown is remote: the bounded side");
+        // An operator-moved local listener is still same-node.
+        assert!(target_is_same_node_with("10.0.1.7", Some("10.0.1.7")));
+        assert!(!target_is_same_node_with("10.0.1.8", Some("10.0.1.7")));
+
+        let tuned = ReconnectPolicy::same_node_from_lookup(|k| match k {
+            "FLINT_NVME_SAME_NODE_CTRL_LOSS_TMO" => Some("600".into()),
+            _ => None,
+        });
+        assert_eq!(tuned.ctrl_loss_tmo_secs, 600);
+        let infinite = ReconnectPolicy::same_node_from_lookup(|k| match k {
+            "FLINT_NVME_SAME_NODE_CTRL_LOSS_TMO" => Some("-1".into()),
+            _ => None,
+        });
+        assert_eq!(infinite.ctrl_loss_tmo_secs, 300, "an unbounded same-node wait is refused");
+    }
+
+    /// #4 evidence at unstage: fail only a same-node controller that is not
+    /// live; never a live one (its I/O is flowing), never a remote one (no
+    /// local state says it is hopeless).
+    #[test]
+    fn unstage_fails_queued_io_only_on_a_dead_same_node_controller() {
+        let local = "traddr=127.0.0.1,trsvcid=4420,src_addr=127.0.0.1";
+        let remote = "traddr=10.0.1.5,trsvcid=4420";
+        assert!(must_fail_queued_io_at_unstage("connecting", local));
+        assert!(must_fail_queued_io_at_unstage("resetting\n", local));
+        assert!(!must_fail_queued_io_at_unstage("live", local));
+        assert!(!must_fail_queued_io_at_unstage("connecting", remote));
+        assert!(!must_fail_queued_io_at_unstage("connecting", ""));
+        assert_eq!(traddr_of(local), Some("127.0.0.1"));
+        assert_eq!(traddr_of("trsvcid=4420"), None);
+    }
+
+    /// The socket the agent starts with is not a restart; a re-created
+    /// one is, whether it was replaced in place or came back after a gap;
+    /// the gap itself is not (the new target fires when it appears).
+    #[test]
+    fn a_re_created_tgt_socket_is_a_restart_and_the_first_one_is_not() {
+        let mut w = TgtSocketWatch::default();
+        assert!(!w.observe(Some((1, 100))), "the target the agent started with");
+        assert!(!w.observe(Some((1, 100))), "same socket, same target");
+        assert!(w.observe(Some((1, 101))), "replaced in place: a new target");
+        assert!(!w.observe(Some((1, 101))));
+        assert!(!w.observe(None), "target down: nothing to recover yet");
+        assert!(!w.observe(None));
+        assert!(w.observe(Some((1, 102))), "back after a gap: a new target");
+        // The agent starting before the target: the first socket is the
+        // target's first start, not a restart.
+        let mut late = TgtSocketWatch::default();
+        assert!(!late.observe(None));
+        assert!(!late.observe(Some((1, 7))));
+    }
+
+    #[test]
+    fn socket_identity_follows_the_file() {
+        let dir = std::env::temp_dir().join(format!("flint-sockwatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("spdk.sock");
+        let path = p.to_str().unwrap();
+        assert_eq!(socket_identity(path), None);
+        std::fs::write(&p, b"a").unwrap();
+        let first = socket_identity(path).unwrap();
+        // Keep the old inode alive so the new file cannot reuse its number.
+        let kept = dir.join("old.sock");
+        std::fs::rename(&p, &kept).unwrap();
+        std::fs::write(&p, b"b").unwrap();
+        let second = socket_identity(path).unwrap();
+        assert_ne!(first, second, "a re-created file has a new identity");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

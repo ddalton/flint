@@ -962,6 +962,16 @@ pub fn classify_subsystem_nqn(nqn: &str) -> Option<String> {
     }
 }
 
+/// The NQN a volume's loopback export is SERVED under on its consumer
+/// node: always the inner (storage id) domain, because stage mints the
+/// loopback family from the storage id (F47). For an RWO handle the two
+/// domains are the same; for an NFS backing handle `nfs-server-<id>` it is
+/// `…:volume:<id>`, never `…:volume:nfs-server-<id>`. Boot rehydrate used
+/// the handle's own domain and so saw every RWX backing export as missing.
+pub fn loopback_export_nqn(volume_handle: &str) -> String {
+    volume_nqn(storage_id_of_handle(volume_handle))
+}
+
 /// The loopback-subsystem NQNs NodeUnstage's lost-cleanup-data belt must
 /// sweep for a staged handle, both id domains (F47, the loopback edition of
 /// F44's `per_replica_controller_prefixes`): the loopback family is
@@ -1693,6 +1703,20 @@ mod tests {
         let staged = backing_handle(VOL); // "nfs-server-<pv>"
         let rwx = loopback_teardown_nqns(&sh(&staged));
         assert_eq!(rwx, vec![volume_nqn(&staged), volume_nqn(VOL)]);
+    }
+
+    /// The served loopback NQN is the inner one in both shapes, and it is
+    /// one of the NQNs unstage sweeps. Boot rehydrate derived it from the
+    /// RWX backing handle instead, so it never found the live export and
+    /// tried to add the lvol to a second subsystem every minute (bench5
+    /// drill 3.2, 2026-10-22: "already claimed: type exclusive_write").
+    #[test]
+    fn the_served_loopback_nqn_is_the_inner_one() {
+        assert_eq!(loopback_export_nqn(VOL), volume_nqn(VOL));
+        let staged = backing_handle(VOL); // "nfs-server-<pv>"
+        assert_eq!(loopback_export_nqn(&staged), volume_nqn(VOL));
+        assert_ne!(loopback_export_nqn(&staged), volume_nqn(&staged));
+        assert!(loopback_teardown_nqns(&sh(&staged)).contains(&loopback_export_nqn(&staged)));
     }
 
     /// THE HOSTID IS PART OF THE HOST IDENTITY, and the kernel says so.

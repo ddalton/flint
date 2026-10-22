@@ -1230,6 +1230,50 @@ pub(crate) async fn revert_head(
         .ok_or_else(|| format!("bdev_lvol_clone of {} returned no uuid", base_alias).into())
 }
 
+/// F75 (docs/f75-revert-leaves-pre-failure-epochs-under-live-names.md): after
+/// the §5 revert, delete the replica's own epoch snapshots NEWER than the
+/// base — cut while it was in sync, before its failure, and still holding
+/// the record's live names. Left in place, `align_head` takes their names as
+/// convergence and `select_base_epoch` can pick one as a later base. Newest
+/// first (leaf first); never the base (the new head's clone parent) and never
+/// anything older (the epoch GC's). Tolerates "missing", so a crash anywhere
+/// before the record write re-runs it with the revert.
+pub(crate) async fn reap_epochs_newer_than_base(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    lvs_name: &str,
+    volume_id: &str,
+    base: &str,
+    present: &HashSet<String>,
+) -> Result<(), RpcError> {
+    let Some(base_seq) = epoch_seq(volume_id, base) else {
+        return Err(format!("base {} is not an epoch of {}", base, volume_id).into());
+    };
+    let mut newer: Vec<(u64, &String)> = present
+        .iter()
+        .filter_map(|n| epoch_seq(volume_id, n).map(|s| (s, n)))
+        .filter(|(s, _)| *s > base_seq)
+        .collect();
+    newer.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, name) in newer {
+        let alias = format!("{}/{}", lvs_name, name);
+        let del = json!({ "method": "bdev_lvol_delete", "params": { "name": alias } });
+        match rpc.spdk_rpc(node, &del).await {
+            Ok(_) => info!(volume_id, node, epoch = %name,
+                "[CATCHUP] Reaped a pre-failure epoch newer than the revert base (F75)"),
+            Err(e) if is_missing(&e.to_string()) => {}
+            Err(e) => {
+                return Err(format!(
+                    "failed to reap pre-failure epoch {} on {}: {}",
+                    alias, node, e
+                )
+                .into())
+            }
+        }
+    }
+    Ok(())
+}
+
 /// §9-5 full build, step 0 (E = "empty"): discard the head entirely and
 /// re-create it as a fresh EMPTY thin lvol with the same name, sized to the
 /// source head. Safe for the same reason the §5 revert is: a stale
@@ -2004,10 +2048,17 @@ async fn catchup_stale(
         let new_uuid = match &base {
             Some(b) => {
                 let base_alias = format!("{}/{}", identity.lvs_name, b);
-                revert_head(
+                let uuid = revert_head(
                     rpc, &identity.node_name, &head_alias, &identity.lvol_name, &base_alias,
                 )
-                .await?
+                .await?;
+                // F75: before the record marks the head reverted — a resume
+                // with that marker skips the revert and would never reap.
+                reap_epochs_newer_than_base(
+                    rpc, &identity.node_name, &identity.lvs_name, volume_id, b, &present,
+                )
+                .await?;
+                uuid
             }
             None => {
                 // Size the empty head to the source head exactly.
@@ -4064,7 +4115,6 @@ mod tests {
     /// the head reverted — a crash after that write resumes without a
     /// revert and would never reap.
     #[tokio::test]
-    #[ignore = "F75: not fixed — the revert does not reap the stale replica's epochs newer than its base"]
     async fn revert_reaps_the_stale_replicas_epochs_newer_than_its_base() {
         // uuid-b failed at 10:20 holding epochs 3, 4 and 5; 5 was cut at
         // 10:19, inside T_back, so the base is 4. No survivor epoch since:

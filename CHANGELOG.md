@@ -12,6 +12,170 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.60.2] - 2026-10-22
+
+A patch release for six defects and two defaults. spdk-tgt 1.7.2 closes
+the last gap in 1.60.1's replica-divergence fix: a discard in a cluster's
+allocation window could still overtake the earlier write there, so
+replicas could still disagree. The node agent no longer takes ten seconds
+to list the disks on a node that has a blank one. A StorageClass's
+`mountOptions` now reach ReadWriteOnce filesystem volumes; they were
+ignored. A restart of spdk-tgt under a mounted volume no longer turns
+into I/O errors and a read-only filesystem when the target takes more
+than 20 seconds to come back: the volume waits for it. Replicated volumes now
+cut epoch snapshots every 30 minutes instead of every 5, which takes most
+of the copy-on-write cost off their writes, and the catch-up bug that a
+longer interval would have made common (F75) is fixed with it. Every chart is a patch bump;
+appVersion 1.60.2. Guides and their PDFs re-pinned; the lite
+render-parity fixture regenerated.
+
+### Changed
+
+- **Epoch snapshots every 30 minutes, not 5** (chart
+  `replication.orchestrators.epochIntervalSecs` 300 -> 1800, new
+  `epochRetain` 4, was 6 fixed; `FLINT_EPOCH_INTERVAL_SECS` /
+  `FLINT_EPOCH_RETAIN`). After each epoch cut, the next write to every
+  cluster of a replicated volume copies the cluster first (F74), so the
+  cadence sets how often a volume pays that cost. On bench4 (3x
+  i4i.2xlarge, 3 replicas, 2026-10-21), the same Flint with epochs off
+  against epochs every 300 s: 4K random write 110,130 vs 66,149 IOPS
+  (p99 1.4 vs 14.9 ms), queue-depth-1 write 163 vs 481 us p50, 70/30 mixed
+  148,623 vs 128,082 IOPS. Longer intervals land between those. Retention
+  is now 4 epochs, so a returning replica still heals incrementally after
+  an outage of up to 2 hours (was 30 minutes); a longer outage takes a full
+  build, as before. A standby can now trail by up to 30 minutes of writes:
+  when its final copy at attach does not fit the 60 s budget, the volume
+  attaches degraded and the background chase admits the standby later, as
+  before.
+
+- **A volume's kernel NVMe controller now waits out a restart of the
+  spdk-tgt on its own node instead of failing I/O on a timer** (node
+  agent). Since 2026-08-02 every consumer controller failed queued I/O
+  20 s after losing its target (`fast_io_fail_tmo`), to stop a dead target
+  from hanging a consumer, an unmount or a reboot in D-state. But a
+  restart of the target under a mounted volume routinely takes longer:
+  27 to 42 s for a killed target, 95 s when every csi-node pod is killed at
+  once (bench5/bench6, 2026-10-22), more with kubelet's restart backoff or
+  a larger disk. Linux arms that timer once, when the connection drops,
+  and cannot extend it, so no fixed value fits. A controller whose target
+  is on the same node (the raid host's own mount, an NFS server's backing
+  disk) now has no fail-fast timer: its I/O waits for the target and
+  resumes, with a 2 s reconnect delay, as soon as the export is back. It
+  is failed early on evidence instead of time: when kubelet unstages the
+  volume while its target is down, the consumer has left, and Flint fails
+  the queued I/O so the unmount cannot hang. The kernel's `ctrl_loss_tmo`,
+  300 s (`FLINT_NVME_SAME_NODE_CTRL_LOSS_TMO`), remains the backstop for
+  when no Flint process is alive to recover: the controller is then
+  removed and the consumer gets EIO. A controller whose target is on
+  another node keeps a fixed bound, raised from 20 to 60 s
+  (`FLINT_NVME_FAST_IO_FAIL`), because the local agent cannot see that
+  target restart.
+
+### Fixed
+
+- **A restart of spdk-tgt could leave a mounted volume read-only** (node
+  agent, found 2026-10-22). After the target restarts, the node agent
+  re-attaches the data disk and reloads the lvstore before it can rebuild
+  the volume's raid and re-export it, but it noticed the restart only on
+  its 30-second disk-discovery tick. When the tick came late, the volume
+  was back about 42 s after the kill, the consumer's kernel initiator had
+  already failed its queued I/O at 20 s, and ext4 remounted read-only
+  (chaos drill 1.9; 2.2a, the same kill two minutes earlier, passed
+  because the tick happened to land a second after the restart). An RWX
+  volume's NFS server lost its backing filesystem the same way (drill
+  3.3a). A restarted target re-creates its RPC socket, so the agent now
+  checks that file every second and starts disk recovery at once,
+  polling until the new target answers; when the disk is back it wakes
+  the export loss-detector instead of waiting for its 10 s tick; with the
+  change above, a same-node controller waits for that recovery instead of
+  failing at 20 s. On bench7 (3 x i4i.2xlarge, 2026-10-22) every
+  restart drill passed: a target kill under the raid host's mount (I/O
+  back in 20 s), the same kill twice more (36 s, and 48 s under kubelet's
+  restart backoff), all three csi-node pods killed at once (writes stalled
+  up to 125 s, then resumed without an error; on bench6, with a 60 s
+  timer, postgres crash-looped), and a target kill under an RWX volume's
+  NFS server, twice (21 s and 32 s, the server never restarted). A
+  node-level test of the mechanism: a 30 s target outage failed no write
+  and I/O resumed 4 s after the export returned; with a 40 s test
+  backstop, writes failed at 43 s and the controller was removed; and
+  deleting a stuck controller let a blocked unmount finish in 4 s. Present
+  since 2026-08-02, when the kernel bound was introduced; the drills last
+  ran before that.
+- **Boot rehydrate re-exported an RWX volume's backing lvol under the
+  wrong NQN every minute** (node agent). Stage serves the backing volume
+  under the storage id (`…:volume:<pv>`, F47), but rehydrate derived the
+  NQN from the backing handle (`…:volume:nfs-server-<pv>`), so it never
+  saw the live export and tried to add the lvol to a second subsystem
+  each pass ("already claimed"). Harmless to the data path, but it filled
+  the log with errors and failed the chaos harness's log check (drill
+  3.2). Rehydrate now uses the inner NQN.
+- **A returning replica could keep a pre-failure snapshot under a live
+  epoch name** (F75, controller). The catch-up reverts a stale replica to
+  an older epoch but left its own epochs newer than that in place. The
+  re-alignment then took SPDK's "already exists" for that name as done, so
+  the replica's copy of the epoch was its pre-failure snapshot, and a
+  second failure soon after could revert to it and bring back writes the
+  first revert had discarded. The revert now deletes those epochs (newest
+  first, before the record marks the head reverted, so a crash re-runs it).
+  Found by code review on 2026-10-08; with 5-minute epochs it needed an outage
+  shorter than the interval, and with 30-minute epochs most outages are.
+  The test that pinned it is no longer ignored; with the fix removed it
+  fails.
+- **Replicas could still diverge after a discard** (spdk-tgt 1.7.2,
+  2026-10-21). 1.60.1's `blob-alloc-window-order.patch` queued writes
+  and write_zeroes that reached a cluster during its allocation's insert
+  window behind the parked earlier write, but not UNMAPs. A discard of a
+  block in a cluster being allocated (`fstrim`, `blkdiscard`, or ext4's
+  online discard, now that `mountOptions` work) could still overtake the parked write on one replica: that replica
+  then kept the older data, or the zeroes, while the others kept the
+  newer, and the replicas disagreed on the block. The patch now queues
+  unmaps in the window too, as the upstream version of the fix (Gerrit
+  29556) already did, and the overlap log line names the operation
+  (`alloc-window unmap overlaps a parked write ...`). A new blob unit
+  test covers a whole-cluster unmap in the window: with
+  `SPDK_BS_ORDER_ALLOC_WINDOW=0` (the old order) the earlier write lands
+  after the unmap; with the fix, the unmap wins. Removing just the unmap
+  hook fails exactly those assertions, in 5 suites; blob_ut 540/540.
+  On EC2 (bench5: 3 x i4i.2xlarge, one 3-replica volume, epochs every
+  30 s, 2026-10-22), three runs of 4-job random writes under file churn
+  sent 2,317 to 11,645 unmaps to each replica (online discard, and an
+  `fstrim` loop: 1,189 of 1,189 calls succeeded) with every replica
+  identical over the 10 GiB file and no write overtaking a parked one; the
+  lvstores reloaded clean after a graceful restart. No unmap happened to
+  overlap a parked write in those runs, so that exact case rests on the
+  unit test. `images.spdkTarget.tag` is now 1.7.2.
+- **Listing disks on a node with a blank disk took ten seconds** (node
+  agent, 2026-10-21). The node agent's `GET /api/disks` runs the startup
+  auto-recovery, which waited for SPDK to find an lvstore on each data
+  disk by polling `bdev_lvol_get_lvstores` for up to 10 s. A disk with
+  no lvstore (new, or just wiped) never gets one, so every such call
+  waited out the whole 10 s (about 10.6 s measured on EC2, against about
+  80 ms once the disk was initialized). It now calls SPDK's
+  `bdev_wait_for_examine`, which returns as soon as the lvol module has
+  finished examining the disks, and then looks once; a target without
+  that RPC falls back to the old poll. Found when the benchmark install
+  script's 2 s readiness timeout tripped on it. On bench5 the first call
+  on each of three blank disks answered in 0.33 to 0.39 s. New tests in
+  `minimal_disk_service.rs`; a mutant that skips the examine wait fails
+  the clean-disk test after 10.03 s.
+- **A StorageClass's `mountOptions` were ignored for ReadWriteOnce
+  filesystem volumes** (node agent, found 2026-10-22). NodeStage mounted
+  the device with no options at all, so `discard`, `noatime` and the like
+  never reached the filesystem; the NFS paths have honoured them since
+  2026-08-02, this one never did. On bench4, a volume whose StorageClass
+  set `discard` received no unmaps on any replica during 2,442 file
+  deletes. The stage mount (and the ephemeral publish, which mounts
+  without a stage) now passes the operator's options, split and
+  de-duplicated as on the NFS paths; a read-only ephemeral publish still
+  forces `ro`. A volume without `mountOptions` mounts exactly as before
+  (no `-o`). Options take effect the next time the volume is staged on a
+  node: one already staged keeps the options it was mounted with until its
+  pod moves to another node or the node restarts. On bench5 a volume of the
+  same `discard` StorageClass is mounted with `discard`, and each
+  replica received 2,317 and 2,709 unmaps in two runs. Three new unit tests
+  in `mount_opts.rs`.
+
+
 ## [1.60.1] - 2026-10-21
 
 A patch release for three defects in the spdk-tgt image. The first is
@@ -10339,7 +10503,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.1...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.2...HEAD
+[1.60.2]: https://github.com/ddalton/flint/compare/v1.60.1...v1.60.2
 [1.60.1]: https://github.com/ddalton/flint/compare/v1.60.0...v1.60.1
 [1.60.0]: https://github.com/ddalton/flint/compare/v1.59.1...v1.60.0
 [1.59.1]: https://github.com/ddalton/flint/compare/v1.59.0...v1.59.1

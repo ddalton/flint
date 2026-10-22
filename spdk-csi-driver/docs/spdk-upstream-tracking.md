@@ -41,6 +41,25 @@ Evidence for both: bench4, 2026-10-21
 master 58e2d77bb. The stock-master ports and the md0 reproducer
 (`repro-md0.sh`) were built on the box under `/mnt/nvme/spdk-upstream/`.
 
+### Flint's local patches vs the upstream changes
+
+Flint's patches are written against Flint's SPDK tree (v26.05 + the
+concurrent-allocation patch), so they differ from the Gerrit changes:
+
+- `blob-alloc-window-order.patch` vs 29556. Flint queues window ops on the
+  allocation slot (up to 32 in flight per channel); upstream records the one
+  in-flight cluster per channel. Flint keeps the overlap logging and
+  `SPDK_BS_ORDER_ALLOC_WINDOW=0`; upstream has neither. Unmaps are queued in
+  both since spdk-tgt 1.7.2 (2026-10-21): 1.7.1 covered writes and
+  write_zeroes only.
+- `blob-extent-page-md0.patch` vs 29555. Same fix; the upstream test compares
+  only the md page struct (valgrind), and Flint's copy still compares the
+  whole page (harmless: the image builds no unit tests).
+
+**TODO when the changes merge (or review changes them):** re-port the final
+upstream versions into Flint's patches, and re-run the bench4 divergence and
+reload checks before shipping them.
+
 ## When an item lands upstream
 
 1. Note the SPDK release that first contains it.

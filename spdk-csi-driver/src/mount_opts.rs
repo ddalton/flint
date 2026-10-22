@@ -184,6 +184,33 @@ pub fn build_rwx_nfs_mount_opts(readonly: bool, user_flags: &[String]) -> String
     merge(&defaults, user_flags, &forced)
 }
 
+/// `mount` arguments for a filesystem on a Flint block device: the RWO
+/// NodeStage mount and the unstaged ephemeral publish.
+///
+/// Until 2026-10-22 both ran `mount <dev> <path>` with no `-o` at all, so
+/// StorageClass `mountOptions` (`discard`, `noatime`, ...) were dropped for
+/// every RWO volume — the RWX defect above, on the block path. Found on
+/// bench4: an SC with `mountOptions: [discard]` and 2,442 file deletes sent
+/// 0 unmaps to any replica.
+///
+/// There are no driver defaults here, so a volume without `mountOptions`
+/// gets no `-o` and mounts exactly as before. `readonly` forces `ro` (the
+/// ephemeral publish); the stage passes false because the per-pod read-only
+/// bit is applied by the publish's bind mount.
+pub fn build_block_fs_mount_args(readonly: bool, user_flags: &[String]) -> Vec<String> {
+    let forced: Vec<String> = if readonly {
+        vec!["ro".to_string()]
+    } else {
+        Vec::new()
+    };
+    let opts = merge(&[], user_flags, &forced);
+    if opts.is_empty() {
+        Vec::new()
+    } else {
+        vec!["-o".to_string(), opts]
+    }
+}
+
 /// Whether a `NodePublishVolume` must mount read-only.
 ///
 /// Two independent sources, either suffices: kubelet's `readonly` bit,
@@ -258,6 +285,37 @@ mod tests {
         assert!(
             opts.split(',').any(|o| o == "nconnect=8"),
             "refusing rw must not refuse everything else: {opts}"
+        );
+    }
+
+    /// The RWO regression test: the stage mount used no `-o`, so a
+    /// StorageClass `mountOptions: [discard]` never reached ext4.
+    #[test]
+    fn the_rwo_block_path_honours_operator_mount_options() {
+        assert_eq!(
+            build_block_fs_mount_args(false, &f(&["discard", "noatime"])),
+            f(&["-o", "discard,noatime"])
+        );
+        assert_eq!(
+            build_block_fs_mount_args(false, &f(&["discard,noatime"])),
+            f(&["-o", "discard,noatime"])
+        );
+    }
+
+    /// No mountOptions: no `-o`, the exact command every existing volume
+    /// has been staged with.
+    #[test]
+    fn the_rwo_block_path_without_options_mounts_as_before() {
+        assert!(build_block_fs_mount_args(false, &[]).is_empty());
+        assert!(build_block_fs_mount_args(false, &f(&["", " "])).is_empty());
+        assert_eq!(build_block_fs_mount_args(true, &[]), f(&["-o", "ro"]));
+    }
+
+    #[test]
+    fn a_read_only_block_publish_refuses_an_operator_rw() {
+        assert_eq!(
+            build_block_fs_mount_args(true, &f(&["rw", "discard"])),
+            f(&["-o", "discard,ro"])
         );
     }
 

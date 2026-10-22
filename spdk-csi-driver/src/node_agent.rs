@@ -240,9 +240,37 @@ impl NodeAgent {
             debug!("[NODE_AGENT] Skipping replica reconciliation (no node UID)");
         }
 
+        // spdk-tgt restart wake-ups (bench5 drills 1.9 / 3.3a, 2026-10-22).
+        // The collapse check below ran only on the 30 s tick, so after a
+        // tgt restart the data disk sat unattached for up to 30 s, and the
+        // consumer's kernel initiator had already failed its queued I/O
+        // (ext4 remounted read-only; an NFS server lost its backing disk).
+        // A restarted target re-creates its RPC socket, so a 1 s stat of
+        // that file is a free restart signal: `tgt_restarted` wakes the
+        // discovery loop at once, and `baseline_back` then wakes the export
+        // loss-detector instead of leaving it to its 10 s tick.
+        let tgt_restarted = Arc::new(tokio::sync::Notify::new());
+        let baseline_back = Arc::new(tokio::sync::Notify::new());
+        let watch_path = self.spdk_socket_path.trim_start_matches("unix://").to_string();
+        let watch_wake = tgt_restarted.clone();
+        let restart_watch_task = tokio::spawn(async move {
+            let mut watch = crate::nvme_recovery::TgtSocketWatch::default();
+            let mut tick = interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                if watch.observe(crate::nvme_recovery::socket_identity(&watch_path)) {
+                    warn!(socket = %watch_path,
+                          "[TGT_RESTART] spdk-tgt RPC socket re-created — target restarted; waking disk recovery now");
+                    watch_wake.notify_one();
+                }
+            }
+        });
+
         // Start disk discovery loop (use FAST mode to avoid expensive auto-recovery every 30s)
         // Auto-recovery already ran above during startup
         let disk_service = self.disk_service.clone();
+        let discovery_wake = tgt_restarted.clone();
+        let discovery_done = baseline_back.clone();
         let discovery_task = tokio::spawn(async move {
             let mut discovery_interval = interval(Duration::from_secs(30));
             // Storage-baseline reconcile (phase-6 yield): a lone spdk-tgt
@@ -255,7 +283,18 @@ impl NodeAgent {
             // reloads the lvstore; the 60s reconcile then re-exports.
             let mut last_disk_count: Option<usize> = None;
             loop {
-                discovery_interval.tick().await;
+                let woken = tokio::select! {
+                    _ = discovery_interval.tick() => false,
+                    _ = discovery_wake.notified() => true,
+                };
+                // Woken by a restart: the new target may not answer RPCs for
+                // a few seconds, so poll every 1 s (up to 30 s) rather than
+                // fall back to the 30 s tick on the first refusal.
+                let attempts = if woken { 30 } else { 1 };
+                for attempt in 0..attempts {
+                if attempt > 0 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
                 // Use FAST discovery (no auto-recovery) to reduce SPDK RPC spam
                 // Auto-recovery is expensive (400+ RPC calls) and is triggered
                 // below only when the baseline collapses.
@@ -278,12 +317,13 @@ impl NodeAgent {
                                         "[DISK_DISCOVERY] Baseline recovery completed"
                                     );
                                     last_disk_count = Some(recovered.len());
+                                    discovery_done.notify_one();
                                 }
                                 Err(e) => {
                                     error!(error = %e, "[DISK_DISCOVERY] Baseline recovery failed");
                                 }
                             }
-                            continue;
+                            break;
                         }
                         last_disk_count = Some(disks.len());
                         debug!(disk_count = disks.len(), "[DISK_DISCOVERY] Found disks on node");
@@ -297,8 +337,14 @@ impl NodeAgent {
                                 "[DISK_DISCOVERY] Disk status"
                             );
                         }
+                        break;
                     }
-                    Err(e) => error!(error = %e, "[DISK_DISCOVERY] Error"),
+                    Err(e) => {
+                        if attempt + 1 == attempts {
+                            error!(error = %e, "[DISK_DISCOVERY] Error");
+                        }
+                    }
+                }
                 }
             }
         });
@@ -491,7 +537,12 @@ impl NodeAgent {
             );
             loss_interval.tick().await; // first tick immediate; skip it
             loop {
-                loss_interval.tick().await;
+                // A restarted target's disk is back: re-export now, not on
+                // the next 10 s tick.
+                tokio::select! {
+                    _ = loss_interval.tick() => {}
+                    _ = baseline_back.notified() => {}
+                }
                 match tokio::time::timeout(detector_budget, loss_agent.reconcile_exports_if_lost()).await {
                     Err(_) => warn!(
                         budget_secs = detector_budget.as_secs(),
@@ -579,7 +630,7 @@ impl NodeAgent {
         // is a separate native sidecar, so a driver-container restart does not
         // touch the data path, and boot rehydrate is the designed recovery.
         //
-        // All six arms are infinite (`loop { interval.tick().await; ... }`, and
+        // All seven arms are infinite (`loop { interval.tick().await; ... }`, and
         // warp::serve().run() never returns), so completion here always means a
         // genuine failure — there is no benign path that could crash-loop us.
         let died = tokio::select! {
@@ -589,6 +640,7 @@ impl NodeAgent {
             _ = detector_task   => "data-path detector loop",
             _ = loss_task       => "export loss-detector loop",
             _ = session_task    => "block-session reconcile loop",
+            _ = restart_watch_task => "spdk-tgt restart watch",
         };
 
         error!(
@@ -2097,9 +2149,11 @@ impl NodeAgent {
         let hostnqn = crate::nvmeof_export::flint_host_nqn(node_name);
         // #2 survivable reconnect: hold the controller reconnecting across an
         // spdk-tgt bounce (with #1 re-exporting the subsystem) so I/O
-        // auto-restores instead of the kernel default giving up. Tunable via
-        // FLINT_NVME_CTRL_LOSS_TMO / FLINT_NVME_RECONNECT_DELAY.
-        let policy = crate::nvme_recovery::ReconnectPolicy::from_env();
+        // auto-restores instead of the kernel default giving up. #4: a
+        // same-node target gets the state-driven policy (no fail-fast clock,
+        // ctrl_loss_tmo as the backstop); a remote one keeps the fixed bound.
+        let same_node = crate::nvme_recovery::target_is_same_node(target_ip);
+        let policy = crate::nvme_recovery::ReconnectPolicy::for_target(target_ip);
         let mut args: Vec<String> = vec![
             "connect".into(),
             "-t".into(), "tcp".into(),
@@ -2144,7 +2198,7 @@ impl NodeAgent {
         // and not as a connect flag because nvme-cli 2.8 has no such option —
         // see ReconnectPolicy::fast_io_fail_sysfs for the D-state hang this
         // exists to prevent.
-        Self::kernel_nvme_apply_fast_io_fail(nqn, &policy);
+        Self::kernel_nvme_apply_fast_io_fail(nqn, policy.fast_io_fail_sysfs_for(same_node));
 
         Ok(())
     }
@@ -2155,8 +2209,8 @@ impl NodeAgent {
     /// behaviour, which must not fail the attach. It is logged loudly instead
     /// — a silently-unbounded controller is exactly what made the runay wedge
     /// so hard to see.
-    fn kernel_nvme_apply_fast_io_fail(nqn: &str, policy: &crate::nvme_recovery::ReconnectPolicy) {
-        let Some(value) = policy.fast_io_fail_sysfs() else { return };
+    fn kernel_nvme_apply_fast_io_fail(nqn: &str, value: Option<String>) {
+        let Some(value) = value else { return };
         let nvme_path = std::path::Path::new("/sys/class/nvme");
         let Ok(entries) = std::fs::read_dir(nvme_path) else { return };
         for entry in entries.flatten() {
@@ -2168,6 +2222,11 @@ impl NodeAgent {
             }
             let attr = entry.path().join("fast_io_fail_tmo");
             match std::fs::write(&attr, &value) {
+                Ok(()) if value == "-1" => println!(
+                    "🧯 [NODE_AGENT] {} fast_io_fail_tmo=off (same-node target: a restart is \
+                     waited out; ctrl_loss_tmo is the backstop)",
+                    entry.file_name().to_string_lossy()
+                ),
                 Ok(()) => println!(
                     "🧯 [NODE_AGENT] {} fast_io_fail_tmo={}s (queued I/O now faults \
                      instead of hanging a consumer in D-state)",
@@ -3527,9 +3586,13 @@ impl NodeAgent {
                 attributable_lvols.insert(lvol_uuid.clone());
             }
             let Some(consumer) = va_map.get(&pv_name) else { continue };
-            // SPDK object names derive from the volumeHandle (differs from
-            // the PV name for synthetic NFS backing PVs).
-            let nqn = crate::identity::volume_nqn(&csi.volume_handle);
+            // The loopback family is INNER-minted at stage (the storage id,
+            // F47), so an NFS backing handle `nfs-server-<id>` is served as
+            // `…:volume:<id>`. Deriving the NQN from the handle itself made
+            // this pass see the RWX backing export as missing forever and
+            // try to add the lvol to a second subsystem every minute
+            // ("already claimed", bench5 drill 3.2, 2026-10-22).
+            let nqn = crate::identity::loopback_export_nqn(&csi.volume_handle);
             let sub = subsystems.get(&nqn);
 
             if storage_node == &self.node_name && consumer == &self.node_name {

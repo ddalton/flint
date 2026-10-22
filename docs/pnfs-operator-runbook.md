@@ -311,9 +311,18 @@ without them the reboot cannot proceed at all.)
 raid *legs*. The **kernel-side** initiator that a consumer's filesystem
 actually sits on comes from `ReconnectPolicy`, which emits only
 `--ctrl-loss-tmo 1800 --reconnect-delay 5` and **no fast-io-fail at all**.
-So the leg I/O is bounded and the consumer I/O is not. Until that is
-closed, `fast_io_fail_tmo` is writable at runtime and
-`FLINT_NVME_CTRL_LOSS_TMO` shortens the outer bound.
+So the leg I/O was bounded and the consumer I/O was not. Closed on
+2026-08-02 by writing `fast_io_fail_tmo` (20 s) to every flint kernel
+controller after connect. Since 1.60.2 that bound applies only to a
+controller whose target is on ANOTHER node (60 s,
+`FLINT_NVME_FAST_IO_FAIL`, outer bound `FLINT_NVME_CTRL_LOSS_TMO`). A
+same-node controller (`traddr=127.0.0.1`) has `fast_io_fail_tmo=off` and
+waits out a local spdk-tgt restart; its bound is `ctrl_loss_tmo` = 300 s
+(`FLINT_NVME_SAME_NODE_CTRL_LOSS_TMO`), after which the kernel removes the
+controller and the consumer gets EIO, and NodeUnstage fails its queued I/O
+at once when the consumer has left. So a node whose csi-node pod never
+comes back hangs an unmount or a reboot for at most about 5 minutes; step
+1 above (writing `delete_controller`) ends it sooner.
 
 **Avoiding it entirely:** do not hand-roll the csi-node DaemonSet while
 pNFS pods hold volumes. Either scale the MDS/DS down first, roll, and scale

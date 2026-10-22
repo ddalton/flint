@@ -32,10 +32,11 @@
 // not revived for this (§1: it is not built, not deployed, and its RPC
 // routing is broken; a controller loop is the same code with none of that).
 //
-// Default-disabled via FLINT_EPOCH_SCHEDULER until the phase-3/4 consumers
-// of epochs exist: epochs cost snapshot space on every multi-replica volume
-// (§5 "space overhead", up to 2× for pre-1.1 thick volumes) and heal nothing
-// on their own yet.
+// The code default is disabled (FLINT_EPOCH_SCHEDULER); the chart enables it
+// with the replication orchestrators. Epochs cost snapshot space on every
+// multi-replica volume (§5 "space overhead") and, after each cut, a cluster
+// copy on the first write to every cluster (F74), which is why the cadence
+// is 30 min, not 5.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -72,10 +73,13 @@ impl NodeRpc for SpdkCsiDriver {
 pub struct EpochConfig {
     /// FLINT_EPOCH_SCHEDULER=enabled — default off until phase 3/4 land.
     pub enabled: bool,
-    /// T_snap (§5): epoch cadence. FLINT_EPOCH_INTERVAL_SECS, default 300.
+    /// T_snap (§5): epoch cadence. FLINT_EPOCH_INTERVAL_SECS, default 1800
+    /// (300 until 1.60.2: each cut costs the next write to every cluster a
+    /// copy, F74 §5.2 #4).
     pub interval: Duration,
     /// K (§5): epochs retained. `K · T_snap` bounds the longest outage healed
-    /// incrementally. FLINT_EPOCH_RETAIN, default 6, min 1.
+    /// incrementally. FLINT_EPOCH_RETAIN, default 4 (2 h at the default
+    /// cadence), min 1.
     pub retain: usize,
 }
 
@@ -83,8 +87,8 @@ impl Default for EpochConfig {
     fn default() -> Self {
         EpochConfig {
             enabled: false,
-            interval: Duration::from_secs(300),
-            retain: 6,
+            interval: Duration::from_secs(1800),
+            retain: 4,
         }
     }
 }

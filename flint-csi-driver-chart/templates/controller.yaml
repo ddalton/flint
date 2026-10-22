@@ -79,7 +79,9 @@ spec:
             - name: FLINT_CUTOVER
               value: {{ if eq (toString (.Values.replication.cutover).enabled | default "true") "false" }}"disabled"{{ else }}"enabled"{{ end }}
             - name: FLINT_EPOCH_INTERVAL_SECS
-              value: {{ .Values.replication.orchestrators.epochIntervalSecs | default 300 | quote }}
+              value: {{ .Values.replication.orchestrators.epochIntervalSecs | default 1800 | quote }}
+            - name: FLINT_EPOCH_RETAIN
+              value: {{ .Values.replication.orchestrators.epochRetain | default 4 | quote }}
             # U11 replica re-placement: swaps a leg off a permanently-lost
             # node (Node deleted, or NotReady past the threshold) onto a
             # healthy one; the catch-up full build restores redundancy.

@@ -218,6 +218,16 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector: {matchLabels: {app: pg}}
               topologyKey: kubernetes.io/hostname
+        # Share pg-load's node. Both must avoid pg's node; on a 3-node
+        # cluster, apart they fill both other nodes, and a drill that
+        # cordons pg's node (3.1, 3.8) leaves pg nowhere to go — Pending
+        # until the drill times out (bench5/bench6, 2026-10-22).
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: {matchLabels: {app: pg-load}}
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: witness
           image: busybox:1.36

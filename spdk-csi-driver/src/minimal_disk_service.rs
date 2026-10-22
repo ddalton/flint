@@ -667,9 +667,10 @@ impl MinimalDiskService {
                     debug!(device_name = %device.device_name, pci_address = %device.pci_address, size_gb = device.size_bytes / (1024*1024*1024), "[AUTO_RECOVERY] Device details");
 
                     // CRITICAL: Wait for SPDK to auto-discover existing LVS from this bdev
-                    // In modern SPDK, the lvol module asynchronously examines new bdevs for LVS
-                    // This is IDEMPOTENT - if auto-discovery fails, we explicitly load the LVS
-                    // Timeout is 10 seconds to handle slow disks or examination delays
+                    // In modern SPDK, the lvol module asynchronously examines new bdevs for LVS.
+                    // bdev_wait_for_examine returns when that examination is done, so a clean
+                    // disk answers at once instead of after the whole timeout (10 s on every
+                    // GET /api/disks before 1.60.2). The 10 s bounds the wait and the fallback poll.
                     if let Some(lvs_name) = self.wait_for_lvs_discovery(&bdev_name, 10).await {
                         info!(lvs_name = %lvs_name, bdev_name = %bdev_name, "[AUTO_RECOVERY] Auto-discovered existing LVS");
                     } else {
@@ -1496,93 +1497,28 @@ impl MinimalDiskService {
     }
 
     /// Wait for SPDK to auto-discover LVS on a bdev (async examination)
-    /// In modern SPDK, when a bdev is created, the lvol module asynchronously examines it for existing LVS
-    /// This is IDEMPOTENT and will try multiple strategies to ensure LVS is discovered if it exists
+    /// In modern SPDK, when a bdev is created, the lvol module asynchronously examines it for existing LVS.
+    /// `bdev_wait_for_examine` completes once every pending examination has finished, so one lvstore
+    /// lookup after it is authoritative; a target without that RPC falls back to polling.
     async fn wait_for_lvs_discovery(&self, bdev_name: &str, timeout_secs: u64) -> Option<String> {
-        let correlation_id = format!("{:08x}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u32);
-        println!("🔍 [LVS_DISCOVERY:{}] Waiting for SPDK to auto-discover LVS on bdev: {} (timeout: {}s)", 
-                 correlation_id, bdev_name, timeout_secs);
-        println!("🔍 [LVS_DISCOVERY:{}] CORRELATE: Check SPDK logs for vbdev_lvol.c messages about '{}'", 
-                 correlation_id, bdev_name);
-        
-        use tokio::time::{sleep, Duration};
+        use tokio::time::Duration;
         let start = std::time::Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-        
-        let mut iteration = 0;
-        
-        while start.elapsed() < timeout {
-            iteration += 1;
-            
-            if iteration % 10 == 1 {
-                println!("🔄 [LVS_DISCOVERY:{}] Polling iteration {} (elapsed: {}ms)", 
-                         correlation_id, iteration, start.elapsed().as_millis());
-            }
-            
-            // Query for all lvstores
-            match self.call_spdk_rpc(&json!({
-                "method": "bdev_lvol_get_lvstores"
-            })).await {
-                Ok(response) => {
-                    if let Some(lvstore_list) = response["result"].as_array() {
-                        if iteration % 10 == 1 && !lvstore_list.is_empty() {
-                            println!("🔍 [LVS_DISCOVERY:{}] Found {} total LVS in system", correlation_id, lvstore_list.len());
-                            for (idx, lvstore) in lvstore_list.iter().enumerate() {
-                                let name = lvstore["name"].as_str().unwrap_or("unknown");
-                                let base = lvstore["base_bdev"].as_str().unwrap_or("unknown");
-                                println!("🔍 [LVS_DISCOVERY:{}]   LVS[{}]: name='{}', base_bdev='{}'", 
-                                         correlation_id, idx, name, base);
-                            }
-                        }
-                        
-                        for lvstore in lvstore_list {
-                            if let Some(base_bdev) = lvstore["base_bdev"].as_str() {
-                                if base_bdev == bdev_name {
-                                    let lvs_name = lvstore["name"].as_str().unwrap_or("unknown").to_string();
-                                    let lvs_uuid = lvstore["uuid"].as_str().unwrap_or("unknown");
-                                    let free_clusters = lvstore["free_clusters"].as_u64().unwrap_or(0);
-                                    let cluster_size = lvstore["cluster_size"].as_u64().unwrap_or(0);
-                                    let free_gb = (free_clusters * cluster_size) / (1024*1024*1024);
-                                    
-                                    println!("✅ [LVS_DISCOVERY:{}] SUCCESS! Found LVS after {} iterations ({}ms)", 
-                                             correlation_id, iteration, start.elapsed().as_millis());
-                                    println!("✅ [LVS_DISCOVERY:{}]   LVS Name: {}", correlation_id, lvs_name);
-                                    println!("✅ [LVS_DISCOVERY:{}]   LVS UUID: {}", correlation_id, lvs_uuid);
-                                    println!("✅ [LVS_DISCOVERY:{}]   Base Bdev: {}", correlation_id, base_bdev);
-                                    println!("✅ [LVS_DISCOVERY:{}]   Free Space: {}GB", correlation_id, free_gb);
-                                    
-                                    return Some(lvs_name);
-                                }
-                            }
-                        }
-                    } else if iteration % 10 == 1 {
-                        println!("🔍 [LVS_DISCOVERY:{}] Query returned no lvstores array", correlation_id);
-                    }
-                }
-                Err(e) => {
-                    println!("⚠️ [LVS_DISCOVERY:{}] Failed to query lvstores (iteration {}): {}", correlation_id, iteration, e);
-                }
-            }
-            
-            // SPDK v25.09.x has no explicit "load_lvstore" method
-            // Auto-discovery happens via examine_disk callback when bdev is created
-            // Just keep polling - if examination hasn't completed yet, it will soon
-            
-            // Wait 500ms before next check (reduced from 100ms to minimize SPDK log spam)
-            // This reduces SPDK RPC calls from 100/disk to 20/disk during 10s timeout
-            sleep(Duration::from_millis(500)).await;
+        let (lvs, path) = discover_lvs(
+            |method| async move {
+                self.call_spdk_rpc(&json!({ "method": method })).await.map_err(|e| e.to_string())
+            },
+            bdev_name,
+            Duration::from_secs(timeout_secs),
+            Duration::from_millis(500),
+        )
+        .await;
+        match &lvs {
+            Some(name) => println!("✅ [LVS_DISCOVERY] LVS '{}' on bdev '{}' ({:?}, {}ms)",
+                                   name, bdev_name, path, start.elapsed().as_millis()),
+            None => println!("🔍 [LVS_DISCOVERY] No LVS on bdev '{}' ({:?}, {}ms)",
+                             bdev_name, path, start.elapsed().as_millis()),
         }
-        
-        println!("❌ [LVS_DISCOVERY:{}] TIMEOUT! No LVS discovered on bdev '{}' after {}s ({} iterations)", 
-                 correlation_id, bdev_name, timeout_secs, iteration);
-        println!("❌ [LVS_DISCOVERY:{}] CORRELATE: Check SPDK logs around this time for vbdev_lvol examination of '{}'", 
-                 correlation_id, bdev_name);
-        println!("❌ [LVS_DISCOVERY:{}] This may indicate: 1) No LVS on disk, 2) SPDK examination failed, or 3) Timing issue", 
-                 correlation_id);
-        None
+        lvs
     }
 
     /// Helper methods for physical device discovery
@@ -2293,6 +2229,59 @@ struct PhysicalDevice {
     pub model: String,
 }
 
+/// How `discover_lvs` reached its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LvsDiscoveryPath {
+    /// `bdev_wait_for_examine` returned, then one lookup: authoritative.
+    Examined,
+    /// The examine wait failed or timed out (or the lookup after it failed):
+    /// polled `bdev_lvol_get_lvstores` until found or the timeout.
+    Polled,
+}
+
+/// The name of the lvstore whose base bdev is `bdev_name`, from the result
+/// of `bdev_lvol_get_lvstores`.
+fn lvs_on_bdev(lvstores: &Value, bdev_name: &str) -> Option<String> {
+    lvstores.as_array()?.iter().find_map(|lvs| {
+        (lvs["base_bdev"].as_str() == Some(bdev_name))
+            .then(|| lvs["name"].as_str().unwrap_or("unknown").to_string())
+    })
+}
+
+/// Find the lvstore on `bdev_name` once SPDK has examined it. `rpc` calls an
+/// SPDK method without params and returns its `{"result": ...}` envelope.
+/// First `bdev_wait_for_examine` (bounded by `timeout`), then one lookup; if
+/// either fails, the pre-1.60.2 poll every `poll` until `timeout`.
+async fn discover_lvs<F, Fut>(
+    rpc: F,
+    bdev_name: &str,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> (Option<String>, LvsDiscoveryPath)
+where
+    F: Fn(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, String>>,
+{
+    match tokio::time::timeout(timeout, rpc("bdev_wait_for_examine")).await {
+        Ok(Ok(_)) => match rpc("bdev_lvol_get_lvstores").await {
+            Ok(v) => return (lvs_on_bdev(&v["result"], bdev_name), LvsDiscoveryPath::Examined),
+            Err(e) => warn!(bdev_name, error = %e, "[LVS_DISCOVERY] lvstore lookup after examine failed; polling"),
+        },
+        Ok(Err(e)) => warn!(bdev_name, error = %e, "[LVS_DISCOVERY] bdev_wait_for_examine failed; polling"),
+        Err(_) => warn!(bdev_name, ?timeout, "[LVS_DISCOVERY] bdev_wait_for_examine timed out; polling"),
+    }
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(v) = rpc("bdev_lvol_get_lvstores").await {
+            if let Some(name) = lvs_on_bdev(&v["result"], bdev_name) {
+                return (Some(name), LvsDiscoveryPath::Polled);
+            }
+        }
+        tokio::time::sleep(poll).await;
+    }
+    (None, LvsDiscoveryPath::Polled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2609,5 +2598,87 @@ mod tests {
         // Allow some tolerance for test execution overhead
         assert!(elapsed.as_millis() >= 290, "Should have backoff delays totaling ~300ms, got {}ms", elapsed.as_millis());
         assert!(elapsed.as_millis() <= 400, "Backoff should not exceed expected time significantly, got {}ms", elapsed.as_millis());
+    }
+    use std::time::Duration;
+
+    /// 1.60.2: lvstore discovery waits on bdev_wait_for_examine instead of
+    /// polling to a 10 s timeout. A scripted SPDK: each method's answer, and
+    /// every call recorded in order.
+    fn scripted_rpc(
+        answers: Vec<(&'static str, Result<Value, String>)>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    ) -> impl Fn(&'static str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> {
+        move |method| {
+            calls.lock().unwrap().push(method);
+            let answer = answers
+                .iter()
+                .find(|(m, _)| *m == method)
+                .map(|(_, a)| a.clone())
+                .unwrap_or_else(|| Err(format!("unscripted method {}", method)));
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn lvstores(entries: &[(&str, &str)]) -> Value {
+        json!({ "result": entries.iter().map(|(name, bdev)| json!({"name": name, "base_bdev": bdev})).collect::<Vec<_>>() })
+    }
+
+    #[test]
+    fn lvs_on_bdev_matches_the_base_bdev_only() {
+        let v = lvstores(&[("lvs_a", "uring_nvme0n1"), ("lvs_b", "uring_nvme1n1")]);
+        assert_eq!(lvs_on_bdev(&v["result"], "uring_nvme1n1"), Some("lvs_b".to_string()));
+        assert_eq!(lvs_on_bdev(&v["result"], "uring_nvme2n1"), None);
+        assert_eq!(lvs_on_bdev(&json!(null), "uring_nvme0n1"), None);
+    }
+
+    #[tokio::test]
+    async fn discover_lvs_after_examine_finds_the_lvstore_with_one_lookup() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let rpc = scripted_rpc(vec![
+            ("bdev_wait_for_examine", Ok(json!({"result": true}))),
+            ("bdev_lvol_get_lvstores", Ok(lvstores(&[("lvs_n0", "uring_nvme0n1")]))),
+        ], calls.clone());
+        let got = discover_lvs(rpc, "uring_nvme0n1", Duration::from_secs(10), Duration::from_millis(500)).await;
+        assert_eq!(got, (Some("lvs_n0".to_string()), LvsDiscoveryPath::Examined));
+        assert_eq!(*calls.lock().unwrap(), vec!["bdev_wait_for_examine", "bdev_lvol_get_lvstores"]);
+    }
+
+    /// The regression: a clean disk used to cost the whole 10 s timeout on
+    /// every GET /api/disks. After the examine wait, "none" is final at once.
+    #[tokio::test]
+    async fn discover_lvs_on_a_clean_disk_answers_without_waiting_out_the_timeout() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let rpc = scripted_rpc(vec![
+            ("bdev_wait_for_examine", Ok(json!({"result": true}))),
+            ("bdev_lvol_get_lvstores", Ok(lvstores(&[]))),
+        ], calls.clone());
+        let start = std::time::Instant::now();
+        let got = discover_lvs(rpc, "uring_nvme0n1", Duration::from_secs(10), Duration::from_millis(500)).await;
+        assert_eq!(got, (None, LvsDiscoveryPath::Examined));
+        assert!(start.elapsed() < Duration::from_secs(1), "took {:?}", start.elapsed());
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    /// A target without bdev_wait_for_examine keeps the old behaviour: poll.
+    #[tokio::test]
+    async fn discover_lvs_falls_back_to_polling_when_examine_wait_fails() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let rpc = scripted_rpc(vec![
+            ("bdev_wait_for_examine", Err("Method not found".to_string())),
+            ("bdev_lvol_get_lvstores", Ok(lvstores(&[("lvs_n0", "uring_nvme0n1")]))),
+        ], calls.clone());
+        let got = discover_lvs(rpc, "uring_nvme0n1", Duration::from_secs(10), Duration::from_millis(50)).await;
+        assert_eq!(got, (Some("lvs_n0".to_string()), LvsDiscoveryPath::Polled));
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let rpc = scripted_rpc(vec![
+            ("bdev_wait_for_examine", Err("Method not found".to_string())),
+            ("bdev_lvol_get_lvstores", Ok(lvstores(&[]))),
+        ], calls.clone());
+        let start = std::time::Instant::now();
+        let got = discover_lvs(rpc, "uring_nvme0n1", Duration::from_millis(300), Duration::from_millis(50)).await;
+        assert_eq!(got, (None, LvsDiscoveryPath::Polled));
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        assert!(calls.lock().unwrap().iter().filter(|m| **m == "bdev_lvol_get_lvstores").count() >= 2);
     }
 }

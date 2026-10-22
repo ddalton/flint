@@ -3835,6 +3835,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     println!("⚠️ [NODE] Failed to create staging directory (may exist): {}", e);
                 }
 
+                // Operator `mountOptions` for the stage mount below (read
+                // before the capability is moved out of the request).
+                let stage_mount_args = spdk_csi_driver::mount_opts::build_block_fs_mount_args(
+                    false,
+                    &spdk_csi_driver::mount_opts::operator_mount_flags(
+                        "NODE_STAGE",
+                        req.volume_capability.as_ref(),
+                    ),
+                );
+
                 // For filesystem volumes, format and mount the device
                 // Check if this is a filesystem volume by looking at volume_capability
                 if let Some(volume_capability) = req.volume_capability {
@@ -4121,8 +4131,9 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                         }
                                     }
                                     // Mount the device to staging path
-                                    println!("🔧 [NODE] Mounting {} to {}", device_path, staging_target_path);
+                                    println!("🔧 [NODE] Mounting {} to {} {:?}", device_path, staging_target_path, stage_mount_args);
                                     let mount_output = std::process::Command::new("mount")
+                                        .args(&stage_mount_args)
                                         .arg(&device_path)
                                         .arg(&staging_target_path)
                                         .output()
@@ -4419,6 +4430,16 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 // got connection-refused for every volume on the node
                 // (found by the 1.2.0 release gate, 2026-06-12). See
                 // mount_util for the containment layers.
+                // #4 state-driven deadline: the consumer has left, so I/O
+                // still queued on a same-node controller that is not live
+                // has no one waiting for it — fail it now rather than let
+                // the unmount's flush park in D-state until ctrl_loss_tmo.
+                let failed = spdk_csi_driver::nvme_recovery::fail_queued_io_for_departed_consumer(
+                    &staging_target_path,
+                );
+                if !failed.is_empty() {
+                    println!("🧯 [NODE] failed queued I/O on {:?} before unmount (target not live)", failed);
+                }
                 println!("🔄 [NODE] Bounded unmount attempt");
                 let mut unmount_success =
                     spdk_csi_driver::mount_util::bounded_umount(&staging_target_path, false, 10)
@@ -5027,12 +5048,14 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                     return Err(tonic::Status::internal(format!("Format failed: {}", error)));
                 }
                 
+                let user_flags = spdk_csi_driver::mount_opts::operator_mount_flags(
+                    "NODE_PUBLISH",
+                    req.volume_capability.as_ref(),
+                );
                 let mut mount_cmd = std::process::Command::new("mount");
-                if readonly {
-                    mount_cmd.args(["-o", "ro", &device_path, &target_path]);
-                } else {
-                    mount_cmd.args([&device_path, &target_path]);
-                }
+                mount_cmd
+                    .args(spdk_csi_driver::mount_opts::build_block_fs_mount_args(readonly, &user_flags))
+                    .args([&device_path, &target_path]);
                 let mount_output = mount_cmd
                     .output()
                     .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;

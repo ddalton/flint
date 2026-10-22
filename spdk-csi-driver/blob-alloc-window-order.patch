@@ -1,7 +1,7 @@
 diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
---- a/lib/blob/blobstore.c	2026-10-21 19:51:52.161218251 +0000
-+++ b/lib/blob/blobstore.c	2026-10-21 19:51:52.164218301 +0000
-@@ -2695,6 +2695,80 @@
+--- a/lib/blob/blobstore.c	2026-10-21 23:05:52.334520612 +0000
++++ b/lib/blob/blobstore.c	2026-10-21 23:05:52.337521093 +0000
+@@ -2695,6 +2695,84 @@
  	return NULL;
  }
  
@@ -14,7 +14,9 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 + * on the slot; an earlier one to the same units then lands on top of it. One
 + * replica of a raid1 that hits the window ends with the older data, the
 + * others with the newer. Queue such a write on the slot instead, so writes to
-+ * a cluster being allocated apply in arrival order.
++ * a cluster being allocated apply in arrival order. Unmaps too (2026-10-21):
++ * one in the window would release or deallocate the cluster ahead of the
++ * parked write, which then lands after it on that replica only.
 + * SPDK_BS_ORDER_ALLOC_WINDOW=0 restores the old behaviour (A/B, and the unit
 + * test's control). A write overlapping a parked write is logged every time
 + * ("overlaps a parked write": the divergence case); other window hits are
@@ -31,6 +33,8 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 +	struct spdk_bs_cluster_alloc_slot *slot;
 +	spdk_bs_user_op_t *op, *parked = NULL;
 +	const char *env;
++	const char *what = op_type == SPDK_BLOB_UNMAP ? "unmap" :
++			   op_type == SPDK_BLOB_WRITE_ZEROES ? "write_zeroes" : "write";
 +	bool order;
 +
 +	if (ch->alloc_slots_used == 0) {
@@ -52,17 +56,17 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
 +	}
 +	if (parked != NULL) {
 +		g_bs_alloc_window_overlaps++;
-+		SPDK_NOTICELOG("alloc-window write overlaps a parked write: blob 0x%" PRIx64
++		SPDK_NOTICELOG("alloc-window %s overlaps a parked write: blob 0x%" PRIx64
 +			       " io_unit %" PRIu64 "+%" PRIu64 " parked %" PRIu64 "+%" PRIu64
 +			       " cluster %u: %s (overlap %" PRIu64 ", window hits %" PRIu64 ")\n",
-+			       blob->id, offset, length, parked->u.user_op.offset,
++			       what, blob->id, offset, length, parked->u.user_op.offset,
 +			       parked->u.user_op.length, slot->cluster_number,
 +			       order ? "queued behind it" : "BYPASS, overtakes it",
 +			       g_bs_alloc_window_overlaps, g_bs_alloc_window_hits);
 +	} else if (g_bs_alloc_window_hits <= 20 || (g_bs_alloc_window_hits & 65535) == 0) {
-+		SPDK_NOTICELOG("alloc-window write: blob 0x%" PRIx64 " io_unit %" PRIu64 "+%" PRIu64
++		SPDK_NOTICELOG("alloc-window %s: blob 0x%" PRIx64 " io_unit %" PRIu64 "+%" PRIu64
 +			       " cluster %u: %s (window hits %" PRIu64 ", overlaps %" PRIu64 ")\n",
-+			       blob->id, offset, length, slot->cluster_number,
++			       what, blob->id, offset, length, slot->cluster_number,
 +			       order ? "queued" : "bypass", g_bs_alloc_window_hits,
 +			       g_bs_alloc_window_overlaps);
 +	}
@@ -82,7 +86,7 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  static void
  blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
  {
-@@ -3289,6 +3363,10 @@
+@@ -3289,6 +3367,10 @@
  	}
  	case SPDK_BLOB_WRITE:
  	case SPDK_BLOB_WRITE_ZEROES: {
@@ -93,7 +97,19 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  		if (is_allocated) {
  			/* Write to the blob */
  			spdk_bs_batch_t *batch;
-@@ -3619,6 +3697,11 @@
+@@ -3329,6 +3411,11 @@
+ 		struct spdk_blob_free_cluster_ctx *ctx = NULL;
+ 		spdk_bs_batch_t *batch;
+ 
++		if (is_allocated &&
++		    bs_write_in_alloc_window(_ch, blob, offset, length, &cpl, op_type, NULL, 0, NULL)) {
++			break;
++		}
++
+ 		/* if aligned with cluster release cluster,
+ 		 * but if blob locked_operation_in_progress has been set
+ 		 * because of some specical cases, such as doing inflate,
+@@ -3619,6 +3706,11 @@
  							 rw_iov_done, NULL);
  			}
  		} else {
@@ -106,9 +122,9 @@ diff -ruN a/lib/blob/blobstore.c b/lib/blob/blobstore.c
  				spdk_bs_sequence_t *seq;
  
 diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
---- a/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 19:51:52.167218351 +0000
-+++ b/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 19:51:52.170218400 +0000
-@@ -6035,6 +6035,121 @@
+--- a/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 23:05:52.341521735 +0000
++++ b/test/unit/lib/blob/blob.c/blob_ut.c	2026-10-21 23:05:52.344522217 +0000
+@@ -6035,6 +6035,126 @@
  	poll_threads();
  }
  
@@ -134,7 +150,7 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
 +
 +static uint8_t
 +ut_alloc_window_race(struct spdk_blob_store *bs, struct spdk_io_channel *channel,
-+		     struct spdk_blob *blob, bool use_iov, bool *in_window)
++		     struct spdk_blob *blob, int mode, bool *in_window)
 +{
 +	uint64_t iou = spdk_bs_get_io_unit_size(bs);
 +	uint8_t *a = malloc(iou), *b = malloc(iou), *r = malloc(iou), got;
@@ -150,7 +166,7 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
 +	iov_b.iov_len = iou;
 +	g_win_seq = g_win_a = g_win_b = 0;
 +	CU_ASSERT(blob->active.clusters[0] == 0);
-+	if (use_iov) {
++	if (mode == 1) {
 +		spdk_blob_io_writev(blob, channel, &iov_a, 1, 1, 1, win_a_cpl, NULL);
 +	} else {
 +		spdk_blob_io_write(blob, channel, a, 1, 1, win_a_cpl, NULL);
@@ -159,8 +175,11 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
 +		poll_thread_times(0, 1);
 +	}
 +	*in_window = blob->active.clusters[0] != 0 && g_win_a == 0;
-+	if (use_iov) {
++	if (mode == 1) {
 +		spdk_blob_io_writev(blob, channel, &iov_b, 1, 1, 1, win_b_cpl, NULL);
++	} else if (mode == 2) {
++		/* B = an unmap of the whole cluster */
++		spdk_blob_io_unmap(blob, channel, 0, spdk_bs_get_cluster_size(bs) / iou, win_b_cpl, NULL);
 +	} else {
 +		spdk_blob_io_write(blob, channel, b, 1, 1, win_b_cpl, NULL);
 +	}
@@ -178,8 +197,8 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
 +	return got;
 +}
 +
-+/* write and writev (vbdev_lvol's path), thin (zeroes backing) and
-+ * copy-on-write (snapshot backing), each with the ordering on (B, the later
++/* write, writev (vbdev_lvol's path) and a whole-cluster unmap (thin only),
++ * thin (zeroes backing) and copy-on-write (snapshot backing), each with the ordering on (B, the later
 + * write, wins) and off (the control: A re-executes on top of B -- the replica
 + * divergence seen on bench4). */
 +static void
@@ -194,8 +213,8 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
 +	uint8_t got;
 +
 +	SPDK_CU_ASSERT_FATAL(channel != NULL);
-+	for (iov = 0; iov < 2; iov++) {
-+		for (cow = 0; cow < 2; cow++) {
++	for (iov = 0; iov < 3; iov++) {
++		for (cow = 0; cow < (iov == 2 ? 1 : 2); cow++) {
 +			for (order = 1; order >= 0; order--) {
 +				setenv("SPDK_BS_ORDER_ALLOC_WINDOW", order ? "1" : "0", 1);
 +				snapshot = NULL;
@@ -210,9 +229,11 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
 +				got = ut_alloc_window_race(bs, channel, blob, iov, &in_window);
 +				CU_ASSERT(in_window);
 +				if (order) {
-+					CU_ASSERT(got == 0xB2);
++					/* B (the later op) wins: its data, or zeroes after the unmap */
++					CU_ASSERT(got == (iov == 2 ? 0x00 : 0xB2));
 +					CU_ASSERT(g_win_a < g_win_b);
 +				} else {
++					/* the control: A re-executes on top of B */
 +					CU_ASSERT(got == 0xA1);
 +				}
 +				ut_blob_close_and_delete(bs, blob);
@@ -230,7 +251,7 @@ diff -ruN a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob
  static void
  blob_cow_same_cluster_waits(void)
  {
-@@ -11224,6 +11339,7 @@
+@@ -11224,6 +11344,7 @@
  		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_md0);
  		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_enospc);
  		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);

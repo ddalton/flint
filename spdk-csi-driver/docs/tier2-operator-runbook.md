@@ -70,8 +70,8 @@ validation.
 | Variable | Default | Meaning |
 |---|---|---|
 | `FLINT_EPOCH_SCHEDULER` | disabled | Common epoch snapshot cuts. |
-| `FLINT_EPOCH_INTERVAL_SECS` | 300 | Cut cadence (T_snap). Test clusters run 30. |
-| `FLINT_EPOCH_RETAIN` | 6 (min 1) | Epochs retained (K). `K × T_snap` bounds the longest outage healed incrementally; older marks fall back to a full build. |
+| `FLINT_EPOCH_INTERVAL_SECS` | 1800 (chart `replication.orchestrators.epochIntervalSecs`; 300 before 1.60.2) | Cut cadence (T_snap). Test clusters run 30. |
+| `FLINT_EPOCH_RETAIN` | 4, min 1 (chart `epochRetain`; 6 before 1.60.2) | Epochs retained (K). `K × T_snap` bounds the longest outage healed incrementally; older marks fall back to a full build. |
 | `FLINT_CATCHUP` | disabled | Stale catch-up + standby chase. |
 | `FLINT_CUTOVER` | disabled | Tier-1 RWO rejoin-bounce / RWX cutover planner. |
 | `FLINT_HOT_REJOIN` | disabled | The Tier-2 trigger loop + reconciler. Turning this on is the deliberate acceptance of the `skip_rebuild` patch. |
