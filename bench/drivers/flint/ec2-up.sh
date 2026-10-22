@@ -23,9 +23,15 @@ fail() { printf '\n✗ %s\n' "$*" >&2; exit 1; }
 step "helm upgrade flint-csi to $VERSION"
 # Pull into a private dir: on the Mac, helm's default cache dirs are
 # root-owned and an OCI install from them fails ("failed to download").
-pull=$(mktemp -d)
-helm pull "$CHART" --version "$VERSION" -d "$pull"
-pkg=$(ls "$pull"/*.tgz)
+# CHART may also be a local package (a release candidate's chart, packaged
+# from the tree); its version is checked the same way.
+if [ -f "$CHART" ]; then
+  pkg=$CHART
+else
+  pull=$(mktemp -d)
+  helm pull "$CHART" --version "$VERSION" -d "$pull"
+  pkg=$(ls "$pull"/*.tgz)
+fi
 got=$(helm show chart "$pkg" | awk '/^version:/{print $2; exit}')   # reads the LOCAL package
 [ "$got" = "$VERSION" ] || fail "pulled chart is version '$got', wanted $VERSION"
 helm upgrade --install flint-csi "$pkg" \
@@ -37,10 +43,22 @@ step "initialize each node's instance store"
 for p in $(kubectl -n flint-system get pods -l app=flint-csi-node -o name); do
   node=$(kubectl -n flint-system get "$p" -o jsonpath='{.spec.nodeName}')
   port=$(( 19081 + RANDOM % 1000 ))
+  # The agent's /api/disks can take 10+ s right after a fresh install (bench4,
+  # 2026-10-21: ~10.6 s). A short client timeout drops the connection
+  # mid-request, and that kills `kubectl port-forward`, so the next call gets
+  # "connection refused": poll with a long timeout, re-forwarding if needed.
   kubectl -n flint-system port-forward "$p" "$port:9081" >/dev/null 2>&1 &
   pf=$!
-  for _ in $(seq 1 30); do curl -s -m 2 "http://127.0.0.1:$port/api/disks" >/dev/null && break; sleep 1; done
-  disks=$(curl -s -m 30 "http://127.0.0.1:$port/api/disks")
+  disks=""; pull_out=$(mktemp); rm -f "$pull_out"
+  for _ in $(seq 1 10); do
+    tt=$(curl -s -m 60 -o "$pull_out" -w '%{time_total}' "http://127.0.0.1:$port/api/disks" || true)
+    disks=$(cat "$pull_out" 2>/dev/null || true)
+    [ -n "$disks" ] && break
+    kill -0 "$pf" 2>/dev/null || { kubectl -n flint-system port-forward "$p" "$port:9081" >/dev/null 2>&1 & pf=$!; }
+    sleep 3
+  done
+  [ -n "$disks" ] || { kill "$pf" 2>/dev/null; fail "$node: /api/disks never answered"; }
+  echo "$node: GET /api/disks answered in ${tt} s (curl time_total of the answering call)" >&2
   pci=$(python3 -c '
 import json, sys
 model = sys.argv[1]
@@ -54,6 +72,7 @@ print(hits[0]["pci_address"] if len(hits) == 1 else "")
 ' "$DISK_MODEL" <<<"$disks")
   if [ -z "$pci" ]; then kill "$pf"; echo "$disks" >&2; fail "$node: not exactly one '$DISK_MODEL' (or non-system) disk in /api/disks"; fi
   echo "$node: $pci" >&2
+  kill -0 "$pf" 2>/dev/null || { kubectl -n flint-system port-forward "$p" "$port:9081" >/dev/null 2>&1 & pf=$!; sleep 3; }
   curl -s -m 300 -X POST -H 'Content-Type: application/json' \
     -d "{\"pci_addresses\":[\"$pci\"]}" "http://127.0.0.1:$port/api/disks/initialize" | tee /dev/stderr | grep -q '"success":true' ||
     { kill "$pf"; fail "$node: initialize failed"; }
