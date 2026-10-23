@@ -105,8 +105,10 @@ returns, with or without a syncer running.
 An agent pod's TREE takes it as it takes any other writer's publish: the
 syncer's next barrier sees the pointer has moved and, in its first step,
 writes the change into the tree wherever the tree is clean and the path is
-in its scope: within one cadence tick (`floorSecs`, 60 s by default), or
-sooner when the agent publishes or syncs. Nothing is queued: what a tree
+in its scope: within seconds while the workspace is active (the syncer's
+news poll reads the pointer every second, `FLINT_SYNC_NEWS_POLL_SECS`),
+else within one cadence tick (`floorSecs`, 60 s by default), or sooner
+when the agent publishes or syncs. Nothing is queued: what a tree
 is owed is derived from the manifest at each barrier (P1-lite). A path
 the agent has dirtied is its work, and its next publish records what it
 publishes over (R7).
@@ -131,11 +133,13 @@ keys and touches nothing shared, and it never refuses. Commit — `put_file`,
 or `promote_draft` — when the person saves, at the pace a person saves.
 
 - `request_boundary(requestor)` asks the syncers to publish. It answers
-  `recorded`, never `done`. A syncer reads the request at the start of its
-  next barrier, which is its next cadence tick (`floorSecs`, 60 s by
-  default) unless its agent publishes first, and that barrier carries it.
-  It is not a one-second door: the syncer's one-second poll looks only at
-  the agent's local `.flint/` files.
+  `recorded`, never `done`. While its workspace is active, a syncer's news
+  poll reads the request within a second, and its sentinel arm honours it
+  as it honours the agent's own publish, under the same minimum interval
+  and hourly budget. On an idle workspace (nothing published, taken or
+  asked for in five minutes) the request waits for the syncer's next
+  barrier, its next cadence tick (`floorSecs`, 60 s by default) unless its
+  agent publishes first, and that barrier carries it.
 - `wait_cited(path, etag, timeout, poll)` answers at once for a save
   (it is cited when acknowledged), and `CitationPending` (HTTP 202) for a
   version nothing cites when `timeout` passes.

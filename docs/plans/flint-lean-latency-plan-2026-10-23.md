@@ -88,7 +88,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 |---|---|---|---|---|
 | **A** | a manifest chunk cache, verified by address, misses fetched in parallel; the gateway judges and commits against the document it holds | per load: N sequential chunk GETs become one LIST plus the changed chunks. Per UI save: two whole-document loads become two pointer reads | none: a load returns the document at the pointer it read, as before | **built** (§5) |
 | **C** | the collection pass (retire ledger, reap, orphan, generation and chunk sweeps) runs on a cadence, not on every publish | per publish: 3 LISTs and 4 GETs under the lease | none: the reap and the sweeps are steps a commit section may take or not | **built** (§6) |
-| B | an adaptive news poll: read the pointer at 1 s while the agent is active, back to the floor when idle; the request cell rides the same read | visibility from up to 60 s to about 1 s | none: more consumes, each the same step | not started. Cost: up to 1 GET/s per active workspace |
+| B | an adaptive news poll: read the pointer at 1 s while the agent is active, back to the floor when idle; the request cell rides the same read | visibility from up to 60 s to about 1 s | none: more barriers, each the same steps | **built** (§10). Cost: 2 GETs/s per active writer, 1 per active reader |
 | D | the baseline in memory, loaded once per process, persisted incrementally | at 1M, the baseline file is 38% of a 10 s publish: two parses (about 27%, removed by loading it once) and one full rewrite (about 9%, mostly removed by persisting incrementally); and most of the idle tick | none | **built** (§11) |
 | E | change tracking (inotify) in place of the walk, full walk on overflow; inotify on `.flint/` in place of the 1 s poll | at 1M, 2 s per barrier and the idle tick | none, if the fallback is the walk | not started; hardest (watch limits, uid) |
 | F | policy: `sentinelMinIntervalSecs` 5 → 1, and a bytes-only publish budget | a sustained ceiling of one declared publish a minute | none | not started; a user decision |
@@ -419,20 +419,125 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
 2. **The collection cadence (C): 300 s** (user, 2026-10-23): half the
    retire age, so replaced versions stay up to 1.5 × G.
 3. **D: built by flint-c2** (assigned by the user, 2026-10-23; §11), on
-   `lean-latency-d` off the A+C commit. Still open: B (1 s visibility for an active agent, up to
-   1 GET/s each), G (the document under the lease, 38% of a 1M publish;
-   D and G together are 76%), the post-checkout re-hash (§8, item 5), and
-   E, the hardest and the last.
+   `lean-latency-d` off the A+C commit. B: built (item 5, §10). Still open:
+   G (the document under the lease, 38% of a 1M publish; D and G together
+   are 76%), the post-checkout re-hash (§8, item 5), and E, the hardest
+   and the last.
 4. **The models: no change, no re-proof** (asked by the user, 2026-10-23).
    A and C stay inside behaviours LeanP1 and LeanChunkGC already have
    (§5, §6); the code-trace check at the shipped cadence is the evidence
    for C (§6).
+5. **B: news runs the floor's barrier early** (user, 2026-10-23), at most
+   one such barrier per 5 s. Not "ticker only" (the agent told and left to
+   pull), and not a background sync, which would take a peer's change
+   without publishing but reverse `sync.rs`'s "never background" stance.
+   The cost the user accepted: an active agent's unpublished edits publish
+   when news arrives, not only at the floor.
+
 6. **D: no model change, no re-proof.** A save is still all or nothing,
    the disk still holds what the last successful save held, and a restart
    reads the disk, which is what LeanP1's `Restart` assumes (§11). S3,
    folding `reader.json` into the baseline, is NOT done: it changes the
    reader's skip rule, which the model checks, to save one small write per
    pull.
+
+## 10. Lever B, as built
+
+**What it does.** `news.rs`. A third arm of the syncer loop, on its own
+interval like the other two. While the workspace is active it reads, every
+`news_poll_secs` (1 s), what an idle tick's first two steps read: a
+writer's cell, then the manifest pointer. A gateway boundary request in the
+cell becomes the pending publish the sentinel arm honours within its next
+second, under its usual minimum interval and hourly budget. A pointer whose
+seq is past the news ticker's `observed_seq` is news: the ticker moves at
+once, so an agent reading `.flint/remote.seq` sees it within a second, and
+the floor's barrier runs early, at most once per `news_min_interval_secs`
+(5 s). A reader's early tick is its pull. Before its first poll the arm
+primes the ticker with the document the tree holds (`news_start`): a
+checkout writes no ticker, and a fresh tree's first poll would read its
+own checkout as news.
+
+**Active** means a publish, a consume, an ack, a request at the control
+socket, or news, within `news_active_secs` (300 s); a syncer starts active.
+Past the window the arm sends nothing and only the floor reads the bucket,
+as before. The first news after a quiet spell therefore waits for the floor
+(up to 60 s), and the workspace is active again from it.
+
+**What it never does.**
+- Honour a pending publish or sync. The early barrier is the floor's
+  cadence barrier alone (`cadence_floor`, split out of `floor_tick`), never
+  `floor_tick`, whose deferred honours would then run every 5 s and spend
+  past the hourly budget. A request the barrier finds standing it carries,
+  as every barrier does (H10); the ack stays the sentinel arm's.
+- Run a barrier for the tree's own install: the ticker already names it.
+- Move the floor. Resetting the floor's interval on news would let a busy
+  peer starve the floor's deferred honours, the starvation the independent
+  intervals exist to prevent (D3/D12). This one lives in the loop of
+  `bin/flint_sync.rs`, which no unit test reaches: it rests on reading the
+  loop, which never touches `floor_iv` outside its own arm.
+- Move the ticker's `integrated_seq`: nothing is integrated until a
+  barrier takes the news, so the poll writes only `observed_seq` and
+  `observed_etag` (`touch_remote_seq`), not through `ticker_from`.
+
+**Cost.** Two GETs a second per active writer, one per active reader:
+about 173k GETs a day, $0.07 on S3 Standard, for a writer busy all day;
+nothing for an idle one. Each early barrier costs what a floor barrier
+costs: an idle tick's local work (0.14 s at 20k files, 1 s at 200k, 5 s at
+1M; §8), the consume of what is new, and a publish when the tree has
+unpublished edits.
+
+**The bound on what news can make a syncer do.** Whoever moves the pointer
+(a peer, or the gateway on a UI save) causes at most one early barrier per
+5 s at each active syncer: 720 an hour. The sentinel budget (60 work units
+an hour) bounds declared publishes only, as before.
+
+**The model.** Nothing new. A poll is two reads. Folding a gateway request
+between barriers is `Touch`, which needs only an idle writer, as the
+sentinel arm already does every second. The early barrier is a barrier,
+and LeanP1 does not time barriers.
+
+**Knobs.** `FLINT_SYNC_NEWS_POLL_SECS` (1; 0 = off, the shape before),
+`FLINT_SYNC_NEWS_ACTIVE_SECS` (300), `FLINT_SYNC_NEWS_MIN_INTERVAL_SECS`
+(5); `LeanConfig::news_*`.
+
+**Tests.** `tests_news.rs`: a peer's publish is news the ticker shows before
+the early barrier takes it; a writer's own publish is not news, nor is a
+fresh checkout once the ticker is primed (with an unprimed control); a poll is
+two GETs for a writer and one for a reader, with or without news; a gateway
+boundary request is pending one poll later; the early barrier leaves a
+pending publish to the floor, which then honours it; a reader takes news
+and writes nothing; the arm on a made-up clock takes news at once, then at
+most once an interval, and sends nothing once idle; the clock's own rules.
+`tests_conformance.rs` gains a scenario through the arm, so the code-trace
+check replays a poll's fold and an early barrier against LeanP1.
+
+**Results.** Two `flint-sync run` writers, A and B, on one MinIO prefix on
+the build box (loopback; binary sha256 prefix `a70618bb0f1a77ea`, B on top
+of D), 2026-10-23. A publishes a one-file change through its publish
+sentinel; measured is the time from A's ack to the bytes in B's tree.
+
+| arm | runs | A's ack → B's tree |
+|---|---:|---:|
+| B (news poll 1 s) | 12 | 421–445 ms |
+| B, after 330 s idle | 1 | 28.4 s |
+| control (`FLINT_SYNC_NEWS_POLL_SECS=0`) | 8 | 48.5–52.5 s |
+
+The narrow B range is the two syncers' one-second ticks running in a fixed
+phase; in general expect up to a second plus the barrier. The control's
+runs sit near the floor's worst case because each started 6–12 s after
+the previous one arrived, just after B's floor tick: a change at a random
+moment waits 0–60 s, 30 s on average. The idle run is the floor too, as
+designed. Loopback MinIO answers in about a millisecond; on S3 add the
+poll's and the barrier's requests at about 25 ms each, and the consume
+(§8: 0.26 s at 20k files, 1.5 s at 200k; 5.5 s at 1M with D, §11).
+
+Verification, B on top of D: syncer 361 pass and 1 ignored (debug, CI's
+command); gateway 66; the binaries build; mutation controls N1–N8 each
+fail their test (the poll treats the tree's own install as news; the
+early barrier honours pendings; no minimum interval; an idle workspace
+polls; a writer's poll skips the cell; news does not move the ticker; a
+barrier leaves news pending; the ticker is never primed); the code-trace
+check 84/84 on tla-mc, 32 traces accepted, the news scenario among them.
 
 ## 11. Lever D, as built
 

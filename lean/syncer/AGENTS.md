@@ -19,9 +19,12 @@ to; sentinel protocol 1.
    point is in the bucket together, under one manifest. Readers elsewhere
    see the last boundary, never a half-written tree.
 3. **Boundaries happen on a cadence** (every `floorSecs` seconds, default
-   60) **and on demand**, when you ask for one with the publish verb.
-   Ask when you finish a unit of work; do not rely on the cadence for
-   anything a reader must see.
+   60), **when news arrives** (while the workspace is active, within
+   seconds of another writer's or the gateway's change, at most one every
+   five seconds), **and on demand**, when you ask for one with the publish
+   verb. The workspace is active while anything was published, taken or
+   asked for in the last five minutes. Ask when you finish a unit of work;
+   do not rely on the cadence or on news for anything a reader must see.
 4. **One tree per pod.** This pod has one syncer, and every process in
    it shares the tree. Nobody outside the pod writes to these files live.
    Contributions from outside (other agents sharing this workspace, a
@@ -181,8 +184,11 @@ The syncer never overwrites a file you modified. News from the bucket
 reaches your tree at boundaries, onto files you have not modified:
 writes queued from outside (the inbox) at the next boundary, and changes
 other writers published within a boundary or two of your syncer seeing
-the manifest move. `sync` integrates the bucket's latest manifest now,
-at a point you choose, instead of waiting for that.
+the manifest move. While the workspace is active the syncer looks for
+news every second, so `remote.seq` shows it within about a second and a
+boundary follows within seconds; otherwise both wait for the floor tick.
+`sync` integrates the bucket's latest manifest now, at a point you
+choose, instead of waiting for that.
 
 `.flint/remote.seq` tells you whether there is news, at zero cost:
 
@@ -263,8 +269,9 @@ yours.
   read-only for you, so a write fails at once with `EROFS` ("Read-only
   file system"). Put build output, caches and scratch files in a
   directory outside the workspace.
-- **The tree follows the bucket on its own.** At every floor tick the
-  syncer integrates the latest boundary and the inbox into your tree;
+- **The tree follows the bucket on its own.** At every floor tick, and
+  within seconds of news while the workspace is active, the syncer
+  integrates the latest boundary and the inbox into your tree;
   `remote.seq` shows the news and what is integrated. `verbs` is
   `["sync", "remote-seq"]`.
 - **`publish` is refused, never ignored.** A touch is answered with

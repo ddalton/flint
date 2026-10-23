@@ -61,6 +61,7 @@ pub mod inbox;
 pub mod lease;
 pub mod manifest;
 pub mod metrics;
+pub mod news;
 pub mod reader;
 pub mod scan;
 pub(crate) mod safefs;
@@ -81,6 +82,7 @@ mod tests;
 #[cfg(test)] mod tests_steps;
 #[cfg(test)] mod tests_cache;
 #[cfg(test)] mod tests_baseline;
+#[cfg(test)] mod tests_news;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -437,6 +439,22 @@ pub struct LeanConfig {
     /// Sentinel poll cadence (env-only, not a fleet contract).
     pub sentinel_poll_secs: u64,
 
+    // --- the news poll (latency plan 2026-10-23, lever B; `news.rs`) ---
+    /// While the workspace is active, read the pointer (a writer the cell
+    /// too) this often, and run the floor's barrier early when a peer or
+    /// the gateway moved it. 0 = off: news waits for the floor, as
+    /// before. `FLINT_SYNC_NEWS_POLL_SECS`.
+    pub news_poll_secs: u64,
+    /// How long after the last sign of work (a publish, a consume, an ack,
+    /// a served request, news) the workspace counts as active. Past it
+    /// the poll stops and only the floor reads the bucket.
+    /// `FLINT_SYNC_NEWS_ACTIVE_SECS`.
+    pub news_active_secs: u64,
+    /// The fewest seconds between two news-triggered barriers. News inside
+    /// it waits, so two busy writers cannot answer each other's publishes
+    /// faster than this. `FLINT_SYNC_NEWS_MIN_INTERVAL_SECS`.
+    pub news_min_interval_secs: u64,
+
     // --- the publish fence (design 2026-09-13 §4; `lease.rs`) ---
     /// How often a barrier waiting for the cell re-reads it.
     pub claim_poll_secs: u64,
@@ -562,6 +580,9 @@ impl LeanConfig {
             sentinel_min_interval_secs: 5,
             sentinel_hourly_budget: 60,
             sentinel_poll_secs: 1,
+            news_poll_secs: 1,
+            news_active_secs: 300,
+            news_min_interval_secs: 5,
             claim_poll_secs: lease::CLAIM_POLL_SECS,
             claim_poll_head_ms: lease::CLAIM_POLL_HEAD_MS,
             claim_quiet_spacing_secs: lease::QUIET_SPACING_SECS,

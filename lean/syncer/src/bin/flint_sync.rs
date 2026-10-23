@@ -63,6 +63,15 @@
 //!                                 .flint-sync/chunk-cache, verified on use)
 //!   FLINT_SYNC_CHUNK_FETCH_PARALLELISM  chunk GETs a manifest load keeps in
 //!                                 flight (default 16; 1 = one at a time)
+//!   FLINT_SYNC_NEWS_POLL_SECS     while the workspace is active, read the
+//!                                 pointer (a writer the cell too) this
+//!                                 often and run the barrier early on news
+//!                                 (default 1; 0 = off: news waits for the
+//!                                 floor)
+//!   FLINT_SYNC_NEWS_ACTIVE_SECS   active this long after the last publish,
+//!                                 consume, ack or news (default 300)
+//!   FLINT_SYNC_NEWS_MIN_INTERVAL_SECS  fewest seconds between two
+//!                                 news-triggered barriers (default 5)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_CHECKOUT_SCOPE     comma list of path prefixes; checkout
 //!                                 materialises ONLY what they cover.
@@ -304,6 +313,11 @@ async fn main() {
     }
     cfg.chunk_fetch_parallelism =
         env_u64("FLINT_SYNC_CHUNK_FETCH_PARALLELISM", flint_lean::CHUNK_FETCH_PARALLELISM as u64).max(1) as usize;
+    // Latency plan lever B: the news arm's poll, its active window, and the
+    // fewest seconds between two early barriers.
+    cfg.news_poll_secs = env_u64("FLINT_SYNC_NEWS_POLL_SECS", cfg.news_poll_secs);
+    cfg.news_active_secs = env_u64("FLINT_SYNC_NEWS_ACTIVE_SECS", cfg.news_active_secs);
+    cfg.news_min_interval_secs = env_u64("FLINT_SYNC_NEWS_MIN_INTERVAL_SECS", cfg.news_min_interval_secs);
     // Drill-only: the sweep's grace, shortened so a host leg need not wait
     // ten minutes. The gateway's own overwrite grace does not move with it.
     cfg.untracked_grace_secs =
@@ -721,7 +735,17 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
 
     let mut floor_iv = tokio::time::interval(floor);
     let mut poll_iv = tokio::time::interval(poll_every);
-    for iv in [&mut floor_iv, &mut poll_iv] {
+    // Latency plan lever B: the news arm, on its own interval like the
+    // other two. Nothing it does resets the floor: a busy peer must not
+    // starve the floor's deferred honours (`news.rs`).
+    let mut news = flint_lean::news::NewsClock::new(&sc.cfg, std::time::Instant::now());
+    let mut news_iv = tokio::time::interval(news.every());
+    if news.enabled() {
+        if let Err(e) = sc.news_start() {
+            eprintln!("flint-sync: news ticker not primed (the first poll may run one barrier early): {e}");
+        }
+    }
+    for iv in [&mut floor_iv, &mut poll_iv, &mut news_iv] {
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         iv.reset(); // consume the immediate first tick
     }
@@ -730,19 +754,27 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
         tokio::select! {
             _ = floor_iv.tick() => {
                 match sc.floor_tick().await {
-                    Ok(o) if !o.no_change || !o.acks.is_empty() => eprintln!(
-                        "flint-sync: {} seq={:?} up={} del={} consumed={} acks={}{}",
-                        if sc.cfg.access.is_read() { "pull" } else { "barrier" },
-                        o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len(),
-                        // Structured and greppable: this line is the
-                        // only signal surface an operator has without
-                        // the metrics endpoint.
-                        match &o.withheld_reason {
-                            Some(why) => format!(" withheld_reason={why}"),
-                            None => String::new(),
+                    Ok(o) => {
+                        // What this tick read is no longer news.
+                        news.taken();
+                        if flint_lean::news::worked(&o) {
+                            news.touch(std::time::Instant::now());
                         }
-                    ),
-                    Ok(_) => {}
+                        if !o.no_change || !o.acks.is_empty() {
+                            eprintln!(
+                                "flint-sync: {} seq={:?} up={} del={} consumed={} acks={}{}",
+                                if sc.cfg.access.is_read() { "pull" } else { "barrier" },
+                                o.seq, o.uploaded, o.deleted, o.consumed, o.acks.len(),
+                                // Structured and greppable: this line is the
+                                // only signal surface an operator has without
+                                // the metrics endpoint.
+                                match &o.withheld_reason {
+                                    Some(why) => format!(" withheld_reason={why}"),
+                                    None => String::new(),
+                                }
+                            );
+                        }
+                    }
                     // A fence (deposed inside the commit section) is one
                     // more failed barrier: nothing was installed, the
                     // uploads stand, the next floor claims again.
@@ -760,13 +792,39 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
             _ = poll_iv.tick() => {
                 if !posture.enabled { continue; }
                 match sc.sentinel_tick().await {
-                    Ok(acks) => for a in acks {
-                        eprintln!(
-                            "flint-sync: sentinel ack status={} boundary={} seq={:?} nonces={}",
-                            a.status, a.boundary, a.seq, a.nonces.len()
-                        );
-                    },
+                    Ok(acks) => {
+                        if !acks.is_empty() {
+                            news.touch(std::time::Instant::now());
+                        }
+                        // Only an answer that ran took the news.
+                        if acks.iter().any(|a| a.status == "ok") {
+                            news.taken();
+                        }
+                        for a in acks {
+                            eprintln!(
+                                "flint-sync: sentinel ack status={} boundary={} seq={:?} nonces={}",
+                                a.status, a.boundary, a.seq, a.nonces.len()
+                            );
+                        }
+                    }
                     Err(e) => log_retry(&sc, &e, "sentinel honor failed (retrying)"),
+                }
+            }
+            _ = news_iv.tick(), if news.enabled() => {
+                let now = std::time::Instant::now();
+                match sc.news_arm(&mut news, now).await {
+                    Ok(Some(o)) => {
+                        if flint_lean::news::worked(&o) {
+                            news.touch(now);
+                        }
+                        eprintln!(
+                            "flint-sync: news {} seq={:?} up={} del={} consumed={}",
+                            if sc.cfg.access.is_read() { "pull" } else { "barrier" },
+                            o.seq, o.uploaded, o.deleted, o.consumed,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => log_retry(&sc, &e, "news poll failed (retrying)"),
                 }
             }
             // The socket's requests are served by the ONE task that
@@ -789,6 +847,12 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                             sc.sentinel_tick().await
                         }
                         .await;
+                        // An agent at the door is at work; an honoured
+                        // boundary read the pointer, so it took the news.
+                        news.touch(std::time::Instant::now());
+                        if matches!(&out, Ok(acks) if acks.iter().any(|a| a.status == "ok")) {
+                            news.taken();
+                        }
                         let v = match out {
                             Ok(acks) => serde_json::json!({
                                 "status": "ok",
@@ -804,7 +868,12 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                         let _ = reply.send(v);
                     }
                     flint_lean::uds::CtlRequest::Sync { reply } => {
-                        let v = match sc.sync().await {
+                        let synced = sc.sync().await;
+                        news.touch(std::time::Instant::now());
+                        if synced.is_ok() {
+                            news.taken();
+                        }
+                        let v = match synced {
                             Ok(r) => serde_json::to_value(&r).unwrap_or_default(),
                             Err(e) => serde_json::json!({
                                 "status": "error", "message": e.to_string(),

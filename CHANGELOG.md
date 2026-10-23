@@ -87,6 +87,26 @@ covered by the stability guarantee.
   2.4 s and from 9.7 s to 6.9 s. The cost is memory: the baseline stays
   resident between barriers, roughly 200 MiB a writer at 1M files.
 
+- **lean: a peer's change reaches an active agent's tree within seconds,
+  not at the next minute** (lever B). A syncer read the bucket only inside
+  a barrier, and a barrier ran at the floor tick (60 s) unless its agent
+  published, so a peer's or the UI's change, and a gateway boundary
+  request, waited up to a minute. While the workspace is active (anything
+  published, taken or asked for in the last five minutes) the syncer now
+  reads the manifest pointer, and a writer its inbox, every second
+  (`FLINT_SYNC_NEWS_POLL_SECS`, 0 = off). News moves `.flint/remote.seq` at
+  once and runs the floor's barrier early, at most once every five seconds
+  (`FLINT_SYNC_NEWS_MIN_INTERVAL_SECS`), so an active agent's unpublished
+  edits now also publish when news arrives. A gateway boundary request is
+  honoured within about a second, under the sentinel's minimum interval
+  and hourly budget as before. It costs two GETs a second per active
+  writer and one per reader; an idle workspace
+  (`FLINT_SYNC_NEWS_ACTIVE_SECS`, 300) polls nothing. Two writers on a
+  loopback MinIO: a peer's one-file change reached the other tree 0.42 to
+  0.45 s after its publish (12 runs), against 48.5 to 52.5 s with the poll
+  off (8 runs, each started just after the floor tick; a change at a
+  random moment waits 30 s on average).
+
 ### Fixed
 
 - **lean gateway docs: a boundary request is not a one-second door.**

@@ -968,7 +968,7 @@ pub struct FloorOutcome {
 impl Syncer {
     /// Move the news ticker from what the barrier already learned (D5).
     /// Never issues a request of its own.
-    fn ticker_from(&self, seq: Option<u64>, etag: Option<String>) -> LeanResult<()> {
+    pub(crate) fn ticker_from(&self, seq: Option<u64>, etag: Option<String>) -> LeanResult<()> {
         // Read in place (lever D): this runs on every tick, and each of
         // the two reads it replaced was a parse of the whole baseline.
         let (baseline_seq, derived_etag) = self.state.with_baseline(|b| (b.seq, b.derived_etag.clone()))?;
@@ -1073,31 +1073,7 @@ impl Syncer {
         }
         // A reader's floor is its pull (`reader.rs`): no barrier, ever.
         if self.cfg.access.is_read() {
-            return match self.reader_pull().await {
-                Ok(p) => {
-                    let _ = self.clear_auth_pause();
-                    match &p.sync {
-                        Some(r) => {
-                            out.seq = Some(r.seq);
-                            out.consumed = r.applied.len();
-                            out.deleted = r.deleted.len();
-                        }
-                        None => {
-                            out.no_change = true;
-                            out.seq = Some(self.state.with_baseline(|b| b.seq)?);
-                        }
-                    }
-                    self.ticker_from(p.observed_seq, p.observed_etag)?;
-                    out.withheld_reason = self.write_gauges(None)?.withheld_reason;
-                    Ok(out)
-                }
-                Err(e) => {
-                    if e.is_auth() {
-                        let _ = self.note_auth_pause();
-                    }
-                    Err(e)
-                }
-            };
+            return self.reader_floor(out).await;
         }
         // Finding 10's sweep (`untracked.rs`), when due: before this tick's
         // barrier, so the barrier consumes what it tracks.
@@ -1106,46 +1082,84 @@ impl Syncer {
         // barrier the floor owed; running a second one would be pure
         // churn.
         if !published {
-            let ran = self.cadence_barrier().await.map(|r| {
-                out.seq = r.seq;
-                out.no_change = r.no_change;
-                out.uploaded = r.uploaded.len();
-                out.deleted = r.deleted.len();
-                out.consumed = r.consumed;
-                out.parked = r.parked.len();
-                out.observed_etag = r.observed_etag.clone();
-                r.observed_seq
-            });
-            match ran {
-                Ok(observed) => {
-                    // The floor tick is the one scheduled request every
-                    // writer makes, idle or not, so it is where a
-                    // credential pause is seen to END — and, below, to
-                    // begin. A claim sees both too, but an idle writer
-                    // never claims. Best-effort: a gauge that failed to
-                    // write must not fail a tick that succeeded.
-                    let _ = self.clear_auth_pause();
-                    let etag = out.observed_etag.take();
-                    self.ticker_from(observed, etag)?;
-                    // A foreign 412 outranks "waiting for a boundary":
-                    // those paths are not ours to publish at all, and
-                    // saying "quiesce-pending" would send an operator
-                    // looking for a clock instead of a conflict record.
-                    let forced = (out.parked > 0).then_some(super::gauges::Withheld::Parked412);
-                    out.withheld_reason = self.write_gauges(forced)?.withheld_reason;
-                    return Ok(out);
-                }
-                Err(e) => {
-                    if e.is_auth() {
-                        let _ = self.note_auth_pause();
-                    }
-                    return Err(e);
-                }
-            }
+            return self.cadence_floor(out).await;
         }
         self.ticker_from(out.seq, None)?;
         out.withheld_reason = self.write_gauges(None)?.withheld_reason;
         Ok(out)
+    }
+
+    /// A reader's floor: its pull, then the ticker and the gauges. The
+    /// news tick (`news.rs`) runs it too.
+    pub(crate) async fn reader_floor(&mut self, mut out: FloorOutcome) -> LeanResult<FloorOutcome> {
+        match self.reader_pull().await {
+            Ok(p) => {
+                let _ = self.clear_auth_pause();
+                match &p.sync {
+                    Some(r) => {
+                        out.seq = Some(r.seq);
+                        out.consumed = r.applied.len();
+                        out.deleted = r.deleted.len();
+                    }
+                    None => {
+                        out.no_change = true;
+                        out.seq = Some(self.state.with_baseline(|b| b.seq)?);
+                    }
+                }
+                self.ticker_from(p.observed_seq, p.observed_etag)?;
+                out.withheld_reason = self.write_gauges(None)?.withheld_reason;
+                Ok(out)
+            }
+            Err(e) => {
+                if e.is_auth() {
+                    let _ = self.note_auth_pause();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// A writer's floor barrier, the cadence barrier, then the ticker and
+    /// the gauges. The news tick (`news.rs`) runs it too, and runs nothing
+    /// else of the floor: the pending honours stay the floor's and the
+    /// sentinel arm's, under their interval and budget.
+    pub(crate) async fn cadence_floor(&mut self, mut out: FloorOutcome) -> LeanResult<FloorOutcome> {
+        let ran = self.cadence_barrier().await.map(|r| {
+            out.seq = r.seq;
+            out.no_change = r.no_change;
+            out.uploaded = r.uploaded.len();
+            out.deleted = r.deleted.len();
+            out.consumed = r.consumed;
+            out.parked = r.parked.len();
+            out.observed_etag = r.observed_etag.clone();
+            r.observed_seq
+        });
+        match ran {
+            Ok(observed) => {
+                // The floor tick is the one scheduled request every
+                // writer makes, idle or not, so it is where a
+                // credential pause is seen to END — and, below, to
+                // begin. A claim sees both too, but an idle writer
+                // never claims. Best-effort: a gauge that failed to
+                // write must not fail a tick that succeeded.
+                let _ = self.clear_auth_pause();
+                let etag = out.observed_etag.take();
+                self.ticker_from(observed, etag)?;
+                // A foreign 412 outranks "waiting for a boundary":
+                // those paths are not ours to publish at all, and
+                // saying "quiesce-pending" would send an operator
+                // looking for a clock instead of a conflict record.
+                let forced = (out.parked > 0).then_some(super::gauges::Withheld::Parked412);
+                out.withheld_reason = self.write_gauges(forced)?.withheld_reason;
+                Ok(out)
+            }
+            Err(e) => {
+                if e.is_auth() {
+                    let _ = self.note_auth_pause();
+                }
+                Err(e)
+            }
+        }
     }
 
     /// The preStop drain (D10 rule 1): settle every owed ack BEFORE the

@@ -21,6 +21,7 @@ use flint_store::memory::MemoryStore;
 use sha2::{Digest, Sha256};
 
 use super::control;
+use super::inbox;
 use super::lease;
 use super::manifest;
 use super::sentinel::Verb;
@@ -1155,4 +1156,28 @@ async fn conformance_withheld_republished_over_a_ui_save() {
     }
     assert_eq!(read(dir_b.path(), "p.txt").as_deref(), Some("A's edit"), "fixture: B did not converge");
     dump("withheld_republished_over_a_ui_save", &buf);
+}
+
+/// Lever B, the news arm (`news.rs`). B's poll sees A's publish and, from
+/// the same cell read, folds a gateway boundary request between barriers
+/// (the model's Touch). B's early barrier is the floor's cadence barrier:
+/// it takes A's change, publishes B's own and carries the request, and
+/// the sentinel arm acks it after.
+#[tokio::test]
+async fn conformance_a_news_tick_takes_a_peers_change_and_carries_a_gateway_request() {
+    let (store, buf, mut a, mut b, dir_a, dir_b) = two_writers(&[("x.txt", "x v1"), ("y.txt", "y")]).await;
+    start(&store, &[("A", &a), ("B", &b)]).await;
+    Agent { name: "A", sc: &a, root: dir_a.path() }.write("x.txt", "A's x");
+    a.run_barrier().await.unwrap();
+    Agent { name: "B", sc: &b, root: dir_b.path() }.write("y.txt", "B's y");
+    inbox::gateway_request(store.as_ref(), &b.cfg, inbox::RequestedVerb::Boundary, "ci@example").await.unwrap();
+    assert!(b.news_poll().await.unwrap().is_some(), "fixture: A's publish is not news to B");
+    assert!(b.load_pending(Verb::Publish).unwrap().is_some(), "fixture: the poll did not fold the request");
+    let o = b.news_tick().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x.txt").as_deref(), Some("A's x"), "fixture: the news tick did not take A's change");
+    assert_eq!(o.uploaded, 1, "fixture: the news tick did not publish B's edit: {o:?}");
+    clear_min_interval(&b);
+    let ack = b.honor_pending(Verb::Publish, false).await.unwrap().unwrap();
+    assert_eq!(ack.status, "ok", "fixture: {ack:?}");
+    dump("a_news_tick_takes_a_peers_change_and_carries_a_gateway_request", &buf);
 }
