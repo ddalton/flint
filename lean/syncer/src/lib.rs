@@ -76,6 +76,7 @@ mod tests;
 #[cfg(test)] mod tests_upload_gate;
 #[cfg(test)] mod tests_conformance;
 #[cfg(test)] mod tests_bench;
+#[cfg(test)] mod tests_steps;
 
 use std::path::PathBuf;
 use std::sync::Arc;

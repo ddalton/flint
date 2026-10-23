@@ -8,7 +8,9 @@ use std::path::Path;
 
 use bytes::Bytes;
 
-use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, PutCondition, StoreError};
+use flint_store::{
+    crc64_nvme, crc64_to_b64, GenerationStamps, ObjectStore, PosixStamps, PutCondition, RequestCounts, StoreError,
+};
 
 use super::inbox;
 use super::manifest::{self, LeanEntry};
@@ -90,6 +92,84 @@ pub struct BarrierReport {
     /// an ordinary barrier can be told from one that had to converge a
     /// workspace first.
     pub rescope_replayed: bool,
+    /// Where this barrier's time went, step by step ([`StepTiming`]).
+    pub steps: Vec<StepTiming>,
+}
+
+/// One step of a barrier and what it cost: wall time, and the requests
+/// the store sent during it (`None` from a store that does not count).
+/// A step the barrier entered more than once — each CAS attempt's load,
+/// fence, merge and CAS — is one entry, summed, in the order it first
+/// ran.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct StepTiming {
+    pub step: &'static str,
+    pub us: u64,
+    pub requests: Option<RequestCounts>,
+}
+
+/// Times a barrier's steps. Each `lap` charges everything since the
+/// previous one to the step it names, so the steps tile the barrier:
+/// their times sum to its wall time, and their requests to everything
+/// the store sent for it.
+struct StepClock {
+    store: std::sync::Arc<dyn ObjectStore>,
+    at: std::time::Instant,
+    counted: Option<RequestCounts>,
+    steps: Vec<StepTiming>,
+}
+
+impl StepClock {
+    fn start(store: std::sync::Arc<dyn ObjectStore>) -> Self {
+        let counted = store.request_counts();
+        Self { store, at: std::time::Instant::now(), counted, steps: vec![] }
+    }
+
+    fn lap(&mut self, step: &'static str) {
+        let now = std::time::Instant::now();
+        let counted = self.store.request_counts();
+        let us = now.duration_since(self.at).as_micros() as u64;
+        let sent = match (self.counted, counted) {
+            (Some(a), Some(b)) => Some(counts_between(a, b)),
+            _ => None,
+        };
+        match self.steps.iter_mut().find(|s| s.step == step) {
+            Some(s) => {
+                s.us += us;
+                s.requests = match (s.requests, sent) {
+                    (Some(a), Some(b)) => Some(counts_sum(a, b)),
+                    _ => None,
+                };
+            }
+            None => self.steps.push(StepTiming { step, us, requests: sent }),
+        }
+        self.at = now;
+        self.counted = counted;
+    }
+}
+
+fn counts_between(a: RequestCounts, b: RequestCounts) -> RequestCounts {
+    RequestCounts {
+        get: b.get.saturating_sub(a.get),
+        head: b.head.saturating_sub(a.head),
+        put: b.put.saturating_sub(a.put),
+        copy: b.copy.saturating_sub(a.copy),
+        delete: b.delete.saturating_sub(a.delete),
+        list: b.list.saturating_sub(a.list),
+        multipart: b.multipart.saturating_sub(a.multipart),
+    }
+}
+
+fn counts_sum(a: RequestCounts, b: RequestCounts) -> RequestCounts {
+    RequestCounts {
+        get: a.get + b.get,
+        head: a.head + b.head,
+        put: a.put + b.put,
+        copy: a.copy + b.copy,
+        delete: a.delete + b.delete,
+        list: a.list + b.list,
+        multipart: a.multipart + b.multipart,
+    }
 }
 
 /// Upload waves per chunk. The chunk is `fanout * this`, so a wave
@@ -604,6 +684,7 @@ impl Syncer {
         // owe an answer (the publish sentinel, the drain) give it before
         // this; this is the backstop for the ones that do not.
         self.refuse_if_read("barrier")?;
+        let mut clock = StepClock::start(self.store.clone());
         // Review 2026-09-18, H10: a barrier that begins while a publish
         // declaration stands CARRIES it, whoever called — the floor's
         // cadence barrier after a failed honor as much as the honor itself
@@ -633,6 +714,7 @@ impl Syncer {
             .filter(|id| !id.is_empty());
         let declared = declared || carries.is_some();
         let source = if carries.is_some() && source == "cadence" { "sentinel-deferred" } else { source };
+        clock.lap("cell");
         // No lease is held until the commit section (design 2026-09-13
         // §4): the consume, the scan and the uploads below run with the
         // cell at rest, guarded by each object's own etag. What the
@@ -660,12 +742,14 @@ impl Syncer {
                 r.uncited, r.unlinked, r.materialized
             );
         }
+        clock.lap("rescope_replay");
 
         // Step 1's second half: what the tree is owed. A UI save, delete or
         // rename COMMITS (P2), so it reaches the tree as a peer's change
         // does: derived, not queued.
         let (consumed, seen_pointer) = self.consume_owed().await?;
         report.consumed = consumed;
+        clock.lap("consume");
         // The agent runs alongside: what it does to the tree between the
         // removal pass above and the scan below is the model's interleaving
         // of a local edit between Consume and Scan (the rename world's
@@ -674,6 +758,7 @@ impl Syncer {
         consume_window("before-scan", "");
         // Step 2: scan-diff against the persisted baseline.
         let mut baseline = self.state.load_baseline()?;
+        clock.lap("baseline_load");
         let scanned = scan::scan(&self.cfg.root)?;
         let mut classified = scan::classify(&scanned, &baseline);
         let racy_cleared = scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
@@ -686,6 +771,7 @@ impl Syncer {
             report.absences_confirmed = self.confirm_absences(&mut classified)?;
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
+        clock.lap("scan");
 
         // Skip-on-no-diff: nothing local, and the bucket manifest where the
         // consume left it.
@@ -752,6 +838,8 @@ impl Syncer {
                     baseline.prev_scan = scanned.keys().cloned().collect();
                     self.state.save_baseline(&baseline)?;
                 }
+                clock.lap("idle_check");
+                report.steps = clock.steps;
                 self.trace_barrier_end(&report, barrier_started);
                 return Ok(report);
             }
@@ -765,6 +853,7 @@ impl Syncer {
         let mut intent = self.state.load_intent()?;
         intent = IntentJournal { flush_uuid: flush_uuid.clone(), carrier: intent.carrier.clone() };
         self.state.save_intent(&intent)?;
+        clock.lap("intent");
         // No window (P2): a UI save commits without the lease, and the
         // uploads below race it the way two writers race each other —
         // the commit's CAS decides, and the loser is preserved and
@@ -849,6 +938,7 @@ impl Syncer {
                 }
             }
         }
+        clock.lap("upload");
 
         // A PULL-ONLY boundary: nothing uploaded or deleted, so the merge
         // can only add nothing — and then the commit section writes nothing
@@ -888,9 +978,12 @@ impl Syncer {
                 baseline.prev_scan = scanned.keys().cloned().collect();
                 self.state.save_baseline(&baseline)?;
                 self.state.clear_intent_keys()?;
+                clock.lap("pull_only");
+                report.steps = clock.steps;
                 self.trace_barrier_end(&report, barrier_started);
                 return Ok(report);
             }
+            clock.lap("pull_only");
         }
 
         // THE COMMIT SECTION (design 2026-09-13 §4). Everything above ran
@@ -904,12 +997,14 @@ impl Syncer {
         let held = super::lease::claim(self).await?;
         let epoch = held.epoch;
         eprintln!("flint-sync: publish fence held (epoch {epoch})");
+        clock.lap("claim");
         if self.cfg.drill_hold_commit_secs > 0 {
             eprintln!(
                 "flint-sync: DRILL: holding the fence for {}s inside the commit section",
                 self.cfg.drill_hold_commit_secs
             );
             tokio::time::sleep(std::time::Duration::from_secs(self.cfg.drill_hold_commit_secs)).await;
+            clock.lap("drill_hold");
         }
         let commit: LeanResult<()> = async {
             // The entries carry the epoch the commit HOLDS, not the hint
@@ -1008,6 +1103,7 @@ impl Syncer {
                 })?;
                 report.parked.push(path.clone());
             }
+            clock.lap("verify");
             let mut foreign_entries: Vec<(String, LeanEntry)> = vec![];
             // Set when the merge added nothing to the document: nothing is
             // installed, and theirs becomes the merge base as it stands.
@@ -1023,6 +1119,7 @@ impl Syncer {
                     )));
                 }
                 let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
+                clock.lap("load");
                 // Review 2026-09-18, H2: THE fence — the cell read AFTER the
                 // load this CAS merges onto. The read at the top of step 5
                 // comes before the HEAD fan-out and the window, and a holder
@@ -1041,6 +1138,7 @@ impl Syncer {
                 // depose each other every floor.
                 super::lease::renew_if_due(self).await?;
                 self.verify_not_deposed().await?;
+                clock.lap("fence");
                 // The baseline IS the merge base (P1-lite).
                 let base = merge_base(&baseline);
                 let MergeOnto { theirs, expected, merged, foreign, overridden, recreated, over_theirs } = self.merge_onto(
@@ -1094,9 +1192,11 @@ impl Syncer {
                             serde_json::json!({"flush": flush_uuid, "path": path}),
                         );
                     }
+                    clock.lap("merge");
                     attempt -= 1;
                     continue;
                 }
+                clock.lap("merge");
                 // Nothing of ours changes the document — a barrier that only
                 // found the manifest moved by another writer. Installing it
                 // anyway was an empty generation, and the peer's next tick
@@ -1168,6 +1268,7 @@ impl Syncer {
                             intent.carrier = Some(c);
                         }
                         self.state.save_intent(&intent)?;
+                        clock.lap("cas");
                         foreign_entries = foreign;
                         let replaced = expected.as_ref().map(|h| h.etag.clone());
                         break (theirs, merged, meta.etag, overridden, recreated, over_theirs, replaced);
@@ -1176,6 +1277,7 @@ impl Syncer {
                     | Err(LeanError::Store(StoreError::Conflict(_))) => {
                         self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
                             "expected": expected.as_ref().map(|h| h.etag.clone()), "result": "lost"}));
+                        clock.lap("cas");
                         // A rotation is exactly this 412, and re-merging past
                         // it would be the straggler install: the next
                         // attempt's read after its load is the fence.
@@ -1183,6 +1285,7 @@ impl Syncer {
                         // the lease, so the race is usually lost to saves,
                         // and the gap between two of them is the way in (G2).
                         tokio::time::sleep(cas_backoff(attempt)).await;
+                        clock.lap("backoff");
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -1236,6 +1339,7 @@ impl Syncer {
                     retired.push(was.key.clone());
                 }
             }
+            clock.lap("retire_set");
             for (path, was) in &overridden {
                 let integrated = baseline
                     .entries
@@ -1307,6 +1411,7 @@ impl Syncer {
                     report.deleted.push(path.clone());
                 }
             }
+            clock.lap("surface");
             if self.cfg.drill_hold_gc_secs > 0 && !retired.is_empty() {
                 eprintln!(
                     "flint-sync: DRILL: holding the GC for {}s before the batch delete",
@@ -1315,6 +1420,7 @@ impl Syncer {
                 self.trace("drill_hold", serde_json::json!({"flush": flush_uuid, "where": "gc",
                     "secs": self.cfg.drill_hold_gc_secs}));
                 tokio::time::sleep(std::time::Duration::from_secs(self.cfg.drill_hold_gc_secs)).await;
+                clock.lap("drill_hold");
             }
             // RETIRE-AGE G (M1): what this commit retired was LOGGED with its
             // CAS (`manifest::cas_write_retiring`), as the gateway's commits
@@ -1331,12 +1437,14 @@ impl Syncer {
                     None
                 }
             };
+            clock.lap("retire_ledger");
             if let Some(l) = &ledger {
                 match self.reap_retired(l, &installed, &flush_uuid).await {
                     Ok(n) => report.collected = n,
                     Err(e) => eprintln!("flint-sync: retired handles not collected (next time): {e}"),
                 }
             }
+            clock.lap("reap");
             if !retired.is_empty() {
                 self.trace("gc", serde_json::json!({"flush": flush_uuid, "retired": retired.len(),
                     "collected": report.collected}));
@@ -1352,6 +1460,7 @@ impl Syncer {
                     Err(e) => eprintln!("flint-sync: orphan sweep (retrying next time it is due): {e}"),
                 }
             }
+            clock.lap("orphan_sweep");
 
             // Step 7: the baseline follows what this barrier published. What
             // theirs changed is owed, and the next consume derives it: the
@@ -1384,6 +1493,7 @@ impl Syncer {
             baseline.prev_scan = scanned.keys().cloned().collect();
             self.state.save_baseline(&baseline)?;
             self.state.clear_intent_keys()?;
+            clock.lap("baseline");
             // The commit section's end (the model's `Finish`). No window is
             // written: under P2 a UI save never waits on one (G1).
             self.trace("window_clear", serde_json::json!({"flush": flush_uuid}));
@@ -1415,6 +1525,7 @@ impl Syncer {
                 }
             };
             self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "generations", "removed": swept_generations}));
+            clock.lap("generation_sweep");
             // And the CHUNK reaper, same reason, same best-effort terms.
             // `sweep_chunks` returns 0 without a request on a workspace that
             // is not chunked, so this costs nothing until the layout moves.
@@ -1443,9 +1554,14 @@ impl Syncer {
                 }
             };
             self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "chunks", "removed": swept_chunks}));
+            clock.lap("chunk_sweep");
             Ok(())
         }
         .await;
+        // The section's documents (theirs, the merge, the install) are
+        // freed as its block ends: at a million entries that is time the
+        // lease is held for, so it is its own step rather than release's.
+        clock.lap("free");
         // Hand the cell on whatever happened — unless it is no longer
         // ours to hand on: a fence means a successor holds it, and the
         // barrier is simply abandoned (its manifest never installed; its
@@ -1464,6 +1580,8 @@ impl Syncer {
                 }
             }
         }
+        clock.lap("release");
+        report.steps = clock.steps;
         commit?;
         self.trace_barrier_end(&report, barrier_started);
         Ok(report)
@@ -1481,6 +1599,7 @@ impl Syncer {
                 "leaked": report.leaked.len(),
                 "consumed": report.consumed, "no_change": report.no_change,
                 "ms": started.elapsed().as_millis() as u64, "requests": self.trace_requests(),
+                "steps": report.steps,
             }),
         );
     }
