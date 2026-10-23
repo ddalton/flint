@@ -439,7 +439,12 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
    reads the disk, which is what LeanP1's `Restart` assumes (§11). S3,
    folding `reader.json` into the baseline, is NOT done: it changes the
    reader's skip rule, which the model checks, to save one small write per
-   pull.
+   pull. **The journal: KEPT** (user, 2026-10-23), after the comparison in
+   §11 found it about two-thirds of D's code for about a tenth of a
+   publish: it changes no rule the model checks. What the model assumes of
+   a save (all or nothing), the journal's own code now provides, where
+   temp+rename did before; that is tested (§11's battery and controls), not
+   proved.
 
 ## 10. Lever B, as built
 
@@ -685,6 +690,28 @@ cut, 6349 for the re-parse). The bench process holds two writers, each
 with its own resident baseline, so this is roughly 200 MiB a writer at 1M
 files, from single runs. Freeing the written map before the re-parse did
 not move the peak. The bench does not measure the syncer alone.
+
+**The journal against the cache alone.** Is the journal worth its code?
+The same bench, D as committed against "cache-only": D with the journal
+off, so every save is a whole write of `baseline.json` as before D, a save
+that changed nothing writes nothing, and the re-parse runs only after a
+large change. The two binaries were interleaved, at 0 ms; 20k and 200k
+three repetitions, 1M two. Logs in `/mnt/nvme/d-cacheonly/`.
+
+| barrier | 20k cache-only | 20k D | 200k cache-only | 200k D | 1M cache-only | 1M D |
+|---|---:|---:|---:|---:|---:|---:|
+| idle tick | 41–42 ms | 41 ms | 489–490 ms | 486–490 ms | 2.6 s | 2.6 s |
+| taking a peer's one-file change | 93–97 ms | 82 ms | 1049–1078 ms | 930–943 ms | 6.4 s | 5.1–5.2 s |
+| one-file publish, collection not due | 134–138 ms | 122–123 ms | 1399–1411 ms | 1261–1262 ms | 7.5–7.6 s | 6.8–6.9 s |
+| peak RSS, whole bench process | 146–147 MiB | 145–148 MiB | 1380–1382 MiB | 1367–1369 MiB | 6554–6560 MiB | 6319 MiB |
+
+All of the difference is the save step (1M: 715–735 ms cache-only, 59–76
+ms with the journal). So the cache alone carries about three-quarters of
+D's publish gain at every size and all of its idle-tick gain. The journal
+adds about a tenth of a publish, 12–24% of taking a peer's change (a
+consume that takes one also saves), nothing on the idle tick, and about
+235 MiB less peak memory at 1M (no whole-document serialisation per save).
+It is about 780 of D's ~1,140 lines of code and tests. Kept (§9, item 6).
 
 **Model.** None changes (§9, item 6): a save is still all or nothing,
 the disk still holds what the last successful save held, and a restart
