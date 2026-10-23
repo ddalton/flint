@@ -62,6 +62,8 @@ struct Leg {
     each: u64,
     whole_put_max: u64,
     put_delay_ms: u64,
+    /// Every request's latency, a part's `UploadPart` included.
+    request_delay_ms: u64,
 }
 
 /// Run one leg; the gate's high-water mark and the store, for the
@@ -71,6 +73,7 @@ async fn publish(leg: &Leg) -> (u64, Arc<MemoryStore>) {
         .with_part_parallelism(leg.part_parallelism)
         .with_upload_inflight_max_bytes(leg.gate_bytes);
     store.inject_put_whole_delay_ms(leg.put_delay_ms);
+    store.inject_request_delay_ms(leg.request_delay_ms);
     let store = Arc::new(store);
     let gate = store.upload_gate().expect("the double was built with a gate");
     let dir = tempfile::tempdir().unwrap();
@@ -104,6 +107,10 @@ async fn compose_parts_never_exceed_the_budget_and_the_control_blows_past_it() {
         each: 4 * MIB,
         whole_put_max: MIB, // everything composes, in 1 MiB parts
         put_delay_ms: 0,
+        // So the parts overlap for a round trip each. Without it the
+        // control's overlap was the scheduler's: under a busy suite the
+        // reads finished one by one and the control fell short.
+        request_delay_ms: 5,
     };
     let (bounded, _) = publish(&leg(budget)).await;
     assert!(bounded <= budget, "high-water {bounded} exceeded the {budget} budget");
@@ -131,6 +138,7 @@ async fn whole_bodies_never_exceed_the_budget_and_the_control_blows_past_it() {
         each: MIB / 2,
         whole_put_max: 64 * MIB, // nothing composes: every file is one PUT
         put_delay_ms: 5,         // so the PUTs overlap and hold their bodies
+        request_delay_ms: 0,
     };
     let (bounded, _) = publish(&leg(budget)).await;
     assert!(bounded <= budget, "high-water {bounded} exceeded the {budget} budget");
@@ -159,6 +167,7 @@ async fn a_single_object_larger_than_the_budget_still_publishes() {
         each: 6 * MIB,
         whole_put_max: 64 * MIB,
         put_delay_ms: 0,
+        request_delay_ms: 0,
     };
     let (hw, _) = tokio::time::timeout(std::time::Duration::from_secs(30), publish(&whole))
         .await
@@ -175,6 +184,7 @@ async fn a_single_object_larger_than_the_budget_still_publishes() {
         each: 8 * MIB,
         whole_put_max: 4 * MIB,
         put_delay_ms: 0,
+        request_delay_ms: 0,
     };
     let (hw, store) = tokio::time::timeout(std::time::Duration::from_secs(30), publish(&parts))
         .await

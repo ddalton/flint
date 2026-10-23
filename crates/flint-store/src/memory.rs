@@ -1547,6 +1547,11 @@ impl MemoryStore {
                 let bytes = tokio::task::spawn_blocking(move || read_local(&file, offset, len))
                     .await
                     .map_err(|e| StoreError::Other(format!("local read join: {e}")))??;
+                // The `UploadPart` round trip, under the permit: with a
+                // request delay injected, the parts of one object are in
+                // flight together for it, however fast the reads finish
+                // on a busy machine (`tests_upload_gate`).
+                self.pace().await;
                 self.land_part(spec, upload_id, i, len, bytes)
             }
             PartSource::BaseCopy { offset, len } => {
