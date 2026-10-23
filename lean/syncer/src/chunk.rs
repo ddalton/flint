@@ -198,6 +198,190 @@ pub fn split(entries: &BTreeMap<String, LeanEntry>) -> LeanResult<Vec<(ChunkRef,
     split_with(entries, CHUNK_TARGET, CHUNK_MIN, CHUNK_MAX)
 }
 
+/// The chunk list covers the key space in order: each chunk's first key is
+/// past the one before it.
+pub fn check_list_order(refs: &[ChunkRef]) -> LeanResult<()> {
+    for w in refs.windows(2) {
+        if w[0].first >= w[1].first {
+            return Err(LeanError::State(format!(
+                "chunk list is not in strictly increasing key order: {:?} then {:?}",
+                w[0].first, w[1].first
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parse chunk `i` of `refs` and check it against what the list committed
+/// to: its entry count, its first key, and no key at or past the next
+/// chunk's first. The body's address is the caller's to have checked. A
+/// full load (`assemble`) and lever G's view (`docview`) both parse
+/// through here, so a chunk passes the same checks however it is read.
+pub fn parse_chunk(refs: &[ChunkRef], i: usize, b: &[u8]) -> LeanResult<BTreeMap<String, LeanEntry>> {
+    let r = &refs[i];
+    let body: ChunkBody =
+        serde_json::from_slice(b).map_err(|e| LeanError::State(format!("chunk {} parse: {e}", r.addr)))?;
+    if body.entries.len() != r.n {
+        return Err(LeanError::State(format!(
+            "chunk {} holds {} entries, the pointer says {}",
+            r.addr,
+            body.entries.len(),
+            r.n
+        )));
+    }
+    match body.entries.keys().next() {
+        Some(k) if *k == r.first => {}
+        Some(k) => {
+            return Err(LeanError::State(format!("chunk {} starts at {k:?}, the pointer says {:?}", r.addr, r.first)))
+        }
+        None => {
+            return Err(LeanError::State(format!(
+                "chunk {} is empty; an empty chunk cannot be addressed by a first key",
+                r.addr
+            )))
+        }
+    }
+    if let (Some(next), Some(last)) = (refs.get(i + 1), body.entries.keys().next_back()) {
+        if *last >= next.first {
+            return Err(LeanError::State(format!(
+                "chunk {} runs to {last:?}, past the next chunk's first key {:?} — the \
+                 chunks overlap and one shadows the other",
+                r.addr, next.first
+            )));
+        }
+    }
+    Ok(body.entries)
+}
+
+/// One step of a re-chunk's key stream.
+enum Step {
+    /// A key of the changed document, its entry, and whether it is an old
+    /// chunk's LAST key (the old chunking cut after it).
+    Key(String, LeanEntry, bool),
+    /// A deleted key, or a delete of a key the document lacks.
+    Skip,
+    End,
+}
+
+/// Re-chunk a document after `changes`, reusing every chunk of `old` that
+/// neither the changes nor their cascade reach (latency plan §12, claim 1).
+///
+/// `old` is the chunk list `split_with` made of the document, and
+/// `entries_of(i)` hands back chunk `i`'s entries; it is asked only for the
+/// chunks the re-chunk passes through. `changes` maps a path to its new
+/// entry, `None` deleting it (a delete of a path the document lacks changes
+/// nothing). Each ref comes back with the body this call encoded, or `None`
+/// where it is `old`'s ref, reused.
+///
+/// The chunker's only state is the run since the last cut, 0 at every cut.
+/// So the work starts at the chunk holding the next change, whose start is a
+/// cut in both chunkings, and stops at the first new cut that is also an old
+/// one with no change before the next old chunk: from there the key stream,
+/// and so its chunking, is the old one. The result is `split_with` of the
+/// changed entries, ref for ref and byte for byte.
+pub fn rechunk_with<F>(
+    old: &[ChunkRef],
+    mut entries_of: F,
+    changes: &BTreeMap<String, Option<LeanEntry>>,
+    target: usize,
+    min: usize,
+    max: usize,
+) -> LeanResult<Vec<(ChunkRef, Option<Vec<u8>>)>>
+where
+    F: FnMut(usize) -> LeanResult<std::sync::Arc<BTreeMap<String, LeanEntry>>>,
+{
+    debug_assert!(target > 0 && min > 0 && max >= min, "degenerate chunk sizing");
+    let changes: Vec<(&String, &Option<LeanEntry>)> = changes.iter().collect();
+    // The chunk a path falls in: the last whose first key is not after it.
+    let home = |p: &str| old.partition_point(|r| r.first.as_str() <= p).saturating_sub(1);
+    let mut load = |m: usize| -> LeanResult<Vec<(String, LeanEntry)>> {
+        Ok(entries_of(m)?.iter().map(|(k, e)| (k.clone(), e.clone())).collect())
+    };
+    let mut out: Vec<(ChunkRef, Option<Vec<u8>>)> = Vec::with_capacity(old.len() + 1);
+    let mut c = 0usize; // the next change
+    let mut i = 0usize; // the next old chunk not yet reused or re-chunked
+    while c < changes.len() {
+        let start = home(changes[c].0);
+        debug_assert!(old.is_empty() || start >= i, "a change before the old chunk the last region synced to");
+        let start = start.max(i);
+        out.extend(old[i..start.min(old.len())].iter().map(|r| (r.clone(), None)));
+        let mut m = start;
+        let mut cur = if m < old.len() { load(m)? } else { vec![] };
+        let mut pos = 0usize;
+        let mut run: BTreeMap<String, LeanEntry> = BTreeMap::new();
+        let mut first: Option<String> = None;
+        loop {
+            // The changes below the next old chunk's first key are this one's.
+            let bound = old.get(m + 1).map(|r| r.first.as_str());
+            let change = changes.get(c).copied().filter(|(k, _)| bound.is_none_or(|b| k.as_str() < b));
+            if pos >= cur.len() && change.is_none() && m + 1 < old.len() {
+                m += 1;
+                cur = load(m)?;
+                pos = 0;
+                continue;
+            }
+            let step = match (cur.get(pos), change) {
+                (None, None) => Step::End,
+                (Some((ok, _)), Some((ck, cv))) if ck.as_str() < ok.as_str() => {
+                    c += 1;
+                    cv.clone().map_or(Step::Skip, |e| Step::Key(ck.clone(), e, false))
+                }
+                (Some((ok, _)), Some((ck, cv))) if ck.as_str() == ok.as_str() => {
+                    c += 1;
+                    pos += 1;
+                    cv.clone().map_or(Step::Skip, |e| Step::Key(ck.clone(), e, pos == cur.len()))
+                }
+                (Some((ok, oe)), _) => {
+                    pos += 1;
+                    Step::Key(ok.clone(), oe.clone(), pos == cur.len())
+                }
+                (None, Some((ck, cv))) => {
+                    c += 1;
+                    cv.clone().map_or(Step::Skip, |e| Step::Key(ck.clone(), e, false))
+                }
+            };
+            let (k, e, old_last) = match step {
+                Step::Key(k, e, last) => (k, e, last),
+                Step::Skip => continue,
+                Step::End => {
+                    // The tail is a chunk even when it never hit a boundary.
+                    if let Some(f) = first.take() {
+                        out.push(encode_chunk(f, std::mem::take(&mut run))?);
+                    }
+                    i = old.len();
+                    break;
+                }
+            };
+            first.get_or_insert_with(|| k.clone());
+            run.insert(k.clone(), e);
+            if (run.len() >= min && cuts_after_with(&k, target)) || run.len() >= max {
+                let f = first.take().expect("a run holds its first key");
+                out.push(encode_chunk(f, std::mem::take(&mut run))?);
+                // In sync: the old chunking cut here too, and no change falls
+                // before the next old chunk.
+                let synced = old_last
+                    && match (changes.get(c), old.get(m + 1)) {
+                        (None, _) => true,
+                        (Some((ck, _)), Some(next)) => ck.as_str() >= next.first.as_str(),
+                        (Some(_), None) => false,
+                    };
+                if synced {
+                    i = m + 1;
+                    break;
+                }
+            }
+        }
+    }
+    out.extend(old[i.min(old.len())..].iter().map(|r| (r.clone(), None)));
+    Ok(out)
+}
+
+fn encode_chunk(first: String, entries: BTreeMap<String, LeanEntry>) -> LeanResult<(ChunkRef, Option<Vec<u8>>)> {
+    let n = entries.len();
+    let bytes = encode(&ChunkBody { entries })?;
+    Ok((ChunkRef { addr: chunk_address(&bytes), first, n }, Some(bytes)))
+}
+
 /// A body that does not hash to the address it was fetched by: the store
 /// handed back something else (a stale read, a wrong key, a truncated
 /// body), or a local copy was damaged.
@@ -249,14 +433,9 @@ fn assemble_checked<B: AsRef<[u8]>>(
             bodies.len()
         )));
     }
+    check_list_order(refs)?;
     let mut out: BTreeMap<String, LeanEntry> = BTreeMap::new();
-    for (i, (r, b)) in refs.iter().zip(bodies).enumerate() {
-        if i > 0 && refs[i - 1].first >= r.first {
-            return Err(LeanError::State(format!(
-                "chunk list is not in strictly increasing key order: {:?} then {:?}",
-                refs[i - 1].first, r.first
-            )));
-        }
+    for (i, b) in bodies.iter().enumerate() {
         // The object was fetched BY address, so a mismatch means the
         // store handed back something else — a stale read, a wrong key,
         // a truncated body. Content addressing makes this checkable for
@@ -264,42 +443,9 @@ fn assemble_checked<B: AsRef<[u8]>>(
         // choosing not to know.
         let b = b.as_ref();
         if check_address {
-            check_address_of(b, &r.addr)?;
+            check_address_of(b, &refs[i].addr)?;
         }
-        let body: ChunkBody = serde_json::from_slice(b)
-            .map_err(|e| LeanError::State(format!("chunk {} parse: {e}", r.addr)))?;
-        if body.entries.len() != r.n {
-            return Err(LeanError::State(format!(
-                "chunk {} holds {} entries, the pointer says {}",
-                r.addr,
-                body.entries.len(),
-                r.n
-            )));
-        }
-        match body.entries.keys().next() {
-            Some(k) if *k == r.first => {}
-            Some(k) => {
-                return Err(LeanError::State(format!(
-                    "chunk {} starts at {k:?}, the pointer says {:?}",
-                    r.addr, r.first
-                )))
-            }
-            None => {
-                return Err(LeanError::State(format!(
-                    "chunk {} is empty; an empty chunk cannot be addressed by a first key",
-                    r.addr
-                )))
-            }
-        }
-        if let (Some(next), Some(last)) = (refs.get(i + 1), body.entries.keys().next_back()) {
-            if *last >= next.first {
-                return Err(LeanError::State(format!(
-                    "chunk {} runs to {last:?}, past the next chunk's first key {:?} — the \
-                     chunks overlap and one shadows the other",
-                    r.addr, next.first
-                )));
-            }
-        }
+        let body = ChunkBody { entries: parse_chunk(refs, i, b)? };
         for (k, v) in body.entries {
             if out.insert(k.clone(), v).is_some() {
                 return Err(LeanError::State(format!(

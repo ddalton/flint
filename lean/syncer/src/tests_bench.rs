@@ -68,6 +68,8 @@ fn bench_store() -> (Arc<dyn ObjectStore>, &'static str, Option<Arc<MemoryStore>
 fn bench_arm() -> &'static str {
     match std::env::var("FLINT_BENCH_ARM").as_deref() {
         Ok("control") => "control",
+        // Lever G's control: everything shipped but the chunk view.
+        Ok("noview") => "noview",
         _ => "shipped",
     }
 }
@@ -79,6 +81,9 @@ fn bench_syncer(store: &Arc<dyn ObjectStore>, root: &std::path::Path, prefix: &s
         cfg.chunk_cache = None;
         cfg.chunk_fetch_parallelism = 1;
         cfg.collect_every_secs = 0;
+    }
+    if bench_arm() == "noview" {
+        cfg.chunk_view = false;
     }
     let state = super::state::SyncerState::open(cfg.state_dir()).unwrap();
     Syncer {

@@ -63,6 +63,9 @@
 //!                                 .flint-sync/chunk-cache, verified on use)
 //!   FLINT_SYNC_CHUNK_FETCH_PARALLELISM  chunk GETs a manifest load keeps in
 //!                                 flight (default 16; 1 = one at a time)
+//!   FLINT_SYNC_CHUNK_VIEW         "off" loads and merges the whole manifest
+//!                                 at every commit (default on: only the
+//!                                 chunks the commit's paths fall in)
 //!   FLINT_SYNC_NEWS_POLL_SECS     while the workspace is active, read the
 //!                                 pointer (a writer the cell too) this
 //!                                 often and run the barrier early on news
@@ -313,6 +316,10 @@ async fn main() {
     }
     cfg.chunk_fetch_parallelism =
         env_u64("FLINT_SYNC_CHUNK_FETCH_PARALLELISM", flint_lean::CHUNK_FETCH_PARALLELISM as u64).max(1) as usize;
+    // Latency plan lever G: a commit reads the document chunk by chunk.
+    if std::env::var("FLINT_SYNC_CHUNK_VIEW").as_deref() == Ok("off") {
+        cfg.chunk_view = false;
+    }
     // Latency plan lever B: the news arm's poll, its active window, and the
     // fewest seconds between two early barriers.
     cfg.news_poll_secs = env_u64("FLINT_SYNC_NEWS_POLL_SECS", cfg.news_poll_secs);

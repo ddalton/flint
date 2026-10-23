@@ -33,6 +33,9 @@ pub(super) fn cfg_for(root: &std::path::Path) -> LeanConfig {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // Every chunk-view commit is checked against the whole-document merge
+    // (latency plan lever G).
+    c.g_shadow = true;
     c
 }
 
@@ -5799,7 +5802,7 @@ fn assemble_refuses_every_way_a_chunk_list_can_lie() {
 /// generation is swept out from under it — and it cannot be produced by
 /// calling the store's methods in sequence from a test, which is why it
 /// lives in the backend.
-struct SweepMidRead {
+pub(super) struct SweepMidRead {
     inner: Arc<MemoryStore>,
     current_key: String,
     doomed_key: String,
@@ -5983,6 +5986,98 @@ impl ObjectStore for SweepMidRead {
     }
 }
 
+/// Generation 2 published over generation 1, generation 1 put back as the
+/// live pointer, and a store that sweeps a chunk only generation 1 names in
+/// the middle of a read: at the reader's GET of it, or, with `cached` (the
+/// chunk cache on), at its LIST of the chunk prefix; `move_pointer` also
+/// moves the pointer to
+/// generation 2. Returns the store under it, the swept store, the config,
+/// generation 2, and the swept chunk's key.
+pub(super) async fn sweep_mid_read(
+    move_pointer: bool,
+    cached: bool,
+) -> (Arc<MemoryStore>, Arc<dyn ObjectStore>, LeanConfig, super::manifest::LeanManifest, String, tempfile::TempDir) {
+    let inner = Arc::new(MemoryStore::new());
+    let plain: Arc<dyn ObjectStore> = inner.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = cfg_for(dir.path());
+    if cached {
+        // The cache lives in the state dir, which a syncer's state
+        // opens; without it nothing is cached and this arm would
+        // decide nothing (the assertion after the load says so).
+        std::fs::create_dir_all(cfg.state_dir()).unwrap();
+    } else {
+        cfg.chunk_cache = None;
+    }
+    cfg.chunk_target = 64;
+    cfg.chunk_min = 16;
+    cfg.chunk_max = 256;
+
+    // Generation 1, then generation 2 over the same project. Both
+    // sets of chunks are durable; only the pointer distinguishes
+    // them, which is the layout working as designed.
+    let m1 = manifest_of(600, 1);
+    let meta1 =
+        manifest::cas_write_chunked(plain.as_ref(), &cfg, &m1, None, &[],
+            manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
+            .await
+            .unwrap();
+    let p1 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap().pointer;
+    let c1 = match p1.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.to_vec(),
+        _ => panic!("not chunked"),
+    };
+    let mut m2 = m1.clone();
+    m2.seq = 2;
+    m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
+    let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
+    manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
+        manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
+        .await
+        .unwrap();
+    let lp2 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap();
+    let ptr2_bytes = serde_json::to_vec(&lp2.pointer).unwrap();
+
+    // Put generation 1 back as the live pointer, so a reader starts
+    // on the generation the sweep is about to collect.
+    let stamps = GenerationStamps {
+        generation: 1,
+        epoch: 1,
+        flush_uuid: "rewind".into(),
+        boundary_source: None,
+        posix: None,
+    };
+    let p1_bytes = serde_json::to_vec(&p1).unwrap();
+    let crc = crc64_nvme(&p1_bytes);
+    plain
+        .put_whole(&cfg.current_key(), Bytes::from(p1_bytes), &PutCondition::Unconditional, &stamps, crc)
+        .await
+        .unwrap();
+
+    // A chunk only generation 1 references — the one a sweep would
+    // legitimately take once generation 1 leaves the window.
+    let c2: Vec<String> = match lp2.pointer.entries().unwrap() {
+        super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
+        _ => panic!("not chunked"),
+    };
+    let doomed = c1
+        .iter()
+        .find(|r| !c2.contains(&r.addr))
+        .expect("generation 2 shares every chunk with generation 1 — nothing to sweep");
+
+    let store: Arc<dyn ObjectStore> = Arc::new(SweepMidRead {
+        inner: inner.clone(),
+        current_key: cfg.current_key(),
+        doomed_key: cfg.chunk_key(&doomed.addr),
+        next_pointer: ptr2_bytes.clone(),
+        move_pointer,
+        on_list: cached,
+        fired: std::sync::atomic::AtomicBool::new(false),
+    });
+    let doomed_key = cfg.chunk_key(&doomed.addr);
+    (inner, store, cfg, m2, doomed_key, dir)
+}
+
 /// §8.2 — a reader whose generation is swept out from under it RESTARTS
 /// onto the current one instead of tearing.
 ///
@@ -6001,87 +6096,11 @@ async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
     // its GET, one with it at its LIST (every chunk is cached: the writes
     // below keep what they write). Same decision either way.
     for (move_pointer, cached) in [(true, false), (false, false), (true, true), (false, true)] {
-        let inner = Arc::new(MemoryStore::new());
-        let plain: Arc<dyn ObjectStore> = inner.clone();
-        let dir = tempfile::tempdir().unwrap();
-        let mut cfg = cfg_for(dir.path());
-        if cached {
-            // The cache lives in the state dir, which a syncer's state
-            // opens; without it nothing is cached and this arm would
-            // decide nothing (the assertion after the load says so).
-            std::fs::create_dir_all(cfg.state_dir()).unwrap();
-        } else {
-            cfg.chunk_cache = None;
-        }
-        cfg.chunk_target = 64;
-        cfg.chunk_min = 16;
-        cfg.chunk_max = 256;
-
-        // Generation 1, then generation 2 over the same project. Both
-        // sets of chunks are durable; only the pointer distinguishes
-        // them, which is the layout working as designed.
-        let m1 = manifest_of(600, 1);
-        let meta1 =
-            manifest::cas_write_chunked(plain.as_ref(), &cfg, &m1, None, &[],
-                manifest::PublishStamps { epoch: 1, flush_uuid: "u1", boundary_source: None })
-                .await
-                .unwrap();
-        let p1 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap().pointer;
-        let c1 = match p1.entries().unwrap() {
-            super::manifest::Entries::Chunked(c) => c.to_vec(),
-            _ => panic!("not chunked"),
-        };
-        let mut m2 = m1.clone();
-        m2.seq = 2;
-        m2.entries.insert("src/f00003.txt".into(), entry_at("changed", 42));
-        let h = super::manifest::ManifestHandle { etag: meta1.etag.clone(), legacy: false, prev_chunks: Vec::new(), prev_tombstones: None };
-        manifest::cas_write_chunked(plain.as_ref(), &cfg, &m2, Some(&h), &c1,
-            manifest::PublishStamps { epoch: 1, flush_uuid: "u2", boundary_source: None })
-            .await
-            .unwrap();
-        let lp2 = manifest::load_pointer(plain.as_ref(), &cfg).await.unwrap().unwrap();
-        let ptr2_bytes = serde_json::to_vec(&lp2.pointer).unwrap();
-
-        // Put generation 1 back as the live pointer, so a reader starts
-        // on the generation the sweep is about to collect.
-        let stamps = GenerationStamps {
-            generation: 1,
-            epoch: 1,
-            flush_uuid: "rewind".into(),
-            boundary_source: None,
-            posix: None,
-        };
-        let p1_bytes = serde_json::to_vec(&p1).unwrap();
-        let crc = crc64_nvme(&p1_bytes);
-        plain
-            .put_whole(&cfg.current_key(), Bytes::from(p1_bytes), &PutCondition::Unconditional, &stamps, crc)
-            .await
-            .unwrap();
-
-        // A chunk only generation 1 references — the one a sweep would
-        // legitimately take once generation 1 leaves the window.
-        let c2: Vec<String> = match lp2.pointer.entries().unwrap() {
-            super::manifest::Entries::Chunked(c) => c.iter().map(|r| r.addr.clone()).collect(),
-            _ => panic!("not chunked"),
-        };
-        let doomed = c1
-            .iter()
-            .find(|r| !c2.contains(&r.addr))
-            .expect("generation 2 shares every chunk with generation 1 — nothing to sweep");
-
-        let store: Arc<dyn ObjectStore> = Arc::new(SweepMidRead {
-            inner: inner.clone(),
-            current_key: cfg.current_key(),
-            doomed_key: cfg.chunk_key(&doomed.addr),
-            next_pointer: ptr2_bytes.clone(),
-            move_pointer,
-            on_list: cached,
-            fired: std::sync::atomic::AtomicBool::new(false),
-        });
+        let (inner, store, cfg, m2, doomed_key, _dir) = sweep_mid_read(move_pointer, cached).await;
 
         let got = manifest::load(store.as_ref(), &cfg).await;
         assert!(
-            inner.head(&cfg.chunk_key(&doomed.addr)).await.is_err(),
+            inner.head(&doomed_key).await.is_err(),
             "the sweep never ran (cached: {cached}): this arm decided nothing"
         );
         if move_pointer {

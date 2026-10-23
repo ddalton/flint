@@ -133,6 +133,24 @@ covered by the stability guarantee.
   off (8 runs, each started just after the floor tick; a change at a
   random moment waits 30 s on average).
 
+- **lean: a commit reads and rewrites only the chunks it changes** (lever
+  G). Under the lease, a publish used to load every chunk of the manifest,
+  clone it twice, diff it whole against the merge base, and split and hash
+  it whole again: about 4.1 s of a one-file publish at a million files. A
+  commit now reads the pointer, the tombstones object and one LIST proving
+  every chunk the pointer names exists, parses only the chunks its paths
+  fall in, and merges path by path. It re-chunks from the first changed
+  key until its boundaries line up with the old ones again, so the chunk
+  list it writes is the whole re-split's, byte for byte. Whether a replaced
+  handle is still cited elsewhere is answered from the path its key names
+  and, per chunk, the entries whose key names another path (a rename's
+  destination), kept by chunk address. The collection pass still reads the
+  whole document, every 300 s. `FLINT_SYNC_CHUNK_VIEW=off` loads and merges
+  the whole document, as before. On a store answering in 25 ms, a one-file
+  publish at a million files went from 7.0 to 3.1 s (the commit's own steps
+  from 4.1 to 0.3 s), and at 200,000 files from 1.5 to 0.87 s, with the
+  same requests. Taking a peer's change is unchanged.
+
 ### Fixed
 
 - **lean gateway docs: a boundary request is not a one-second door.**

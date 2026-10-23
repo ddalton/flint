@@ -92,7 +92,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | D | the baseline in memory, loaded once per process, persisted incrementally | at 1M, the baseline file is 38% of a 10 s publish: two parses (about 27%, removed by loading it once) and one full rewrite (about 9%, mostly removed by persisting incrementally); and most of the idle tick | none | **built** (§11) |
 | E | change tracking (inotify) in place of the walk, full walk on overflow; inotify on `.flint/` in place of the 1 s poll | at 1M, 2 s per barrier and the idle tick | none, if the fallback is the walk | not started; hardest (watch limits, uid) |
 | F | policy: `sentinelMinIntervalSecs` 5 → 1, and a bytes-only publish budget | a sustained ceiling of one declared publish a minute | none | not started; a user decision |
-| G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none | not started; needs A's per-chunk view |
+| G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none: the same document, chunk list and retire set | **built**, the commit side (§12); the consume side is G2 |
 
 **What the two measurements say about order.** On S3 and at 20k–200k
 files, requests dominate, so A, C and B come first. At 1M, CPU dominates,
@@ -445,6 +445,15 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
    a save (all or nothing), the journal's own code now provides, where
    temp+rename did before; that is tested (§11's battery and controls), not
    proved.
+7. **G: a lazy per-chunk view, the commit side first** (user,
+   2026-10-23). No document is held between barriers (D already holds the
+   baseline); a commit parses only the chunks its paths fall in. The
+   consume side (deriving what is owed from a chunk-list diff) is G2, after
+   the commit side lands, because it is a new shortcut whose soundness
+   belongs in LeanP1 as an invariant (§12). **The order after it** (user,
+   2026-10-23): G2 next, then the gateway's commits (UI saves, deletes,
+   renames and promotes edit the whole document today), the latter after a
+   measurement of what a UI save costs at 200k and 1M.
 
 ## 10. Lever B, as built
 
@@ -716,3 +725,150 @@ It is about 780 of D's ~1,140 lines of code and tests. Kept (§9, item 6).
 **Model.** None changes (§9, item 6): a save is still all or nothing,
 the disk still holds what the last successful save held, and a restart
 reads the disk, as LeanP1's `Restart` assumes.
+
+## 12. Lever G, the commit side: design
+
+**Where the time goes** (1M files, D as built, 0 ms, a one-file publish of
+6.9 s): `cas` 1.16 s, `load` 1.09 s, `merge` 0.90 s, `retire_set` 0.68 s,
+`free` 0.32 s, 4.1 s in all, every one O(entries) for a change of one
+path. The rest is the scan (2.5 s, E's).
+
+| step | the whole-document work | what G does instead |
+|---|---|---|
+| load | fetch, hash and parse every chunk | the pointer, the tombstones object, one LIST, and only the chunks the commit's paths fall in |
+| merge | `merge_base` copies the baseline; `merge_onto` and `merge` each clone the document; `foreign` and `gone` diff all of it; `path_clashes` range-scans under every cited path | per changed path, against the baseline in place; the result is an overlay (path → entry or deleted) on the view; `foreign`/`gone` only when the event trace is on (the trace check reads their counts; nothing else does) |
+| path clashes | every cited path | per upsert: anything under `u/`, and each ancestor of `u` cited as a file |
+| adds nothing | compare both entry maps | compare the overlay with the paths it names |
+| cas | split and hash the whole merged document | re-chunk from the first changed key until a new cut lands on an old one after the last change, then reuse the old refs |
+| retire set (twice: the barrier and the retire log) | every key of both documents | theirs' keys at the changed paths that the merged document no longer cites anywhere |
+| free | drop two or three full maps | nothing large was built |
+
+**Exactness, the two claims G rests on.**
+1. *Re-chunking.* The chunker's only state is the run length since the
+   last cut, which is 0 at every cut. Starting at the chunk that holds the
+   first change (its start is a cut in both chunkings) and stopping at the
+   first new cut that falls on an old cut after the last change, the rest
+   of the key stream is identical and so is its chunking. So the chunk list
+   G writes is `split(merged)`, byte for byte: the rule `LeanChunkMerge.tla`
+   checks (recompute from the merged entries, never splice two writers'
+   lists) holds, because the list is recomputed; only its unchanged stretch
+   is reused, and only against the one document the merge started from.
+   Property test: random key sets and edits, the re-chunk against
+   `chunk::split_with` of the applied set, at small `target`/`min`/`max` so
+   cascades and forced cuts happen.
+2. *Who else cites a handle.* A handle key is minted `files/<path>@<flush>`.
+   Call an entry an ALIAS when its key does not parse to its own path (a
+   rename's destination, or a key of any other shape). Every entry citing
+   key `k` is then either at `path_of(k)` or an alias, so "is `k` cited
+   anywhere" is one point lookup plus the aliases, for any key format: a
+   misparse only makes more entries aliases. Each chunk's aliases are
+   computed when it is parsed and kept by address (chunks are immutable),
+   so a process parses every chunk once, on its first commit, as D parses
+   the baseline once.
+
+**What a missing chunk does.** As a full load: one LIST of `chunks/`
+proves every chunk the pointer names exists, used or not, so a hole is
+refused (an unchanged pointer) or restarts the load (a moved one), and the
+new pointer never re-cites a chunk the bucket lost. The LIST is the one A
+already pays.
+
+**Unchanged.** The collection pass (C: the reap, the orphan and generation
+sweeps) still reads the whole installed document, assembled from the view
+on the commits that run it, every 300 s. The single-object layout keeps
+the full path. The gateway's commits are G's next step, not this one.
+
+**Verification.** A shadow mode for the battery (`LeanConfig::g_shadow`,
+on in the tests' config): every commit also runs the full path and asserts
+the same merged entries, tombstones, chunk list, retire set, clashes and
+merge outcomes, so the 361 existing tests check G against the code it
+replaces. Then the code-trace check (the merge event's counts come from
+the full path under the trace), mutation controls, and the bench at 20k,
+200k and 1M.
+
+**The model.** None changes: G computes the same document, chunk list and
+retire set as the full path (claims 1 and 2, and the shadow mode). G2, the
+consume side, is the one with a model obligation.
+
+**As built** (`lean-latency-g`). `docview.rs`: `DocView` (open, lazy and
+verified chunk reads, `first_under`, `rechunk`, `retired`, `assemble`) and
+`CommitDocs`, which carries what a commit installed to the steps after its
+CAS. `chunk::rechunk_with` and `chunk::parse_chunk`, which a full load's
+`assemble` now parses through too. `manifest::merge_changes`, which
+`manifest::merge` is now built on, and `manifest::cas_write_view` over a
+publish split out of the whole-document write. In the barrier, the commit
+loop opens a view (the whole-document path stays, verbatim, for the
+single-object layout, a refused LIST and `FLINT_SYNC_CHUNK_VIEW=off`), and
+so does the pull-only path; the clash withholding and the carrier record
+are shared by both paths.
+
+Where it differs from the design above:
+- *The alias cache is the workspace's* (`LeanConfig::alias_cache`), not
+  the process's: two workspaces with one prefix (the tests' many syncers)
+  must not prune each other. It is filled by every full load and every
+  whole-document write, which hold all the entries anyway, and by each
+  chunk a re-chunk encodes; so a writer parses a chunk for its aliases
+  only when someone else wrote it and this process has not loaded it.
+  `aliases()` reads what the cache lacks from the view's own parse, never
+  from the cache a second time, where a concurrent prune could have
+  dropped it.
+- *A chunk gone at a lazy read after the LIST* is refused, not restarted
+  onto a moved pointer. Live chunks are never swept and a retired one
+  outlives its retirement by the retire age, so this is a bucket that lost
+  data, and the barrier retries either way; the view never returns a
+  document missing entries (`a_view_refuses_a_hole_and_never_serves_a_short_document`).
+- *The merge's `foreign` count* (`BarrierReport::foreign_queued`) is
+  counted only under the event trace or the shadow check, where the whole
+  document is read anyway; it is 0 otherwise. Nothing acts on it.
+
+**Tests.** The shadow check across the battery: 147 tests reach the view's
+write path and 16 its pull-only path. `tests_rechunk.rs`: the re-chunk is
+`split_with` over 1,600 random documents and edits and every edge of the
+key stream, and a one-path change reads 1.12 chunks on average of 162.
+`tests_docview.rs`: a hole refused as a full load refuses it; a one-file
+publish's commit section sends 3 GETs through the view against 58 through
+the whole document (56 chunks, cache off); a handle survives an edit at its
+own path while an alias cites it, and an edit at an alias while its own
+path cites it, and is collected once nothing does; and `clashes_view`
+answers `path_clashes` over 300 random documents.
+
+**Results.** The bench (`tests_bench.rs`, release build, the in-memory store
+at 0 or 25 ms a request). The control is `FLINT_BENCH_ARM=noview`, the
+whole-document path, in the same binary. There were 3 reps at 20k and
+200k and 1 at 1M; a range spans the reps. At 25 ms a request:
+
+| barrier | 20k noview | 20k G | 200k noview | 200k G | 1M noview | 1M G |
+|---|---:|---:|---:|---:|---:|---:|
+| one-file publish, collection not due | 510–516 ms | 411–421 ms | 1,514–1,555 ms | 864–872 ms | 7,045 ms | 3,099 ms |
+| one-file publish, collection due | 697–701 ms | 628–637 ms | 1,745–1,784 ms | 1,338–1,347 ms | 7,392 ms | 5,069 ms |
+| one-file publish, orphan sweep due too | 739–744 ms | 664–667 ms | 1,842–1,899 ms | 1,479–1,491 ms | 8,103 ms | 5,832 ms |
+| taking a peer's one-file change | 211–212 ms | 212–213 ms | 975–1,024 ms | 1,020–1,032 ms | 5,319 ms | 5,400 ms |
+| idle tick | 104–105 ms | 103–105 ms | 520–532 ms | 532–544 ms | 2,621 ms | 2,658 ms |
+
+At 0 ms, which leaves CPU only, the not-due publish went from 107–108 to
+49–51 ms at 20k and from 1,184–1,185 to 482–488 ms at 200k. Both arms
+sent the same requests in every row.
+
+The commit's own steps at 1M, for the not-due publish:
+
+| step | noview | G |
+|---|---:|---:|
+| load | 1,221 ms | 53 ms |
+| merge | 899 ms | under 20 ms |
+| CAS | 1,037 ms | 96 ms |
+| retire set | 556 ms | under 20 ms |
+| free | 196 ms | under 20 ms |
+| release | 144 ms | 27 ms |
+| **total** | **4.1 s** | **0.3 s** |
+
+Most of the 3.1 s that remains is the walk (2.5 s, lever E). Taking a
+peer's change is unchanged, as designed: its consume (2.6–2.7 s at 1M) is
+G2. The bench process's peak RSS, seeding included, fell from 5.96 to
+5.19 GB at 1M and from 1.32 to 1.08 GB at 200k.
+
+Verification on the box:
+- The syncer's tests: 369 passed, 1 ignored. The gateway's: 66 passed.
+- The binaries build.
+- The code-trace check: 84/84 on tla-mc.
+- Mutation controls V1–V9 each fail their tests. V9's first form was
+  vacuous: the full load also remembered the aliases. Its second form
+  stops every path from remembering them, and is caught.

@@ -55,6 +55,7 @@ pub mod chunk;
 pub mod chunkcache;
 pub mod conformance;
 pub mod control;
+pub mod docview;
 pub mod gauges;
 pub use gauges::{status_report, Gauges, StatusReport};
 pub mod inbox;
@@ -83,6 +84,8 @@ mod tests;
 #[cfg(test)] mod tests_cache;
 #[cfg(test)] mod tests_baseline;
 #[cfg(test)] mod tests_news;
+#[cfg(test)] mod tests_rechunk;
+#[cfg(test)] mod tests_docview;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -331,6 +334,19 @@ pub struct LeanConfig {
     /// cached load, every chunk of an uncached one. 1 = one at a time,
     /// the shape before. `FLINT_SYNC_CHUNK_FETCH_PARALLELISM`.
     pub chunk_fetch_parallelism: usize,
+    /// A commit reads the document chunk by chunk (latency plan lever G,
+    /// `docview`): only the chunks its paths fall in, and it re-chunks only
+    /// what it changed. `false` loads and merges the whole document, the
+    /// shape before. `FLINT_SYNC_CHUNK_VIEW=off`.
+    pub chunk_view: bool,
+    /// Tests only: every chunk-view commit also runs the whole-document
+    /// merge and asserts the same document, chunk list, retire set and
+    /// per-path decisions (latency plan §12, "Verification").
+    pub g_shadow: bool,
+    /// This workspace's chunks' aliases, by address (`docview`): what lets
+    /// a commit answer "who else cites this handle" without the document.
+    /// Shared by every clone of the config, so a syncer's views share it.
+    pub alias_cache: Arc<docview::AliasCache>,
     pub chunk_target: usize,
     pub chunk_min: usize,
     pub chunk_max: usize,
@@ -557,6 +573,9 @@ impl LeanConfig {
             collect_every_secs: manifest::RETIRE_GRACE_SECS / 2,
             chunk_cache: Some(chunk_cache),
             chunk_fetch_parallelism: CHUNK_FETCH_PARALLELISM,
+            chunk_view: true,
+            g_shadow: false,
+            alias_cache: Arc::default(),
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,
             chunk_max: chunk::CHUNK_MAX,

@@ -310,7 +310,7 @@ pub async fn load_pointer(
 /// AND the pointer moved under us, so it is bounded by publish rate,
 /// not by anything we control — three is generous for a workspace whose
 /// floor is measured in seconds.
-const LOAD_ATTEMPTS: u32 = 3;
+pub(crate) const LOAD_ATTEMPTS: u32 = 3;
 
 /// What `fetch_chunks` found for one pointer.
 enum Fetched {
@@ -322,13 +322,13 @@ enum Fetched {
 }
 
 /// The object a load found missing.
-enum Hole {
+pub(crate) enum Hole {
     Chunk { addr: String, first: String },
     Tombstones(String),
 }
 
 impl Hole {
-    fn refusal(&self, seq: u64) -> String {
+    pub(crate) fn refusal(&self, seq: u64) -> String {
         match self {
             Hole::Chunk { addr, first } => format!(
                 "manifest pointer at seq {seq} names chunk {addr} (first key {first:?}), which does \
@@ -558,6 +558,7 @@ pub async fn load_from(
                     }
                 };
                 let entries = super::chunk::assemble_verified(refs, &bodies)?;
+                super::docview::remember(cfg, refs, &entries);
                 // What the cache keeps from here is this document's chunks:
                 // the next load needs these and whatever is new.
                 if let Some(c) = cfg.chunk_cache.as_deref() {
@@ -880,28 +881,58 @@ async fn cas_write_chunked_refs(
     prev: &[super::chunk::ChunkRef],
     pub_stamps: PublishStamps<'_>,
 ) -> LeanResult<(ObjectMeta, Vec<String>)> {
-    let PublishStamps { epoch, flush_uuid, boundary_source } = pub_stamps;
-    let mut m = m.clone();
-    if boundary_source.is_some() {
-        m.boundary_source = boundary_source.map(|s| s.to_string());
-    }
-    let m = &m;
-    let split =
-        super::chunk::split_with(&m.entries, cfg.chunk_target, cfg.chunk_min, cfg.chunk_max)?;
+    let boundary_source = pub_stamps.boundary_source.map(|s| s.to_string()).or_else(|| m.boundary_source.clone());
+    let split = super::chunk::split_with(&m.entries, cfg.chunk_target, cfg.chunk_min, cfg.chunk_max)?;
+    let chunks: Vec<(super::chunk::ChunkRef, Option<Vec<u8>>)> = split.into_iter().map(|(r, b)| (r, Some(b))).collect();
+    let refs: Vec<super::chunk::ChunkRef> = chunks.iter().map(|(r, _)| r.clone()).collect();
+    super::docview::remember(cfg, &refs, &m.entries);
+    let doc = ChunkedDoc { seq: m.seq, sole_writer: m.sole_writer, boundary_source, tombstones: &m.tombstones };
+    publish_chunk_list(store, cfg, &chunks, &doc, expected, prev, pub_stamps.epoch, pub_stamps.flush_uuid).await
+}
+
+/// What a chunked publish writes beside its chunk list.
+pub struct ChunkedDoc<'a> {
+    pub seq: u64,
+    pub sole_writer: bool,
+    pub boundary_source: Option<String>,
+    pub tombstones: &'a BTreeMap<String, Tombstone>,
+}
+
+/// Publish a chunk list: every chunk `prev` lacks, then the tombstones
+/// object, then the pointer CAS. `chunks` carries a body for each chunk it
+/// encoded; one without a body is `prev`'s and is never sent. The ordering
+/// is the atomicity story (`cas_write_chunked`).
+#[allow(clippy::too_many_arguments)]
+async fn publish_chunk_list(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    chunks: &[(super::chunk::ChunkRef, Option<Vec<u8>>)],
+    doc: &ChunkedDoc<'_>,
+    expected: Option<&ManifestHandle>,
+    prev: &[super::chunk::ChunkRef],
+    epoch: u64,
+    flush_uuid: &str,
+) -> LeanResult<(ObjectMeta, Vec<String>)> {
     let have: std::collections::HashSet<&str> = prev.iter().map(|r| r.addr.as_str()).collect();
 
     let stamps = GenerationStamps {
-        generation: m.seq,
+        generation: doc.seq,
         epoch,
         flush_uuid: flush_uuid.to_string(),
-        boundary_source: m.boundary_source.clone(),
+        boundary_source: doc.boundary_source.clone(),
         posix: None,
     };
 
-    for (r, body) in &split {
+    for (r, body) in chunks {
         if have.contains(r.addr.as_str()) {
             continue;
         }
+        let Some(body) = body else {
+            return Err(LeanError::State(format!(
+                "chunk {} is not in the list this publish replaces and was never encoded",
+                r.addr
+            )));
+        };
         // UNCONDITIONAL, and that is a correctness requirement rather
         // than laziness — `LeanChunkGCAdoptSkips` in the formal model
         // fails without it.
@@ -931,10 +962,10 @@ async fn cas_write_chunked_refs(
 
     // The tombstones, one object beside the chunks (rewritten like an
     // adopted chunk: the sweep reads age, and the bytes are identical).
-    let tombstones = if m.tombstones.is_empty() {
+    let tombstones = if doc.tombstones.is_empty() {
         None
     } else {
-        let (addr, body) = super::chunk::encode_tombstones(&m.tombstones)?;
+        let (addr, body) = super::chunk::encode_tombstones(doc.tombstones)?;
         let crc = crc64_nvme(&body);
         if let Some(c) = cfg.chunk_cache.as_deref() {
             c.put(&addr, &body);
@@ -943,12 +974,12 @@ async fn cas_write_chunked_refs(
         Some(addr)
     };
     let pointer = Pointer {
-        seq: m.seq,
+        seq: doc.seq,
         entries_key: None,
         entries_seq: None,
-        chunks: Some(split.into_iter().map(|(r, _)| r).collect()),
-        sole_writer: m.sole_writer,
-        boundary_source: m.boundary_source.clone(),
+        chunks: Some(chunks.iter().map(|(r, _)| r.clone()).collect()),
+        sole_writer: doc.sole_writer,
+        boundary_source: doc.boundary_source.clone(),
         epoch,
         tombstones: tombstones.clone(),
     };
@@ -1002,13 +1033,52 @@ pub async fn cas_write_retiring(
 ) -> LeanResult<ObjectMeta> {
     let (meta, refs) = cas_write_refs(store, cfg, m, expected, epoch, flush_uuid, boundary_source).await?;
     let still: std::collections::HashSet<&str> = m.entries.values().map(|e| e.key.as_str()).collect();
-    let mut handles: Vec<String> = before
+    let handles: Vec<String> = before
         .map(|b| b.entries.values().map(|e| e.key.clone()).filter(|k| !still.contains(k.as_str())).collect())
         .unwrap_or_default();
+    log_retired(store, cfg, m.seq, epoch, flush_uuid, handles, refs.as_deref(), expected).await;
+    Ok(meta)
+}
+
+/// Lever G's commit (latency plan §12): publish the chunk list a view's
+/// re-chunk made (`docview::DocView::rechunk`), and log what it retired.
+/// `retired_handles` is the caller's: the keys of the document it merged
+/// onto that the published one no longer cites, as `cas_write_retiring`
+/// computes them over both whole documents.
+#[allow(clippy::too_many_arguments)]
+pub async fn cas_write_view(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    chunks: &[(super::chunk::ChunkRef, Option<Vec<u8>>)],
+    doc: &ChunkedDoc<'_>,
+    expected: &ManifestHandle,
+    epoch: u64,
+    flush_uuid: &str,
+    retired_handles: Vec<String>,
+) -> LeanResult<ObjectMeta> {
+    let (meta, refs) =
+        publish_chunk_list(store, cfg, chunks, doc, Some(expected), &expected.prev_chunks, epoch, flush_uuid).await?;
+    log_retired(store, cfg, doc.seq, epoch, flush_uuid, retired_handles, Some(&refs), Some(expected)).await;
+    Ok(meta)
+}
+
+/// The log of what a commit retired: `handles`, and the chunk objects the
+/// replaced pointer named that `refs` (the new one's) does not.
+#[allow(clippy::too_many_arguments)]
+async fn log_retired(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    seq: u64,
+    epoch: u64,
+    flush_uuid: &str,
+    mut handles: Vec<String>,
+    refs: Option<&[String]>,
+    expected: Option<&ManifestHandle>,
+) {
     handles.sort();
     handles.dedup();
     let mut chunks: Vec<String> = vec![];
-    if let (Some(refs), Some(h)) = (refs.as_ref(), expected) {
+    if let (Some(refs), Some(h)) = (refs, expected) {
         let now: std::collections::HashSet<&str> = refs.iter().map(|a| a.as_str()).collect();
         chunks = h
             .prev_chunks
@@ -1024,20 +1094,25 @@ pub async fn cas_write_retiring(
         let at = super::now_unix();
         let log = RetireLog { at_unix: at, handles, chunks };
         let key = format!("{}{at:020}-{flush_uuid}-{}.json", retired_prefix(cfg), uuid::Uuid::new_v4());
-        let body = serde_json::to_vec(&log).map_err(|e| LeanError::State(format!("retire log: {e}")))?;
+        let body = match serde_json::to_vec(&log) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("flint-sync: could not encode what seq {seq} retired ({e}); the sweeps judge it by write age");
+                return;
+            }
+        };
         let crc = crc64_nvme(&body);
         let stamps = GenerationStamps {
-            generation: m.seq,
+            generation: seq,
             epoch,
             flush_uuid: flush_uuid.to_string(),
             boundary_source: None,
             posix: None,
         };
         if let Err(e) = store.put_whole(&key, body.into(), &PutCondition::IfNoneMatchAny, &stamps, crc).await {
-            eprintln!("flint-sync: could not log what seq {} retired ({e}); the sweeps judge it by write age", m.seq);
+            eprintln!("flint-sync: could not log what seq {seq} retired ({e}); the sweeps judge it by write age");
         }
     }
-    Ok(meta)
 }
 
 /// CAS the pointer. Split out because a takeover rotation writes ONLY
@@ -1435,8 +1510,22 @@ pub fn merge(
     mine_deletes: &BTreeSet<String>,
     parked: &BTreeSet<String>,
 ) -> Merged {
+    let base_of = |p: &str| base.get(p).map(|b| b.as_str());
+    let at: BTreeMap<String, LeanEntry> = mine_upserts
+        .keys()
+        .chain(mine_deletes.iter())
+        .filter_map(|p| theirs.entries.get(p).map(|e| (p.clone(), e.clone())))
+        .collect();
+    let c = merge_changes(&base_of, &at, &theirs.tombstones, theirs.seq, mine_upserts, mine_deletes, parked);
+    let mut foreign: Vec<(String, LeanEntry)> = vec![];
+    for (p, e) in &theirs.entries {
+        let changed = base.get(p).map(|b| b != &e.etag).unwrap_or(true);
+        if changed && !mine_upserts.contains_key(p) && !parked.contains(p) {
+            foreign.push((p.clone(), e.clone()));
+        }
+    }
     let mut merged = theirs.clone();
-    merged.seq = theirs.seq + 1;
+    merged.seq = c.seq;
     // Same discipline, and for a sharper reason: inheriting it would
     // let a workspace that once published as a mirror keep refusing
     // adopts forever, and NOT inheriting it would let a mirror silently
@@ -1444,55 +1533,112 @@ pub fn merge(
     // The installing pass sets it from its own config.
     merged.sole_writer = false;
     merged.boundary_source = None;
+    for (p, v) in &c.overlay {
+        match v {
+            Some(e) => {
+                merged.entries.insert(p.clone(), e.clone());
+            }
+            None => {
+                merged.entries.remove(p);
+            }
+        }
+    }
+    merged.tombstones = c.tombstones;
+    Merged {
+        doc: merged,
+        foreign,
+        overridden: c.overridden,
+        deletes: c.deletes,
+        recreated: c.recreated,
+        over_theirs: c.over_theirs,
+    }
+}
 
-    let mut foreign: Vec<(String, LeanEntry)> = vec![];
-    let mut overridden: Vec<(String, LeanEntry)> = vec![];
+/// What `merge` decides for the paths a barrier changes (lever G, latency
+/// plan §12): everything but the foreign set, which is about every OTHER
+/// path. `merge` is this over the whole document plus that set, so a path
+/// cannot be decided two ways.
+pub struct MergedChanges {
+    /// The merged document's generation.
+    pub seq: u64,
+    /// Each changed path's entry in the merged document: `Some` cited (an
+    /// upsert), `None` no longer cited (a delete that applied to a cited
+    /// path). Every other path is theirs, as it stands.
+    pub overlay: BTreeMap<String, Option<LeanEntry>>,
+    /// The merged document's tombstones, whole.
+    pub tombstones: BTreeMap<String, Tombstone>,
+    pub overridden: Vec<(String, LeanEntry)>,
+    pub deletes: BTreeMap<String, DeleteOutcome>,
+    pub recreated: Vec<(String, String)>,
+    pub over_theirs: Vec<(String, LeanEntry)>,
+}
+
+/// `merge`'s per-path decisions. `base(p)` is the merge base's etag at
+/// `p`; `theirs_at` is theirs' entry at every path of `mine_upserts` and
+/// `mine_deletes` it cites (a path it lacks is not cited).
+pub fn merge_changes<'b>(
+    base: &dyn Fn(&str) -> Option<&'b str>,
+    theirs_at: &BTreeMap<String, LeanEntry>,
+    theirs_tombstones: &BTreeMap<String, Tombstone>,
+    theirs_seq: u64,
+    mine_upserts: &BTreeMap<String, LeanEntry>,
+    mine_deletes: &BTreeSet<String>,
+    parked: &BTreeSet<String>,
+) -> MergedChanges {
+    let seq = theirs_seq + 1;
+    let mut tombstones = theirs_tombstones.clone();
+    let mut overlay: BTreeMap<String, Option<LeanEntry>> = BTreeMap::new();
     // The DELETES mine publishes over: a path mine uploads that the merge
     // base cited and theirs no longer does. Named by the version the
     // delete removed — theirs' tombstone, else the base's citation.
     let recreated: Vec<(String, String)> = mine_upserts
         .keys()
-        .filter(|p| !theirs.entries.contains_key(*p))
+        .filter(|p| !theirs_at.contains_key(*p))
         .filter_map(|p| {
-            let base_etag = base.get(p)?;
-            let deleted = theirs.tombstones.get(p).map(|t| t.etag.clone()).unwrap_or_else(|| base_etag.clone());
+            let base_etag = base(p)?;
+            let deleted = theirs_tombstones.get(p).map(|t| t.etag.clone()).unwrap_or_else(|| base_etag.to_string());
             Some((p.clone(), deleted))
         })
         .collect();
-    for (p, e) in &theirs.entries {
-        let changed = base.get(p).map(|b| b != &e.etag).unwrap_or(true);
-        if changed && !mine_upserts.contains_key(p) && !parked.contains(p) {
-            foreign.push((p.clone(), e.clone()));
-        }
-        if changed && mine_upserts.contains_key(p) {
-            overridden.push((p.clone(), e.clone()));
-        }
-    }
-
+    // Theirs' version at a path mine uploads, changed since the merge base
+    // (R7), in path order.
+    let overridden: Vec<(String, LeanEntry)> = mine_upserts
+        .keys()
+        .filter_map(|p| theirs_at.get(p).map(|e| (p, e)))
+        .filter(|(p, e)| base(p).map(|b| b != e.etag).unwrap_or(true))
+        .map(|(p, e)| (p.clone(), e.clone()))
+        .collect();
     for (p, e) in mine_upserts {
-        merged.entries.insert(p.clone(), e.clone());
+        overlay.insert(p.clone(), Some(e.clone()));
         // A path cited again has no delete to remember.
-        merged.tombstones.remove(p);
+        tombstones.remove(p);
     }
     let mut deletes = BTreeMap::new();
     let mut over_theirs: Vec<(String, LeanEntry)> = vec![];
     for p in mine_deletes {
-        let outcome = delete_outcome(base, theirs, p, parked);
+        let outcome = delete_outcome_with(base(p), theirs_at.get(p), parked.contains(p));
         deletes.insert(p.clone(), outcome);
         if outcome == DeleteOutcome::OverTheirs {
-            if let Some(e) = theirs.entries.get(p) {
+            if let Some(e) = theirs_at.get(p) {
                 over_theirs.push((p.clone(), e.clone()));
             }
         }
         if outcome != DeleteOutcome::Parked {
-            if let Some(retired) = merged.entries.remove(p) {
+            // What the merged document cites at `p` so far: mine's upsert,
+            // else theirs.
+            let cited = match overlay.get(p) {
+                Some(v) => v.clone(),
+                None => theirs_at.get(p).cloned(),
+            };
+            if let Some(retired) = cited {
+                overlay.insert(p.clone(), None);
                 // H1e: the document says what this delete retired.
-                merged.tombstones.insert(p.clone(), Tombstone { etag: retired.etag, seq: merged.seq });
+                tombstones.insert(p.clone(), Tombstone { etag: retired.etag, seq });
             }
         }
     }
-    merged.tombstones.retain(|_, t| merged.seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
-    Merged { doc: merged, foreign, overridden, deletes, recreated, over_theirs }
+    tombstones.retain(|_, t| seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
+    MergedChanges { seq, overlay, tombstones, overridden, deletes, recreated, over_theirs }
 }
 
 /// What `merge` returns: the document, and what it decided per path.
@@ -1545,11 +1691,17 @@ pub fn delete_outcome(
     p: &str,
     parked: &BTreeSet<String>,
 ) -> DeleteOutcome {
-    if parked.contains(p) {
+    delete_outcome_with(base.get(p).map(|b| b.as_str()), theirs.entries.get(p), parked.contains(p))
+}
+
+/// [`delete_outcome`] from the two things it reads: the merge base's etag
+/// at the path, and theirs' entry there.
+pub fn delete_outcome_with(base: Option<&str>, theirs: Option<&LeanEntry>, parked: bool) -> DeleteOutcome {
+    if parked {
         return DeleteOutcome::Parked;
     }
-    match (theirs.entries.get(p), base.get(p)) {
-        (Some(e), Some(b)) if &e.etag == b => DeleteOutcome::Applied,
+    match (theirs, base) {
+        (Some(e), Some(b)) if e.etag == b => DeleteOutcome::Applied,
         // Already deleted by someone else: nothing is left to cite.
         (None, _) => DeleteOutcome::Applied,
         // Changed since base, or present in theirs and not in base.

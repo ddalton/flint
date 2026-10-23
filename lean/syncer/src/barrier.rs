@@ -13,6 +13,7 @@ use flint_store::{
 };
 
 use super::inbox;
+use super::docview::{CommitDocs, DocView, Opened};
 use super::manifest::{self, LeanEntry};
 use super::scan;
 use super::state::{BaselineEntry, Carrier, ConflictRecord, IntentJournal};
@@ -960,28 +961,77 @@ impl Syncer {
             && upserts.is_empty()
             && observed.is_empty()
         {
-            let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
-            let m = self.merge_onto(
-                current.as_ref(),
-                &merge_base(&baseline),
-                &upserts,
-                &classified.deletes,
-                &parked,
-                &flush_uuid,
-            );
-            if let Some(handle) = m.expected.as_ref().filter(|_| m.adds_nothing()) {
+            let opened = if self.cfg.chunk_view {
+                DocView::open(self.store.clone(), &self.cfg, None).await?
+            } else {
+                Opened::Full(manifest::load(self.store.as_ref(), &self.cfg).await?)
+            };
+            // When the merge adds nothing: the document's seq and etag, its
+            // entries at the carried paths, and the foreign count.
+            let pulled: Option<(u64, String, manifest::LeanManifest, usize)> = match opened {
+                Opened::Full(current) => {
+                    let m = self.merge_onto(
+                        current.as_ref(),
+                        &merge_base(&baseline),
+                        &upserts,
+                        &classified.deletes,
+                        &parked,
+                        &flush_uuid,
+                    );
+                    match m.expected.as_ref().filter(|_| m.adds_nothing()).map(|h| h.etag.clone()) {
+                        Some(etag) => Some((m.theirs.seq, etag, m.theirs, m.foreign.len())),
+                        None => None,
+                    }
+                }
+                Opened::View(mut v) => {
+                    // Lever G: no upload and no delete, so the merge adds
+                    // nothing unless it restamps the mirror flag.
+                    let full = if self.cfg.event_trace.is_some() || self.cfg.g_shadow {
+                        let doc = v.assemble().await?;
+                        Some(self.merge_onto(
+                            Some(&doc),
+                            &merge_base(&baseline),
+                            &upserts,
+                            &classified.deletes,
+                            &parked,
+                            &flush_uuid,
+                        ))
+                    } else {
+                        None
+                    };
+                    let adds_nothing = self.cfg.sole_writer == v.pointer.sole_writer;
+                    if let Some(f) = full.as_ref().filter(|_| self.cfg.g_shadow) {
+                        assert_eq!(adds_nothing, f.adds_nothing(), "lever G: a pull-only adds-nothing is not the whole-document merge's");
+                    }
+                    if adds_nothing {
+                        let carried = self.carried_paths()?;
+                        v.prefetch(carried.iter().map(|p| p.as_str())).await?;
+                        let mut entries = BTreeMap::new();
+                        for p in &carried {
+                            if let Some(e) = v.get(p).await? {
+                                entries.insert(p.clone(), e);
+                            }
+                        }
+                        let at = manifest::LeanManifest { seq: v.seq(), entries, ..Default::default() };
+                        Some((v.seq(), v.etag.clone(), at, full.map(|f| f.foreign.len()).unwrap_or(0)))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((seq, etag, theirs_at, foreign)) = pulled {
                 // What theirs changed at a path this tree holds is owed: the
                 // next consume derives it, because theirs is not the document
                 // it last derived against (or is, and there is nothing).
-                self.note_carrier_uncited(&m.theirs)?;
-                report.seq = Some(m.theirs.seq);
+                self.note_carrier_uncited(&theirs_at)?;
+                report.seq = Some(seq);
                 report.no_change = true;
-                report.manifest_etag = Some(handle.etag.clone());
-                report.observed_seq = Some(m.theirs.seq);
-                report.observed_etag = Some(handle.etag.clone());
-                report.foreign_queued = m.foreign.len();
-                baseline.seq = m.theirs.seq;
-                baseline.manifest_etag = Some(handle.etag.clone());
+                report.manifest_etag = Some(etag.clone());
+                report.observed_seq = Some(seq);
+                report.observed_etag = Some(etag.clone());
+                report.foreign_queued = foreign;
+                baseline.seq = seq;
+                baseline.manifest_etag = Some(etag.clone());
                 baseline.prev_scan.sync_to(scanned.keys());
                 self.state.commit_baseline(baseline)?;
                 self.state.clear_intent_keys()?;
@@ -1118,14 +1168,20 @@ impl Syncer {
             let mut attempt = 0;
             // The last value carried out: the adoptions this install
             // declined for a move, whose entries stay in the cell.
-            let (theirs_at_cas, installed, installed_etag, overridden, recreated, over_theirs, replaced_etag) = loop {
+            let (mut docs, installed_etag, overridden, recreated, over_theirs, replaced_etag) = loop {
                 attempt += 1;
                 if attempt > CAS_ATTEMPTS {
                     return Err(LeanError::State(format!(
                         "manifest CAS lost {CAS_ATTEMPTS} merge races — refusing this barrier"
                     )));
                 }
-                let current = manifest::load(self.store.as_ref(), &self.cfg).await?;
+                // Lever G (latency plan §12): the document chunk by chunk,
+                // unless it is on another layout or the view is off.
+                let opened = if self.cfg.chunk_view {
+                    DocView::open(self.store.clone(), &self.cfg, None).await?
+                } else {
+                    Opened::Full(manifest::load(self.store.as_ref(), &self.cfg).await?)
+                };
                 clock.lap("load");
                 // Review 2026-09-18, H2: THE fence — the cell read AFTER the
                 // load this CAS merges onto. The read at the top of step 5
@@ -1146,151 +1202,239 @@ impl Syncer {
                 super::lease::renew_if_due(self).await?;
                 self.verify_not_deposed().await?;
                 clock.lap("fence");
-                // The baseline IS the merge base (P1-lite).
-                let base = merge_base(&baseline);
-                let MergeOnto { theirs, expected, merged, foreign, overridden, recreated, over_theirs } = self.merge_onto(
-                    current.as_ref(),
-                    &base,
+                let mut theirs = match opened {
+                    Opened::View(v) => v,
+                    Opened::Full(current) => {
+                        // The baseline IS the merge base (P1-lite).
+                        let base = merge_base(&baseline);
+                        let MergeOnto { theirs, expected, merged, foreign, overridden, recreated, over_theirs } = self.merge_onto(
+                            current.as_ref(),
+                            &base,
+                            &upserts,
+                            &classified.deletes,
+                            &parked,
+                            &flush_uuid,
+                        );
+                        // A DOCUMENT MUST BE MATERIALISABLE. No filesystem can hold
+                        // a file `a` and a file `a/x`, so no document may cite
+                        // both — a fresh checkout would have to create a directory
+                        // where its own manifest says a file goes. The agent makes
+                        // exactly that shape by replacing a published file with a
+                        // directory (or the reverse): the scan sees the old path
+                        // absent and the new one new, the two-scan guard withholds a
+                        // FIRST absence, and the upload lands beside the citation it
+                        // was meant to replace (review 2026-09-18, M5's agent-side
+                        // twin). Judged here because this is where the document's
+                        // final shape is known — theirs, my upserts and the deletes
+                        // that actually applied. Mine is the side that yields: the
+                        // path stays dirty and publishes at the next barrier, by
+                        // which time the withheld absence is confirmed and its
+                        // citation gone. This re-merges without spending a CAS
+                        // attempt; the clash is decided, not raced.
+                        let clash = path_clashes(&merged.entries, &upserts);
+                        if !clash.is_empty() {
+                            self.withhold_clashes(clash, &mut upserts, &mut new_baseline_entries, &mut report, &mut parked, &flush_uuid)?;
+                            clock.lap("merge");
+                            attempt -= 1;
+                            continue;
+                        }
+                        clock.lap("merge");
+                        // Nothing of ours changes the document — a barrier that only
+                        // found the manifest moved by another writer. Installing it
+                        // anyway was an empty generation, and the peer's next tick
+                        // then found the manifest moved and did the same: two idle
+                        // writers traded generations (and cell claims) for as long
+                        // as both ran. Theirs becomes the merge base as it stands.
+                        if let Some(handle) = expected.as_ref() {
+                            if merged.entries == theirs.entries && merged.sole_writer == theirs.sole_writer {
+                                foreign_entries = foreign;
+                                installed_nothing = true;
+                                break (
+                                    CommitDocs::Full { installed: theirs.clone(), theirs },
+                                    handle.etag.clone(),
+                                    vec![],
+                                    vec![],
+                                    vec![],
+                                    Some(handle.etag.clone()),
+                                );
+                            }
+                        }
+                        match manifest::cas_write_retiring(
+                            self.store.as_ref(),
+                            &self.cfg,
+                            &merged,
+                            Some(&theirs),
+                            expected.as_ref(),
+                            epoch,
+                            &flush_uuid,
+                            Some(source),
+                        )
+                        .await
+                        {
+                            Ok(meta) => {
+                                // Before the deletes and before step 7: this is the
+                                // only record that survives a crash in that window.
+                                self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
+                                    "expected": expected.as_ref().map(|h| h.etag.clone()), "etag": meta.etag, "result": "ok"}));
+                                // H10: what this install carried of the standing
+                                // declaration survives a restart, for the ack.
+                                if let Some(id) = carries.as_ref() {
+                                    note_carried(&mut intent, id, &classified, &upserts, &report, |p| merged.entries.contains_key(p));
+                                }
+                                self.state.save_intent(&intent)?;
+                                clock.lap("cas");
+                                foreign_entries = foreign;
+                                let replaced = expected.as_ref().map(|h| h.etag.clone());
+                                break (CommitDocs::Full { theirs, installed: merged }, meta.etag, overridden, recreated, over_theirs, replaced);
+                            }
+                            Err(LeanError::Store(StoreError::PreconditionFailed(_)))
+                            | Err(LeanError::Store(StoreError::Conflict(_))) => {
+                                self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
+                                    "expected": expected.as_ref().map(|h| h.etag.clone()), "result": "lost"}));
+                                clock.lap("cas");
+                                // A rotation is exactly this 412, and re-merging past
+                                // it would be the straggler install: the next
+                                // attempt's read after its load is the fence.
+                                // Back off first: under P2 a UI save never waits on
+                                // the lease, so the race is usually lost to saves,
+                                // and the gap between two of them is the way in (G2).
+                                tokio::time::sleep(cas_backoff(attempt)).await;
+                                clock.lap("backoff");
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                };
+                // Lever G (latency plan §12): the merge, the clash check, the
+                // re-chunk and the retire set read only the chunks the
+                // commit's paths fall in, and the new chunk list re-encodes
+                // only what the change and its cascade reach.
+                let paths: Vec<String> = upserts.keys().chain(classified.deletes.iter()).cloned().collect();
+                theirs.prefetch(paths.iter().map(|p| p.as_str())).await?;
+                let mut at: BTreeMap<String, LeanEntry> = BTreeMap::new();
+                for p in &paths {
+                    if let Some(e) = theirs.get(p).await? {
+                        at.insert(p.clone(), e);
+                    }
+                }
+                let base_of = |p: &str| baseline.entries.get(p).map(|e| e.etag.as_str());
+                let mc = manifest::merge_changes(
+                    &base_of,
+                    &at,
+                    &theirs.tombstones,
+                    theirs.seq(),
                     &upserts,
                     &classified.deletes,
                     &parked,
-                    &flush_uuid,
                 );
-                // A DOCUMENT MUST BE MATERIALISABLE. No filesystem can hold
-                // a file `a` and a file `a/x`, so no document may cite
-                // both — a fresh checkout would have to create a directory
-                // where its own manifest says a file goes. The agent makes
-                // exactly that shape by replacing a published file with a
-                // directory (or the reverse): the scan sees the old path
-                // absent and the new one new, the two-scan guard withholds a
-                // FIRST absence, and the upload lands beside the citation it
-                // was meant to replace (review 2026-09-18, M5's agent-side
-                // twin). Judged here because this is where the document's
-                // final shape is known — theirs, my upserts and the deletes
-                // that actually applied. Mine is the side that yields: the
-                // path stays dirty and publishes at the next barrier, by
-                // which time the withheld absence is confirmed and its
-                // citation gone. This re-merges without spending a CAS
-                // attempt; the clash is decided, not raced.
-                let clash = path_clashes(&merged.entries, &upserts);
+                // The event trace's merge record (its foreign and gone counts
+                // are about every path) and the shadow check read the whole
+                // documents.
+                let full = if self.cfg.event_trace.is_some() || self.cfg.g_shadow {
+                    let doc = theirs.assemble().await?;
+                    Some(self.merge_onto(Some(&doc), &merge_base(&baseline), &upserts, &classified.deletes, &parked, &flush_uuid))
+                } else {
+                    None
+                };
+                let clash = clashes_view(&mut theirs, &mc.overlay, &upserts).await?;
+                let shadow = full.as_ref().filter(|_| self.cfg.g_shadow);
+                if let Some(f) = shadow {
+                    shadow_merge(f, &mc, &clash, &upserts);
+                }
                 if !clash.is_empty() {
-                    for path in clash {
-                        let gone = upserts.remove(&path).expect("named from upserts above");
-                        new_baseline_entries.remove(&path);
-                        report.uploaded.retain(|p| p != &path);
-                        report.published_bytes =
-                            report.published_bytes.saturating_sub(gone.size);
-                        parked.insert(path.clone());
-                        report.parked.push(path.clone());
-                        self.state.append_conflict(&ConflictRecord {
-                            path: path.clone(),
-                            foreign_etag: gone.etag,
-                            preserved_key: None,
-                            kind: "upload-withheld-path-clash: the document still cites a path \
-                                   this one would sit inside (or around) — a published file \
-                                   replaced by a directory, or the reverse. No workspace can \
-                                   hold both, so nothing is cited here until that citation \
-                                   goes; the path stays dirty and publishes next barrier"
-                                .into(),
-                            at_unix: now_unix(),
-                        })?;
-                        self.trace(
-                            "path_clash",
-                            serde_json::json!({"flush": flush_uuid, "path": path}),
-                        );
-                    }
+                    self.withhold_clashes(clash, &mut upserts, &mut new_baseline_entries, &mut report, &mut parked, &flush_uuid)?;
                     clock.lap("merge");
                     attempt -= 1;
                     continue;
                 }
                 clock.lap("merge");
-                // Nothing of ours changes the document — a barrier that only
-                // found the manifest moved by another writer. Installing it
-                // anyway was an empty generation, and the peer's next tick
-                // then found the manifest moved and did the same: two idle
-                // writers traded generations (and cell claims) for as long
-                // as both ran. Theirs becomes the merge base as it stands.
-                if let Some(handle) = expected.as_ref() {
-                    if merged.entries == theirs.entries && merged.sole_writer == theirs.sole_writer {
-                        foreign_entries = foreign;
-                        installed_nothing = true;
-                        break (theirs.clone(), theirs, handle.etag.clone(), vec![], vec![], vec![], Some(handle.etag.clone()));
-                    }
+                let expected = theirs.handle();
+                // Nothing of ours changes the document: the full path's
+                // check, over the paths the overlay names.
+                let adds_nothing = self.cfg.sole_writer == theirs.pointer.sole_writer
+                    && mc.overlay.iter().all(|(p, v)| at.get(p) == v.as_ref());
+                if let Some(f) = shadow {
+                    assert_eq!(adds_nothing, f.adds_nothing(), "lever G: adds-nothing is not the whole-document merge's");
                 }
-                match manifest::cas_write_retiring(
+                if adds_nothing {
+                    foreign_entries = full.map(|f| f.foreign).unwrap_or_default();
+                    installed_nothing = true;
+                    let (seq, tombstones) = (theirs.seq(), theirs.tombstones.clone());
+                    let (sole_writer, boundary_source) = (theirs.pointer.sole_writer, theirs.pointer.boundary_source.clone());
+                    break (
+                        CommitDocs::View { theirs, overlay: BTreeMap::new(), retired: vec![], seq, tombstones, sole_writer, boundary_source },
+                        expected.etag.clone(),
+                        vec![],
+                        vec![],
+                        vec![],
+                        Some(expected.etag),
+                    );
+                }
+                let chunks = theirs.rechunk(&mc.overlay).await?;
+                let retired = theirs.retired(&mc.overlay).await?;
+                if let Some(f) = shadow {
+                    shadow_write(f, &chunks, &retired, &self.cfg);
+                }
+                let doc = manifest::ChunkedDoc {
+                    seq: mc.seq,
+                    sole_writer: self.cfg.sole_writer,
+                    boundary_source: Some(source.to_string()),
+                    tombstones: &mc.tombstones,
+                };
+                match manifest::cas_write_view(
                     self.store.as_ref(),
                     &self.cfg,
-                    &merged,
-                    Some(&theirs),
-                    expected.as_ref(),
+                    &chunks,
+                    &doc,
+                    &expected,
                     epoch,
                     &flush_uuid,
-                    Some(source),
+                    retired.clone(),
                 )
                 .await
                 {
                     Ok(meta) => {
                         // Before the deletes and before step 7: this is the
                         // only record that survives a crash in that window.
-                        self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
-                            "expected": expected.as_ref().map(|h| h.etag.clone()), "etag": meta.etag, "result": "ok"}));
-                        // H10: what this install carried of the standing
-                        // declaration survives a restart, for the ack.
+                        self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": mc.seq,
+                            "expected": Some(expected.etag.clone()), "etag": meta.etag, "result": "ok"}));
                         if let Some(id) = carries.as_ref() {
-                            let mut c = intent
-                                .carrier
-                                .take()
-                                .filter(|c| &c.pending_id == id)
-                                .unwrap_or_else(|| Carrier { pending_id: id.clone(), ..Default::default() });
-                            c.paths.extend(classified.uploads.iter().chain(&classified.deletes).cloned());
-                            // L-136: an earlier carry's delete that this one
-                            // uploads is an upload again, so a peer's delete
-                            // of it is named (`note_carrier_uncited`).
-                            // L-137: the bytes it published, so a peer's
-                            // replacement of them is named too.
-                            for p in &classified.uploads {
-                                c.deletes.remove(p);
-                                match upserts.get(p) {
-                                    Some(e) => c.published.insert(p.clone(), e.crc64_b64.clone()),
-                                    None => c.published.remove(p),
-                                };
-                            }
-                            for p in &classified.deletes {
-                                c.published.remove(p);
-                            }
-                            c.deletes.extend(classified.deletes.iter().cloned());
-                            // `honor_publish`'s dropped set, decided here:
-                            // parks and deferrals are settled before the
-                            // CAS, and an outranked delete is one the merged
-                            // document still cites. Since M3 no delete is
-                            // outranked (only uploads park, and the merge
-                            // removes every unparked delete: `merge_applies_
-                            // a_local_delete_and_names_the_version_it_
-                            // deleted_over`), so the second clause is a
-                            // backstop no barrier reaches.
-                            c.dropped.extend(report.parked.iter().chain(&report.deferred).cloned());
-                            c.dropped.extend(
-                                classified.deletes.iter().filter(|p| merged.entries.contains_key(p.as_str())).cloned(),
-                            );
-                            intent.carrier = Some(c);
+                            note_carried(&mut intent, id, &classified, &upserts, &report, |p| match mc.overlay.get(p) {
+                                Some(v) => v.is_some(),
+                                None => at.contains_key(p),
+                            });
                         }
                         self.state.save_intent(&intent)?;
                         clock.lap("cas");
-                        foreign_entries = foreign;
-                        let replaced = expected.as_ref().map(|h| h.etag.clone());
-                        break (theirs, merged, meta.etag, overridden, recreated, over_theirs, replaced);
+                        foreign_entries = full.map(|f| f.foreign).unwrap_or_default();
+                        let live: std::collections::HashSet<&str> = chunks.iter().map(|(r, _)| r.addr.as_str()).collect();
+                        theirs.retain_aliases(&live);
+                        let replaced = Some(expected.etag.clone());
+                        break (
+                            CommitDocs::View {
+                                theirs,
+                                overlay: mc.overlay,
+                                retired,
+                                seq: mc.seq,
+                                tombstones: mc.tombstones,
+                                sole_writer: self.cfg.sole_writer,
+                                boundary_source: Some(source.to_string()),
+                            },
+                            meta.etag,
+                            mc.overridden,
+                            mc.recreated,
+                            mc.over_theirs,
+                            replaced,
+                        );
                     }
                     Err(LeanError::Store(StoreError::PreconditionFailed(_)))
                     | Err(LeanError::Store(StoreError::Conflict(_))) => {
-                        self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": merged.seq,
-                            "expected": expected.as_ref().map(|h| h.etag.clone()), "result": "lost"}));
+                        self.trace("cas", serde_json::json!({"flush": flush_uuid, "seq": mc.seq,
+                            "expected": Some(expected.etag.clone()), "result": "lost"}));
                         clock.lap("cas");
-                        // A rotation is exactly this 412, and re-merging past
-                        // it would be the straggler install: the next
-                        // attempt's read after its load is the fence.
-                        // Back off first: under P2 a UI save never waits on
-                        // the lease, so the race is usually lost to saves,
-                        // and the gap between two of them is the way in (G2).
+                        // As the full path: the next attempt's read after its
+                        // load is the fence, after a backoff (G2).
                         tokio::time::sleep(cas_backoff(attempt)).await;
                         clock.lap("backoff");
                         continue;
@@ -1298,17 +1442,18 @@ impl Syncer {
                     Err(e) => return Err(e),
                 }
             };
-            report.seq = Some(installed.seq);
+            let installed_seq = docs.installed_seq();
+            report.seq = Some(installed_seq);
             report.no_change = installed_nothing;
             // A fused install IS a coherent point, and cadence/hybrid have
             // exactly one source. The gauges must not report "no boundary
             // ever" on a workspace that publishes every minute. A barrier
             // that installed nothing marks no boundary of its own.
             if !installed_nothing {
-                self.note_boundary("cadence", installed.seq)?;
+                self.note_boundary("cadence", installed_seq)?;
             }
             report.manifest_etag = Some(installed_etag.clone());
-            report.observed_seq = Some(installed.seq);
+            report.observed_seq = Some(installed_seq);
             report.observed_etag = Some(installed_etag.clone());
             report.foreign_queued = foreign_entries.len();
 
@@ -1338,14 +1483,7 @@ impl Syncer {
             // to fail on, so the CAS, the one place the citation is read,
             // takes the decision (R7; the model's first HitlOverAny run
             // under handles cited an acked write over blind without it).
-            let still_cited: BTreeSet<&str> = installed.entries.values().map(|e| e.key.as_str()).collect();
-            let mut retired: Vec<String> = vec![];
-            for (path, was) in &theirs_at_cas.entries {
-                let dropped = installed.entries.get(path).map(|now| now.key != was.key).unwrap_or(true);
-                if dropped && !still_cited.contains(was.key.as_str()) {
-                    retired.push(was.key.clone());
-                }
-            }
+            let retired: Vec<String> = docs.retired();
             clock.lap("retire_set");
             for (path, was) in &overridden {
                 let integrated = baseline
@@ -1402,7 +1540,7 @@ impl Syncer {
                 self.trace("surface", serde_json::json!({"flush": flush_uuid, "path": path, "etag": was.etag, "key": was.key, "over_delete": true}));
             }
             for path in &classified.deletes {
-                if installed.entries.contains_key(path) {
+                if docs.installed_get(path).await?.is_some() {
                     // Never expected: since M3 a delete applies over theirs,
                     // and only uploads are parked, so every delete leaves the
                     // document. Were one still cited it is not in this
@@ -1413,7 +1551,7 @@ impl Syncer {
                     self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "result": "still-cited"}));
                     report.parked.push(path.clone());
                 } else {
-                    let key = theirs_at_cas.entries.get(path).map(|e| e.key.clone());
+                    let key = docs.theirs_get(path).await?.map(|e| e.key);
                     self.trace("gc", serde_json::json!({"flush": flush_uuid, "path": path, "key": key, "result": "retired"}));
                     report.deleted.push(path.clone());
                 }
@@ -1465,8 +1603,15 @@ impl Syncer {
             if collect {
                 clock.lap("retire_ledger");
             }
+            // The collection pass reads the whole installed document (lever G
+            // assembles it from the view only on the commits that run it).
+            let installed_full = match &ledger {
+                Some(_) => Some(docs.installed_full().await?),
+                None => None,
+            };
+            let whole = || installed_full.as_deref().expect("assembled for the collection pass");
             if let Some(l) = &ledger {
-                match self.reap_retired(l, &installed, &flush_uuid).await {
+                match self.reap_retired(l, whole(), &flush_uuid).await {
                     Ok(n) => report.collected = n,
                     Err(e) => eprintln!("flint-sync: retired handles not collected (next time): {e}"),
                 }
@@ -1484,11 +1629,12 @@ impl Syncer {
             // commit's re-read of its own uploads above and this CAS are
             // race-free against it; never this barrier's own handles.
             if let Some(l) = ledger.as_ref().filter(|_| self.lease.is_some()) {
-                match self.sweep_orphans_if_due(&installed, &flush_uuid, now_unix(), &l.spared).await {
+                match self.sweep_orphans_if_due(whole(), &flush_uuid, now_unix(), &l.spared).await {
                     Ok(n) => report.swept = n,
                     Err(e) => eprintln!("flint-sync: orphan sweep (retrying next time it is due): {e}"),
                 }
             }
+            drop(installed_full);
             if collect {
                 clock.lap("orphan_sweep");
             }
@@ -1518,8 +1664,10 @@ impl Syncer {
             for path in &report.deleted {
                 baseline.entries.remove(path);
             }
-            self.note_carrier_uncited(&installed)?;
-            baseline.seq = installed.seq;
+            let carried = self.carried_paths()?;
+            let carried_at = docs.installed_at(&carried).await?;
+            self.note_carrier_uncited(&carried_at)?;
+            baseline.seq = installed_seq;
             baseline.manifest_etag = Some(installed_etag);
             baseline.prev_scan.sync_to(scanned.keys());
             self.state.commit_baseline(baseline)?;
@@ -2007,6 +2155,156 @@ pub(super) fn path_clashes<V, U>(
     mine
 }
 
+/// `path_clashes` over a view and the overlay a merge made of it (lever G,
+/// latency plan §12): the same answer, from each upsert's own neighbourhood
+/// rather than every cited path. An upsert with anything cited under it is
+/// mine to withhold; so, for each cited ancestor that is not an upsert, is
+/// the first upsert under it (the whole-document rule takes one a round,
+/// and the caller re-merges for the rest).
+pub(super) async fn clashes_view(
+    theirs: &mut DocView,
+    overlay: &BTreeMap<String, Option<LeanEntry>>,
+    upserts: &BTreeMap<String, LeanEntry>,
+) -> LeanResult<Vec<String>> {
+    async fn cites(theirs: &mut DocView, overlay: &BTreeMap<String, Option<LeanEntry>>, p: &str) -> LeanResult<bool> {
+        match overlay.get(p) {
+            Some(v) => Ok(v.is_some()),
+            None => Ok(theirs.get(p).await?.is_some()),
+        }
+    }
+    let under = |pfx: &str| {
+        overlay
+            .range::<str, _>((std::ops::Bound::Included(pfx), std::ops::Bound::Unbounded))
+            .take_while(|(k, _)| k.starts_with(pfx))
+            .any(|(_, v)| v.is_some())
+    };
+    let mut mine: Vec<String> = vec![];
+    for u in upserts.keys() {
+        if !cites(theirs, overlay, u).await? {
+            continue;
+        }
+        let pfx = format!("{u}/");
+        if under(&pfx) || theirs.first_under(&pfx, &|k| overlay.contains_key(k)).await?.is_some() {
+            mine.push(u.clone());
+        }
+        let mut cut = 0;
+        while let Some(i) = u[cut..].find('/') {
+            let a = &u[..cut + i];
+            cut += i + 1;
+            if upserts.contains_key(a) || !cites(theirs, overlay, a).await? {
+                continue;
+            }
+            let apfx = format!("{a}/");
+            let first = upserts
+                .range::<str, _>((std::ops::Bound::Included(apfx.as_str()), std::ops::Bound::Unbounded))
+                .take_while(|(k, _)| k.starts_with(&apfx))
+                .map(|(k, _)| k)
+                .find(|k| matches!(overlay.get(k.as_str()), Some(Some(_))));
+            if let Some(q) = first {
+                mine.push(q.clone());
+            }
+        }
+    }
+    mine.sort();
+    mine.dedup();
+    Ok(mine)
+}
+
+/// The shadow check of a chunk-view merge (tests; latency plan §12,
+/// "Verification"): the overlay over theirs is the whole-document merge,
+/// and so are the tombstones, every per-path decision and the clashes.
+fn shadow_merge(
+    full: &MergeOnto,
+    mc: &manifest::MergedChanges,
+    clash: &[String],
+    upserts: &BTreeMap<String, LeanEntry>,
+) {
+    let mut applied = full.theirs.entries.clone();
+    for (p, v) in &mc.overlay {
+        match v {
+            Some(e) => {
+                applied.insert(p.clone(), e.clone());
+            }
+            None => {
+                applied.remove(p);
+            }
+        }
+    }
+    assert!(applied == full.merged.entries, "lever G: the overlay over theirs is not the whole-document merge");
+    assert_eq!(mc.seq, full.merged.seq, "lever G: the merged seq");
+    assert_eq!(mc.tombstones, full.merged.tombstones, "lever G: the merged tombstones");
+    assert_eq!(mc.overridden, full.overridden, "lever G: overridden");
+    assert_eq!(mc.recreated, full.recreated, "lever G: recreated");
+    assert_eq!(mc.over_theirs, full.over_theirs, "lever G: over_theirs");
+    assert_eq!(clash, path_clashes(&full.merged.entries, upserts).as_slice(), "lever G: the path clashes");
+}
+
+/// The shadow check of a chunk-view write: the chunk list is `split_with`
+/// of the merged entries, ref for ref and byte for byte, and the retire set
+/// is the whole-document one.
+fn shadow_write(full: &MergeOnto, chunks: &[(super::chunk::ChunkRef, Option<Vec<u8>>)], retired: &[String], cfg: &super::LeanConfig) {
+    let want = super::chunk::split_with(&full.merged.entries, cfg.chunk_target, cfg.chunk_min, cfg.chunk_max)
+        .expect("the shadow split");
+    let got: Vec<&super::chunk::ChunkRef> = chunks.iter().map(|(r, _)| r).collect();
+    let want_refs: Vec<&super::chunk::ChunkRef> = want.iter().map(|(r, _)| r).collect();
+    assert_eq!(got, want_refs, "lever G: the re-chunk is not split_with of the merged entries");
+    for ((r, body), (_, w)) in chunks.iter().zip(&want) {
+        if let Some(b) = body {
+            assert!(b == w, "lever G: chunk {} encodes differently from split_with", r.addr);
+        }
+    }
+    let whole = CommitDocs::Full { theirs: full.theirs.clone(), installed: full.merged.clone() }.retired();
+    assert_eq!(retired, whole.as_slice(), "lever G: the retire set");
+}
+
+/// H10: what an install carried of the standing declaration, kept for the
+/// ack: the paths it published and deleted, the bytes it published, and
+/// what it dropped. `cites(p)`: the installed document cites `p`. Both
+/// commit paths, the whole document's and lever G's view, record here.
+fn note_carried(
+    intent: &mut IntentJournal,
+    id: &String,
+    classified: &scan::Classified,
+    upserts: &BTreeMap<String, LeanEntry>,
+    report: &BarrierReport,
+    cites: impl Fn(&str) -> bool,
+) {
+    let mut c = intent
+        .carrier
+        .take()
+        .filter(|c| &c.pending_id == id)
+        .unwrap_or_else(|| Carrier { pending_id: id.clone(), ..Default::default() });
+    c.paths.extend(classified.uploads.iter().chain(&classified.deletes).cloned());
+    // L-136: an earlier carry's delete that this one
+    // uploads is an upload again, so a peer's delete
+    // of it is named (`note_carrier_uncited`).
+    // L-137: the bytes it published, so a peer's
+    // replacement of them is named too.
+    for p in &classified.uploads {
+        c.deletes.remove(p);
+        match upserts.get(p) {
+            Some(e) => c.published.insert(p.clone(), e.crc64_b64.clone()),
+            None => c.published.remove(p),
+        };
+    }
+    for p in &classified.deletes {
+        c.published.remove(p);
+    }
+    c.deletes.extend(classified.deletes.iter().cloned());
+    // `honor_publish`'s dropped set, decided here:
+    // parks and deferrals are settled before the
+    // CAS, and an outranked delete is one the merged
+    // document still cites. Since M3 no delete is
+    // outranked (only uploads park, and the merge
+    // removes every unparked delete: `merge_applies_
+    // a_local_delete_and_names_the_version_it_
+    // deleted_over`), so the second clause is a
+    // backstop no barrier reaches.
+    c.dropped.extend(report.parked.iter().chain(&report.deferred).cloned());
+    c.dropped.extend(classified.deletes.iter().filter(|p| cites(p.as_str())).cloned());
+    intent.carrier = Some(c);
+}
+
 pub(super) fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
     match (std::fs::metadata(local), base) {
         (Err(_), None) => false,                   // both absent: clean
@@ -2343,6 +2641,49 @@ impl Syncer {
     /// H10: the carried uploads the document this barrier ended at does not
     /// cite (a peer deleted them since). The ack names that document, so it
     /// reads this; no request is made for it.
+    /// The paths the standing carrier record names (H10): all that
+    /// `note_carrier_uncited` reads of a document.
+    fn carried_paths(&self) -> LeanResult<Vec<String>> {
+        Ok(self.state.load_intent()?.carrier.map(|c| c.paths.into_iter().collect()).unwrap_or_default())
+    }
+
+    /// A DOCUMENT MUST BE MATERIALISABLE: each upload `clash` names is
+    /// withheld this barrier, recorded, and stays dirty for the next (the
+    /// caller's comment at `path_clashes`). Both commit paths withhold here.
+    #[allow(clippy::too_many_arguments)]
+    fn withhold_clashes(
+        &self,
+        clash: Vec<String>,
+        upserts: &mut BTreeMap<String, LeanEntry>,
+        new_baseline_entries: &mut BTreeMap<String, BaselineEntry>,
+        report: &mut BarrierReport,
+        parked: &mut BTreeSet<String>,
+        flush_uuid: &str,
+    ) -> LeanResult<()> {
+        for path in clash {
+            let gone = upserts.remove(&path).expect("named from upserts above");
+            new_baseline_entries.remove(&path);
+            report.uploaded.retain(|p| p != &path);
+            report.published_bytes = report.published_bytes.saturating_sub(gone.size);
+            parked.insert(path.clone());
+            report.parked.push(path.clone());
+            self.state.append_conflict(&ConflictRecord {
+                path: path.clone(),
+                foreign_etag: gone.etag,
+                preserved_key: None,
+                kind: "upload-withheld-path-clash: the document still cites a path \
+                       this one would sit inside (or around) — a published file \
+                       replaced by a directory, or the reverse. No workspace can \
+                       hold both, so nothing is cited here until that citation \
+                       goes; the path stays dirty and publishes next barrier"
+                    .into(),
+                at_unix: now_unix(),
+            })?;
+            self.trace("path_clash", serde_json::json!({"flush": flush_uuid, "path": path}));
+        }
+        Ok(())
+    }
+
     fn note_carrier_uncited(&self, doc: &manifest::LeanManifest) -> LeanResult<()> {
         let mut intent = self.state.load_intent()?;
         let Some(c) = intent.carrier.as_mut() else { return Ok(()) };
