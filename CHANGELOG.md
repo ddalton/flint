@@ -12,6 +12,26 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.60.3] - 2026-10-23
+
+A patch release for a cross-tenant data leak and three defects. On a disk
+that cannot unmap -- EC2 instance storage, attached through SPDK's
+`uring` bdev -- a new volume could read a deleted volume's data where it
+had never written; spdk-tgt 1.7.3 zeroes a cluster before a volume maps
+it unwritten, and thick volumes are zeroed as they are created. Raw
+block PVCs (`volumeMode: Block`) now work. A thick multi-replica volume
+no longer loses a replica to the orphan sweep while it is being
+created, and its replicas are created at once. A CreateVolume that
+outlives the provisioner's deadline now finishes instead of retrying
+forever.
+
+Validated on EC2 2026-10-22/23 (bench8, bench9; 3 x i4i spot): the leak
+reproduced with zeroing switched off and never with it on. Whole-volume
+replica scrubs on the release candidate: 0 of 12,288 chunks differing
+(thick), 0 of 12,288 chunks differing (thin). Restart gate PASS on the
+release's driver and spdk-tgt (10 drills and the kernel deadline checks).
+spdk-csi-driver lib 2,683 pass / 0 fail.
+
 ### Security
 
 - **A new volume could read a deleted volume's data** where it had never
@@ -23,7 +43,7 @@ covered by the stability guarantee.
   (never zeroed at all), and for a disk holding data from before Flint.
   Reproduced on the build box in all four cases (2026-10-22); it also made
   replicas disagree on never-written blocks, which the bench4 scrub read as
-  divergence. Fixed in spdk-tgt (next tag, after the release gates): a
+  divergence. Fixed in spdk-tgt 1.7.3: a
   cluster is zeroed before it is mapped unwritten, thin on its first write,
   thick when the volume is created or grown (series patch 0010,
   `SPDK_BS_ZERO_NEW_CLUSTERS=0` restores the old behaviour for A/B). The
@@ -34,10 +54,12 @@ covered by the stability guarantee.
   cluster needs no zeroes: its data goes into the cluster before the
   cluster is mapped, and it is the cluster's only write (0012), so
   sequential writes of 128 KiB and up, bulk loads and replica rebuilds pay
-  nothing. What remains is a new volume's first small random writes: on
-  bench8 (i4i, thin, 3 replicas, 4 KiB QD32) they ran at 20-25% of normal
-  for about a minute per 48 GiB of first writes, then at normal speed;
-  nothing after a cluster's first write.
+  nothing (bench9, 1 MiB first writes of a 48 GiB file, thin, 3 replicas:
+  695 MiB/s, as with no zeroing at all, 696; zeroing without 0012, 519).
+  What remains is a new volume's first small random writes: on bench9
+  (4 KiB QD32) they ran at 20%, 31%, 72% and 97% of normal in the first
+  four 15 s windows of a 48 GiB file (bench8: 20-25% for about a minute),
+  then at normal speed; nothing after a cluster's first write.
 
 ### Changed
 
@@ -10605,7 +10627,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.2...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.3...HEAD
+[1.60.3]: https://github.com/ddalton/flint/compare/v1.60.2...v1.60.3
 [1.60.2]: https://github.com/ddalton/flint/compare/v1.60.1...v1.60.2
 [1.60.1]: https://github.com/ddalton/flint/compare/v1.60.0...v1.60.1
 [1.60.0]: https://github.com/ddalton/flint/compare/v1.59.1...v1.60.0

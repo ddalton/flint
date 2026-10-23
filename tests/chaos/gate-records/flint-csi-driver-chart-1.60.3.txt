@@ -1,0 +1,23 @@
+RESTART-GATE PASS flint-csi-driver-chart 1.60.3 2026-10-23T01:47:36Z
+cluster: kubernetes-admin@kubernetes; nodes: bench9-aws-1 bench9-aws-2 bench9-cp-1 
+images (node driver tgt):
+  bench9-aws-2 docker.io/dilipdalton/flint-driver@sha256:419bab3bbffe8f2d7b8d37b70e55f4089f720518c4ae6698ed24934da5b32a06 docker.io/dilipdalton/spdk-tgt@sha256:9e31bea6e914028c8387175c719071697a87e7cadaef0133695483b1e2a6c1b7
+  bench9-cp-1 docker.io/dilipdalton/flint-driver@sha256:419bab3bbffe8f2d7b8d37b70e55f4089f720518c4ae6698ed24934da5b32a06 docker.io/dilipdalton/spdk-tgt@sha256:9e31bea6e914028c8387175c719071697a87e7cadaef0133695483b1e2a6c1b7
+  bench9-aws-1 docker.io/dilipdalton/flint-driver@sha256:419bab3bbffe8f2d7b8d37b70e55f4089f720518c4ae6698ed24934da5b32a06 docker.io/dilipdalton/spdk-tgt@sha256:9e31bea6e914028c8387175c719071697a87e7cadaef0133695483b1e2a6c1b7
+results:
+  2026-10-23T01:10:26Z SDL-KERNEL A PASS: target gone 30 s (controller connecting), 0 failed writes, resumed 5 s after the export returned
+  2026-10-23T01:10:26Z SDL-KERNEL B PASS: writes failed 43 s after the target went (ctrl_loss_tmo 40), controller removed
+  2026-10-23T01:10:26Z SDL-KERNEL C PASS: umount blocked 10 s with the target gone; finished 4 s after delete_controller (rc=0)
+  2026-10-23T01:10:26Z SDL-KERNEL PASS
+  2026-10-23T01:11:57Z kernel controllers (rwo): bench9-aws-2 nvme2 127.0.0.1 fio=off cl=300 rd=2;
+  2026-10-23T01:13:49Z done 2.2a -> PASS | 2026-10-23T01:12:12Z,2,2.2a,25,13,0,bench9-aws-2,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"RAID-host spdk-tgt kill; io_resume=21s; raid=raid_pvc-89fa3d8b-61ac-4da8-8b3d-1dc13c56fc06 state=on
+  2026-10-23T01:15:47Z done 1.9 -> PASS | 2026-10-23T01:13:58Z,1r3,1.9,33,23,0,bench9-aws-2,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=32s"
+  2026-10-23T01:18:22Z done 1.9-again -> PASS | 2026-10-23T01:15:56Z,1r3,1.9,71,62,0,bench9-aws-2,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=70s"
+  2026-10-23T01:22:44Z done 2.7 -> PASS | 2026-10-23T01:18:38Z,2,2.7,167,6,0,bench9-aws-2,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"r3 DOUBLE remote-leg kill; worst_ack_age=5s; raid=raid_pvc-89fa3d8b-61ac-4da8-8b3d-1dc13c56fc06 stat
+  2026-10-23T01:33:19Z done 2.11 -> PASS | 2026-10-23T01:23:00Z,2,2.11,541,137,0,bench9-aws-2,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"all-at-once 3-node csi-node kill incl raid host; degraded_direct=none; acked_tail_risk=none; torn
+  2026-10-23T01:35:24Z kernel controllers (rwx): bench9-aws-2 nvme2 127.0.0.1 fio=off cl=300 rd=2;
+  2026-10-23T01:37:09Z done 3.1 -> PASS | 2026-10-23T01:35:33Z,3,3.1,31,21,new:0,bench9-aws-2,bench9-aws-1,Y,Y,Y,PASS,Y,PASS,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y"
+  2026-10-23T01:38:34Z done 3.2 -> PASS | 2026-10-23T01:37:18Z,3,3.2,21,15,0,bench9-aws-1,bench9-aws-1,Y,Y,Y,PASS,Y,PASS,"nfs pod delete: recreate=17s io_resume=18s estale=0"
+  2026-10-23T01:40:01Z done 3.3a -> PASS | 2026-10-23T01:38:42Z,3,3.3a,24,11,0,bench9-aws-1,bench9-aws-1,Y,Y,Y,PASS,Y,PASS,"spdk-tgt kill on nfs node: io_resume=19s nfs_restarts=0"
+  2026-10-23T01:45:00Z done 3.8 -> PASS | 2026-10-23T01:40:09Z,3,3.8,229,24,new:0,bench9-aws-1,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"RWX churn x10; nfs_uid_same=Y"
+  2026-10-23T01:46:47Z done 3.3a-again -> PASS | 2026-10-23T01:45:09Z,3,3.3a,37,26,0,bench9-aws-2,bench9-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt kill on nfs node: io_resume=32s nfs_restarts=0"

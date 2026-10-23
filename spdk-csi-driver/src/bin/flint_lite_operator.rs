@@ -54,7 +54,7 @@ struct Args {
     #[arg(
         long,
         env = "FLINT_HUB_IMAGE",
-        default_value = "dilipdalton/flint-pnfs:1.60.2"
+        default_value = "dilipdalton/flint-pnfs:1.60.3"
     )]
     hub_image: String,
 
