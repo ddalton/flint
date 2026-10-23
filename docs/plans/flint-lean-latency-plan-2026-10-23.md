@@ -93,6 +93,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | E | change tracking (inotify) in place of the walk, full walk on overflow; inotify on `.flint/` in place of the 1 s poll | at 1M, 2 s per barrier and the idle tick | none, if the fallback is the walk | not started; hardest (watch limits, uid) |
 | F | policy: `sentinelMinIntervalSecs` 5 → 1, and a bytes-only publish budget | a sustained ceiling of one declared publish a minute | none | not started; a user decision |
 | G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none: the same document, chunk list and retire set | **built**, the commit side (§12); the consume side is G2 |
+| G2 | the consume derives only where the document moved since its last derive: a chunk-list diff | nothing measurable on the shipped allocator (§14) | a new rule and claim (`ddoc`, `Inv_DiffSound`) | **dropped** (user, 2026-10-23); archived on the local branch `lean-latency-g2-dropped` |
 
 **What the two measurements say about order.** On S3 and at 20k–200k
 files, requests dominate, so A, C and B come first. At 1M, CPU dominates,
@@ -453,7 +454,10 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
    belongs in LeanP1 as an invariant (§12). **The order after it** (user,
    2026-10-23): G2 next, then the gateway's commits (UI saves, deletes,
    renames and promotes edit the whole document today), the latter after a
-   measurement of what a UI save costs at 200k and 1M.
+   measurement of what a UI save costs at 200k and 1M. **G2 is dropped**
+   (user, 2026-10-23: "if G2 makes no difference we should drop it"; §14).
+   **The benches measured the wrong allocator** (§15): from here on a
+   lever is measured on flint-sync's own (musl + mimalloc).
 
 ## 10. Lever B, as built
 
@@ -872,3 +876,116 @@ Verification on the box:
 - Mutation controls V1–V9 each fail their tests. V9's first form was
   vacuous: the full load also remembered the aliases. Its second form
   stops every path from remembering them, and is caught.
+
+## 14. Lever G2, the consume side: explored and dropped
+
+(§13 is lever E's, on its own branch.)
+
+**What it was.** A consume that found the document moved derived only
+where it had moved since its last derive. It diffed the two chunk lists,
+whose content addresses make an unchanged chunk provably unchanged, and
+looked at the paths it had marked. Its target was the 2.7 s that G's bench
+charged to the consume when a peer's change arrived at 1M files.
+
+**What the model found first, and what to reuse if this returns.** A diff
+against the derived document alone is unsound. Take a path this tree
+publishes over a document that moved since its derive, which the UI then
+deletes. Neither document cites it, so the tree keeps a file nothing
+cites, forever. The fix: such a commit marks its own paths for the next
+derive.
+
+In LeanP1 (archived), `CommitRechecksOwn = FALSE` breaks `Inv_DiffSound`
+at depth 12 on exactly that route. The fact that makes the diff sound,
+`Inv_DiffRecord`, never reads the document: on what the tree holds, the
+record and the baseline differ only where it marked. The full M0–M10 proof
+was never re-run; `ddoc` changes the writer record, so it would need to be.
+
+**Why it was dropped.** Built and verified (syncer 381, gateway 66,
+mutations D1–D5 caught, 69 battery tests through the diff, trace 84/84).
+Then it was measured on flint-sync's own allocator (§15). Taking a peer's
+one-file change, at 25 ms a request:
+
+| | without G2 | with G2 |
+|---|---:|---:|
+| 200k, musl + mimalloc (0 ms) | 28.3 ms | 27.9 ms |
+| 1M, musl + mimalloc | 239 ms | 169 ms |
+| 1M, gnu + mimalloc | 212 ms | 218 ms |
+| 1M, glibc | 455 ms | 441 ms |
+
+One run each. The barrier around it was 2.0–2.9 s, almost all of it the
+walk. Whether 70 ms of a 2.4 s barrier is real is uncertain, since the
+gnu runs show none. The 2.7 s G2 targeted was not the derive: it was
+glibc's (§15).
+
+## 15. The allocator: what the benches measured, and what ships
+
+**The finding.** flint-sync ships as a static musl binary with mimalloc.
+`fastalloc` is a default feature since 2026-09-12, after musl's
+single-lock malloc tripled a checkout's CPU. But `#[global_allocator]` is
+declared only in `bin/flint_sync.rs`. Every latency bench in this plan
+(A, C, B, D, G, E) and the battery ran the library's test binary, which
+never had it: they measured the box's glibc malloc, which nothing ships
+with.
+
+`lib.rs` now declares mimalloc for the test binary under `fastalloc`, so
+`cargo test` runs the shipped allocator.
+
+**glibc moved cost between steps.** glibc keeps small freed chunks in
+fastbins and merges them at the next large allocation. A barrier's walk
+frees about a path string per file at its end, so the next barrier's
+first step paid the merge. That step is the consume:
+- on glibc it cost 25–33 ms per barrier at 200k and 116–256 ms at 1M,
+  idle ticks included;
+- with fastbins off (`GLIBC_TUNABLES=glibc.malloc.mxfast=0`) it fell to 0;
+- on mimalloc it was 0 at 200k, and at 1M only its one request.
+
+G's 401–424 ms consume at 200k, and its 2.7 s at 1M, were mostly this.
+(flint-c2 proposed the mechanism; this comparison confirmed it.)
+
+**The comparison** (`/mnt/nvme/alloc-bench` on the box, one run per cell;
+the same G2 tree; ms; 200k at 0 ms a request, 1M at 25 ms):
+
+| allocator | 200k idle | 200k publish | 1M idle | 1M publish | 1M walk |
+|---|---:|---:|---:|---:|---:|
+| musl + mimalloc (**ships**) | 424 | 473 | 2,254 | 2,600 | 2,149 |
+| glibc (**what the benches measured**) | 482 | 516 | 2,601 | 3,162 | 2,293–2,359 |
+| glibc, no fastbins | 465 | 509 | — | — | — |
+| gnu + mimalloc | 337 | 350 | 1,794 | 2,220 | 1,694 |
+| musl's own malloc | 485 | 511 | — | — | — |
+
+"Publish" is a one-file publish with collection not due.
+
+- **What ships is 10–20% faster than what we measured**, and the
+  difference sits in the walk and in the consume's merge.
+- **A gnu build with mimalloc is another 20–25% faster**, almost all in the
+  walk (1.69 s against 2.15 s at 1M). That points at musl's libc (string
+  and syscall wrappers), not the allocator.
+- **Decision (user, 2026-10-23): keep shipping musl + mimalloc.** glibc is
+  avoided for its CVE exposure. Its large surface (NSS, iconv, locale,
+  `GLIBC_TUNABLES`) is mostly unreachable from a static sidecar, but it
+  still lands in every image scan. The walk's gap is to be won inside musl
+  instead. Profile both walks at 1M first; if the libc wrappers are the
+  cost, call `getdents64`/`statx` directly (rustix's raw-Linux backend; the
+  build already pulls in `linux-raw-sys`), which makes the walk
+  independent of the libc. That is lever E's code (§13): handed to it. The
+  cost of the choice: a static binary carries its own musl, so a musl CVE
+  needs a `flint-sync` rebuild, and image scanners may not see it.
+- **Every per-step figure above §15 is glibc's.** The relative gains of A,
+  C, D and G come from whole steps going away (requests, parses, document
+  clones), so they should hold. G's 1M publish (7.0 → 3.1 s) is worth
+  re-measuring on the shipped allocator before it is quoted.
+
+**How to build what ships, on the box.** Plain cargo cannot build
+mimalloc's C for musl there. zig 0.13 at `/mnt/nvme/zig-linux-x86_64-0.13.0`
+does it, behind two wrappers in `~/musl-cc`:
+- `x86_64-linux-musl-gcc` runs `zig cc -target x86_64-linux-musl`, and drops
+  the `--target=<rust triple>` that cc-rs adds;
+- `x86_64-linux-musl-ar` runs `zig ar`.
+
+Then `PATH=~/musl-cc:$PATH cargo test --release --lib --target
+x86_64-unknown-linux-musl`. The wrappers come from `~/musl-mi-build.sh`.
+
+**One oddity, left for the post-checkout re-hash lever.** At 200k the
+first barrier after a checkout took 21 s on every allocator but musl's
+own, which took 2.2 s. It looks like timing, not CPU: the slower checkout
+leaves fewer files inside the racy window, so fewer need re-hashing.

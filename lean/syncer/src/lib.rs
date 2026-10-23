@@ -84,6 +84,13 @@ mod tests;
 #[cfg(test)] mod tests_cache;
 #[cfg(test)] mod tests_baseline;
 #[cfg(test)] mod tests_news;
+// The binary's allocator (`fastalloc`, bin/flint_sync.rs) never reached
+// the test binary: the battery and the latency benches ran the system
+// malloc (glibc on the box) while flint-sync ships mimalloc. Under
+// `fastalloc` they run the shipped allocator too.
+#[cfg(all(test, feature = "fastalloc"))]
+#[global_allocator]
+static TEST_GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(test)] mod tests_rechunk;
 #[cfg(test)] mod tests_docview;
 
