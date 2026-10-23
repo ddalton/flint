@@ -41,6 +41,11 @@ pub fn image_path(dir: &Path) -> PathBuf {
     dir.join("tree.img")
 }
 
+/// The loop mount's options. `nodev,nosuid` because checkout restores
+/// the manifest's mode bits, setuid and setgid included, and the tenant
+/// bind is cloned from this mount (`fuse::bind_mount` adds them again).
+pub const LOOP_OPTS: &str = "loop,nodev,nosuid,noatime";
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
@@ -90,7 +95,7 @@ mod imp {
             })?;
         }
         std::fs::create_dir_all(tree).map_err(|e| format!("tree {}: {e}", tree.display()))?;
-        run("mount -o loop", Command::new("mount").args(["-o", "loop,noatime"]).arg(&img).arg(tree)).inspect_err(
+        run("mount -o loop", Command::new("mount").args(["-o", LOOP_OPTS]).arg(&img).arg(tree)).inspect_err(
             |_| {
                 if fresh {
                     let _ = std::fs::remove_file(&img);
@@ -157,7 +162,7 @@ mod imp {
             return Ok(());
         }
         std::fs::create_dir_all(tree).map_err(|e| format!("tree {}: {e}", tree.display()))?;
-        run("mount -o loop", Command::new("mount").args(["-o", "loop,noatime"]).arg(&img).arg(tree))
+        run("mount -o loop", Command::new("mount").args(["-o", LOOP_OPTS]).arg(&img).arg(tree))
     }
 
     /// Unmount the ceiling and reclaim its blocks. Best effort by
@@ -210,5 +215,54 @@ mod tests {
         let img = image_path(dir);
         assert_eq!(img, dir.join("tree.img"));
         assert!(!img.starts_with(dir.join("tree")), "the image must not live inside the tree it backs");
+    }
+
+    #[test]
+    fn the_loop_mount_is_nodev_and_nosuid() {
+        let opts: Vec<&str> = LOOP_OPTS.split(',').collect();
+        for o in ["loop", "nodev", "nosuid"] {
+            assert!(opts.contains(&o), "{o} missing from {LOOP_OPTS}");
+        }
+    }
+
+    /// Both mounts, `ensure`'s and `remount`'s, as the kernel reports
+    /// them. Needs root, mkfs.ext4 and a loop device; it runs in a
+    /// private mount namespace on its own thread (the `mount` child
+    /// inherits it), so nothing reaches the machine's mount table.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_tree_is_mounted_nodev_and_nosuid() {
+        use nix::mount::{mount, umount2, MntFlags, MsFlags};
+        if !nix::unistd::geteuid().is_root() {
+            eprintln!("SKIPPED: needs root for a loop mount");
+            return;
+        }
+        // SAFETY: unshare(2) of this test thread's own mount namespace.
+        assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWNS) }, 0, "unshare: {}", std::io::Error::last_os_error());
+        mount(None::<&str>, "/", None::<&str>, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None::<&str>).unwrap();
+
+        let t = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(t.path()).unwrap();
+        let tree = dir.join("tree");
+        let opts = || {
+            let info = std::fs::read_to_string("/proc/thread-self/mountinfo").unwrap();
+            let want = tree.to_string_lossy().into_owned();
+            info.lines()
+                .filter(|l| l.split(' ').nth(4) == Some(want.as_str()))
+                .last()
+                .and_then(|l| l.split(' ').nth(5).map(str::to_string))
+                .unwrap_or_else(|| panic!("{want} is not a mount point:\n{info}"))
+        };
+        let check = |opts: String| {
+            let has = |o: &str| opts.split(',').any(|x| x == o);
+            assert!(has("nodev") && has("nosuid"), "{opts}");
+        };
+
+        ensure(&dir, &tree, 1, 1000, 1000).unwrap();
+        check(opts());
+        umount2(&tree, MntFlags::empty()).unwrap();
+        remount(&dir, &tree).unwrap();
+        check(opts());
+        let _ = umount2(&tree, MntFlags::MNT_DETACH);
     }
 }

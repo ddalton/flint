@@ -12,6 +12,19 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Security
+
+- **A lean workspace was mounted `suid` and `dev`.** Checkout restores
+  each file's mode bits, setuid and setgid included, and the pod's
+  read-write bind of the tree (and the quota's loop mount) carried the
+  node root filesystem's flags, so any process in the pod could run a
+  checked-out setuid binary as the workspace's uid. Every bind into a
+  pod is now `nodev,nosuid`, read-write ones included. It is made from a
+  staging mount that already has the flags, so the host's copy, the one
+  kubelet hands the container, has them too. The loop mount is
+  `loop,nodev,nosuid,noatime`. Passthrough mounts were already
+  `nodev,nosuid`.
+
 ## [1.60.3] - 2026-10-23
 
 A patch release for a cross-tenant data leak and three defects. On a disk

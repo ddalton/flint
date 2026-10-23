@@ -142,29 +142,46 @@ mod imp {
         Ok(fd)
     }
 
-    /// Bind `src` onto the tenant's `target`, read-only when asked.
+    /// The flags the stage is remounted with: `nodev,nosuid` always,
+    /// `ro` when asked.
     ///
-    /// **A read-only bind is made FROM a read-only mount, never by
-    /// remounting the target.** The plugin's `/var/lib/kubelet` is a
-    /// Bidirectional (shared) mount, so the bind at `target` propagates
-    /// to the host, and the host's copy is the one kubelet hands the
-    /// container. Propagation carries MOUNT events, not a later
+    /// Always, because a lean tree is a plain directory (or an ext4
+    /// image) that checkout fills with the manifest's mode bits,
+    /// `mode & 0o7777`, setuid and setgid included. A plain `MS_BIND`
+    /// clones the flags of whatever the directory sits on — the node's
+    /// root filesystem, `suid,dev` — so any process in the pod could run
+    /// a checked-out setuid binary as the CR's uid. The FUSE source is
+    /// born `nodev,nosuid` (`open_and_mount`); the lean tree gets them
+    /// here (and from its loop mount when the quota is on, `quota.rs`).
+    pub fn stage_flags(read_only: bool) -> MsFlags {
+        let flags = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_NODEV | MsFlags::MS_NOSUID;
+        if read_only {
+            flags | MsFlags::MS_RDONLY
+        } else {
+            flags
+        }
+    }
+
+    /// Bind `src` onto the tenant's `target`, `nodev,nosuid`, and
+    /// read-only when asked.
+    ///
+    /// **Every bind is made FROM a mount that already has its flags,
+    /// never by remounting the target.** The plugin's `/var/lib/kubelet`
+    /// is a Bidirectional (shared) mount, so the bind at `target`
+    /// propagates to the host, and the host's copy is the one kubelet
+    /// hands the container. Propagation carries MOUNT events, not a later
     /// `MS_REMOUNT` of one instance's flags: bind-then-remount left the
     /// plugin's instance `ro` and the host's `rw`, and a read-only
     /// consumer wrote its tree freely (access drill A2, EC2 2026-09-15,
     /// kernel 6.18; util-linux's one-call `mount --bind -o ro` does the
     /// same). A propagated copy is a clone of the mount being attached,
     /// flags included, so the target is bound from a staging bind that
-    /// is already read-only, and every copy is born `ro`. The stage sits
-    /// beside `src` in the plugin-owned volume directory and is unmounted
-    /// straight after; its unmount propagates like its mount did.
+    /// already carries [`stage_flags`], and every copy is born with them.
+    /// The read-write bind goes the same way for `nodev,nosuid`. The stage
+    /// sits beside `src` in the plugin-owned volume directory and is
+    /// unmounted straight after; its unmount propagates like its mount did.
     pub fn bind_mount(src: &Path, target: &Path, read_only: bool) -> io::Result<()> {
         std::fs::create_dir_all(target)?;
-        if !read_only {
-            mount(Some(src), target, None::<&str>, MsFlags::MS_BIND, None::<&str>)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", src.display(), target.display())))?;
-            return Ok(());
-        }
         let stage = ro_stage_of(src);
         // A stage a crash left between its bind and its unmount.
         let _ = umount2(&stage, MntFlags::MNT_DETACH);
@@ -172,14 +189,8 @@ mod imp {
         let bound = (|| -> io::Result<()> {
             mount(Some(src), &stage, None::<&str>, MsFlags::MS_BIND, None::<&str>)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", src.display(), stage.display())))?;
-            mount(
-                None::<&str>,
-                &stage,
-                None::<&str>,
-                MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
-                None::<&str>,
-            )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("remount ro {}: {e}", stage.display())))?;
+            mount(None::<&str>, &stage, None::<&str>, stage_flags(read_only), None::<&str>)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("remount {}: {e}", stage.display())))?;
             mount(Some(&stage), target, None::<&str>, MsFlags::MS_BIND, None::<&str>)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("bind {} → {}: {e}", stage.display(), target.display())))
         })();
@@ -367,9 +378,11 @@ mod imp {
 
 pub use imp::{bind_mount, is_mountpoint, open_and_mount, unmount, wait_ready_opts};
 
-/// The directory a read-only bind is staged on: beside its source, in the
+/// The directory a bind is staged on: beside its source, in the
 /// plugin-owned volume directory (`<vid>/ro-stage` for `<vid>/tree` or
 /// `<vid>/src`). Removal paths unmount it before removing the directory.
+/// Named for the read-only bind it was first made for; the read-write
+/// bind is staged there too, for `nodev,nosuid` ([`bind_mount`]).
 pub const RO_STAGE: &str = "ro-stage";
 
 pub fn ro_stage_of(src: &Path) -> std::path::PathBuf {
@@ -417,6 +430,86 @@ mod tests {
     fn a_read_only_bind_is_staged_inside_the_volume_directory() {
         assert_eq!(ro_stage_of(Path::new("/p/volumes/v1/tree")), Path::new("/p/volumes/v1/ro-stage"));
         assert_eq!(ro_stage_of(Path::new("/p/volumes/v1/src")), Path::new("/p/volumes/v1/ro-stage"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_stage_is_nodev_and_nosuid_and_only_a_read_only_one_is_ro() {
+        use nix::mount::MsFlags;
+        for ro in [false, true] {
+            let f = imp::stage_flags(ro);
+            assert!(f.contains(MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_NODEV | MsFlags::MS_NOSUID), "{f:?}");
+            assert_eq!(f.contains(MsFlags::MS_RDONLY), ro, "{f:?}");
+        }
+    }
+
+    /// The per-mount options (field 6) of the topmost mount at `path`.
+    #[cfg(target_os = "linux")]
+    fn mount_opts(info: &str, path: &str) -> Option<String> {
+        info.lines()
+            .filter(|l| l.split(' ').nth(4).map(|m| unescape_mountinfo(m) == path).unwrap_or(false))
+            .last()
+            .and_then(|l| l.split(' ').nth(5).map(str::to_string))
+    }
+
+    /// Judged where the consumer sees it: the HOST's copy, which is the
+    /// one kubelet hands the container. Two peer mounts stand in for the
+    /// plugin's Bidirectional `/var/lib/kubelet` and the host's. A bind
+    /// remounted in place passes on the plugin's side and fails on the
+    /// host's (drill A2), so both are read.
+    ///
+    /// Needs root for mount(2). It runs in a private mount namespace on
+    /// its own thread, so nothing reaches the machine's mount table, and
+    /// reads `/proc/thread-self/mountinfo` (`self` is the main thread's).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn every_bind_reaches_the_hosts_copy_nodev_and_nosuid() {
+        use nix::mount::{mount, umount2, MntFlags, MsFlags};
+        if !nix::unistd::geteuid().is_root() {
+            eprintln!("SKIPPED: needs root for mount(2)");
+            return;
+        }
+        // SAFETY: unshare(2) of this test thread's own mount namespace.
+        assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWNS) }, 0, "unshare: {}", io::Error::last_os_error());
+        mount(None::<&str>, "/", None::<&str>, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None::<&str>).unwrap();
+
+        let t = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(t.path()).unwrap();
+        let plugin = base.join("plugin");
+        let host = base.join("host");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::create_dir_all(&host).unwrap();
+        mount(Some(&plugin), &plugin, None::<&str>, MsFlags::MS_BIND, None::<&str>).unwrap();
+        // `suid,dev`, as the node's root filesystem under the real
+        // `/var/lib/kubelet` is. A tempdir on a `nosuid,nodev` tmpfs
+        // (Ubuntu's `/tmp`) would lend every bind its flags, and the
+        // code before the fix would pass.
+        mount(None::<&str>, &plugin, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT, None::<&str>).unwrap();
+        mount(None::<&str>, &plugin, None::<&str>, MsFlags::MS_SHARED, None::<&str>).unwrap();
+        mount(Some(&plugin), &host, None::<&str>, MsFlags::MS_BIND, None::<&str>).unwrap();
+        let info = std::fs::read_to_string("/proc/thread-self/mountinfo").unwrap();
+        for side in [&plugin, &host] {
+            let opts = mount_opts(&info, &side.to_string_lossy()).unwrap();
+            assert!(!opts.split(',').any(|o| o == "nodev" || o == "nosuid"), "precondition: {} is {opts}", side.display());
+        }
+
+        let src = plugin.join("volumes/v1/tree");
+        std::fs::create_dir_all(&src).unwrap();
+        for (name, ro) in [("rw", false), ("ro", true)] {
+            bind_mount(&src, &plugin.join("pods").join(name), ro).unwrap();
+            let info = std::fs::read_to_string("/proc/thread-self/mountinfo").unwrap();
+            for side in [&plugin, &host] {
+                let at = side.join("pods").join(name);
+                let opts = mount_opts(&info, &at.to_string_lossy())
+                    .unwrap_or_else(|| panic!("{} is not a mount point:\n{info}", at.display()));
+                let has = |o: &str| opts.split(',').any(|x| x == o);
+                assert!(has("nodev") && has("nosuid"), "{}: {opts}", at.display());
+                assert!(has(if ro { "ro" } else { "rw" }), "{}: {opts}", at.display());
+            }
+            assert!(!mountinfo_has(&info, &ro_stage_of(&src).to_string_lossy()), "the stage outlived its bind:\n{info}");
+        }
+        let _ = umount2(&host, MntFlags::MNT_DETACH);
+        let _ = umount2(&plugin, MntFlags::MNT_DETACH);
     }
 
     #[test]
