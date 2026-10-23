@@ -68,6 +68,7 @@ pub mod sentinel;
 pub mod state;
 pub mod sync;
 pub mod trace;
+pub mod tracked;
 pub mod untracked;
 pub mod uds;
 pub mod verbs;
@@ -79,6 +80,7 @@ mod tests;
 #[cfg(test)] mod tests_bench;
 #[cfg(test)] mod tests_steps;
 #[cfg(test)] mod tests_cache;
+#[cfg(test)] mod tests_baseline;
 
 use std::path::PathBuf;
 use std::sync::Arc;

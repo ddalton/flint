@@ -226,4 +226,16 @@ async fn barrier_cost_against_workspace_size() {
     put(dir_b.path(), 3, "v2 from B, sweep due");
     let r = timed(&mut b, &mut ops, n, kind, "own_publish_one_sweep_due").await;
     println!("BENCH n={n} swept={}", r.swept);
+    // Lever D's two costs: the parses it saves, and the memory it keeps.
+    // Peak RSS covers BOTH writers and, on the in-memory store, the store.
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kib = |key: &str| {
+        status.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).unwrap_or("?").to_string()
+    };
+    println!(
+        "BENCH n={n} baseline_parses_b={} vm_hwm_kib={} vm_rss_kib={}",
+        b.state.baseline_parses(),
+        kib("VmHWM:"),
+        kib("VmRSS:")
+    );
 }

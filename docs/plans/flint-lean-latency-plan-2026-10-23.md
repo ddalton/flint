@@ -89,7 +89,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | **A** | a manifest chunk cache, verified by address, misses fetched in parallel; the gateway judges and commits against the document it holds | per load: N sequential chunk GETs become one LIST plus the changed chunks. Per UI save: two whole-document loads become two pointer reads | none: a load returns the document at the pointer it read, as before | **built** (§5) |
 | **C** | the collection pass (retire ledger, reap, orphan, generation and chunk sweeps) runs on a cadence, not on every publish | per publish: 3 LISTs and 4 GETs under the lease | none: the reap and the sweeps are steps a commit section may take or not | **built** (§6) |
 | B | an adaptive news poll: read the pointer at 1 s while the agent is active, back to the floor when idle; the request cell rides the same read | visibility from up to 60 s to about 1 s | none: more consumes, each the same step | not started. Cost: up to 1 GET/s per active workspace |
-| D | the baseline in memory, loaded once per process, persisted incrementally | at 1M, the baseline file is 38% of a 10 s publish: two parses (about 27%, removed by loading it once) and one full rewrite (about 9%, mostly removed by persisting incrementally); and most of the idle tick | none | assigned to flint-c2 (2026-10-23), off the A+C commit; not started |
+| D | the baseline in memory, loaded once per process, persisted incrementally | at 1M, the baseline file is 38% of a 10 s publish: two parses (about 27%, removed by loading it once) and one full rewrite (about 9%, mostly removed by persisting incrementally); and most of the idle tick | none | **built** (§11) |
 | E | change tracking (inotify) in place of the walk, full walk on overflow; inotify on `.flint/` in place of the 1 s poll | at 1M, 2 s per barrier and the idle tick | none, if the fallback is the walk | not started; hardest (watch limits, uid) |
 | F | policy: `sentinelMinIntervalSecs` 5 → 1, and a bytes-only publish budget | a sustained ceiling of one declared publish a minute | none | not started; a user decision |
 | G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none | not started; needs A's per-chunk view |
@@ -418,8 +418,8 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
    one request per load that needs chunks.
 2. **The collection cadence (C): 300 s** (user, 2026-10-23): half the
    retire age, so replaced versions stay up to 1.5 × G.
-3. **D: assigned to flint-c2** (user, 2026-10-23), in its own worktree off
-   the A+C commit. Still open: B (1 s visibility for an active agent, up to
+3. **D: built by flint-c2** (assigned by the user, 2026-10-23; §11), on
+   `lean-latency-d` off the A+C commit. Still open: B (1 s visibility for an active agent, up to
    1 GET/s each), G (the document under the lease, 38% of a 1M publish;
    D and G together are 76%), the post-checkout re-hash (§8, item 5), and
    E, the hardest and the last.
@@ -427,3 +427,160 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
    A and C stay inside behaviours LeanP1 and LeanChunkGC already have
    (§5, §6); the code-trace check at the shipped cadence is the evidence
    for C (§6).
+6. **D: no model change, no re-proof.** A save is still all or nothing,
+   the disk still holds what the last successful save held, and a restart
+   reads the disk, which is what LeanP1's `Restart` assumes (§11). S3,
+   folding `reader.json` into the baseline, is NOT done: it changes the
+   reader's skip rule, which the model checks, to save one small write per
+   pull.
+
+## 11. Lever D, as built
+
+flint-c2, 2026-10-23, branch `lean-latency-d` off the A+C commit
+`1528f5d5`.
+
+**What it removes.** Every barrier parsed `.flint-sync/baseline.json`
+twice (once in `consume_owed`, once before the scan) and rewrote it whole
+at the end of every publish. The deployed floor tick parsed it twice more
+in `ticker_from`, for `seq` and `derived_etag`; the bench does not run
+that path, so it under-counts what a deployed tick paid. At 1M files a
+parse is about 1.3 s and the rewrite 0.85 s.
+
+**On disk.** `baseline.json` keeps its format: the whole snapshot,
+written temp+rename, plus one new field, `journal`, the snapshot's id,
+minted at each whole write and serialised LAST so the e2e plant's
+`sed` anchor still finds the baseline's own `"entries":{` first
+(`run-verbs.sh`). Beside it, `baseline.log`: the first line names the
+snapshot id it belongs to, and each further line is one save:
+`<crc64 hex> <json>` of the scalars (`seq`, `manifest_etag`,
+`derived_etag`) and the members it put or removed in `entries`,
+`skipped` and `prev_scan`. A load applies every whole, verified line of
+the journal that names its snapshot and stops at the first that is not
+(a crash mid-line, a flipped bit). So a torn save is a save that never
+happened, as a torn temp file was before. A save writes at the verified
+length, never at the file's end, so the bytes of one that failed half-way
+are overwritten, not followed. A whole write (the first save, a large
+change, a journal past a quarter of its snapshot) writes the snapshot
+with a new id and then a fresh journal; a death between the two leaves
+the old journal naming the old id, and the next load ignores it.
+
+**In memory.** The state directory's flock already made the syncer its
+only writer, so the parsed baseline cannot change under the process
+holding it. `SyncerState` holds it:
+
+- `take_baseline` / `commit_baseline`: the hot paths (consume, the
+  barrier's scan and commit, sync, checkout) take it and hand it back,
+  with no copy. A path that errors out drops it, and the next load reads
+  the disk, which still holds the last successful save.
+- `with_baseline`: per-tick readers (the ticker, the publish ack, the
+  reader, the drain) read it in place.
+- `load_baseline` / `save_baseline`: copies, for the rare paths
+  (rescope) and the battery.
+
+`TrackedMap` and `TrackedSet` (`tracked.rs`) record the keys a save
+changed. They have no `DerefMut`, so a mutation the journal would miss
+does not compile. What they cannot record is a collection replaced
+whole, or a copy older than the last save; each collection carries the
+lineage it was loaded under, and a save of anything not of the disk's
+current lineage writes the whole document, which is exactly what every
+save did before D. A save that fails drops the held copy.
+`TrackedSet::sync_to` walks the old and new members once and copies only
+what came or went, so `prev_scan` no longer allocates a million strings
+per barrier.
+
+After a whole write the store holds the bytes it just wrote, parsed, not
+the map it wrote (the old one freed first). The first cut held the map,
+and the bench below found every walk of a large structure slower under it:
+a map a checkout built by inserting in arrival order is scattered across
+the heap, and it now lived for the whole process instead of one barrier.
+A parse allocates in key order. Whole writes are rare (a checkout, a
+compaction, a large change), so that is one parse each.
+
+**Readers outside the process, and tests that fake a restart.**
+`flint-sync status` read `baseline.json` raw for `baseline_seq`; it now
+reads snapshot and journal through `state::read_baseline_at`, which never
+cuts a torn line (it may be the owner's write in progress). In the
+battery, one test read `baseline.json` raw and two helpers faked a crash
+by copying it aside (three tests failed through one of them); they now
+read through `read_baseline_at`, or copy `baseline.log` with it, because
+the durable baseline is both files. The e2e plant in `run-verbs.sh` edits
+the snapshot with `sed` while no syncer runs; the id survives the edit, so
+the journal still applies (`a_snapshot_edited_in_place_keeps_its_journal`).
+The e2e itself was not re-run.
+
+**Not done.** S3 (the reader's `reader.json` memo folded into
+`derived_etag`): it changes the reader's skip rule, which the model
+checks (`RPullRead`, `LeanP1ReaderOwedIgnored`), to save one small write
+per pull.
+
+**Evidence.**
+
+- The lean battery on the code as committed: 351 pass (the base's 340
+  and D's 11), 1 ignored (the bench).
+  The gateway's tests pass against it.
+- `tests_baseline.rs`: a small save appends and reads back; a torn line;
+  a corrupt line; a half-written line followed by a save; a journal for
+  another snapshot; a snapshot edited in place keeps its journal; a stale
+  copy and a collection replaced whole are written whole; `sync_to`; a
+  seeded 400-step walk of every mutation, re-read from disk at every
+  step, with stale copies and compactions; and a steady barrier parses
+  the baseline zero times, with a control (forget it once: one parse).
+- Six mutations, each failing its test and nothing passing vacuously:
+  the lineage check ignored, the torn tail not cut, the save appended at
+  the end, the journal applied to any snapshot, the checksum not checked,
+  no cache.
+
+**Results.** The bench of §4, on the box, in-memory store; the A+C
+commit `1528f5d5` (before) against D, two binaries interleaved within
+each repetition. 20k and 200k: three repetitions, ranges. 1M: one run.
+Logs on the box (`/mnt/nvme/d-bench/`, `/mnt/nvme/d-reparse/`,
+`/mnt/nvme/d-final/`).
+
+The first cut (no re-parse), at 0 ms and at 25 ms a request:
+
+| barrier | 20k before | 20k D | 200k before | 200k D | 1M before | 1M D |
+|---|---:|---:|---:|---:|---:|---:|
+| idle tick, 0 ms | 81–82 ms | 39–40 ms | 948–967 ms | 476–482 ms | 5.1 s | 2.5 s |
+| idle tick, 25 ms | 142–145 ms | 106–107 ms | 996–1000 ms | 541–547 ms | 5.1 s | 2.6 s |
+| taking a peer's one-file change, 25 ms | 267–274 ms | 221–223 ms | 1542–1548 ms | 1126–1130 ms | 8.4 s | 5.5 s |
+| one-file publish, collection not due, 25 ms | 589–593 ms | 528–541 ms | 2210–2217 ms | 1791–1796 ms | 10.0 s | 8.0 s |
+| one-file publish, collection due, 25 ms | 794–801 ms | 728–738 ms | 2431–2444 ms | 2003–2021 ms | 10.3 s | 8.3 s |
+
+What went, per step at 1M and 25 ms (one-file publish): `consume` 1519 to
+151 ms, `baseline_load` 1308 to 0, the save 843 to 65. What came back:
+`scan`, `load`, `merge` and `retire_set` each walk a large structure, and
+each got slower, 1.6 s together at 1M (`retire_set` 418 to 961 ms), 260 ms
+at 200k. `retire_set` never touches the baseline, so it is the heap, not
+the map's own walk.
+
+The re-parse, at 0 ms (200k: three repetitions, the three binaries
+interleaved; 1M: one run):
+
+| barrier | 200k before | 200k first cut | 200k D | 1M before | 1M first cut | 1M D |
+|---|---:|---:|---:|---:|---:|---:|
+| idle tick | 962–987 ms | 479–487 ms | 445–450 ms | 5.1 s | 2.5 s | 2.4 s |
+| taking a peer's one-file change | 1444–1445 ms | 989–1009 ms | 881–888 ms | 8.3 s | 5.3 s | 5.1 s |
+| one-file publish, collection not due | 1844–1855 ms | 1423–1438 ms | 1223–1235 ms | 9.7 s | 7.6 s | 6.9 s |
+| that publish's `merge` | 165–167 ms | 225–235 ms | 167–168 ms | 866 ms | 1177 ms | 989 ms |
+| that publish's `retire_set` | 81–84 ms | 181–184 ms | 100–104 ms | 418 ms | 961 ms | 718 ms |
+
+At 200k the re-parse takes `load` and `merge` back to where they were and
+most of `retire_set`; `scan` stays 40–70 ms slower. At 1M it takes back
+about half of what the first cut lost; the rest (`retire_set` still 300 ms
+over) is not understood. D as committed (the re-parse, the old map freed
+first), one run at 1M, 0 ms: idle tick 2.5 s, taking a peer's change
+5.1 s, one-file publish 6.9 s (7.0 s with the collection due, 7.6 s with
+the orphan sweep due too).
+
+**The cost: memory.** The baseline now stays resident between barriers.
+Peak RSS of the whole bench process, which also holds the in-memory store
+and a second writer: 20k 139–141 to 142–144 MiB, 200k 1242–1253 to
+1314–1365 MiB, 1M 5929 MiB to 6364 MiB as committed (6158 for the first
+cut, 6349 for the re-parse). The bench process holds two writers, each
+with its own resident baseline, so this is roughly 200 MiB a writer at 1M
+files, from single runs. Freeing the written map before the re-parse did
+not move the peak. The bench does not measure the syncer alone.
+
+**Model.** None changes (§9, item 6): a save is still all or nothing,
+the disk still holds what the last successful save held, and a restart
+reads the disk, as LeanP1's `Restart` assumes.

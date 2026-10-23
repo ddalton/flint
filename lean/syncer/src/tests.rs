@@ -7884,12 +7884,12 @@ async fn a_narrow_stopped_before_its_last_unlink_has_uncited_everything_first() 
             "outputs/big-5.bin".into(),
             "rescope-before-unlink",
             Box::new(move || {
-                // The file the barrier reads at its next start (the state
-                // dir's lock refuses a second `SyncerState` while it runs).
-                let raw = std::fs::read(state_dir.join("baseline.json")).unwrap();
-                let durable: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-                let still: Vec<&String> = gone.iter().filter(|p| durable["entries"].get(p.as_str()).is_some()).collect();
-                assert!(durable["entries"].get("inputs/wanted.txt").is_some(), "fixture: not the baseline file");
+                // What the barrier reads at its next start: the snapshot and
+                // its journal (the state dir's lock refuses a second
+                // `SyncerState` while it runs).
+                let durable = super::state::read_baseline_at(&state_dir).unwrap();
+                let still: Vec<&String> = gone.iter().filter(|p| durable.entries.contains_key(p.as_str())).collect();
+                assert!(durable.entries.contains_key("inputs/wanted.txt"), "fixture: not the baseline file");
                 assert!(still.is_empty(), "a narrow unlinked before its uncite was durable: still cited {still:?}");
                 panic!("the crash");
             }),
@@ -10862,7 +10862,7 @@ async fn restart_between_the_cas_and_step_7_then(peer_deletes: bool, then: After
     let snap: Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>> = Default::default();
     let snap_in = snap.clone();
     hooked.before_delete(&b.cfg.file_key("tmp.txt"), move || {
-        *snap_in.lock().unwrap() = ["intent.json", "baseline.json"]
+        *snap_in.lock().unwrap() = ["intent.json", "baseline.json", "baseline.log"]
             .iter()
             .map(|f| {
                 let p = state_dir.join(f);
@@ -12353,7 +12353,7 @@ async fn renamed_away_after_an_install(restart: bool) -> (Arc<MemoryStore>, temp
     let snap: Arc<std::sync::Mutex<Vec<(std::path::PathBuf, Option<Vec<u8>>)>>> = Default::default();
     let snap_in = snap.clone();
     hooked.before_delete(&a.cfg.file_key("tmp.txt"), move || {
-        *snap_in.lock().unwrap() = ["intent.json", "baseline.json"]
+        *snap_in.lock().unwrap() = ["intent.json", "baseline.json", "baseline.log"]
             .iter()
             .map(|f| {
                 let p = state_dir.join(f);

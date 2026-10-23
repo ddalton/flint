@@ -122,7 +122,7 @@ impl Syncer {
         let in_scope = |path: &str| scope.as_ref().map(|s| s.covers(path)).unwrap_or(true);
         let mut report = SyncReport::default();
         report.scope = scope.as_ref().map(|s| s.entries().to_vec());
-        let mut baseline = self.state.load_baseline()?;
+        let mut baseline = self.state.take_baseline()?;
         // What the baseline cited before, for the trace (only when it is on):
         // the paths this sync took are the ones whose citation it moved.
         let before: Option<BTreeMap<String, String>> = self
@@ -429,7 +429,7 @@ impl Syncer {
             None if !left => {
                 baseline.seq = theirs.seq;
                 baseline.derived_etag = Some(metag.clone().unwrap_or_default());
-                baseline.skipped = dirty_skips;
+                baseline.skipped.sync_to(&dirty_skips);
                 report.seq = theirs.seq;
             }
             // Something is still owed: nothing is recorded as derived, and
@@ -446,11 +446,11 @@ impl Syncer {
             }
         }
         let rescan = scan::scan(&self.cfg.root)?;
-        baseline.prev_scan = rescan.keys().cloned().collect();
+        baseline.prev_scan.sync_to(rescan.keys());
         // Materialised files before the baseline that vouches for them.
         self.state.sync_tree()?;
-        self.state.save_baseline(&baseline)?;
-        let taken: Vec<&String> = before
+        // What the trace reports, read before the baseline is handed back.
+        let taken: Vec<String> = before
             .as_ref()
             .map(|before| {
                 before
@@ -459,12 +459,15 @@ impl Syncer {
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .filter(|p| before.get(*p) != baseline.entries.get(*p).map(|e| &e.etag))
+                    .cloned()
                     .collect()
             })
             .unwrap_or_default();
+        let skipped: Vec<String> = baseline.skipped.iter().cloned().collect();
+        self.state.commit_baseline(baseline)?;
         self.trace("sync", serde_json::json!({"scoped": scope.is_some(), "applied": report.applied.len(),
             "deleted": report.deleted.len(), "conflicts": report.conflicts.len(), "seq": report.seq,
-            "taken": taken, "skipped": baseline.skipped, "left": left, "failed": failed,
+            "taken": taken, "skipped": skipped, "left": left, "failed": failed,
             "reader": self.cfg.access.is_read()}));
         Ok(report)
     }

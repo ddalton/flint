@@ -97,14 +97,13 @@ impl Syncer {
     /// etags alone, and a path its sync could not take waited for the
     /// next commit (review 2026-09-29, S4).
     fn still_owed(&self) -> LeanResult<bool> {
-        let b = self.state.load_baseline()?;
-        if b.derived_etag.is_none() {
-            return Ok(true);
-        }
-        Ok(!b.skipped.iter().all(|path| {
-            super::barrier::check_contained(&self.cfg.root, path).is_ok()
-                && super::barrier::local_dirty(&self.cfg.root.join(path), b.entries.get(path))
-        }))
+        self.state.with_baseline(|b| {
+            b.derived_etag.is_none()
+                || !b.skipped.iter().all(|path| {
+                    super::barrier::check_contained(&self.cfg.root, path).is_ok()
+                        && super::barrier::local_dirty(&self.cfg.root.join(path), b.entries.get(path))
+                })
+        })
     }
 
     fn load_pulled_from(&self) -> Option<PulledFrom> {

@@ -857,7 +857,7 @@ async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
                 }
                 match last {
                     Ok(acks) => {
-                        let seq = sc.state.load_baseline().ok().map(|b| b.seq);
+                        let seq = sc.state.with_baseline(|b| b.seq).ok();
                         if let Err(e) = sc.state.write_drained(seq, acks.len()) {
                             eprintln!("flint-sync: drain published but its attestation could not be written: {e}");
                         }

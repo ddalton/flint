@@ -803,7 +803,7 @@ impl Syncer {
             return Ok(report);
         }
 
-        let mut baseline = self.state.load_baseline()?;
+        let mut baseline = self.state.take_baseline()?;
         let mut present: BTreeSet<String> = BTreeSet::new();
         let mut attempt = 0u32;
         let (m, metag, results) = loop {
@@ -904,14 +904,14 @@ impl Syncer {
         // derived, and nothing is skipped.
         baseline.derived_etag = Some(baseline.manifest_etag.clone().unwrap_or_default());
         baseline.skipped.clear();
-        baseline.prev_scan = present;
+        baseline.prev_scan.sync_to(&present);
         // Every materialised file reaches stable storage BEFORE the
         // baseline and the marker that vouch for it: after a power loss
         // the tree is then at least as durable as its description, so
         // the next scan cannot read a zero-length survivor as a local
         // edit and publish it over the good version.
         self.state.sync_tree()?;
-        self.state.save_baseline(&baseline)?;
+        self.state.commit_baseline(baseline)?;
         // Before the marker, always — including the `None` case, which
         // REMOVES any scope a crashed predecessor left behind. The
         // marker is the agent-start gate; a scope that landed after it
@@ -1267,7 +1267,7 @@ impl Syncer {
         baseline.skipped.clear();
 
         self.state.sync_tree()?;
-        self.state.save_baseline(&baseline)?;
+        self.state.commit_baseline(baseline)?;
         self.state.save_scope(target.as_deref())?;
         // LAST. While this document exists the workspace is mid-rescope
         // and `run_barrier` will replay before doing anything else.

@@ -203,8 +203,8 @@ impl Syncer {
         }
 
         // (a) the baseline cites a path under the reserved namespace.
-        let baseline = self.state.load_baseline()?;
-        let legacy_cited = baseline.entries.keys().any(|p| super::scan::is_control_path(p));
+        let legacy_cited =
+            self.state.with_baseline(|b| b.entries.keys().any(|p| super::scan::is_control_path(p)))?;
 
         // (b) a sentinel-named file exists before this tree has ever
         //     been given a capability marker (i.e. before any syncer

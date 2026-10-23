@@ -796,7 +796,7 @@ impl Syncer {
         let conflicts = conflicts_since(before, self.state.conflicts_dropped()?, self.state.load_conflicts()?);
         let units = self.charge_budget(report.published_bytes)?;
         let _ = units;
-        let baseline = self.state.load_baseline()?;
+        let manifest_etag = self.state.with_baseline(|b| b.manifest_etag.clone())?;
         // Review 2026-09-12, inbox-1: a boundary with a standing park does
         // NOT carry the agent's file — `ok` promised "the boundary is in
         // the bucket". It is `partial`, and `report.dropped` names the
@@ -831,7 +831,7 @@ impl Syncer {
             nonces: pending.nonces.clone(),
             sentinel_mtime_unix_ns: pending.consumed_mtime_unix_ns,
             seq: report.seq,
-            manifest_etag: baseline.manifest_etag.clone(),
+            manifest_etag,
             // The clock the CAS stamped (`source`), so the ack and the
             // bucket name the same one — the drain's included, which used
             // to be acked `sentinel-deferred` and re-written `drain`.
@@ -969,7 +969,9 @@ impl Syncer {
     /// Move the news ticker from what the barrier already learned (D5).
     /// Never issues a request of its own.
     fn ticker_from(&self, seq: Option<u64>, etag: Option<String>) -> LeanResult<()> {
-        let baseline_seq = self.state.load_baseline()?.seq;
+        // Read in place (lever D): this runs on every tick, and each of
+        // the two reads it replaced was a parse of the whole baseline.
+        let (baseline_seq, derived_etag) = self.state.with_baseline(|b| (b.seq, b.derived_etag.clone()))?;
         // A merge that carried another writer's change into the manifest
         // moves the baseline's seq to that document while the tree is still
         // OWED the change until the next consume derives against it. Until
@@ -977,9 +979,8 @@ impl Syncer {
         // while nothing was owed: waiting = the document named is not the
         // one last derived against. (A path the agent is working on is its
         // own, not waited on.)
-        let b = self.state.load_baseline()?;
         let same = |a: &str, b: &str| a.trim_matches('"') == b.trim_matches('"');
-        let waiting = match (etag.as_deref(), b.derived_etag.as_deref()) {
+        let waiting = match (etag.as_deref(), derived_etag.as_deref()) {
             (Some(e), Some(d)) => !same(e, d),
             (Some(_), None) => true,
             (None, _) => false,
@@ -1083,7 +1084,7 @@ impl Syncer {
                         }
                         None => {
                             out.no_change = true;
-                            out.seq = Some(self.state.load_baseline()?.seq);
+                            out.seq = Some(self.state.with_baseline(|b| b.seq)?);
                         }
                     }
                     self.ticker_from(p.observed_seq, p.observed_etag)?;

@@ -202,7 +202,9 @@ fn read_json<T: serde::de::DeserializeOwned>(p: &std::path::Path) -> Option<T> {
 pub fn status_report(cfg: &super::LeanConfig) -> LeanResult<StatusReport> {
     let sd = cfg.state_dir();
     let cd = cfg.control_dir();
-    let baseline: super::state::Baseline = read_json(&sd.join("baseline.json")).unwrap_or_default();
+    // The snapshot AND its journal (lever D): the snapshot alone is the
+    // baseline as of the last whole write.
+    let baseline = super::state::read_baseline_at(&sd).unwrap_or_default();
     let inc: Option<super::state::Incarnation> = read_json(&sd.join("incarnation.json"));
     let mut pending_sentinels = vec![];
     // Named by the SAME function that writes them. The previous form

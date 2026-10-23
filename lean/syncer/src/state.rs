@@ -2,8 +2,12 @@
 //!
 //! Everything the barrier needs to survive a CONTAINER restart lives
 //! here as small JSON files under `<root>/.flint-sync/`, each written
-//! temp+rename. A POD replacement gets a fresh emptyDir and therefore a
-//! fresh identity — that asymmetry is deliberate (the plan's P4: the
+//! temp+rename. The baseline is the exception (lever D): a snapshot
+//! written temp+rename and a journal that each save appends to in place,
+//! held parsed in memory for the life of the process.
+//!
+//! A POD replacement gets a fresh emptyDir and therefore a fresh
+//! identity — that asymmetry is deliberate (the plan's P4: the
 //! incarnation id is emptyDir-scoped, so only the same pod's restarted
 //! container may self-supersede the lease).
 
@@ -13,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::tracked::{TrackedMap, TrackedSet};
 use super::{LeanError, LeanResult};
 
 /// One published path as this syncer last knew it: the handle it
@@ -62,7 +67,7 @@ pub struct Baseline {
     pub seq: u64,
     /// Manifest document ETag we expect at the next CAS.
     pub manifest_etag: Option<String>,
-    pub entries: BTreeMap<String, BaselineEntry>,
+    pub entries: TrackedMap<BaselineEntry>,
     /// THE CHEAP PATH'S RECORD (scan trigger). The pointer etag of the
     /// document the last full consume derived against, with nothing left
     /// but the agent's own work; `None` = derive at the next consume (a
@@ -76,10 +81,18 @@ pub struct Baseline {
     /// cheap path holds only while every one is still dirty: an agent that
     /// backs out makes the document's version owed.
     #[serde(default)]
-    pub skipped: BTreeSet<String>,
+    pub skipped: TrackedSet,
     /// Paths present at the PREVIOUS scan (the two-consecutive-scans
     /// deletion rule: absence must survive two scans).
-    pub prev_scan: BTreeSet<String>,
+    pub prev_scan: TrackedSet,
+    /// This snapshot's id, minted at each whole write: the journal
+    /// (`baseline.log`) applies to the snapshot its first line names
+    /// (lever D). An id rather than a checksum, so a snapshot edited in
+    /// place keeps its journal, and one written whole anew does not.
+    /// LAST, so the fields before it keep the order the e2e plant relies
+    /// on (`run-verbs.sh`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) journal: Option<String>,
 }
 
 /// A rescope in flight (scoped-read design §4.3). `target` is the scope
@@ -231,6 +244,8 @@ pub struct SyncerState {
     /// checkout into tmp-rename ENOENT collisions). The hub has the
     /// identical gate (`state_backend::is_single_occupant`).
     _lock: std::fs::File,
+    /// The baseline, parsed once per process (lever D).
+    baseline: std::sync::Mutex<BaselineStore>,
 }
 
 const MARKER: &str = "checkout-complete";
@@ -303,6 +318,433 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> LeanResult<()> {
     super::safefs::write_via_tmp(path, &tmp, bytes, None).map(|_| ())
 }
 
+/// The journal beside `baseline.json`: what each save changed since the
+/// snapshot it names (lever D).
+const BASELINE_LOG: &str = "baseline.log";
+
+/// A journal longer than this share of its snapshot is folded into a new
+/// snapshot at the next save: a reload never replays more than a quarter
+/// of the document, and a full write is paid once per that many bytes of
+/// change rather than at every save.
+const COMPACT_SHARE: u64 = 4;
+/// ...and never for a journal shorter than this.
+const COMPACT_MIN_BYTES: u64 = 256 * 1024;
+
+/// The journal's first line: the snapshot it applies to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct JournalHead {
+    snapshot: String,
+}
+
+/// One save: its scalars, and the members it changed.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct JournalRecord {
+    seq: u64,
+    #[serde(default)]
+    manifest_etag: Option<String>,
+    #[serde(default)]
+    derived_etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    put: Vec<(String, BaselineEntry)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    del: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skipped_add: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skipped_del: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scan_add: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scan_del: Vec<String>,
+}
+
+impl JournalRecord {
+    /// What `b` changed since its lineage, draining what it recorded.
+    fn drain(b: &mut Baseline) -> JournalRecord {
+        let mut r = JournalRecord {
+            seq: b.seq,
+            manifest_etag: b.manifest_etag.clone(),
+            derived_etag: b.derived_etag.clone(),
+            ..Default::default()
+        };
+        for k in b.entries.take_touched() {
+            match b.entries.get(&k) {
+                Some(e) => r.put.push((k, e.clone())),
+                None => r.del.push(k),
+            }
+        }
+        for k in b.skipped.take_touched() {
+            match b.skipped.contains(&k) {
+                true => r.skipped_add.push(k),
+                false => r.skipped_del.push(k),
+            }
+        }
+        for k in b.prev_scan.take_touched() {
+            match b.prev_scan.contains(&k) {
+                true => r.scan_add.push(k),
+                false => r.scan_del.push(k),
+            }
+        }
+        r
+    }
+
+    fn changes_members(&self) -> bool {
+        !(self.put.is_empty()
+            && self.del.is_empty()
+            && self.skipped_add.is_empty()
+            && self.skipped_del.is_empty()
+            && self.scan_add.is_empty()
+            && self.scan_del.is_empty())
+    }
+
+    fn apply(self, b: &mut Baseline) {
+        b.seq = self.seq;
+        b.manifest_etag = self.manifest_etag;
+        b.derived_etag = self.derived_etag;
+        for (k, e) in self.put {
+            b.entries.apply_put(k, e);
+        }
+        for k in &self.del {
+            b.entries.apply_del(k);
+        }
+        for k in self.skipped_add {
+            b.skipped.apply_add(k);
+        }
+        for k in &self.skipped_del {
+            b.skipped.apply_del(k);
+        }
+        for k in self.scan_add {
+            b.prev_scan.apply_add(k);
+        }
+        for k in &self.scan_del {
+            b.prev_scan.apply_del(k);
+        }
+    }
+}
+
+/// `<crc64 hex> <json>\n`. serde_json never writes a raw newline, so a
+/// line is one record, and a line without its newline is a torn one.
+fn journal_line(json: &[u8]) -> Vec<u8> {
+    let mut l = format!("{:016x} ", flint_store::crc64_nvme(json)).into_bytes();
+    l.extend_from_slice(json);
+    l.push(b'\n');
+    l
+}
+
+/// The JSON of one verified line, or `None` (torn, or not this format).
+fn journal_payload(line: &[u8]) -> Option<&[u8]> {
+    if line.len() < 18 || line[16] != b' ' { return None }
+    let crc = u64::from_str_radix(std::str::from_utf8(&line[..16]).ok()?, 16).ok()?;
+    let json = &line[17..];
+    (flint_store::crc64_nvme(json) == crc).then_some(json)
+}
+
+/// The scalars a save writes every time: a save that changed none of
+/// them and no member writes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Scalars {
+    seq: u64,
+    manifest_etag: Option<String>,
+    derived_etag: Option<String>,
+}
+
+impl Scalars {
+    fn of(b: &Baseline) -> Scalars {
+        Scalars { seq: b.seq, manifest_etag: b.manifest_etag.clone(), derived_etag: b.derived_etag.clone() }
+    }
+}
+
+/// The baseline as the disk holds it, parsed once per process. The state
+/// directory's flock makes this process its only writer, so nothing but
+/// this process's own saves can move the disk out from under it.
+#[derive(Default)]
+struct BaselineStore {
+    /// The disk's state, unless a caller holds it (`take_baseline`).
+    cache: Option<Baseline>,
+    /// The lineage the disk holds; 0 = not loaded yet.
+    lineage: u64,
+    next_lineage: u64,
+    /// The snapshot's length on disk; `None` = no snapshot.
+    snapshot: Option<u64>,
+    /// Verified bytes of `baseline.log`, head included; 0 = no journal
+    /// that belongs to the snapshot.
+    log_len: u64,
+    scalars: Scalars,
+    /// Whole-snapshot parses this process made (`tests_baseline`).
+    parses: u64,
+    #[cfg(test)]
+    compact_min_bytes: Option<u64>,
+}
+
+impl BaselineStore {
+    fn next(&mut self) -> u64 {
+        self.next_lineage += 1;
+        self.next_lineage
+    }
+}
+
+fn stamp(b: &mut Baseline, lineage: u64) {
+    b.entries.stamp(lineage);
+    b.skipped.stamp(lineage);
+    b.prev_scan.stamp(lineage);
+}
+
+impl SyncerState {
+    fn baseline_store(&self) -> std::sync::MutexGuard<'_, BaselineStore> {
+        // A panic while holding it leaves the cache as it was: the disk
+        // is the truth either way.
+        self.baseline.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Parse the disk's baseline into the store if no copy is there.
+    fn fill(&self, st: &mut BaselineStore) -> LeanResult<()> {
+        if st.cache.is_some() {
+            return Ok(());
+        }
+        let disk = read_baseline_files(&self.dir, true)?;
+        st.parses += disk.snapshot_len.is_some() as u64;
+        let mut b = disk.baseline;
+        let lineage = st.next();
+        stamp(&mut b, lineage);
+        st.lineage = lineage;
+        st.snapshot = disk.snapshot_len;
+        st.log_len = disk.log_len;
+        st.scalars = Scalars::of(&b);
+        st.cache = Some(b);
+        Ok(())
+    }
+
+    /// Write `b` to disk: what it changed, as one journal line, when it
+    /// is the disk's own lineage and the journal has room; else the whole
+    /// document, as before D, with a fresh journal. On success `b` is the
+    /// disk's state and of its new lineage.
+    fn persist(&self, st: &mut BaselineStore, b: &mut Baseline) -> LeanResult<()> {
+        let ours = st.lineage != 0
+            && b.entries.lineage() == st.lineage
+            && b.skipped.lineage() == st.lineage
+            && b.prev_scan.lineage() == st.lineage;
+        let room = match st.snapshot {
+            Some(len) if st.log_len > 0 => {
+                #[cfg(test)]
+                let min = st.compact_min_bytes.unwrap_or(COMPACT_MIN_BYTES);
+                #[cfg(not(test))]
+                let min = COMPACT_MIN_BYTES;
+                st.log_len < (len / COMPACT_SHARE).max(min)
+            }
+            _ => false,
+        };
+        // A save that changed much of the tree (a checkout, a rescope) is a
+        // new snapshot, not a journal line as long as one.
+        let changed = b.entries.touched_len() + b.skipped.touched_len() + b.prev_scan.touched_len();
+        let small = changed <= (b.entries.len() / 8).max(4096);
+        if ours && room && small {
+            let rec = JournalRecord::drain(b);
+            if !rec.changes_members() && Scalars::of(b) == st.scalars {
+                return Ok(());
+            }
+            let json = serde_json::to_vec(&rec).map_err(|e| LeanError::State(format!("baseline journal: {e}")))?;
+            let line = journal_line(&json);
+            let path = self.dir.join(BASELINE_LOG);
+            super::safefs::check_parent(&path)?;
+            // Written at the verified length, not appended: a write that
+            // failed half-way left bytes past it, and this one replaces
+            // them rather than following them.
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = fs::OpenOptions::new().write(true).open(&path)?;
+            f.seek(SeekFrom::Start(st.log_len))?;
+            f.write_all(&line)?;
+            let len = st.log_len + line.len() as u64;
+            f.set_len(len)?;
+            f.sync_data()?;
+            st.log_len = len;
+        } else {
+            // Written whole: what it recorded is in the document.
+            b.entries.take_touched();
+            b.skipped.take_touched();
+            b.prev_scan.take_touched();
+            let id = uuid::Uuid::new_v4().to_string();
+            b.journal = Some(id.clone());
+            // COMPACT JSON: the snapshot is the O(files) document.
+            let bytes = serde_json::to_vec(&*b).map_err(|e| LeanError::State(format!("baseline: {e}")))?;
+            write_atomic(&self.dir.join(BASELINE), &bytes)?;
+            // The snapshot first, then its journal: a death between the two
+            // leaves the old journal naming the old snapshot's id, which the
+            // next load ignores.
+            let json = serde_json::to_vec(&JournalHead { snapshot: id })
+                .map_err(|e| LeanError::State(format!("baseline journal: {e}")))?;
+            let line = journal_line(&json);
+            write_atomic(&self.dir.join(BASELINE_LOG), &line)?;
+            // Held as the bytes just written parse, not as the map that was
+            // written: a map a checkout built by inserting in arrival order is
+            // scattered across the heap, and every later walk of it, and of
+            // the documents allocated around it, pays for that (measured at
+            // 200k files: `merge` 225-235 -> 167-168 ms and `retire_set`
+            // 181-184 -> 100-104 ms per publish). A parse allocates in key
+            // order. A whole write is rare (a checkout, a compaction, a large
+            // change): one parse each. The written map is freed first, so
+            // the two are never held at once.
+            *b = Baseline::default();
+            *b = serde_json::from_slice(&bytes).map_err(|e| LeanError::State(format!("baseline: {e}")))?;
+            st.snapshot = Some(bytes.len() as u64);
+            st.log_len = line.len() as u64;
+        }
+        // Every copy made before this save is now stale: a later save of
+        // one writes it whole, as every save did before D.
+        let lineage = st.next();
+        stamp(b, lineage);
+        st.lineage = lineage;
+        st.scalars = Scalars::of(b);
+        Ok(())
+    }
+
+    /// A copy of the baseline. O(entries): for reads off the hot path and
+    /// the battery. The hot paths use `take_baseline` / `with_baseline`.
+    pub fn load_baseline(&self) -> LeanResult<Baseline> {
+        let mut st = self.baseline_store();
+        self.fill(&mut st)?;
+        Ok(st.cache.clone().expect("filled above"))
+    }
+
+    /// Read the baseline in place.
+    pub fn with_baseline<R>(&self, f: impl FnOnce(&Baseline) -> R) -> LeanResult<R> {
+        let mut st = self.baseline_store();
+        self.fill(&mut st)?;
+        Ok(f(st.cache.as_ref().expect("filled above")))
+    }
+
+    /// The baseline itself, to change and hand back with
+    /// `commit_baseline`. Until then the store holds none: a caller that
+    /// never hands it back costs the next load one parse, and changes
+    /// nothing on disk.
+    pub fn take_baseline(&self) -> LeanResult<Baseline> {
+        let mut st = self.baseline_store();
+        self.fill(&mut st)?;
+        Ok(st.cache.take().expect("filled above"))
+    }
+
+    /// Persist a baseline taken with `take_baseline` and keep it. A
+    /// baseline that changed nothing writes nothing.
+    pub fn commit_baseline(&self, mut b: Baseline) -> LeanResult<()> {
+        let mut st = self.baseline_store();
+        if let Err(e) = self.persist(&mut st, &mut b) {
+            // What the disk holds is no longer known here (a snapshot
+            // renamed before its journal failed, say): forget it, and the
+            // next load reads the disk.
+            st.cache = None;
+            st.lineage = 0;
+            st.snapshot = None;
+            st.log_len = 0;
+            return Err(e);
+        }
+        st.cache = Some(b);
+        Ok(())
+    }
+
+    /// Persist a copy, keeping one (O(entries)).
+    pub fn save_baseline(&self, b: &Baseline) -> LeanResult<()> {
+        self.commit_baseline(b.clone())
+    }
+
+    /// Whole-snapshot parses this process has made: one at the first
+    /// load, and then one after a save failed or a taken baseline was not
+    /// handed back.
+    pub fn baseline_parses(&self) -> u64 {
+        self.baseline_store().parses
+    }
+
+    /// Drop the held baseline, as a new process would start without one.
+    #[cfg(test)]
+    pub(crate) fn forget_baseline(&self) {
+        let mut st = self.baseline_store();
+        st.cache = None;
+        st.lineage = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_baseline_compact_min(&self, bytes: u64) {
+        self.baseline_store().compact_min_bytes = Some(bytes);
+    }
+}
+
+/// The baseline as the disk holds it: the snapshot, and the journal lines
+/// that belong to it.
+struct DiskBaseline {
+    baseline: Baseline,
+    /// The snapshot's length; `None` = there is none.
+    snapshot_len: Option<u64>,
+    /// Verified bytes of the journal; 0 = none that belongs.
+    log_len: u64,
+}
+
+/// Read `dir`'s baseline. `owner` (the process holding the state
+/// directory's flock) also cuts a torn last line off, so its next save
+/// follows the last good one. Any other reader leaves the file alone: the
+/// line it found torn may be the owner's write in progress.
+fn read_baseline_files(dir: &Path, owner: bool) -> LeanResult<DiskBaseline> {
+    // NotFound alone means absent: `exists()` answered false for EACCES
+    // too, and an unreadable baseline read as an empty one is the
+    // "unreadable means deleted" class (`load_scope`).
+    match fs::read(dir.join(BASELINE)) {
+        Ok(bytes) => {
+            let b = serde_json::from_slice(&bytes).map_err(|e| LeanError::State(format!("baseline: {e}")))?;
+            replay_onto(dir, b, bytes.len() as u64, owner)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(DiskBaseline { baseline: Baseline::default(), snapshot_len: None, log_len: 0 })
+        }
+        Err(e) => Err(LeanError::State(format!("read {BASELINE}: {e}"))),
+    }
+}
+
+fn replay_onto(dir: &Path, mut b: Baseline, snapshot_len: u64, owner: bool) -> LeanResult<DiskBaseline> {
+    let none = |b| Ok(DiskBaseline { baseline: b, snapshot_len: Some(snapshot_len), log_len: 0 });
+    let Some(id) = b.journal.clone() else { return none(b) };
+    let path = dir.join(BASELINE_LOG);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return none(b),
+        Err(e) => return Err(LeanError::State(format!("read {BASELINE_LOG}: {e}"))),
+    };
+    let mut lines = bytes.split_inclusive(|c| *c == b'\n');
+    let Some(first) = lines.next().filter(|l| l.ends_with(b"\n")) else { return none(b) };
+    let belongs = journal_payload(&first[..first.len() - 1])
+        .and_then(|j| serde_json::from_slice::<JournalHead>(j).ok())
+        .is_some_and(|h| h.snapshot == id);
+    if !belongs {
+        // Written for another snapshot: a whole write that landed its new
+        // snapshot and died before its fresh journal. Everything in this
+        // one is in that snapshot. The next save replaces it.
+        return none(b);
+    }
+    let mut good = first.len() as u64;
+    for line in lines {
+        let rec = line
+            .strip_suffix(b"\n")
+            .and_then(journal_payload)
+            .and_then(|j| serde_json::from_slice::<JournalRecord>(j).ok());
+        match rec {
+            Some(r) => {
+                r.apply(&mut b);
+                good += line.len() as u64;
+            }
+            None => break,
+        }
+    }
+    if owner && good < bytes.len() as u64 {
+        let f = fs::OpenOptions::new().write(true).open(&path)?;
+        f.set_len(good)?;
+        f.sync_all()?;
+    }
+    Ok(DiskBaseline { baseline: b, snapshot_len: Some(snapshot_len), log_len: good })
+}
+
+/// The baseline of a state directory this process does not hold: what
+/// its owner's next load would read, never cutting anything. For
+/// `status`, which runs beside a live syncer.
+pub fn read_baseline_at(dir: &Path) -> LeanResult<Baseline> {
+    Ok(read_baseline_files(dir, false)?.baseline)
+}
+
 impl SyncerState {
     pub fn open(dir: PathBuf) -> LeanResult<SyncerState> {
         fs::create_dir_all(&dir)?;
@@ -324,7 +766,7 @@ impl SyncerState {
                 )));
             }
         }
-        Ok(SyncerState { dir, _lock: lock })
+        Ok(SyncerState { dir, _lock: lock, baseline: Default::default() })
     }
 
     pub fn marker_present(&self) -> bool {
@@ -365,25 +807,6 @@ impl SyncerState {
     /// Written LAST at checkout: the agent-start gate.
     pub fn write_marker(&self) -> LeanResult<()> {
         write_atomic(&self.dir.join(MARKER), b"ok\n")
-    }
-
-    pub fn load_baseline(&self) -> LeanResult<Baseline> {
-        let p = self.dir.join(BASELINE);
-        if !p.exists() {
-            return Ok(Baseline::default());
-        }
-        let bytes = fs::read(&p)?;
-        serde_json::from_slice(&bytes).map_err(|e| LeanError::State(format!("baseline: {e}")))
-    }
-
-    /// COMPACT: the baseline is the other O(files) document, rewritten
-    /// on the cadence tick and re-parsed several times per barrier. The
-    /// agent-facing O(1) files (gauges, capabilities, acks) stay pretty
-    /// — those exist to be `cat`-ed.
-    pub fn save_baseline(&self, b: &Baseline) -> LeanResult<()> {
-        let bytes =
-            serde_json::to_vec(b).map_err(|e| LeanError::State(format!("baseline: {e}")))?;
-        write_atomic(&self.dir.join(BASELINE), &bytes)
     }
 
     /// What this workspace was admitted to hold, or `None` for an

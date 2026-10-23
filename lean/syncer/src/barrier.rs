@@ -229,7 +229,9 @@ impl Syncer {
     /// and must not pay a second GET for it (an idle tick is the cell and
     /// the pointer).
     pub async fn consume_owed(&mut self) -> LeanResult<(usize, Seen)> {
-        let mut baseline = self.state.load_baseline()?;
+        // Taken, not copied (lever D): every return below hands it back,
+        // and one that does not costs the next load a parse, nothing more.
+        let mut baseline = self.state.take_baseline()?;
         // THE CHEAP PATH (scan trigger). Only three things make a path
         // newly owed: the document moved (the pointer is not the one last
         // derived against — a peer, a UI save, or this tree's own commit
@@ -254,6 +256,7 @@ impl Syncer {
                     // several writers' traces (formal/trace/storm2conf.py)
                     // places the consume after the install that wrote it.
                     self.trace("derive", serde_json::json!({"seq": p.pointer.seq, "cheap": true}));
+                    self.state.commit_baseline(baseline)?;
                     return Ok((0, Seen::Pointer(p.pointer.seq, p.etag.clone())));
                 }
             }
@@ -262,6 +265,7 @@ impl Syncer {
         let Some(current) = manifest::load_from(self.store.as_ref(), &self.cfg, read).await? else {
             // Neither the pointer nor the legacy object exists: nothing
             // has ever been published here, and this pass read both.
+            self.state.commit_baseline(baseline)?;
             return Ok((0, Seen::Nothing));
         };
         let doc = &current.manifest;
@@ -484,7 +488,7 @@ impl Syncer {
             taken += 1;
         }
         baseline.derived_etag = (!left).then(|| current.etag.clone());
-        baseline.skipped = skipped;
+        baseline.skipped.sync_to(&skipped);
         if !left {
             // Everything owed is taken: the tree is integrated with this
             // document (its dirty paths are the agent's, about to publish).
@@ -494,7 +498,7 @@ impl Syncer {
         // The files this baseline vouches for reached the disk before the
         // baseline does (audit 2026-09-03, finding 9).
         self.state.sync_tree()?;
-        self.state.save_baseline(&baseline)?;
+        self.state.commit_baseline(baseline)?;
         // The pointer as this load saw it (a legacy single object has none,
         // and the fast path asks the bucket itself).
         let seen = match &current.pointer {
@@ -756,8 +760,9 @@ impl Syncer {
         // tenth box run reached its counterexample through it). A test
         // window, like the consume's (H7); nothing in it calls the store.
         consume_window("before-scan", "");
-        // Step 2: scan-diff against the persisted baseline.
-        let mut baseline = self.state.load_baseline()?;
+        // Step 2: scan-diff against the persisted baseline, taken from the
+        // store and handed back at each end of the barrier (lever D).
+        let mut baseline = self.state.take_baseline()?;
         clock.lap("baseline_load");
         let scanned = scan::scan(&self.cfg.root)?;
         let mut classified = scan::classify(&scanned, &baseline);
@@ -823,21 +828,14 @@ impl Syncer {
             if unchanged {
                 report.no_change = true;
                 report.seq = Some(baseline.seq);
-                // prev_scan still advances (the two-scan rule's clock) —
-                // but the baseline document (hundreds of MB at 1M
-                // entries) is rewritten only when the scan SET moved.
-                // Compare without building the set: both sides iterate
-                // sorted, and the allocation this used to make was the
-                // size of the very document it was trying not to write.
-                // ...or when the racy pass cleared a flag: unsaved, every
-                // later barrier would hash that file again.
-                if !racy_cleared.is_empty()
-                    || scanned.len() != baseline.prev_scan.len()
-                    || !scanned.keys().eq(baseline.prev_scan.iter())
-                {
-                    baseline.prev_scan = scanned.keys().cloned().collect();
-                    self.state.save_baseline(&baseline)?;
-                }
+                // prev_scan still advances (the two-scan rule's clock), and
+                // a racy flag the hash cleared is kept (unsaved, every later
+                // barrier would hash that file again). Handed back either
+                // way: the store writes what changed, and nothing when
+                // nothing did. `sync_to` walks both sorted sides and copies
+                // only the paths that came or went.
+                baseline.prev_scan.sync_to(scanned.keys());
+                self.state.commit_baseline(baseline)?;
                 clock.lap("idle_check");
                 report.steps = clock.steps;
                 self.trace_barrier_end(&report, barrier_started);
@@ -975,8 +973,8 @@ impl Syncer {
                 report.foreign_queued = m.foreign.len();
                 baseline.seq = m.theirs.seq;
                 baseline.manifest_etag = Some(handle.etag.clone());
-                baseline.prev_scan = scanned.keys().cloned().collect();
-                self.state.save_baseline(&baseline)?;
+                baseline.prev_scan.sync_to(scanned.keys());
+                self.state.commit_baseline(baseline)?;
                 self.state.clear_intent_keys()?;
                 clock.lap("pull_only");
                 report.steps = clock.steps;
@@ -1514,8 +1512,8 @@ impl Syncer {
             self.note_carrier_uncited(&installed)?;
             baseline.seq = installed.seq;
             baseline.manifest_etag = Some(installed_etag);
-            baseline.prev_scan = scanned.keys().cloned().collect();
-            self.state.save_baseline(&baseline)?;
+            baseline.prev_scan.sync_to(scanned.keys());
+            self.state.commit_baseline(baseline)?;
             self.state.clear_intent_keys()?;
             clock.lap("baseline");
             // The commit section's end (the model's `Finish`). No window is

@@ -72,6 +72,21 @@ covered by the stability guarantee.
   request (20k files: 867 ms to 570 ms; 1M files: 16.2 s and 238 requests
   to 10.3 s and 13).
 
+- **lean: the baseline is parsed once per process, and a save writes only
+  what it changed** (lever D). Every barrier parsed
+  `.flint-sync/baseline.json` twice, the floor tick twice more, and every
+  publish rewrote it whole: at 1M files about 1.3 s a parse and 0.85 s a
+  write. The syncer now holds it in memory (the state directory's lock
+  already made it the only writer). A save appends what it changed to
+  `.flint-sync/baseline.log` beside the snapshot, as one checksummed line.
+  A torn or corrupt line is a save that never happened. A journal that
+  passes a quarter of its snapshot's size is folded into a new snapshot.
+  `flint-sync status` reads both files. On the in-memory store, the idle
+  tick at 200k files went from 962–987 ms to 445–450 ms and a one-file
+  publish from 1844–1855 ms to 1223–1235 ms; at 1M files, from 5.1 s to
+  2.4 s and from 9.7 s to 6.9 s. The cost is memory: the baseline stays
+  resident between barriers, roughly 200 MiB a writer at 1M files.
+
 ### Fixed
 
 - **lean gateway docs: a boundary request is not a one-second door.**
