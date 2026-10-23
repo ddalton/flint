@@ -393,6 +393,8 @@ impl Workspace {
         };
         let read = self.view().await?;
         judge(read.as_deref())?;
+        // Let go before the commit, which edits the held document in place.
+        drop(read);
 
         let author = author.map(str::to_string).unwrap_or_else(|| meta.author.clone());
         let added_unix = now_unix();

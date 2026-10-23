@@ -76,10 +76,16 @@ pub struct Workspace {
 /// before it is used, and a load that used any still LISTs the chunk prefix
 /// once, so a chunk the bucket lost refuses the load as it always did). One
 /// manifest's worth per workspace, about 277 bytes per entry.
+///
+/// And the chunks' ALIASES (latency plan §16): which entries cite a handle
+/// their path does not name. A UI commit answers "is this handle still
+/// cited" from them without scanning the document, so they must outlive the
+/// `Workspace` a server builds per request.
 #[derive(Default)]
 pub struct ManifestCache {
     doc: std::sync::Mutex<Option<Arc<LoadedManifest>>>,
     chunks: Arc<MemoryChunkCache>,
+    aliases: Arc<flint_lean::docview::AliasCache>,
 }
 
 /// One `ManifestCache` per workspace prefix, for a server that builds a
@@ -519,6 +525,7 @@ impl Workspace {
         // beside the manifest cache.
         let mut cfg = LeanConfig::new(prefix, "/nonexistent");
         cfg.chunk_cache = Some(manifests.chunks.clone());
+        cfg.alias_cache = manifests.aliases.clone();
         Workspace { store, cfg, max_put_bytes: WHOLE_PUT_MAX, read_only: false, manifests }
     }
 
@@ -573,8 +580,16 @@ impl Workspace {
         self
     }
 
+    /// Commit every UI edit as a whole document, reloaded after (the shape
+    /// before latency plan §16): the control arm of its bench.
+    pub fn without_chunk_view(mut self) -> Self {
+        self.cfg.chunk_view = false;
+        self
+    }
+
     pub fn with_manifest_cache(mut self, cache: Arc<ManifestCache>) -> Self {
         self.cfg.chunk_cache = Some(cache.chunks.clone());
+        self.cfg.alias_cache = cache.aliases.clone();
         self.manifests = cache;
         self
     }
@@ -639,6 +654,9 @@ impl Workspace {
         let read = self.view().await?;
         self.judge_save(read.as_deref(), path, opts)?;
         let prev = read.as_ref().and_then(|l| l.manifest.entries.get(path)).cloned();
+        // Let go of the document before the commit: held by no one else, the
+        // commit makes the one it installs from it in place, not from a copy.
+        drop(read);
         let crc = crc64_nvme(&body);
         let size = body.len() as u64;
         let added_unix = now_unix();
@@ -694,22 +712,31 @@ impl Workspace {
     }
 
     /// ONE manifest CAS for a UI edit (P2): load the current document,
-    /// let `edit` judge it and change a copy (the next generation, with
-    /// the installing party's fields reset, as `manifest::merge` does),
-    /// CAS it in, and on a lost race do it all again against what won.
-    /// Never takes the writers' lease and never waits on their window;
+    /// let `edit` judge it and change it (the next generation, with the
+    /// installing party's fields reset, as `manifest::merge` does), CAS it
+    /// in, and on a lost race do it all again against what won. Never takes
+    /// the writers' lease and never waits on their window;
     /// `ConcurrentWrite` after `manifest::EDIT_CAS_ATTEMPTS` lost races.
+    ///
+    /// The edit writes an overlay, not a copy, and the commit rewrites only
+    /// the chunks it changes (`manifest::commit_edit_paths`; latency plan
+    /// §16). The held document is taken out of the cache for it, so the one
+    /// it installs is made from it in place and held next, with no reload:
+    /// the next verb finds it under the pointer this commit wrote.
     pub(crate) async fn commit_edit(
         &self,
         flush: &str,
-        edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), VerbError>,
+        edit: impl Fn(Option<&LoadedManifest>, &mut manifest::DocEdit<'_>) -> Result<(), VerbError>,
     ) -> Result<(), VerbError> {
-        // The first attempt edits the view — the document at the pointer
-        // just read, from the cache while the pointer has not moved — rather
-        // than loading it again; the CAS is If-Match on its etag, so a stale
-        // view loses and the next attempt loads (latency plan lever A).
-        let first = self.view().await?;
-        match manifest::commit_edit_from(self.store.as_ref(), &self.cfg, flush, Some(first), edit).await {
+        // The first attempt edits the document at the pointer just read, the
+        // held one while the pointer has not moved; the CAS is If-Match on
+        // its etag, so a stale one loses and the next attempt loads.
+        let first = self.take_view().await?;
+        let out = manifest::commit_edit_paths(self.store.as_ref(), &self.cfg, flush, Some(first), edit).await;
+        if let Some(held) = out.held {
+            *self.manifests.doc.lock().unwrap() = Some(held);
+        }
+        match out.result {
             Ok(()) => Ok(()),
             Err(manifest::EditError::Refused(e)) => Err(e),
             Err(manifest::EditError::Store(e)) => Err(e.into()),
@@ -867,7 +894,7 @@ impl Workspace {
     /// The current manifest: the cached one while the pointer has not moved
     /// (one small GET), else a load, cached by the etag it was loaded at. A
     /// legacy single-object workspace has no pointer to key on and loads.
-    pub(crate) async fn view(&self) -> Result<Option<Arc<LoadedManifest>>, VerbError> {
+    pub async fn view(&self) -> Result<Option<Arc<LoadedManifest>>, VerbError> {
         let Some(p) = manifest::load_pointer(self.store.as_ref(), &self.cfg).await? else {
             return Ok(manifest::load(self.store.as_ref(), &self.cfg).await?.map(Arc::new));
         };
@@ -880,6 +907,21 @@ impl Workspace {
             *self.manifests.doc.lock().unwrap() = Some(l.clone());
         }
         Ok(loaded)
+    }
+
+    /// `view`, taking the held document out of the cache rather than
+    /// sharing it (a commit edits it in place, then hands it back).
+    async fn take_view(&self) -> Result<Option<Arc<LoadedManifest>>, VerbError> {
+        let Some(p) = manifest::load_pointer(self.store.as_ref(), &self.cfg).await? else {
+            return Ok(manifest::load(self.store.as_ref(), &self.cfg).await?.map(Arc::new));
+        };
+        {
+            let mut held = self.manifests.doc.lock().unwrap();
+            if held.as_ref().is_some_and(|c| c.etag == p.etag) {
+                return Ok(held.take());
+            }
+        }
+        Ok(manifest::load_from(self.store.as_ref(), &self.cfg, Some(Some(p))).await?.map(Arc::new))
     }
 
     /// Delete a file: it COMMITS (P2) — one manifest CAS stops citing it,

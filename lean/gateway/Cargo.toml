@@ -21,13 +21,18 @@ keywords = ["s3", "workspace", "flint", "lean", "gateway"]
 categories = ["filesystem"]
 
 [features]
-default = ["s3", "http"]
+default = ["s3", "http", "fastalloc"]
 # The real S3 backend (`connect`, `S3Store`). Off, the crate builds
 # against the in-memory store only.
 s3 = ["flint-lean/s3", "flint-store/s3"]
 # The HTTP router (`http::routes`) and the binary. A backend on another
 # web stack turns it off and never compiles warp.
 http = ["dep:warp"]
+# mimalloc as the binary's allocator, as the syncer and the NFS server ship
+# it: the binary is static musl, whose malloc is one process-wide lock, and
+# on mimalloc a UI save at 1M files took 2.9 s against 3.7 s (latency plan
+# §16). Only the binary declares it; an embedder chooses its own.
+fastalloc = ["dep:mimalloc"]
 
 [[bin]]
 name = "flint-lean-gateway"
@@ -49,6 +54,7 @@ thiserror = "1.0"
 tokio = { version = "1.0", features = ["rt", "time", "macros"] }
 uuid = { version = "1.0", features = ["v4"] }
 warp = { version = "0.4", features = ["server"], optional = true }
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 # warp::test for the battery (the server feature comes with it).

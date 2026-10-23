@@ -94,6 +94,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | F | policy: `sentinelMinIntervalSecs` 5 → 1, and a bytes-only publish budget | a sustained ceiling of one declared publish a minute | none | not started; a user decision |
 | G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none: the same document, chunk list and retire set | **built**, the commit side (§12); the consume side is G2 |
 | G2 | the consume derives only where the document moved since its last derive: a chunk-list diff | nothing measurable on the shipped allocator (§14) | a new rule and claim (`ddoc`, `Inv_DiffSound`) | **dropped** (user, 2026-10-23); archived on the local branch `lean-latency-g2-dropped` |
+| GW | the gateway's UI commits by path: an overlay re-chunked by chunk, the installed document held, mimalloc | at 1M, about 3.7 s of every UI save, rename and delete (§16) | none: the same document, chunk list and retire set | **built** (§16) |
 
 **What the two measurements say about order.** On S3 and at 20k–200k
 files, requests dominate, so A, C and B come first. At 1M, CPU dominates,
@@ -989,3 +990,101 @@ x86_64-unknown-linux-musl`. The wrappers come from `~/musl-mi-build.sh`.
 first barrier after a checkout took 21 s on every allocator but musl's
 own, which took 2.2 s. It looks like timing, not CPU: the slower checkout
 leaves fewer files inside the racy window, so fewer need re-hashing.
+
+## 16. The gateway's commits (lever G on the UI's side)
+
+**Measured first** (user, §9 item 7). The gateway bench
+(`lean/gateway/tests/latency_bench.rs`, release, static musl as shipped,
+the memory store) put every UI verb at seconds at 1M:
+
+| 1M, 25 ms a request | musl malloc (shipped) | mimalloc |
+|---|---:|---:|
+| save | 3,711 ms | 2,902 ms |
+| rename | 3,669 ms | 2,883 ms |
+| delete | 3,685 ms | 2,866 ms |
+| overwrite after a read | 2,199 ms | 1,686 ms |
+
+The requests were the same in both arms (2 GETs, 4 PUTs, 1 LIST), so the
+cost was CPU, and it was linear in the document (68 ms at 20k, 664 ms at
+200k). Each verb's cost had two parts:
+- **The reload, about 1.5 s.** The gateway's own last commit moved the
+  pointer, so its held copy was stale, and the next verb re-assembled the
+  whole document from cached chunks. An overwrite right after a read
+  skipped this, which is why it was cheaper.
+- **The commit, about 2.0 s.** It cloned the whole document, edited it,
+  re-split and re-hashed all of it, and diffed it whole for the retire
+  set.
+
+**The lever (user, 2026-10-23: all three parts).**
+1. **Edit by path.** `manifest::commit_edit_paths`. An edit writes an
+   overlay (`DocEdit`), whose `entries` answer `get`, `contains_key`,
+   `insert` and `remove` as the edited map would, so the verbs' judging
+   code is unchanged. The commit re-chunks only from the first chunk an
+   overlay path falls in until the chunking lines up again
+   (`chunk::rechunk_with`, G's), loading each old chunk from the held
+   document. It answers the retire set by G's rule from the overlay and
+   the chunks' aliases (`docview::retired_over`). It publishes only the new
+   chunks. A document that isn't chunked, or none, is edited whole as
+   before.
+2. **Hold what it installed.** The gateway takes its held document out of
+   the cache for the commit (`take_view`). The commit makes the installed
+   document from it in place (`Arc::make_mut`: no copy while nothing else
+   holds it) and hands it back under the pointer it wrote. A refusal
+   hands back what it read. The alias cache moves into the shared
+   `ManifestCache`, because a server builds a `Workspace` per request.
+3. **mimalloc**, default on (`fastalloc`, declared only in the binary).
+
+**What does not change: the model.** The gateway installs the same
+document, chunk list and retire set as before; holding its own commit is
+`GCas`'s view of it. In every debug build (so in all the gateway's tests),
+each per-path commit also edits, splits and diffs the whole document, and
+asserts the same chunk list, chunk bytes and retire set (`shadow_edit`).
+`Workspace::without_chunk_view()` is the shape before: whole commits,
+reloaded after, the bench's control arm.
+
+**Results.** The gateway bench, as shipped (static musl with mimalloc).
+The control arm is `FLINT_BENCH_ARM=whole` (`without_chunk_view`) in the
+same binary; one run per cell. At 1M and 25 ms a request:
+
+| verb | whole (before) | by path (after) |
+|---|---:|---:|
+| save | 2,874–2,883 ms | 169 ms |
+| rename | 2,836 ms | 143 ms |
+| delete | 2,833 ms | 143 ms |
+| overwrite | 1,792 ms | 169 ms |
+
+At 0 ms a request, every verb after the first save took 4 ms at 1M,
+against 2.6 s (1.6 s for an overwrite). At 200k at 25 ms: a save 715–738
+→ 210–231 ms, a rename 716 → 146 ms. What remains is the requests: a save
+is 2 GETs, 4 PUTs and a retire log; a rename or delete is one GET fewer.
+No later verb reloads the document or LISTs. The first verb after start
+still loads it once (1.2 s at 1M at 0 ms).
+
+Against what shipped before (musl's malloc, whole commits), a UI save at
+1M and 25 ms went from 3.7 s to 0.17 s.
+
+**Found by the bench, fixed before the numbers above.** `put_file` and
+`promote_draft` held their own reference to the document through the
+commit, so `Arc::make_mut` found it shared and copied 1M entries: 126–174
+ms per save at 1M against 4 ms for a rename. Both now let go before
+committing.
+
+**Verification.**
+- The gateway: 67 passed, every UI commit shadow-checked. The syncer:
+  377 passed.
+- Both binaries build, and the code-trace check passes 84/84.
+- Mutation controls GW1–GW5 each fail their test (`~/gw-mutate.py`):
+  the retire set ignoring the overlay's citations, the held document not
+  edited, nothing held, a chunk losing its first key, and the held
+  document keeping its old etag.
+- The mutation runner now touches what it copies. A restored file keeps
+  its old mtime, so a target that last built a mutation served it to the
+  pristine run: GW5's build failed M0.
+
+**Lever G as shipped** (plan §15). The syncer's bench on musl with
+mimalloc, shipped against `noview`, one-file publish with collection not
+due, 25 ms a request:
+- 1M: 7,309 → 2,732 ms (the commit's steps 4,769 → 205 ms).
+- 200k: 1,694 → 857 ms (1,061 → 204 ms).
+
+The glibc figures were 7.0 → 3.1 s and 1.5 → 0.87 s.

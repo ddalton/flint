@@ -44,6 +44,12 @@ fn env_req(name: &str) -> String {
     }
 }
 
+// See `fastalloc` in Cargo.toml: the static musl binary's own malloc is one
+// process-wide lock.
+#[cfg(feature = "fastalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() {
     let listen: SocketAddr = std::env::var("FLINT_LEAN_GW_LISTEN")

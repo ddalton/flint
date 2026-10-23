@@ -247,6 +247,7 @@ pub const REFUSAL_DOC: &str = concat!(
     "\"note\":\"this workspace uses the manifest pointer layout; upgrade flint-sync\"}"
 );
 
+#[derive(Clone)]
 pub struct LoadedManifest {
     pub manifest: LeanManifest,
     /// The CAS handle: the POINTER's etag under the pointer layout, the
@@ -713,6 +714,246 @@ fn same_document(a: &LeanManifest, b: &LeanManifest) -> bool {
         && a.boundary_source == b.boundary_source
 }
 
+/// A one-CAS edit of a document it does not copy (the gateway's lever,
+/// latency plan §16): the edit reads the document it was handed and writes
+/// an overlay. `entries` answers as the edited document's map would, so an
+/// edit reads as it does under `commit_edit`; `seq` is the next generation
+/// and `tombstones` the document's, to change.
+pub struct DocEdit<'a> {
+    pub seq: u64,
+    pub entries: EditEntries<'a>,
+    pub tombstones: BTreeMap<String, Tombstone>,
+}
+
+/// A document's entries with an overlay on them (`DocEdit::entries`).
+pub struct EditEntries<'a> {
+    base: &'a BTreeMap<String, LeanEntry>,
+    overlay: BTreeMap<String, Option<LeanEntry>>,
+}
+
+impl EditEntries<'_> {
+    pub fn get(&self, p: &str) -> Option<&LeanEntry> {
+        match self.overlay.get(p) {
+            Some(v) => v.as_ref(),
+            None => self.base.get(p),
+        }
+    }
+
+    pub fn contains_key(&self, p: &str) -> bool {
+        self.get(p).is_some()
+    }
+
+    pub fn insert(&mut self, p: String, e: LeanEntry) -> Option<LeanEntry> {
+        let was = self.get(&p).cloned();
+        self.overlay.insert(p, Some(e));
+        was
+    }
+
+    pub fn remove(&mut self, p: &str) -> Option<LeanEntry> {
+        let was = self.get(p).cloned()?;
+        self.overlay.insert(p.to_string(), None);
+        Some(was)
+    }
+}
+
+/// How `commit_edit_paths` ended, and the document to hold next: the one it
+/// installed, made from the one it was handed in place when nothing else
+/// held that (no reload, no copy); or the one it was handed, unchanged,
+/// when the edit refused it. `None`: load before the next edit.
+pub struct EditOutcome<E> {
+    pub result: Result<(), EditError<E>>,
+    pub held: Option<std::sync::Arc<LoadedManifest>>,
+}
+
+/// [`commit_edit_from`] without copying the document (latency plan §16): the
+/// edit writes an overlay (`DocEdit`); the commit re-chunks only from the
+/// first chunk an overlay path falls in until the chunking lines up again
+/// (`chunk::rechunk_with`), answers the retire set from the overlay and the
+/// chunks' aliases (`docview::retired_over`), and publishes only the chunks
+/// that changed. The document it installs is the one `commit_edit_from`
+/// would; the shadow check (`LeanConfig::g_shadow`, and every debug build)
+/// asserts the same chunk list, chunk bytes and retire set. A document that
+/// is not chunked, or none, is edited whole as before, and so is every
+/// document under `chunk_view = false`.
+pub async fn commit_edit_paths<E>(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    flush: &str,
+    first: Option<Option<std::sync::Arc<LoadedManifest>>>,
+    edit: impl Fn(Option<&LoadedManifest>, &mut DocEdit<'_>) -> Result<(), E>,
+) -> EditOutcome<E> {
+    use std::sync::Arc;
+    let mut first = first;
+    // The pointer the last attempt sent, when its CAS answered 412 or 409:
+    // the same own-write check as `commit_edit_from`'s, on the pointer.
+    let mut sent: Option<Pointer> = None;
+    for _ in 0..EDIT_CAS_ATTEMPTS {
+        let current: Option<Arc<LoadedManifest>> = match first.take() {
+            Some(read) => read,
+            None => match load(store, cfg).await {
+                Ok(l) => l.map(Arc::new),
+                Err(e) => return EditOutcome { result: Err(EditError::Store(e)), held: None },
+            },
+        };
+        let chunked: Option<Vec<super::chunk::ChunkRef>> =
+            match current.as_ref().and_then(|l| l.pointer.as_ref()).map(|p| p.entries()) {
+                Some(Ok(Entries::Chunked(r))) if cfg.chunked && cfg.chunk_view => Some(r.to_vec()),
+                _ => None,
+            };
+        let refs = match chunked {
+            Some(r) => r,
+            None => {
+                // Not chunked, nothing published, or the view turned off:
+                // the whole-document edit. A refusal hands back what it read.
+                let read = current.clone();
+                let result = commit_edit_from(store, cfg, flush, Some(current), |cur, doc| {
+                    let base = doc.clone();
+                    let mut de = DocEdit {
+                        seq: doc.seq,
+                        entries: EditEntries { base: &base.entries, overlay: BTreeMap::new() },
+                        tombstones: std::mem::take(&mut doc.tombstones),
+                    };
+                    edit(cur, &mut de)?;
+                    doc.tombstones = de.tombstones;
+                    apply_overlay(&mut doc.entries, de.entries.overlay);
+                    Ok(())
+                })
+                .await;
+                let held = match &result {
+                    Err(EditError::Refused(_)) => read,
+                    _ => None,
+                };
+                return EditOutcome { result, held };
+            }
+        };
+        let cur = current.as_deref().expect("chunked above");
+        if sent.as_ref().is_some_and(|s| cur.pointer.as_ref() == Some(s)) {
+            return EditOutcome { result: Ok(()), held: None };
+        }
+        let base = &cur.manifest;
+        let mut de = DocEdit {
+            seq: base.seq + 1,
+            entries: EditEntries { base: &base.entries, overlay: BTreeMap::new() },
+            tombstones: base.tombstones.clone(),
+        };
+        if let Err(e) = edit(Some(cur), &mut de) {
+            return EditOutcome { result: Err(EditError::Refused(e)), held: current };
+        }
+        let DocEdit { seq, entries, mut tombstones } = de;
+        let overlay = entries.overlay;
+        tombstones.retain(|_, t| seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
+        let built = super::chunk::rechunk_with(
+            &refs,
+            |i| Ok(Arc::new(super::docview::chunk_entries(&base.entries, &refs, i).map(|(k, e)| (k.clone(), e.clone())).collect())),
+            &overlay,
+            cfg.chunk_target,
+            cfg.chunk_min,
+            cfg.chunk_max,
+        )
+        .and_then(|chunks| {
+            let retired = super::docview::retired_over(cfg, &refs, &base.entries, &overlay);
+            if cfg.g_shadow || cfg!(debug_assertions) {
+                shadow_edit(cfg, base, &overlay, &chunks, &retired);
+            }
+            let tomb = match tombstones.is_empty() {
+                true => None,
+                false => Some(super::chunk::encode_tombstones(&tombstones)?.0),
+            };
+            Ok((chunks, retired, tomb))
+        });
+        let (chunks, retired, tomb) = match built {
+            Ok(b) => b,
+            Err(e) => return EditOutcome { result: Err(EditError::Store(e)), held: None },
+        };
+        let doc = ChunkedDoc { seq, sole_writer: false, boundary_source: None, tombstones: &tombstones };
+        let expected = cur.handle();
+        let sending = Pointer {
+            seq,
+            entries_key: None,
+            entries_seq: None,
+            chunks: Some(chunks.iter().map(|(r, _)| r.clone()).collect()),
+            sole_writer: false,
+            boundary_source: None,
+            epoch: 0,
+            tombstones: tomb,
+        };
+        match publish_chunk_list(store, cfg, &chunks, &doc, Some(&expected), &expected.prev_chunks, 0, flush).await {
+            Ok((meta, chunk_refs, pointer)) => {
+                debug_assert_eq!(pointer, sending, "the pointer published is not the one the own-write check compares");
+                log_retired(store, cfg, seq, 0, flush, retired, Some(&chunk_refs), Some(&expected)).await;
+                // The document to hold next: this one, made from what the
+                // edit read, in place when nothing else holds that.
+                let mut held = current.expect("chunked above");
+                let l = Arc::make_mut(&mut held);
+                apply_overlay(&mut l.manifest.entries, overlay);
+                l.manifest.seq = seq;
+                l.manifest.sole_writer = false;
+                l.manifest.boundary_source = None;
+                l.manifest.tombstones = tombstones;
+                l.etag = meta.etag;
+                // The citation's clock is this write's (a full load reads the
+                // pointer's Last-Modified).
+                l.last_modified_unix = meta.last_modified_unix.or_else(|| Some(super::now_unix()));
+                // What the alias cache keeps is this document's chunks; the
+                // new ones are scanned in the held map when first asked.
+                let live: std::collections::HashSet<&str> =
+                    pointer.chunks.iter().flatten().map(|r| r.addr.as_str()).collect();
+                cfg.alias_cache.lock().unwrap().retain(|a, _| live.contains(a.as_str()));
+                l.pointer = Some(pointer);
+                return EditOutcome { result: Ok(()), held: Some(held) };
+            }
+            Err(LeanError::Store(StoreError::PreconditionFailed(_))) | Err(LeanError::Store(StoreError::Conflict(_))) => {
+                sent = Some(sending);
+                continue;
+            }
+            Err(e) => return EditOutcome { result: Err(EditError::Store(e)), held: None },
+        }
+    }
+    EditOutcome { result: Err(EditError::Contended), held: None }
+}
+
+fn apply_overlay(entries: &mut BTreeMap<String, LeanEntry>, overlay: BTreeMap<String, Option<LeanEntry>>) {
+    for (p, v) in overlay {
+        match v {
+            Some(e) => {
+                entries.insert(p, e);
+            }
+            None => {
+                entries.remove(&p);
+            }
+        }
+    }
+}
+
+/// `commit_edit_paths`'s shadow (tests, and every debug build): the whole
+/// document edited, split and diffed as `commit_edit_from` does, must give
+/// the same chunk list, the same bytes for each chunk sent, and the same
+/// retire set.
+fn shadow_edit(
+    cfg: &LeanConfig,
+    base: &LeanManifest,
+    overlay: &BTreeMap<String, Option<LeanEntry>>,
+    chunks: &[(super::chunk::ChunkRef, Option<Vec<u8>>)],
+    retired: &[String],
+) {
+    let mut whole = base.entries.clone();
+    apply_overlay(&mut whole, overlay.clone());
+    let want = super::chunk::split_with(&whole, cfg.chunk_target, cfg.chunk_min, cfg.chunk_max)
+        .expect("shadow: the whole document does not split");
+    let got_refs: Vec<&super::chunk::ChunkRef> = chunks.iter().map(|(r, _)| r).collect();
+    let want_refs: Vec<&super::chunk::ChunkRef> = want.iter().map(|(r, _)| r).collect();
+    assert_eq!(got_refs, want_refs, "edit shadow: the chunk list is not the whole document's");
+    for ((r, body), (_, w)) in chunks.iter().zip(&want) {
+        if let Some(b) = body {
+            assert_eq!(b, w, "edit shadow: chunk {} encodes differently", r.addr);
+        }
+    }
+    let still: std::collections::HashSet<&str> = whole.values().map(|e| e.key.as_str()).collect();
+    let want_retired: Vec<String> =
+        base.entries.values().map(|e| e.key.clone()).filter(|k| !still.contains(k.as_str())).collect();
+    assert_eq!(retired, want_retired.as_slice(), "edit shadow: the retire set is not the whole document's");
+}
+
 /// CAS-write the manifest document. `expected`: None ⇒ first write
 /// (If-None-Match:*); Some(etag) ⇒ If-Match. The caller owns 412
 /// handling (merge-retry or fence — never blind re-seed).
@@ -887,7 +1128,9 @@ async fn cas_write_chunked_refs(
     let refs: Vec<super::chunk::ChunkRef> = chunks.iter().map(|(r, _)| r.clone()).collect();
     super::docview::remember(cfg, &refs, &m.entries);
     let doc = ChunkedDoc { seq: m.seq, sole_writer: m.sole_writer, boundary_source, tombstones: &m.tombstones };
-    publish_chunk_list(store, cfg, &chunks, &doc, expected, prev, pub_stamps.epoch, pub_stamps.flush_uuid).await
+    let (meta, refs, _) =
+        publish_chunk_list(store, cfg, &chunks, &doc, expected, prev, pub_stamps.epoch, pub_stamps.flush_uuid).await?;
+    Ok((meta, refs))
 }
 
 /// What a chunked publish writes beside its chunk list.
@@ -901,7 +1144,9 @@ pub struct ChunkedDoc<'a> {
 /// Publish a chunk list: every chunk `prev` lacks, then the tombstones
 /// object, then the pointer CAS. `chunks` carries a body for each chunk it
 /// encoded; one without a body is `prev`'s and is never sent. The ordering
-/// is the atomicity story (`cas_write_chunked`).
+/// is the atomicity story (`cas_write_chunked`). Returns the pointer's
+/// response, the chunk addresses it references (its tombstones object
+/// included), and the pointer itself.
 #[allow(clippy::too_many_arguments)]
 async fn publish_chunk_list(
     store: &dyn ObjectStore,
@@ -912,7 +1157,7 @@ async fn publish_chunk_list(
     prev: &[super::chunk::ChunkRef],
     epoch: u64,
     flush_uuid: &str,
-) -> LeanResult<(ObjectMeta, Vec<String>)> {
+) -> LeanResult<(ObjectMeta, Vec<String>, Pointer)> {
     let have: std::collections::HashSet<&str> = prev.iter().map(|r| r.addr.as_str()).collect();
 
     let stamps = GenerationStamps {
@@ -986,7 +1231,7 @@ async fn publish_chunk_list(
     let meta = put_pointer(store, cfg, &pointer, expected, &stamps).await?;
     let mut refs: Vec<String> = pointer.chunks.iter().flatten().map(|r| r.addr.clone()).collect();
     refs.extend(tombstones);
-    Ok((meta, refs))
+    Ok((meta, refs, pointer))
 }
 
 /// What a commit retired (M1): the handles its document no longer cites
@@ -1056,7 +1301,7 @@ pub async fn cas_write_view(
     flush_uuid: &str,
     retired_handles: Vec<String>,
 ) -> LeanResult<ObjectMeta> {
-    let (meta, refs) =
+    let (meta, refs, _) =
         publish_chunk_list(store, cfg, chunks, doc, Some(expected), &expected.prev_chunks, epoch, flush_uuid).await?;
     log_retired(store, cfg, doc.seq, epoch, flush_uuid, retired_handles, Some(&refs), Some(expected)).await;
     Ok(meta)

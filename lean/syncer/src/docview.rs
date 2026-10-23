@@ -45,10 +45,75 @@ pub fn key_path<'a>(prefix: &str, key: &'a str) -> Option<&'a str> {
 }
 
 fn aliases_in(prefix: &str, entries: &EntryMap) -> Vec<(String, String)> {
+    aliases_of(prefix, entries.iter())
+}
+
+fn aliases_of<'a>(prefix: &str, entries: impl Iterator<Item = (&'a String, &'a LeanEntry)>) -> Vec<(String, String)> {
     entries
-        .iter()
         .filter(|(p, e)| key_path(prefix, &e.key) != Some(p.as_str()))
         .map(|(p, e)| (p.clone(), e.key.clone()))
+        .collect()
+}
+
+/// Chunk `i`'s entries in a document held whole: from its first key to the
+/// next chunk's.
+pub fn chunk_entries<'a>(
+    doc: &'a EntryMap,
+    refs: &'a [ChunkRef],
+    i: usize,
+) -> impl Iterator<Item = (&'a String, &'a LeanEntry)> {
+    use std::ops::Bound;
+    let to = refs.get(i + 1).map_or(Bound::Unbounded, |n| Bound::Excluded(n.first.as_str()));
+    doc.range::<str, _>((Bound::Included(refs[i].first.as_str()), to))
+}
+
+/// The retire set of an overlay on a document held whole (the gateway's
+/// per-path commit, latency plan §16): `DocView::retired`'s rule, with
+/// every lookup in the map. A chunk whose aliases the cache lacks is
+/// scanned in the map, and remembered.
+pub fn retired_over(
+    cfg: &LeanConfig,
+    refs: &[ChunkRef],
+    doc: &EntryMap,
+    overlay: &BTreeMap<String, Option<LeanEntry>>,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = vec![];
+    for (p, now) in overlay {
+        if let Some(was) = doc.get(p) {
+            if now.as_ref().is_none_or(|n| n.key != was.key) {
+                candidates.push(was.key.clone());
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return vec![];
+    }
+    let aliases: Vec<Aliases> = {
+        let mut cache = cfg.alias_cache.lock().unwrap();
+        (0..refs.len())
+            .map(|i| {
+                cache
+                    .entry(refs[i].addr.clone())
+                    .or_insert_with(|| Arc::new(aliases_of(&cfg.prefix, chunk_entries(doc, refs, i))))
+                    .clone()
+            })
+            .collect()
+    };
+    let mut by_key: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (path, key) in aliases.iter().flat_map(|a| a.iter()) {
+        by_key.entry(key.as_str()).or_default().push(path.as_str());
+    }
+    let overlay_cites: HashSet<&str> = overlay.values().flatten().map(|e| e.key.as_str()).collect();
+    candidates
+        .into_iter()
+        .filter(|k| {
+            let cited = overlay_cites.contains(k.as_str())
+                || by_key.get(k.as_str()).is_some_and(|ps| ps.iter().any(|p| !overlay.contains_key(*p)))
+                || key_path(&cfg.prefix, k)
+                    .filter(|q| !overlay.contains_key(*q))
+                    .is_some_and(|q| doc.get(q).is_some_and(|e| &e.key == k));
+            !cited
+        })
         .collect()
 }
 

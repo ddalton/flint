@@ -151,6 +151,32 @@ covered by the stability guarantee.
   from 4.1 to 0.3 s), and at 200,000 files from 1.5 to 0.87 s, with the
   same requests. Taking a peer's change is unchanged.
 
+- **lean gateway: a UI save, rename or delete rewrites only the chunks it
+  changes, and holds what it installed.** Each UI commit used to clone the
+  whole manifest, edit it, and re-split, re-hash and diff all of it, and
+  the next verb then re-assembled the whole document because the
+  gateway's own commit had moved the pointer: about 3.7 s per verb at a
+  million files. An edit now writes only the paths it changes. The commit
+  re-chunks from the first changed chunk until the boundaries line up again,
+  and publishes only the new chunks. The document it installed is held for
+  the next verb, made in place from the one it edited. The bucket gets
+  exactly the document, chunks and retire set it got before.
+  `Workspace::without_chunk_view()` keeps the old shape, and
+  `Workspace::view()` is now public: the document the gateway holds.
+  On a store answering in 25 ms, at a million files: a UI save went from
+  2.9 to 0.17 s, a rename or delete from 2.8 to 0.14 s (3.7 s each before
+  either change on this list), and what is left is the requests.
+- **lean gateway: the binary uses mimalloc** (`fastalloc`, on by default),
+  as flint-sync and the NFS server do. The static musl binary's own malloc
+  is one process-wide lock. A UI save at a million files took 2.9 s on
+  mimalloc against 3.7 s on musl's allocator, before the change above. An
+  embedder of the library keeps its own allocator.
+- **lean: G's numbers above were measured on glibc.** The test binary
+  never had flint-sync's allocator. As flint-sync ships (static musl with
+  mimalloc), a one-file publish at a million files went from 7.3 to 2.7 s,
+  and at 200,000 from 1.7 to 0.86 s; the commit's own steps from 4.8 to
+  0.2 s.
+
 ### Fixed
 
 - **lean gateway docs: a boundary request is not a one-second door.**

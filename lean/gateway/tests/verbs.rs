@@ -1311,7 +1311,7 @@ const WRITERS: &[&str] = &[
 ];
 
 /// Every public verb that only reads.
-const READERS: &[&str] = &["get_file", "snapshot", "status", "wait_cited", "get_draft", "list_drafts"];
+const READERS: &[&str] = &["get_file", "snapshot", "status", "view", "wait_cited", "get_draft", "list_drafts"];
 
 /// The requests a read-only credential allows, by `MemoryStore` op name
 /// (the syncer battery's `READ_OPS`). Anything else is a write.
@@ -1506,6 +1506,9 @@ async fn a_read_only_workspace_reads_what_writers_wrote_and_sends_only_reads() {
     let st = ro.status().await.unwrap();
     assert_eq!((st.seq, st.epoch), (Some(2), Some(epoch)), "two saves, two commits");
     seen.push("status");
+    let held = ro.view().await.unwrap().expect("two saves, a document");
+    assert_eq!(held.manifest.entries.keys().map(|k| k.as_str()).collect::<Vec<_>>(), ["cited.txt", "tracked.txt"]);
+    seen.push("view");
     let seq = ro.wait_cited("cited.txt", &cited, Duration::from_secs(5), Duration::from_millis(10)).await.unwrap();
     assert_eq!(seq, 2);
     seen.push("wait_cited");
