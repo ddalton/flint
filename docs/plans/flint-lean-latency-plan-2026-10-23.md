@@ -960,7 +960,9 @@ in the model or the code depends on that order.
   not skipped, the root's exclusions applied at every depth, the
   tie-break reversed.
 
-**Results.** The bench of §4 on the box, with the in-memory store at 0 ms.
+**Results.** The bench of §4 on the box, with the in-memory store at 0 ms,
+on glibc's malloc, which is not what ships: the numbers as shipped
+follow this table.
 Three arms from two binaries, interleaved within each repetition: `old`,
 E's tree with the walk before E put back; `t1`, E with one worker; and
 `tN`, E at the default (8 on the box's 8 cores). There were three
@@ -989,16 +991,17 @@ repetitions at 20k and 200k (ranges below) and one run at 1M; a second
   bulk from sorted input. This is the effect §11 measured for the
   baseline: a scattered map slows every later walk, of itself and of what
   is allocated around it.
-- **Not understood: `consume`.** On the old arm, every barrier's consume
-  took 16–40 ms at 200k and about 200 ms at 1M, idle ticks included,
-  for the same single GET. On E's arms (`t1` too) it falls to 0 by the
-  third barrier after the checkout. The cheap path's only per-path work
-  is a stat per path in `skipped`, so the likeliest cause is a
-  different `skipped` set. But E changes nothing the walk returns
-  except when each entry was seen (the racy rule's input). Not
-  diagnosed yet: that needs a run that counts `skipped` and the racy
-  entries per barrier. About 0.2 s of the 1.5 s E takes off the 1M idle
-  tick is this.
+- **`consume`: glibc's, not the syncer's.** On the old arm every
+  barrier's consume took 16–40 ms at 200k and about 200 ms at 1M, idle
+  ticks included, for the same single GET; on E's arms it falls to 0 by
+  the third barrier after the checkout. `skipped` was empty (flint-e4
+  read both baselines). It is glibc parking the old walk's million freed
+  path strings in its fastbins and merging them at the next large
+  allocation, which is in the next barrier's consume: with
+  `GLIBC_TUNABLES=glibc.malloc.mxfast=0` it is gone (flint-e4's
+  allocator comparison, `/mnt/nvme/alloc-bench/`). E's strings come from
+  the workers' arenas and are reused there, never merged. mimalloc, which
+  the syncer ships with, has no such cost.
 - **The first barrier after a checkout is still the re-hash** (§8, item
   5): 103 s of its 107 s at 1M is `classify` hashing every file. E does
   not touch it; it is still unassigned.
@@ -1008,6 +1011,48 @@ repetitions at 20k and 200k (ranges below) and one run at 1M; a second
   apart: the walk's results are held twice for a moment, the workers'
   lists and then the sorted one. `t1` costs about the same as `tN`, so
   the worker count is not what drives it.
+
+**On the allocator the syncer ships with.** Every table above is glibc's
+malloc: `flint-sync` sets mimalloc as its global allocator in
+`bin/flint_sync.rs` only, so the library's test binary, where every
+bench of this plan ran, never had it (found by flint-e4, 2026-10-23). The
+same three arms, built as shipped: static musl with mimalloc, the test
+binary given the syncer's allocator by one `lib.rs` line in the bench's
+copies only (flint-e4 commits it on G2's branch). Both binaries were
+checked static, and mimalloc reports its start in both; the battery
+passes on that build, 373. 200k three repetitions, 1M one run. Logs in
+`/mnt/nvme/e-musl/`.
+
+| barrier | 200k old | 200k t1 | 200k tN | 1M old | 1M t1 | 1M tN |
+|---|---:|---:|---:|---:|---:|---:|
+| idle tick | 415–417 ms | 400–405 ms | 219–223 ms | 2132 ms | 2095 ms | 1141 ms |
+| taking a peer's one-file change | 746–748 ms | 755–764 ms | 566–579 ms | 3815 ms | 3943 ms | 2985 ms |
+| one-file publish, collection not due | 1235–1236 ms | 1252–1285 ms | 1057–1091 ms | 6278 ms | 6567 ms | 5606 ms |
+| that publish's `walk` | 322–324 ms | 274–278 ms | 90–96 ms | 1644 ms | 1458 ms | 497 ms |
+| that publish's `classify` | 91–92 ms | 116 ms | 116–117 ms | 474 ms | 606 ms | 604 ms |
+| that publish's `load`, `merge`, `cas`, `retire_set` | 789–795 ms | 836–869 ms | 822–852 ms | 4045 ms | 4392 ms | 4395 ms |
+| peak RSS, whole bench process | 1267–1380 MiB | 1245–1374 MiB | 1361–1374 MiB | 5941 MiB | 5930 MiB | 5927 MiB |
+
+- **The walk's gain holds**: 1644 to 497 ms at 1M, as on glibc.
+- **But the main thread's later steps get slower**, at any thread
+  count: at 1M `classify` +130 ms, `load` +100, `merge` +147, `cas` +45,
+  `retire_set` +55, about 480 ms, which takes back about 40% of the
+  walk's gain in a publish. On glibc the same steps got faster. The
+  likeliest cause, not yet tested: the walk's million strings are now
+  allocated in the workers' heaps, so the main thread's next large
+  allocations (the documents of `load` and `merge`) no longer reuse the
+  blocks the walk freed at the end of the last barrier, and take cold
+  pages instead.
+- **So, as shipped:** with 8 CPUs the idle tick at 1M drops from 2.1 to
+  1.1 s and a one-file publish from 6.3 to 5.6 s; at 200k from 416 to
+  221 ms and from 1235 to about 1075 ms. **With one CPU E is slower**: a
+  publish takes 6.6 s instead of 6.3 at 1M, with the idle tick
+  unchanged. No memory cost on this allocator.
+- **Not done, and the next step if E is to be finished**: walk on the
+  calling thread when there is one worker (a one-CPU pod then keeps the
+  old allocation pattern plus the relative stat), and build the keys on
+  the calling thread when there are several, then measure both as
+  shipped. Each is a few lines and one bench.
 
 **What the bench does not measure.** The tree was just written, so its
 directories and inodes were in the kernel's cache, and the walk was CPU,

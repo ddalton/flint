@@ -199,16 +199,17 @@ covered by the stability guarantee.
   found, and a directory none of them can list still fails the whole
   walk. `FLINT_SYNC_SCAN_THREADS` sets the number of workers (default:
   the CPUs the process may use, at most 8; 1 is one worker). In the
-  barrier's `steps`, `scan` is now `walk` and `classify`. On the
-  in-memory store with 8 cores, at 200k files the walk went from
-  293–297 ms to 64–68 ms, the idle tick from 462–482 ms to 184–188 ms,
-  and a one-file publish from 1258–1283 ms to 922–938 ms. At 1M files
-  (one run) the idle tick went from 2.5 s to 1.0 s and a one-file
-  publish from 6.8 s to 4.7 s. The cost is about 160 MiB more peak
-  memory at 1M files. Two names that give one relative path (`a\b` and
-  `a/b`) now keep the same file from one walk to the next. inotify was
-  considered and not used: it cannot see every completed write, so a
-  publish would still have to walk.
+  barrier's `steps`, `scan` is now `walk` and `classify`. Built as
+  shipped (static musl, mimalloc), on the in-memory store with 8 cores:
+  at 200k files the idle tick went from 415–417 ms to 219–223 ms and a
+  one-file publish from 1235 ms to 1057–1091 ms; at 1M files (one run)
+  from 2.1 s to 1.1 s and from 6.3 s to 5.6 s. The walk itself is 70%
+  faster, but the steps after it get slower, which takes back about 40%
+  of that in a publish. With one CPU (a CPU limit of 1) a publish is
+  about 5% slower than before. Two names that give one relative path
+  (`a\b` and `a/b`) now keep the same file from one walk to the next.
+  inotify was considered and not used: it cannot see every completed
+  write, so a publish would still have to walk.
 
 ### Fixed
 
