@@ -132,7 +132,7 @@ impl Syncer {
             .then(|| baseline.entries.iter().map(|(p, e)| (p.clone(), e.etag.clone())).collect());
 
         // 1. The scan comes FIRST; dirt is judged against it alone.
-        let scanned = scan::scan(&self.cfg.root)?;
+        let scanned = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
         let mut classified = scan::classify(&scanned, &baseline);
         scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
         let locally_dirty = |path: &str| {
@@ -456,7 +456,7 @@ impl Syncer {
                 report.seq = baseline.seq;
             }
         }
-        let rescan = scan::scan(&self.cfg.root)?;
+        let rescan = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
         baseline.prev_scan.sync_to(rescan.keys());
         // Materialised files before the baseline that vouches for them.
         self.state.sync_tree()?;

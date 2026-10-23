@@ -9,7 +9,8 @@
 //! deletion).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
 
 use super::{state::Baseline, LeanResult, CONTROL_DIR, STATE_DIR};
 use flint_store::crc64_to_b64;
@@ -99,41 +100,124 @@ pub fn stat_changed(b: &super::state::BaselineEntry, size: u64, mtime: i64, nano
 /// the CR's that makes a 0700 directory stops the whole workspace (as
 /// mkfs's root-owned `lost+found` did, before the quota removed it).
 pub fn scan(root: &Path) -> LeanResult<BTreeMap<String, ScanEntry>> {
-    let mut out = BTreeMap::new();
-    walk(root, root, &mut out)?;
-    Ok(out)
+    scan_with(root, default_threads())
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanResult<()> {
+/// Threads the walk uses unless told otherwise: the CPUs this process may
+/// use (the cgroup's quota and the affinity mask count), at most 8.
+pub fn default_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
+}
+
+/// `scan`, by `threads` workers (lever E). They take directories from one
+/// queue, so a tree that is one huge directory and a tree of thousands of
+/// small ones both spread. Each entry is stat'ed relative to its directory
+/// (`DirEntry::metadata`: fstatat/statx with `AT_SYMLINK_NOFOLLOW`), not by
+/// its full path. What it returns is what the one-thread walk returned:
+/// the same entries under the same exclusions, and the first error any
+/// worker meets fails the whole walk (`Queue::failed`), never dropped
+/// with the worker that met it.
+pub fn scan_with(root: &Path, threads: usize) -> LeanResult<BTreeMap<String, ScanEntry>> {
+    let queue = Mutex::new(Queue { dirs: vec![(root.to_path_buf(), String::new())], busy: 0, failed: None });
+    let wake = Condvar::new();
+    let found: Vec<Vec<(String, ScanEntry)>> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads.max(1)).map(|_| s.spawn(|| walk_worker(&queue, &wake))).collect();
+        workers.into_iter().map(|w| w.join().expect("a scan worker panicked")).collect()
+    });
+    if let Some(e) = queue.into_inner().unwrap_or_else(|p| p.into_inner()).failed {
+        return Err(e.into());
+    }
+    // Two names can give one relative path (a `\` in a name becomes `/`).
+    // The one-thread walk kept the later in `read_dir` order; here which
+    // worker read which is chance, so the order is a rule of the tree: by
+    // path, then by what was stat'ed, and the last of equal paths is kept
+    // (`from_iter` sorts stably, then builds in bulk, not by a million
+    // inserts).
+    let mut all: Vec<(String, ScanEntry)> = found.into_iter().flatten().collect();
+    let stat = |e: &ScanEntry| (e.size, e.mtime_unix, e.mtime_nanos, e.mode);
+    all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| stat(&a.1).cmp(&stat(&b.1))));
+    Ok(all.into_iter().collect())
+}
+
+/// The walk's shared state: directories not yet read (with the relative
+/// prefix of what is under each), how many are being read, and the first
+/// error.
+struct Queue {
+    dirs: Vec<(PathBuf, String)>,
+    busy: usize,
+    failed: Option<std::io::Error>,
+}
+
+fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Vec<(String, ScanEntry)> {
+    let mut out = vec![];
+    loop {
+        let (dir, prefix) = {
+            let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if q.failed.is_some() {
+                    return out;
+                }
+                if let Some(next) = q.dirs.pop() {
+                    q.busy += 1;
+                    break next;
+                }
+                if q.busy == 0 {
+                    // Nothing queued and nobody reading: the tree is done.
+                    wake.notify_all();
+                    return out;
+                }
+                q = wake.wait(q).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        let mut subdirs = vec![];
+        let read = read_dir_entries(&dir, &prefix, &mut out, &mut subdirs);
+        let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+        q.busy -= 1;
+        match read {
+            Ok(()) => q.dirs.extend(subdirs),
+            Err(e) => {
+                if q.failed.is_none() {
+                    q.failed = Some(e);
+                }
+            }
+        }
+        wake.notify_all();
+    }
+}
+
+/// One directory: its files into `out`, its subdirectories onto `subdirs`.
+/// `prefix` is the directory's path relative to the root, with a trailing
+/// `/`; empty at the root.
+fn read_dir_entries(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<(String, ScanEntry)>,
+    subdirs: &mut Vec<(PathBuf, String)>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
-        let path = entry.path();
         let name = entry.file_name();
-        if dir == root {
-            let n = name.to_string_lossy();
+        let name = name.to_string_lossy();
+        if prefix.is_empty() {
             // The state dir and the control namespace (boundary-verbs
             // plan D0). Without the second exclusion `.flint/publish`
             // is live ammunition: an ordinary regular file, scanned and
             // PUBLISHED to `<prefix>/files/.flint/publish`.
-            if n == STATE_DIR || n == CONTROL_DIR {
+            if name == STATE_DIR || name == CONTROL_DIR {
                 continue;
             }
         }
-        if name.to_string_lossy().ends_with(TMP_SUFFIX) {
+        if name.ends_with(TMP_SUFFIX) {
             continue;
         }
-        let meta = std::fs::symlink_metadata(&path)?;
+        let meta = entry.metadata()?;
         if meta.file_type().is_symlink() {
             continue;
         }
+        let rel = format!("{prefix}{}", name.replace('\\', "/"));
         if meta.is_dir() {
-            walk(root, &path, out)?;
+            subdirs.push((entry.path(), rel + "/"));
         } else if meta.is_file() {
-            let rel = path
-                .strip_prefix(root)
-                .expect("walk stays under root")
-                .to_string_lossy()
-                .replace('\\', "/");
             #[cfg(unix)]
             let mode = {
                 use std::os::unix::fs::MetadataExt;
@@ -147,7 +231,7 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> LeanR
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
                 .unwrap_or((0, 0));
-            out.insert(rel, ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode, seen_nanos: now_nanos() });
+            out.push((rel, ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode, seen_nanos: now_nanos() }));
         }
     }
     Ok(())

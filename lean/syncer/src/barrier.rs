@@ -774,7 +774,8 @@ impl Syncer {
         // store and handed back at each end of the barrier (lever D).
         let mut baseline = self.state.take_baseline()?;
         clock.lap("baseline_load");
-        let scanned = scan::scan(&self.cfg.root)?;
+        let scanned = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
+        clock.lap("walk");
         let mut classified = scan::classify(&scanned, &baseline);
         let racy_cleared = scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
         for p in &racy_cleared {
@@ -786,7 +787,7 @@ impl Syncer {
             report.absences_confirmed = self.confirm_absences(&mut classified)?;
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
-        clock.lap("scan");
+        clock.lap("classify");
 
         // Skip-on-no-diff: nothing local, and the bucket manifest where the
         // consume left it.

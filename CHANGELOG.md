@@ -55,10 +55,10 @@ covered by the stability guarantee.
 
 - **lean: a barrier says where its time went.** With the event trace
   on (`spec.eventTrace`, `FLINT_SYNC_EVENT_TRACE=1`), `barrier_end`
-  carries `steps`: each step of the barrier in order (consume, scan,
-  upload, claim, load, merge, cas, the sweeps, release, ...), its wall
-  time in microseconds, and the requests the store sent during it. The
-  steps account for every request the barrier makes. Measured on
+  carries `steps`: each step of the barrier in order (consume, walk,
+  classify, upload, claim, load, merge, cas, the sweeps, release, ...),
+  its wall time in microseconds, and the requests the store sent during
+  it. The steps account for every request the barrier makes. Measured on
   loopback MinIO (`lean/e2e/perf/results/barrier-steps-2026-10-23.md`),
   a one-file publish takes 195 ms, 835 ms and 8.5 s at 20k, 100k and 1M
   files. At 1M about 96% of that time grows with the size of the
@@ -191,6 +191,24 @@ covered by the stability guarantee.
   that gate and was re-proved; an agent writing before the marker is the
   mutation that breaks it. `FLINT_SYNC_RACY_AT_GATE=off` keeps the shape
   before.
+
+- **lean: the scan walks the tree with several threads** (lever E). The
+  walk read one directory at a time and stat'ed every entry by its full
+  path. Workers now take directories from one queue and stat each entry
+  relative to its directory. They find exactly what the one-thread walk
+  found, and a directory none of them can list still fails the whole
+  walk. `FLINT_SYNC_SCAN_THREADS` sets the number of workers (default:
+  the CPUs the process may use, at most 8; 1 is one worker). In the
+  barrier's `steps`, `scan` is now `walk` and `classify`. On the
+  in-memory store with 8 cores, at 200k files the walk went from
+  293–297 ms to 64–68 ms, the idle tick from 462–482 ms to 184–188 ms,
+  and a one-file publish from 1258–1283 ms to 922–938 ms. At 1M files
+  (one run) the idle tick went from 2.5 s to 1.0 s and a one-file
+  publish from 6.8 s to 4.7 s. The cost is about 160 MiB more peak
+  memory at 1M files. Two names that give one relative path (`a\b` and
+  `a/b`) now keep the same file from one walk to the next. inotify was
+  considered and not used: it cannot see every completed write, so a
+  publish would still have to walk.
 
 ### Fixed
 

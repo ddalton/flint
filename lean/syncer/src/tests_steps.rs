@@ -42,12 +42,13 @@ fn sent(before: RequestCounts, after: RequestCounts) -> RequestCounts {
     }
 }
 
-const COMMIT: [&str; 23] = [
+const COMMIT: [&str; 24] = [
     "cell",
     "rescope_replay",
     "consume",
     "baseline_load",
-    "scan",
+    "walk",
+    "classify",
     "intent",
     "upload",
     "claim",
@@ -115,6 +116,6 @@ async fn a_barrier_with_nothing_to_publish_takes_no_step_of_the_commit_section()
     let after = store.request_counts().unwrap();
 
     assert!(r.no_change);
-    assert_eq!(names(&r), vec!["cell", "rescope_replay", "consume", "baseline_load", "scan", "idle_check"]);
+    assert_eq!(names(&r), vec!["cell", "rescope_replay", "consume", "baseline_load", "walk", "classify", "idle_check"]);
     assert_eq!(charged(&r), sent(before, after), "{:#?}", r.steps);
 }

@@ -83,6 +83,7 @@ mod tests;
 #[cfg(test)] mod tests_steps;
 #[cfg(test)] mod tests_cache;
 #[cfg(test)] mod tests_baseline;
+#[cfg(test)] mod tests_walk;
 #[cfg(test)] mod tests_news;
 // The binary's allocator (`fastalloc`, bin/flint_sync.rs) never reached
 // the test binary: the battery and the latency benches ran the system
@@ -529,6 +530,10 @@ pub struct LeanConfig {
     /// tracks it — the gateway's `UNTRACKED_GRACE_SECS`, past any live
     /// writer's claim and commit.
     pub untracked_grace_secs: u64,
+    /// Threads the scan walks the tree with (`scan::scan_with`, lever E);
+    /// `FLINT_SYNC_SCAN_THREADS`. The CPUs this process may use, at most
+    /// 8; 1 walks with one worker.
+    pub scan_threads: usize,
     /// How old the last cell WRITE (claim or renew) may be before a
     /// delete in the commit section renews first (review 2026-09-18,
     /// C2). A deposal needs the token still for six spaced polls (60 s),
@@ -632,6 +637,7 @@ impl LeanConfig {
             event_trace: None,
             untracked_sweep_secs: 3600,
             untracked_grace_secs: untracked::UNTRACKED_GRACE_SECS,
+            scan_threads: scan::default_threads(),
             renew_within_secs: 20,
         }
     }

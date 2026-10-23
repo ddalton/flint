@@ -27,6 +27,8 @@
 //! - `FLINT_BENCH_ARM=control`: the shape before levers A and C — no chunk
 //!   cache, chunk fetches one at a time, the collection pass at every
 //!   commit — from the same binary. The default arm is the shipped config.
+//! - `FLINT_BENCH_SCAN_THREADS`: the threads the scan walks with (lever E;
+//!   1 = one worker). Unset, the shipped default.
 
 use super::*;
 use flint_store::memory::MemoryStore;
@@ -97,6 +99,10 @@ fn bench_syncer(store: &Arc<dyn ObjectStore>, root: &std::path::Path, prefix: &s
     }
     if bench_arm() == "nowait" {
         cfg.racy_wait_min = 0;
+    }
+    // Lever E's arms from one binary: the walk's thread count.
+    if let Some(n) = std::env::var("FLINT_BENCH_SCAN_THREADS").ok().and_then(|v| v.parse().ok()) {
+        cfg.scan_threads = n;
     }
     let state = super::state::SyncerState::open(cfg.state_dir()).unwrap();
     Syncer {

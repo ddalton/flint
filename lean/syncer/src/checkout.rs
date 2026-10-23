@@ -1113,7 +1113,7 @@ impl Syncer {
             return Ok(vec![]);
         }
         let baseline = self.state.load_baseline()?;
-        let scanned = super::scan::scan(&self.cfg.root)?;
+        let scanned = super::scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
         let mut c = super::scan::classify(&scanned, &baseline);
         super::scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut c);
         Ok(paths

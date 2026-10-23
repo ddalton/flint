@@ -103,6 +103,9 @@
 //!                                 UploadPartCopy)
 //!   FLINT_SYNC_UPLOAD_PART_PARALLELISM  parts of ONE object uploaded
 //!                                 concurrently on publish (default 8)
+//!   FLINT_SYNC_SCAN_THREADS       threads the scan walks the tree with
+//!                                 (default: the CPUs the process may use,
+//!                                 at most 8)
 //!   FLINT_SYNC_UPLOAD_INFLIGHT_MB upload bytes in flight — every part
 //!                                 and whole body is read into RAM before
 //!                                 its PUT (default 512; 0 = no bound)
@@ -260,6 +263,7 @@ async fn main() {
     };
     let mut cfg = LeanConfig::new(&prefix, &root);
     cfg.floor_secs = env_u64("FLINT_SYNC_FLOOR_SECS", 60);
+    cfg.scan_threads = env_u64("FLINT_SYNC_SCAN_THREADS", cfg.scan_threads as u64).max(1) as usize;
     cfg.sole_writer = std::env::var("FLINT_SYNC_SOLE_WRITER")
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

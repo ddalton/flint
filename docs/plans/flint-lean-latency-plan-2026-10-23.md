@@ -90,7 +90,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | **C** | the collection pass (retire ledger, reap, orphan, generation and chunk sweeps) runs on a cadence, not on every publish | per publish: 3 LISTs and 4 GETs under the lease | none: the reap and the sweeps are steps a commit section may take or not | **built** (§6) |
 | B | an adaptive news poll: read the pointer at 1 s while the agent is active, back to the floor when idle; the request cell rides the same read | visibility from up to 60 s to about 1 s | none: more barriers, each the same steps | **built** (§10). Cost: 2 GETs/s per active writer, 1 per active reader |
 | D | the baseline in memory, loaded once per process, persisted incrementally | at 1M, the baseline file is 38% of a 10 s publish: two parses (about 27%, removed by loading it once) and one full rewrite (about 9%, mostly removed by persisting incrementally); and most of the idle tick | none | **built** (§11) |
-| E | change tracking (inotify) in place of the walk, full walk on overflow; inotify on `.flint/` in place of the 1 s poll | at 1M, 2 s per barrier and the idle tick | none, if the fallback is the walk | not started; hardest (watch limits, uid) |
+| E | the walk in parallel: workers take directories from one queue, and each entry is stat'ed relative to its directory. Not inotify (§9, item 8) | at 1M, most of the scan's 2 s (walk and classify) in every barrier, the idle tick included | none: the walk returns what it returned (§13) | **built** (§13) |
 | F | policy: `sentinelMinIntervalSecs` 5 → 1, and a bytes-only publish budget | a sustained ceiling of one declared publish a minute | none | not started; a user decision |
 | G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none: the same document, chunk list and retire set | **built**, the commit side (§12); the consume side is G2 |
 | G2 | the consume derives only where the document moved since its last derive: a chunk-list diff | nothing measurable on the shipped allocator (§14) | a new rule and claim (`ddoc`, `Inv_DiffSound`) | **dropped** (user, 2026-10-23); archived on the local branch `lean-latency-g2-dropped` |
@@ -460,6 +460,18 @@ E the scan. In the idle tick, the two parses are 2.9 of 5.2 s.
    (user, 2026-10-23: "if G2 makes no difference we should drop it"; §14).
    **The benches measured the wrong allocator** (§15): from here on a
    lever is measured on flint-sync's own (musl + mimalloc).
+
+8. **E: the walk in parallel, not inotify** (user, 2026-10-23; built by
+   flint-c2, §13). A declared publish includes every completed write
+   (`lean/syncer/AGENTS.md`: "everything on disk when the syncer picks the
+   file up is part of the boundary"), and inotify can miss one. A write
+   through a shared mapping raises no event, a full queue drops events
+   (`IN_Q_OVERFLOW`), and files made in a new directory before its watch
+   is added are never reported. The watch limit is also per uid on the
+   node, shared by every pod that runs as that uid. Each of these needs a
+   walk to recover, so inotify could only be a hint, and a publish would
+   still walk the tree. The walk stays the record, and E makes it cheaper.
+   No model change (§13).
 
 ## 10. Lever B, as built
 
@@ -878,6 +890,132 @@ Verification on the box:
 - Mutation controls V1–V9 each fail their tests. V9's first form was
   vacuous: the full load also remembered the aliases. Its second form
   stops every path from remembering them, and is caught.
+
+## 13. Lever E, as built
+
+flint-c2, 2026-10-23, branch `lean-latency-e`, on flint-05's L7 commit
+`dbf616d5` (main after B, plus the chmod fix).
+
+**What it removes.** The walk read one directory at a time and `lstat`ed
+every entry by its full path, so the kernel resolved every component of
+every path again. At 1M files it was 2.0 s of a 10 s publish (§8,
+item 5), and the same 2.0 s of every idle tick.
+
+**What it is.** `scan::scan_with(root, threads)`. Workers take directories
+from one queue (a mutex and a condition variable), so a tree that is one
+huge directory and a tree of thousands of small ones both spread. Each
+entry is stat'ed relative to its directory (`DirEntry::metadata`: `statx`
+or `fstatat` on the directory's descriptor, `AT_SYMLINK_NOFOLLOW`), not by
+its full path. The results are collected, sorted and built into the map in
+bulk, not by a million inserts. `LeanConfig::scan_threads` defaults to the
+CPUs the process may use (`available_parallelism`, which counts the
+cgroup's quota and the affinity mask), at most 8; `FLINT_SYNC_SCAN_THREADS`
+sets it, and 1 walks with one worker. The barrier's scan, the sync's two
+scans and checkout's rescan all use it.
+
+**What it returns is what the one-thread walk returned**: the same entries
+under the same exclusions (the state and control directories at the root
+only, the syncer's temporaries at any depth, symlinks and non-regular
+files skipped), with the same size, mtime and mode. A directory any worker
+cannot list fails the whole walk, as before (flint-05's fail-closed rule,
+`c24beeb7`): the first error is kept in the queue, the other workers stop
+taking directories, and the walk returns it.
+
+**Found on the way: two names for one path.** The walk turns a `\` in a
+name into `/`, so on Linux a file named `a\b` and the file `b` in
+directory `a` give one relative path, and the walk keeps one of them. The
+one-thread walk kept the later in `read_dir` order, the same choice from
+one scan to the next. Workers would keep whichever they happened to read
+later, a different file from scan to scan: each flip a stat change, so a
+re-hash of `a/b` per barrier. The upload reads `root.join(rel)`, the real
+`a/b`, either way. So the order is now a rule of the tree (by path, then
+by size, mtime and mode, and the last kept). That a `\` name is published
+under another path at all is older than E and is not changed here.
+
+**Steps.** The `scan` step of `BarrierReport::steps` is now two: `walk`
+(the tree) and `classify` (against the baseline, the racy recheck, the
+absence confirmation).
+
+**Model.** None changes (§9, item 8). The walk was never atomic: agents
+write under it, and each path is observed at some instant within the walk.
+LeanScanRacy's `Scan` is a per-path version oracle, and the two-scan and
+racy-clean rules (L-138) are what make that safe. E changes the order in
+which paths are observed, never what one observation sees, and nothing
+in the model or the code depends on that order.
+
+**Evidence.**
+
+- The lean battery as a normal user (uid 1000, so the fail-closed tests
+  run, not skip): 373 passed, 1 ignored (flint-05's 369 with E's 4). The
+  gateway's tests pass against it.
+- `tests_walk.rs`, with the walk before E kept verbatim as the oracle: an
+  awkward tree (both exclusions at the root and at depth, temporaries,
+  symlinks to a file and to a directory, a FIFO, empty directories, a `\`
+  name, a 0755 file) at 1, 2 and 8 threads; six seeded random shapes (one
+  directory, deep chains, 200 directories) at 1, 3 and 8; an unlistable
+  directory deep in a busy tree fails the walk at 1, 2 and 8; and two
+  names for one path keep the same one in 20 walks at each of 1, 2 and 8.
+- Four mutations, each failing its tests: a worker that drops its error
+  (fails E's test and both of flint-05's fail-closed tests), temporaries
+  not skipped, the root's exclusions applied at every depth, the
+  tie-break reversed.
+
+**Results.** The bench of §4 on the box, with the in-memory store at 0 ms.
+Three arms from two binaries, interleaved within each repetition: `old`,
+E's tree with the walk before E put back; `t1`, E with one worker; and
+`tN`, E at the default (8 on the box's 8 cores). There were three
+repetitions at 20k and 200k (ranges below) and one run at 1M; a second
+1M round was dropped (user, to free the box). Logs are on the box, in
+`/mnt/nvme/e-bench/`.
+
+| barrier | 20k old | 20k tN | 200k old | 200k t1 | 200k tN | 1M old | 1M t1 | 1M tN |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| idle tick | 40–41 ms | 18 ms | 462–482 ms | 330–331 ms | 184–188 ms | 2.5 s | 1.7 s | 1.0 s |
+| taking a peer's one-file change | 81 ms | 53–54 ms | 916–951 ms | 708–751 ms | 534–571 ms | 5.0 s | 3.6 s | 2.7 s |
+| one-file publish, collection not due | 119–122 ms | 95–101 ms | 1258–1283 ms | 1074–1082 ms | 922–938 ms | 6.8 s | 5.7 s | 4.7 s |
+| that publish's `walk` | 30–32 ms | 11 ms | 296–298 ms | 205–206 ms | 65–66 ms | 1551 ms | 1106 ms | 363 ms |
+| that publish's `classify` | 10 ms | 10 ms | 139–143 ms | 111–113 ms | 107–110 ms | 815 ms | 589 ms | 595 ms |
+| peak RSS, whole bench process | 145–146 MiB | 150–151 MiB | 1317–1379 MiB | 1414–1439 MiB | 1400–1419 MiB | 6390 MiB | 6510 MiB | 6550 MiB |
+
+- **One worker already saves about a third of the walk** (`t1`: 1.55 to
+  1.1 s at 1M), because each stat is relative to its directory and the
+  kernel no longer resolves the full path. Eight workers take the rest
+  to about a quarter of `t1` (363 ms).
+- **`classify` is faster too** (815 to 595 ms at 1M), at any thread
+  count, and so are `retire_set` (200k: 121–122 to 98–111 ms; 1M: 664 to
+  455 ms) and, at 1M, `load` (1080 to 923 ms); `merge`, `cas` and `free`
+  are unchanged. The old walk built its map by one insert per entry, in
+  `read_dir` order, which scatters it across the heap; E builds it in
+  bulk from sorted input. This is the effect §11 measured for the
+  baseline: a scattered map slows every later walk, of itself and of what
+  is allocated around it.
+- **Not understood: `consume`.** On the old arm, every barrier's consume
+  took 16–40 ms at 200k and about 200 ms at 1M, idle ticks included,
+  for the same single GET. On E's arms (`t1` too) it falls to 0 by the
+  third barrier after the checkout. The cheap path's only per-path work
+  is a stat per path in `skipped`, so the likeliest cause is a
+  different `skipped` set. But E changes nothing the walk returns
+  except when each entry was seen (the racy rule's input). Not
+  diagnosed yet: that needs a run that counts `skipped` and the racy
+  entries per barrier. About 0.2 s of the 1.5 s E takes off the 1M idle
+  tick is this.
+- **The first barrier after a checkout is still the re-hash** (§8, item
+  5): 103 s of its 107 s at 1M is `classify` hashing every file. E does
+  not touch it; it is still unassigned.
+- **The cost: memory**, up to about 100 MiB at 200k and 160 MiB at 1M
+  at the peak of the whole bench process (two writers and the store;
+  the 1M figure is from single runs). Likely part of it, not measured
+  apart: the walk's results are held twice for a moment, the workers'
+  lists and then the sorted one. `t1` costs about the same as `tN`, so
+  the worker count is not what drives it.
+
+**What the bench does not measure.** The tree was just written, so its
+directories and inodes were in the kernel's cache, and the walk was CPU,
+not I/O. A cold cache (after a node restart, or memory pressure) makes
+the walk wait on the disk. More workers keep more reads in flight, which
+an NVMe serves in parallel, but that is not measured here. A pod with a
+CPU limit of 1 gets one worker (`available_parallelism` counts the
+quota), and with it `t1`'s gain only.
 
 ## 14. Lever G2, the consume side: explored and dropped
 
