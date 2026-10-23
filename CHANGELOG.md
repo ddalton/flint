@@ -25,6 +25,19 @@ covered by the stability guarantee.
   `loop,nodev,nosuid,noatime`. Passthrough mounts were already
   `nodev,nosuid`.
 
+### Added
+
+- **lean: a barrier says where its time went.** With the event trace
+  on (`spec.eventTrace`, `FLINT_SYNC_EVENT_TRACE=1`), `barrier_end`
+  carries `steps`: each step of the barrier in order (consume, scan,
+  upload, claim, load, merge, cas, the sweeps, release, ...), its wall
+  time in microseconds, and the requests the store sent during it. The
+  steps account for every request the barrier makes. Measured on
+  loopback MinIO (`lean/e2e/perf/results/barrier-steps-2026-10-23.md`),
+  a one-file publish takes 195 ms, 835 ms and 8.5 s at 20k, 100k and 1M
+  files. At 1M about 96% of that time grows with the size of the
+  workspace, not with the change.
+
 ## [1.60.3] - 2026-10-23
 
 A patch release for a cross-tenant data leak and three defects. On a disk
