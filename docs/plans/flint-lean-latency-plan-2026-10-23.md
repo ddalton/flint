@@ -906,11 +906,13 @@ from one queue (a mutex and a condition variable), so a tree that is one
 huge directory and a tree of thousands of small ones both spread. Each
 entry is stat'ed relative to its directory (`DirEntry::metadata`: `statx`
 or `fstatat` on the directory's descriptor, `AT_SYMLINK_NOFOLLOW`), not by
-its full path. The results are collected, sorted and built into the map in
-bulk, not by a million inserts. `LeanConfig::scan_threads` defaults to the
-CPUs the process may use (`available_parallelism`, which counts the
-cgroup's quota and the affinity mask), at most 8; `FLINT_SYNC_SCAN_THREADS`
-sets it, and 1 walks with one worker. The barrier's scan, the sync's two
+its full path. One worker walks on the calling thread, and the calling
+thread makes every key the map keeps ("The fix", below). The results
+are sorted and built into the map in bulk, not by a million inserts.
+`LeanConfig::scan_threads` defaults to the CPUs the process may use
+(`available_parallelism`, which counts the cgroup's quota and the
+affinity mask), at most 8; `FLINT_SYNC_SCAN_THREADS` sets it, and 1
+walks on the calling thread. The barrier's scan, the sync's two
 scans and checkout's rescan all use it.
 
 **What it returns is what the one-thread walk returned**: the same entries
@@ -1016,9 +1018,10 @@ repetitions at 20k and 200k (ranges below) and one run at 1M; a second
 malloc: `flint-sync` sets mimalloc as its global allocator in
 `bin/flint_sync.rs` only, so the library's test binary, where every
 bench of this plan ran, never had it (found by flint-e4, 2026-10-23). The
-same three arms, built as shipped: static musl with mimalloc, the test
-binary given the syncer's allocator by one `lib.rs` line in the bench's
-copies only (flint-e4 commits it on G2's branch). Both binaries were
+same three arms as first built (`f974132a`), as shipped: static musl
+with mimalloc, the test binary given the syncer's allocator by one
+`lib.rs` line in the bench's copies only (flint-e4 commits it on G2's
+branch). Both binaries were
 checked static, and mimalloc reports its start in both; the battery
 passes on that build, 373. 200k three repetitions, 1M one run. Logs in
 `/mnt/nvme/e-musl/`.
@@ -1033,26 +1036,49 @@ passes on that build, 373. 200k three repetitions, 1M one run. Logs in
 | that publish's `load`, `merge`, `cas`, `retire_set` | 789–795 ms | 836–869 ms | 822–852 ms | 4045 ms | 4392 ms | 4395 ms |
 | peak RSS, whole bench process | 1267–1380 MiB | 1245–1374 MiB | 1361–1374 MiB | 5941 MiB | 5930 MiB | 5927 MiB |
 
-- **The walk's gain holds**: 1644 to 497 ms at 1M, as on glibc.
-- **But the main thread's later steps get slower**, at any thread
+- **The walk's gain held**: 1644 to 497 ms at 1M, as on glibc.
+- **But the main thread's later steps got slower**, at any thread
   count: at 1M `classify` +130 ms, `load` +100, `merge` +147, `cas` +45,
-  `retire_set` +55, about 480 ms, which takes back about 40% of the
-  walk's gain in a publish. On glibc the same steps got faster. The
-  likeliest cause, not yet tested: the walk's million strings are now
-  allocated in the workers' heaps, so the main thread's next large
-  allocations (the documents of `load` and `merge`) no longer reuse the
-  blocks the walk freed at the end of the last barrier, and take cold
+  `retire_set` +55, about 480 ms, which took back about 40% of the walk's
+  gain in a publish, and with one CPU a publish was slower than before
+  (6.6 s against 6.3). On glibc the same steps got faster. The cause:
+  the walk's million keys were allocated in the workers' heaps, and
+  mimalloc returns a freed block to the heap that allocated it, so the
+  main thread's next large allocations (the documents of `load` and
+  `merge`) no longer reused the blocks the last walk freed and took cold
   pages instead.
-- **So, as shipped:** with 8 CPUs the idle tick at 1M drops from 2.1 to
-  1.1 s and a one-file publish from 6.3 to 5.6 s; at 200k from 416 to
-  221 ms and from 1235 to about 1075 ms. **With one CPU E is slower**: a
-  publish takes 6.6 s instead of 6.3 at 1M, with the idle tick
-  unchanged. No memory cost on this allocator.
-- **Not done, and the next step if E is to be finished**: walk on the
-  calling thread when there is one worker (a one-CPU pod then keeps the
-  old allocation pattern plus the relative stat), and build the keys on
-  the calling thread when there are several, then measure both as
-  shipped. Each is a few lines and one bench.
+
+**The fix (user, 2026-10-23: "do 1 first").** One worker walks on the
+calling thread, with nothing spawned. Several workers each write their
+files' relative paths end to end into one buffer, a few large
+allocations per worker, and the calling thread makes every key the map
+keeps. The same bench as shipped, the old arm's binary byte-identical
+to the first cut's; logs in `/mnt/nvme/e-fix/`. Battery 373 on both the
+gnu and the musl build, five controls (the fifth: a key's start in the
+buffer not advanced).
+
+| barrier | 200k old | 200k t1 | 200k tN | 1M old | 1M t1 | 1M tN |
+|---|---:|---:|---:|---:|---:|---:|
+| idle tick | 419–420 ms | 374–378 ms | 197–198 ms | 2145 ms | 1956 ms | 1038 ms |
+| taking a peer's one-file change | 724–745 ms | 690–701 ms | 526–527 ms | 3854 ms | 3645 ms | 2736 ms |
+| one-file publish, collection not due | 1205–1234 ms | 1142–1196 ms | 941–996 ms | 6446 ms | 6167 ms | 5232 ms |
+| that publish's `walk` | 313–322 ms | 275–287 ms | 94–96 ms | 1705 ms | 1474 ms | 534 ms |
+| that publish's `classify` | 90–91 ms | 91–92 ms | 92–99 ms | 474 ms | 475 ms | 478 ms |
+| that publish's `load`, `merge`, `cas`, `retire_set` | 764–802 ms | 745–795 ms | 730–779 ms | 4151 ms | 4069 ms | 4076 ms |
+| peak RSS, whole bench process | 1376–1378 MiB | 1309–1374 MiB | 1258–1373 MiB | 5892 MiB | 5876 MiB | 5903 MiB |
+
+- **The later steps are back where the old walk left them** (at 1M,
+  `classify` 474 to 478 ms, the commit's four big steps 4151 to 4076).
+- **So, as shipped:** with 8 CPUs the idle tick drops by about half
+  (200k: 419 to 197 ms; 1M: 2.1 to 1.0 s) and a one-file publish by
+  about a fifth (200k: about 1220 to 970 ms; 1M: 6.4 to 5.2 s). With one
+  CPU, the relative stat alone: the idle tick 10% and a publish 4% at
+  1M. No memory cost.
+- **Still open (user to decide):** on one thread the walk is 20–25%
+  slower under musl than under glibc (flint-e4's comparison, 2.15
+  against 1.69 s at 1M). If a profile puts that in musl's `readdir`
+  and `fstatat` wrappers, the walk could call `getdents64` and `statx`
+  directly (`rustix`, already in the lockfile).
 
 **What the bench does not measure.** The tree was just written, so its
 directories and inodes were in the kernel's cache, and the walk was CPU,

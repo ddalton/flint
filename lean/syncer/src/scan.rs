@@ -116,16 +116,34 @@ pub fn default_threads() -> usize {
 /// its full path. What it returns is what the one-thread walk returned:
 /// the same entries under the same exclusions, and the first error any
 /// worker meets fails the whole walk (`Queue::failed`), never dropped
-/// with the worker that met it.
+/// with the worker that met it. One worker walks on the calling thread.
 pub fn scan_with(root: &Path, threads: usize) -> LeanResult<BTreeMap<String, ScanEntry>> {
     let queue = Mutex::new(Queue { dirs: vec![(root.to_path_buf(), String::new())], busy: 0, failed: None });
     let wake = Condvar::new();
-    let found: Vec<Vec<(String, ScanEntry)>> = std::thread::scope(|s| {
-        let workers: Vec<_> = (0..threads.max(1)).map(|_| s.spawn(|| walk_worker(&queue, &wake))).collect();
-        workers.into_iter().map(|w| w.join().expect("a scan worker panicked")).collect()
-    });
+    let found: Vec<Found> = if threads <= 1 {
+        vec![walk_worker(&queue, &wake)]
+    } else {
+        std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads).map(|_| s.spawn(|| walk_worker(&queue, &wake))).collect();
+            workers.into_iter().map(|w| w.join().expect("a scan worker panicked")).collect()
+        })
+    };
     if let Some(e) = queue.into_inner().unwrap_or_else(|p| p.into_inner()).failed {
         return Err(e.into());
+    }
+    // The keys the map keeps are made here, on the calling thread, never
+    // in a worker. mimalloc, which flint-sync ships with, returns a freed
+    // block to the heap of the thread that allocated it, so a million keys
+    // made by workers left this thread's next large allocations (the
+    // commit's documents) on cold pages: at 1M files, 480 ms more across
+    // classify, load, merge, cas and retire_set (latency plan §13).
+    let mut all: Vec<(String, ScanEntry)> = Vec::with_capacity(found.iter().map(|f| f.files.len()).sum());
+    for f in found {
+        let mut start = 0;
+        for (end, e) in f.files {
+            all.push((f.names[start..end].to_string(), e));
+            start = end;
+        }
     }
     // Two names can give one relative path (a `\` in a name becomes `/`).
     // The one-thread walk kept the later in `read_dir` order; here which
@@ -133,8 +151,7 @@ pub fn scan_with(root: &Path, threads: usize) -> LeanResult<BTreeMap<String, Sca
     // path, then by what was stat'ed, and the last of equal paths is kept
     // (`from_iter` sorts stably, then builds in bulk, not by a million
     // inserts).
-    let mut all: Vec<(String, ScanEntry)> = found.into_iter().flatten().collect();
-    let stat = |e: &ScanEntry| (e.size, e.mtime_unix, e.mtime_nanos, e.mode);
+    let stat =|e: &ScanEntry| (e.size, e.mtime_unix, e.mtime_nanos, e.mode);
     all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| stat(&a.1).cmp(&stat(&b.1))));
     Ok(all.into_iter().collect())
 }
@@ -148,8 +165,17 @@ struct Queue {
     failed: Option<std::io::Error>,
 }
 
-fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Vec<(String, ScanEntry)> {
-    let mut out = vec![];
+/// What one worker found: the files' relative paths end to end in one
+/// buffer, and per file where its path ends there and what was stat'ed.
+/// A few large allocations per worker, not one per file.
+#[derive(Default)]
+struct Found {
+    names: String,
+    files: Vec<(usize, ScanEntry)>,
+}
+
+fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Found {
+    let mut out = Found::default();
     loop {
         let (dir, prefix) = {
             let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
@@ -191,7 +217,7 @@ fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Vec<(String, ScanEntry)>
 fn read_dir_entries(
     dir: &Path,
     prefix: &str,
-    out: &mut Vec<(String, ScanEntry)>,
+    out: &mut Found,
     subdirs: &mut Vec<(PathBuf, String)>,
 ) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -214,9 +240,12 @@ fn read_dir_entries(
         if meta.file_type().is_symlink() {
             continue;
         }
-        let rel = format!("{prefix}{}", name.replace('\\', "/"));
         if meta.is_dir() {
-            subdirs.push((entry.path(), rel + "/"));
+            let mut rel = String::with_capacity(prefix.len() + name.len() + 1);
+            rel.push_str(prefix);
+            push_name(&mut rel, &name);
+            rel.push('/');
+            subdirs.push((entry.path(), rel));
         } else if meta.is_file() {
             #[cfg(unix)]
             let mode = {
@@ -231,10 +260,26 @@ fn read_dir_entries(
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
                 .unwrap_or((0, 0));
-            out.push((rel, ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode, seen_nanos: now_nanos() }));
+            out.names.push_str(prefix);
+            push_name(&mut out.names, &name);
+            out.files.push((
+                out.names.len(),
+                ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode, seen_nanos: now_nanos() },
+            ));
         }
     }
     Ok(())
+}
+
+/// `name` onto `to`, with a `\` in it as `/`, as the one-thread walk wrote
+/// a relative path.
+fn push_name(to: &mut String, name: &str) {
+    for (i, part) in name.split('\\').enumerate() {
+        if i > 0 {
+            to.push('/');
+        }
+        to.push_str(part);
+    }
 }
 
 #[derive(Debug, Default)]
