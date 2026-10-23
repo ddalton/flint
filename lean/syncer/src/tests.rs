@@ -3398,6 +3398,75 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
     std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 }
 
+/// The walk's half of the same rule: a directory it cannot list FAILS
+/// the scan. It never scans as empty, because `classify` reads a path
+/// missing from two scans as the agent's delete. An app running as a
+/// uid other than the CR's gets here by making a 0700 directory.
+#[test]
+fn the_walk_fails_closed_on_a_directory_it_cannot_list() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "ok.txt", "readable");
+    write(dir.path(), "locked/f.txt", "still here");
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let got = super::scan::scan(dir.path());
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    match got {
+        Err(crate::LeanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}"),
+        Err(e) => panic!("the walk failed, but not on the directory it cannot list: {e}"),
+        Ok(s) => panic!("a directory the walk cannot list scanned as {:?}, not as an error", s.keys().collect::<Vec<_>>()),
+    }
+}
+
+/// End to end, on the cadence path, where nothing re-checks an absence
+/// by lstat: the second scan that misses a path IS the delete. A
+/// published file whose directory turns unreadable survives two
+/// barriers (both fail), cited and in the store. Nothing else publishes
+/// meanwhile — the cost `scan`'s doc names — and once the directory is
+/// readable the next barrier publishes the backlog and deletes nothing.
+#[tokio::test]
+async fn an_unreadable_directory_stops_the_barrier_and_deletes_nothing() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "ok.txt", "readable");
+    write(dir.path(), "locked/f.txt", "published");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded.len(), 2);
+
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    write(dir.path(), "later.txt", "written while locked");
+    let r1 = a.run_barrier().await;
+    let r2 = a.run_barrier().await;
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    assert!(m.manifest.entries.contains_key("locked/f.txt"), "an unreadable file was cited out: {r1:?} / {r2:?}");
+    assert!(object_at(&store, &a.cfg, "locked/f.txt").await, "an unreadable file's object was deleted");
+    assert!(r1.is_err() && r2.is_err(), "a barrier over an unreadable directory must fail: {r1:?} / {r2:?}");
+    assert!(!m.manifest.entries.contains_key("later.txt"), "a failed barrier published");
+
+    let r3 = a.run_barrier().await.unwrap();
+    assert!(r3.uploaded.contains(&"later.txt".to_string()), "uploaded {:?}", r3.uploaded);
+    assert!(r3.deleted.is_empty(), "deleted {:?}", r3.deleted);
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
+    for p in ["ok.txt", "locked/f.txt", "later.txt"] {
+        assert!(m.manifest.entries.contains_key(p), "{p} is not cited");
+    }
+}
+
 #[tokio::test]
 async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
     let store = Arc::new(MemoryStore::new());

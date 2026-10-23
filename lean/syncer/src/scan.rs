@@ -67,9 +67,20 @@ pub fn stat_changed(b_size: u64, b_mtime: i64, b_nanos: Option<u32>, size: u64, 
     b_size != size || b_mtime != mtime || b_nanos.map(|n| n != nanos).unwrap_or(false)
 }
 
-/// Walk the workspace. Skips the state dir, symlinks (v1 non-goal, as
-/// the tier manifest's), and anything unreadable (reported upstream by
-/// the barrier as a warning, not a wedge).
+/// Walk the workspace. Skips the state dir, the control namespace and
+/// symlinks (v1 non-goal, as the tier manifest's).
+///
+/// Anything it cannot read FAILS the walk, and with it the barrier: a
+/// directory it cannot list, an entry it cannot lstat. Never skipped.
+/// `classify` reads a path missing from two scans as the agent's
+/// delete, and the barrier then publishes the deletion and deletes the
+/// object, so a skipped directory would cost every file under it.
+/// `Syncer::confirm_absences` keeps the same policy for the same
+/// syscall, and a file the walk can stat but `upload_one` cannot open
+/// fails the barrier the same way. The price is that nothing publishes
+/// until the tree is readable again: an app running as a uid other than
+/// the CR's that makes a 0700 directory stops the whole workspace (as
+/// mkfs's root-owned `lost+found` did, before the quota removed it).
 pub fn scan(root: &Path) -> LeanResult<BTreeMap<String, ScanEntry>> {
     let mut out = BTreeMap::new();
     walk(root, root, &mut out)?;
