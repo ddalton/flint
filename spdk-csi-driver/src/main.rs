@@ -3386,6 +3386,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let staging_target_path = req.staging_target_path.clone();
         let publish_context = req.publish_context.clone();
         let volume_context = req.volume_context.clone();
+        let is_block_stage = matches!(
+            req.volume_capability.as_ref().and_then(|c| c.access_type.as_ref()),
+            Some(spdk_csi_driver::csi::volume_capability::AccessType::Block(_))
+        );
         
         // Contract R2: serialize stage against unstage and the background
         // repair on this volume (probe→mutate window). Kill switch
@@ -3748,6 +3752,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
 
             if already_staged {
                 eprintln!("✅ [WIPEFS_CHECK] Staging path already mounted — skipping cache-clear (idempotent restage)");
+            } else if is_block_stage {
+                // A raw block volume's contents are the user's, filesystem
+                // or not, and it never gets the filesystem-initialized
+                // marker: every restage would look brand new. Never wipe
+                // one; a new volume reads zeroes already (spdk-tgt zeroes a
+                // cluster before mapping it unwritten).
+                eprintln!("🧱 [WIPEFS_CHECK] Raw block volume — blockdev flush only, never wipefs");
+                let _ = std::process::Command::new("blockdev")
+                    .arg("--flushbufs")
+                    .arg(&device_path)
+                    .output();
             } else if fs_initialized {
                 // Filesystem exists (clone/snapshot/previously formatted) - only flush cache
                 eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -4197,7 +4212,13 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                                 }
                             }
                             spdk_csi_driver::csi::volume_capability::AccessType::Block(_) => {
-                                println!("ℹ️ [NODE] Block volume - no filesystem mounting needed");
+                                // The device this stage connected, whatever
+                                // the backend: publish binds this file.
+                                let staged = spdk_csi_driver::block_bind::staged_device(&staging_target_path);
+                                spdk_csi_driver::block_bind::bind_device(&device_path, &staged, false)
+                                    .await
+                                    .map_err(|e| tonic::Status::internal(format!("Block volume stage: {e}")))?;
+                                println!("✅ [NODE] Block volume - {} bound at {}", device_path, staged.display());
                             }
                         }
                     }
@@ -4417,6 +4438,27 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             ));
         }
 
+        // A block volume's staged device (block_bind): unbind it before the
+        // device goes. A bind left behind keeps the device NUMBER, which the
+        // kernel can give to the next volume's device. Probed bounded: on a
+        // filesystem volume this path is inside a mount whose device may be
+        // dead.
+        let staged_block = spdk_csi_driver::block_bind::staged_device(&staging_target_path);
+        let has_staged_block = std::process::Command::new("timeout")
+            .arg("3")
+            .arg("test")
+            .arg("-e")
+            .arg(&staged_block)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if has_staged_block {
+            spdk_csi_driver::block_bind::unbind_device(&staged_block)
+                .await
+                .map_err(|e| tonic::Status::internal(format!("Block volume unstage: {e}")))?;
+            println!("✅ [NODE] Block volume staged device {} unbound", staged_block.display());
+        }
+
         // Check if staging path is actually mounted before attempting unmount
         if std::path::Path::new(&staging_target_path).exists() {
             let is_mounted = std::process::Command::new("mountpoint")
@@ -4628,9 +4670,17 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             println!("📋 [NODE] Mount mode: READ-ONLY (ROX)");
         }
 
-        // Create target directory if it doesn't exist
-        if let Err(e) = std::fs::create_dir_all(&target_path) {
-            println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
+        // Create target directory if it doesn't exist. A block volume's
+        // target is a FILE (kubelet makes only its parent): block_bind
+        // creates it, and a directory there could never take the device.
+        let is_block_publish = matches!(
+            req.volume_capability.as_ref().and_then(|c| c.access_type.as_ref()),
+            Some(spdk_csi_driver::csi::volume_capability::AccessType::Block(_))
+        );
+        if !is_block_publish {
+            if let Err(e) = std::fs::create_dir_all(&target_path) {
+                println!("⚠️ [NODE] Failed to create target directory (may exist): {}", e);
+            }
         }
 
         // -------------------------------------------------------------
@@ -5021,16 +5071,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             
             if is_block_volume {
-                // Block mode - bind mount
-                let mount_output = std::process::Command::new("mount")
-                    .args(["--bind", &device_path, &target_path])
-                    .output()
-                    .map_err(|e| tonic::Status::internal(format!("Failed to mount: {}", e)))?;
-                
-                if !mount_output.status.success() {
-                    let error = String::from_utf8_lossy(&mount_output.stderr);
-                    return Err(tonic::Status::internal(format!("Mount failed: {}", error)));
-                }
+                // Block mode - bind the device onto the target file
+                spdk_csi_driver::block_bind::bind_device(&device_path, std::path::Path::new(&target_path), readonly)
+                    .await
+                    .map_err(|e| tonic::Status::internal(format!("Block volume publish: {e}")))?;
             } else {
                 // Format and mount filesystem
                 let fs_type = req.volume_capability
@@ -5072,32 +5116,43 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
             }
         } else if is_block_volume {
-            // Block volume - bind mount the device directly
-            let ublk_id = self.driver.generate_ublk_id(&volume_id);
-            let device_path = format!("/dev/ublkb{}", ublk_id);
-            
-            println!("📋 [NODE] Block volume - bind mounting device {} to {}", device_path, target_path);
-            
-            if !std::path::Path::new(&device_path).exists() {
-                println!("❌ [NODE] ublk device {} does not exist", device_path);
-                return Err(tonic::Status::internal(format!("ublk device {} not found", device_path)));
+            // Block volume: bind the device NodeStage bound into the staging
+            // directory -- the device its backend connected, never a name
+            // derived here (this used to be /dev/ublkb<id> on every backend).
+            let staged = spdk_csi_driver::block_bind::staged_device(&staging_target_path);
+            if !matches!(
+                spdk_csi_driver::block_bind::held(&staged),
+                Ok(spdk_csi_driver::block_bind::Held::Device(_))
+            ) {
+                // F29 for block: kubelet believes the volume staged but the
+                // staged device is gone (node reboot, a skipped NodeUnstage).
+                // Re-drive NodeStage, as the filesystem path does.
+                println!(
+                    "🩹 [NODE] Block volume: {} holds no device — re-driving NodeStage",
+                    staged.display()
+                );
+                let stage_req = spdk_csi_driver::csi::NodeStageVolumeRequest {
+                    volume_id: req.volume_id.clone(),
+                    publish_context: req.publish_context.clone(),
+                    staging_target_path: staging_target_path.clone(),
+                    volume_capability: req.volume_capability.clone(),
+                    secrets: req.secrets.clone(),
+                    volume_context: req.volume_context.clone(),
+                };
+                self.node_stage_volume(tonic::Request::new(stage_req))
+                    .await
+                    .map_err(|e| {
+                        tonic::Status::new(e.code(), format!("Block volume restage failed: {}", e.message()))
+                    })?;
             }
-            
-            let mut mount_cmd = std::process::Command::new("mount");
-            if readonly {
-                mount_cmd.args(["--bind", "-o", "ro", &device_path, &target_path]);
-            } else {
-                mount_cmd.args(["--bind", &device_path, &target_path]);
-            }
-            let mount_output = mount_cmd
-                .output()
-                .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
-
-            if !mount_output.status.success() {
-                let error = String::from_utf8_lossy(&mount_output.stderr);
-                println!("❌ [NODE] Mount failed: {}", error);
-                return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
-            }
+            println!("📋 [NODE] Block volume - binding {} to {}", staged.display(), target_path);
+            spdk_csi_driver::block_bind::bind_device(
+                &staged.to_string_lossy(),
+                std::path::Path::new(&target_path),
+                readonly,
+            )
+            .await
+            .map_err(|e| tonic::Status::internal(format!("Block volume publish: {e}")))?;
         } else {
             // Filesystem volume - bind mount from staging path
             println!("📋 [NODE] Filesystem volume - bind mounting staging path to target");
@@ -5241,6 +5296,24 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let target_path = req.target_path.clone();
         
         println!("📤 [NODE] Unpublishing volume {} from {}", volume_id, target_path);
+
+        // A block volume's target is a FILE holding the device (block_bind):
+        // unbind it and remove the file; the directory steps below then find
+        // nothing. Kubelet keeps block targets under `volumeDevices/`; the
+        // probes are bounded all the same.
+        let is_block_target = target_path.contains("/volumeDevices/") && ["-b", "-f"].iter().any(|t| {
+            std::process::Command::new("timeout")
+                .args(["3", "test", t, target_path.as_str()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        if is_block_target {
+            spdk_csi_driver::block_bind::unbind_device(std::path::Path::new(&target_path))
+                .await
+                .map_err(|e| tonic::Status::internal(format!("Block volume unpublish: {e}")))?;
+            println!("✅ [NODE] Block volume target {} unbound and removed", target_path);
+        }
         println!("🔍 [DEBUG] Target path: {}", target_path);
 
         // Check if target path exists BEFORE unmount
@@ -5615,7 +5688,39 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         let mut abnormal = abnormal;
         let mut message = message;
 
-        if !req.volume_path.is_empty() {
+        // A block volume's path is the device itself (block_bind): its size
+        // is the whole report -- statvfs there would describe devtmpfs.
+        // Kubelet keeps block volumes under `volumeDevices/`; no other path
+        // is probed (a dead NFS mount would park another thread).
+        let block_total = if !req.volume_path.contains("/volumeDevices/") {
+            None
+        } else {
+            let p = req.volume_path.clone();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || {
+                    let path = std::path::Path::new(&p);
+                    match spdk_csi_driver::block_bind::held(path) {
+                        Ok(spdk_csi_driver::block_bind::Held::Device(_)) => {
+                            spdk_csi_driver::block_bind::device_bytes(path).ok()
+                        }
+                        _ => None,
+                    }
+                }),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+        };
+        if let Some(total) = block_total {
+            usage.push(VolumeUsage {
+                unit: Unit::Bytes as i32,
+                total: total as i64,
+                available: 0,
+                used: 0,
+            });
+        } else if !req.volume_path.is_empty() {
             let stats_path = req.volume_path.clone();
             let fs_stats = tokio::time::timeout(
                 std::time::Duration::from_secs(5),

@@ -58,6 +58,22 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **Raw block PVCs (`volumeMode: Block`) could not be used.**
+  NodePublishVolume looked for `/dev/ublkb<id>` whatever the configured
+  backend, so on the default `nvmeof` backend every Block PVC failed with
+  `ublk device ... not found` (bench4, 2026-10-21); it also made kubelet's
+  target a directory, which a device cannot be bound onto, so the `ublk`
+  backend failed too. NodeStage now binds the device it connected, NVMe-oF
+  namespace or ublk disk, onto a file in the staging directory, and
+  NodePublish binds that file onto the target file, re-driving NodeStage
+  when the staged device is gone (a node reboot). NodeUnpublish and
+  NodeUnstage unbind and remove both. A raw block volume is never
+  `wipefs`ed at stage: it never carries the filesystem-initialized marker,
+  so every restage looked brand new. NodeGetVolumeStats reports a block
+  volume's size. On EC2 (bench9): the driver before the fix failed with
+  `ublk device /dev/ublkb857320 not found`; with the fix a pod wrote 8 MiB
+  to a 3-replica Block PVC and a pod on another node read the same bytes
+  back.
 - **The orphan sweep could delete a replica of a volume still being
   created.** A node deletes a Flint lvol whose PV does not exist after
   three sweeps 60 s apart; a volume has no PV until CreateVolume returns,
