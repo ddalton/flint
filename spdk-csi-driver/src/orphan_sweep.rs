@@ -38,6 +38,13 @@
 //!   object, so a young lvol is legitimately PV-less; strikes also ride
 //!   out publish/unpublish transients. Leaving the candidate set resets
 //!   the count.
+//! * **An unbound PVC is a create in flight.** Strikes alone are a timer:
+//!   a thick replica is zeroed as it is created (~1 s per GiB), and a
+//!   create that outlasted three cycles lost a replica (bench8,
+//!   2026-10-22). A PV-owned object whose volume id is the name the
+//!   external-provisioner gives an unbound PVC (`pvc-<uid>`) is not a
+//!   candidate. The PVC list is read only when some owner PV is absent,
+//!   and a failed read skips the cycle like a failed PV list.
 //!
 //! Known non-goals, accepted: a consumer-side loopback subsystem whose
 //! namespace still references an assembled `raid_*` bdev survives (raid
@@ -99,6 +106,35 @@ pub struct SweepInput {
     /// placeholder — PV-absence authority can never condemn it. Volumes
     /// absent from this map are exempt (no record evidence → never guess).
     pub pv_known_replica_uuids: std::collections::HashMap<String, HashSet<String>>,
+    /// `pvc-<uid>` of every PVC with no volume bound and no deletion
+    /// pending: the PV name the external-provisioner will create for it.
+    /// Empty unless [`SweepInput::needs_unbound_pvcs`] asked for it.
+    pub unbound_pvc_volumes: HashSet<String>,
+}
+
+impl SweepInput {
+    /// The owner of a PV-backed object is gone: no PV, and no unbound PVC
+    /// whose volume is still being created.
+    fn owner_gone(&self, id: &str) -> bool {
+        !pv_exists(&self.existing_pvs, id) && !pv_exists(&self.unbound_pvc_volumes, id)
+    }
+
+    /// Some lvol or subsystem has no PV: only then is the PVC list worth
+    /// reading (it can only spare candidates).
+    pub fn needs_unbound_pvcs(&self) -> bool {
+        let absent = |id: &str| !pv_exists(&self.existing_pvs, id);
+        self.lvols.iter().any(|l| matches!(classify_lvol(&l.name), Some(Owner::Pv(id)) if absent(&id)))
+            || self.subsystems.iter().any(|s| classify_subsystem_nqn(&s.nqn).is_some_and(|id| absent(&id)))
+    }
+}
+
+/// `pvc-<uid>` of every PVC in `pvcs` that is unbound and not being deleted.
+pub fn unbound_pvc_volumes(pvcs: &[k8s_openapi::api::core::v1::PersistentVolumeClaim]) -> HashSet<String> {
+    pvcs.iter()
+        .filter(|c| c.metadata.deletion_timestamp.is_none())
+        .filter(|c| c.spec.as_ref().and_then(|s| s.volume_name.as_deref()).is_none_or(str::is_empty))
+        .filter_map(|c| c.metadata.uid.as_ref().map(|uid| format!("pvc-{uid}")))
+        .collect()
 }
 
 /// What to delete this cycle, in order: subsystems first (their
@@ -133,7 +169,7 @@ pub fn plan_sweep(
     let mut eph_lvols: Vec<&LvolEntry> = Vec::new();
     for lvol in &input.lvols {
         match classify_lvol(&lvol.name) {
-            Some(Owner::Pv(id)) if !pv_exists(&input.existing_pvs, &id) => {
+            Some(Owner::Pv(id)) if input.owner_gone(&id) => {
                 condemned_lvols.insert(lvol.name.as_str());
                 condemned_lvols.insert(lvol.uuid.as_str());
                 condemned_aliases.push(lvol.alias());
@@ -181,7 +217,7 @@ pub fn plan_sweep(
     let mut condemned_subsystems: Vec<String> = Vec::new();
     for sub in &input.subsystems {
         let owner_absent = classify_subsystem_nqn(&sub.nqn)
-            .map(|id| !pv_exists(&input.existing_pvs, &id))
+            .map(|id| input.owner_gone(&id))
             .unwrap_or(false); // foreign / non-volume NQN: never ours
         let all_ns_dead = sub
             .ns_bdevs
@@ -264,7 +300,7 @@ mod tests {
             .iter()
             .flat_map(|l| [l.name.clone(), l.uuid.clone(), l.alias()])
             .collect();
-        SweepInput { lvols, subsystems, ublk_bdevs, all_bdevs, existing_pvs: pvs(existing), pv_known_replica_uuids: Default::default() }
+        SweepInput { lvols, subsystems, ublk_bdevs, all_bdevs, existing_pvs: pvs(existing), pv_known_replica_uuids: Default::default(), unbound_pvc_volumes: Default::default() }
     }
 
     // --- classification -------------------------------------------------
@@ -443,7 +479,7 @@ mod tests {
         // (the §3/§10-8 zombie-consumer case) — raid teardown is
         // NodeUnstage's job, and yanking the export from under a live
         // mount is exactly the D-state hang bug #4 fixed. Survive.
-        let mk = |raid_present: bool| SweepInput { pv_known_replica_uuids: Default::default(),
+        let mk = |raid_present: bool| SweepInput { pv_known_replica_uuids: Default::default(), unbound_pvc_volumes: Default::default(),
             lvols: vec![],
             subsystems: vec![SubsystemEntry {
                 nqn: "nqn.2024-11.com.flint:volume:pvc-dead".into(),
@@ -538,6 +574,75 @@ mod tests {
             vec!["lvs0/vol_pvc-young"]
         );
     }
+    // bench8 (2026-10-22): a thick 3-replica create zeroes its replicas for
+    // minutes; replica 0 waits PV-less meanwhile. Its PVC, still unbound,
+    // spares it however many cycles pass; once the PVC is gone, the usual
+    // three strikes apply.
+    #[test]
+    fn an_unbound_pvc_spares_a_volume_still_being_created() {
+        let young = lvol("lvs0", "vol_pvc-young_replica_0", "u1");
+        let export = SubsystemEntry {
+            nqn: "nqn.2024-11.com.flint:volume:pvc-young_replica_0".into(),
+            ns_bdevs: vec![],
+        };
+        let creating = SweepInput {
+            unbound_pvc_volumes: pvs(&["pvc-young"]),
+            ..input(vec![young], vec![export], Some(vec![]), &[])
+        };
+        assert!(creating.needs_unbound_pvcs());
+        let mut strikes = HashMap::new();
+        for _ in 0..5 {
+            assert_eq!(plan_sweep(&creating, &mut strikes, 3), SweepPlan::default());
+        }
+        assert!(strikes.is_empty(), "a spared volume collects no strikes");
+
+        // The PVC was deleted before it bound: an orphan like any other.
+        let abandoned = SweepInput { unbound_pvc_volumes: HashSet::new(), ..creating.clone() };
+        assert!(plan_sweep(&abandoned, &mut strikes, 3).delete_lvol_aliases.is_empty());
+        assert!(plan_sweep(&abandoned, &mut strikes, 3).delete_lvol_aliases.is_empty());
+        let plan = plan_sweep(&abandoned, &mut strikes, 3);
+        assert_eq!(plan.delete_lvol_aliases, vec!["lvs0/vol_pvc-young_replica_0"]);
+        assert_eq!(plan.delete_subsystem_nqns, vec!["nqn.2024-11.com.flint:volume:pvc-young_replica_0"]);
+
+        // Another volume's unbound PVC spares nothing here.
+        let other = SweepInput { unbound_pvc_volumes: pvs(&["pvc-other"]), ..creating.clone() };
+        assert_eq!(plan_once(&other).delete_lvol_aliases, vec!["lvs0/vol_pvc-young_replica_0"]);
+    }
+
+    #[test]
+    fn the_pvc_list_is_read_only_when_some_owner_pv_is_absent() {
+        let vol = |name: &str| lvol("lvs0", name, "u");
+        let sub = |nqn: &str| SubsystemEntry { nqn: nqn.into(), ns_bdevs: vec![] };
+        assert!(!input(vec![], vec![], None, &[]).needs_unbound_pvcs());
+        assert!(!input(vec![vol("vol_pvc-a"), vol("mydata"), vol("eph_csi-1")], vec![], None, &["pvc-a"]).needs_unbound_pvcs());
+        assert!(input(vec![vol("vol_pvc-a"), vol("vol_pvc-b_replica_1")], vec![], None, &["pvc-a"]).needs_unbound_pvcs());
+        assert!(input(vec![], vec![sub("nqn.2024-11.com.flint:volume:pvc-b")], None, &["pvc-a"]).needs_unbound_pvcs());
+        assert!(!input(vec![], vec![sub("nqn.2014-08.org.nvmexpress.discovery")], None, &[]).needs_unbound_pvcs());
+    }
+
+    #[test]
+    fn unbound_pvc_volumes_are_the_pvcs_waiting_for_a_volume() {
+        use k8s_openapi::api::core::v1::{PersistentVolumeClaim, PersistentVolumeClaimSpec};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
+        let pvc = |uid: Option<&str>, volume: Option<&str>, deleting: bool| PersistentVolumeClaim {
+            metadata: ObjectMeta {
+                uid: uid.map(str::to_string),
+                deletion_timestamp: deleting.then(|| Time(Default::default())),
+                ..Default::default()
+            },
+            spec: Some(PersistentVolumeClaimSpec { volume_name: volume.map(str::to_string), ..Default::default() }),
+            ..Default::default()
+        };
+        let got = unbound_pvc_volumes(&[
+            pvc(Some("u-pending"), None, false),
+            pvc(Some("u-empty"), Some(""), false),
+            pvc(Some("u-bound"), Some("pvc-u-bound"), false),
+            pvc(Some("u-deleting"), None, true),
+            pvc(None, None, false),
+        ]);
+        assert_eq!(got, pvs(&["pvc-u-pending", "pvc-u-empty"]));
+    }
+
     #[test]
     fn stranded_placeholder_condemned_by_strikes_only_when_uuid_unknown() {
         // C6/wave-2: a replica-shaped lvol whose PV EXISTS but whose uuid no
@@ -560,6 +665,7 @@ mod tests {
             all_bdevs: Default::default(),
             existing_pvs: pvs(&["pvc-x"]),
             pv_known_replica_uuids: known.clone(),
+            unbound_pvc_volumes: Default::default(),
         };
         let mut strikes = HashMap::new();
         // Strikes 1 and 2: watched, not condemned.

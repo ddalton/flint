@@ -325,78 +325,75 @@ impl SpdkCsiDriver {
             debug!(replica_num, node_name, device_name, free_gb, "[DRIVER] Replica placement");
         }
 
-        // Step 2: Create lvol on each selected node
-        let mut replicas = Vec::new();
-        let mut created_replicas = Vec::new(); // Track for cleanup on error
+        // Step 2: Create the lvols on the selected nodes, all at once. A thick
+        // replica is zeroed as it is created (~1 s per GiB on i4i): one after
+        // another, a 3-replica volume took three times as long, and replica 0
+        // sat PV-less while the others were zeroed -- long enough for the
+        // orphan sweep to delete it (bench8, 2026-10-22).
+        let lvs_names = selected_nodes
+            .iter()
+            .map(|node_info| {
+                node_info.disk.lvs_name.clone().ok_or_else(|| MinimalStateError::InternalError {
+                    message: "Selected disk has no LVS name".to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-        for (i, node_info) in selected_nodes.iter().enumerate() {
+        let legs = selected_nodes.iter().zip(lvs_names).enumerate().map(|(i, (node_info, lvs_name))| async move {
             let replica_volume_id = format!("{}_replica_{}", volume_id, i);
-            let lvs_name = node_info.disk.lvs_name.as_ref()
-                .ok_or_else(|| MinimalStateError::InternalError {
-                    message: "Selected disk has no LVS name".to_string()
-                })?;
+            let replica_num = i + 1;
+            let node_name = &node_info.node_name;
 
             // Fetch node UID for replica tracking
-            let node_uid = match self.get_node_uid(&node_info.node_name).await {
+            let node_uid = match self.get_node_uid(node_name).await {
                 Ok(uid) => uid,
                 Err(e) => {
-                    let node_name = &node_info.node_name;
                     let err = e.to_string();
                     warn!(node_name, err, "[DRIVER] Failed to get node UID, using empty");
                     String::new()
                 }
             };
 
-            match self.create_lvol(
-                &node_info.node_name,
-                lvs_name,
-                &replica_volume_id,
-                size_bytes,
-                thin_provision,
-            ).await {
-                Ok(lvol_uuid) => {
-                    let replica_num = i + 1;
-                    let node_name = &node_info.node_name;
-                    info!(replica_num, node_name, lvol_uuid, "[DRIVER] Created replica");
-
-                    let replica = ReplicaInfo {
-                        node_name: node_info.node_name.clone(),
-                        node_uid: node_uid.clone(),
-                        disk_pci_address: node_info.disk.pci_address.clone(),
-                        lvol_uuid: lvol_uuid.clone(),
-                        lvol_name: crate::identity::lvol_name(&replica_volume_id),
-                        lvs_name: lvs_name.clone(),
-                        nqn: None, // Will be set during NodePublishVolume if needed
-                        target_ip: None,
-                        target_port: None,
-                        health: "online".to_string(),
-                    };
-
-                    created_replicas.push((node_info.node_name.clone(), lvol_uuid.clone()));
-                    replicas.push(replica);
-
-                    // Invalidate cache for this node
-                    self.capacity_cache.invalidate(&node_info.node_name).await;
-                }
-                Err(e) => {
-                    // Cleanup: Delete all previously created replicas
-                    let replica_num = i + 1;
-                    let node_name = &node_info.node_name;
+            let lvol_uuid = self
+                .create_lvol(node_name, &lvs_name, &replica_volume_id, size_bytes, thin_provision)
+                .await
+                .inspect_err(|e| {
                     let err = e.to_string();
                     error!(replica_num, node_name, err, "[DRIVER] Failed to create replica");
-                    let cleanup_count = created_replicas.len();
-                    debug!(cleanup_count, "[DRIVER] Cleaning up previously created replicas");
+                })?;
+            info!(replica_num, node_name, lvol_uuid, "[DRIVER] Created replica");
 
-                    for (node, uuid) in created_replicas {
-                        let _ = self.delete_lvol(&node, &uuid).await;
-                    }
+            // Invalidate cache for this node
+            self.capacity_cache.invalidate(node_name).await;
 
-            return Err(MinimalStateError::InternalError {
-                        message: format!("Failed to create replica {}: {}", i + 1, e)
-                    });
+            Ok::<_, MinimalStateError>(ReplicaInfo {
+                node_name: node_name.clone(),
+                node_uid,
+                disk_pci_address: node_info.disk.pci_address.clone(),
+                lvol_uuid,
+                lvol_name: crate::identity::lvol_name(&replica_volume_id),
+                lvs_name,
+                nqn: None, // Will be set during NodePublishVolume if needed
+                target_ip: None,
+                target_port: None,
+                health: "online".to_string(),
+            })
+        });
+
+        let replicas = match all_legs(legs).await {
+            Ok(replicas) => replicas,
+            Err((i, e, created)) => {
+                // Cleanup: Delete the replicas that were created
+                let cleanup_count = created.len();
+                debug!(cleanup_count, "[DRIVER] Cleaning up the replicas that were created");
+                for r in created {
+                    let _ = self.delete_lvol(&r.node_name, &r.lvol_uuid).await;
                 }
+                return Err(MinimalStateError::InternalError {
+                    message: format!("Failed to create replica {}: {}", i + 1, e)
+                });
             }
-        }
+        };
 
         let replica_count = replicas.len();
         info!(replica_count, volume_id, "[DRIVER] Created replicas for volume");
@@ -4328,5 +4325,59 @@ mod create_adoption_tests {
         assert_eq!(bdev_with_alias(&answer, "lvs_n/vol_pvc-1").unwrap()["uuid"], "mine");
         assert!(bdev_with_alias(&answer, "lvs_n/vol_pvc-2").is_none());
         assert!(bdev_with_alias(&json!({"code": -19}), "lvs_n/vol_pvc-1").is_none());
+    }
+}
+
+/// Runs `legs` concurrently. All succeeded: their values, in order. Otherwise
+/// the first failing leg's index and error, with the values of the legs that
+/// succeeded (the caller undoes them).
+async fn all_legs<T, E, F>(legs: impl IntoIterator<Item = F>) -> Result<Vec<T>, (usize, E, Vec<T>)>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let mut done = Vec::new();
+    let mut failed = None;
+    for (i, r) in futures::future::join_all(legs).await.into_iter().enumerate() {
+        match r {
+            Ok(v) => done.push(v),
+            Err(e) => {
+                failed.get_or_insert((i, e));
+            }
+        }
+    }
+    match failed {
+        None => Ok(done),
+        Some((i, e)) => Err((i, e, done)),
+    }
+}
+
+#[cfg(test)]
+mod all_legs_tests {
+    use super::all_legs;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    // Every leg waits until all of them have started: legs run one after
+    // another never get past the first.
+    #[tokio::test]
+    async fn the_legs_run_at_the_same_time() {
+        let barrier = Arc::new(Barrier::new(3));
+        let legs = (0..3).map(|i| {
+            let barrier = barrier.clone();
+            async move {
+                barrier.wait().await;
+                Ok::<_, ()>(i)
+            }
+        });
+        let out = tokio::time::timeout(std::time::Duration::from_secs(10), all_legs(legs))
+            .await
+            .expect("the legs did not run at the same time");
+        assert_eq!(out, Ok(vec![0, 1, 2]));
+    }
+
+    #[tokio::test]
+    async fn a_failed_leg_returns_the_legs_that_succeeded() {
+        let legs = (0..4).map(|i| async move { if i % 2 == 1 { Err(format!("leg {i}")) } else { Ok(i) } });
+        assert_eq!(all_legs(legs).await, Err((1, "leg 1".to_string(), vec![0, 2])));
     }
 }

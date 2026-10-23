@@ -49,8 +49,29 @@ covered by the stability guarantee.
 - **csi-provisioner `--timeout` 60s and `--retry-interval-max` 30s** (chart
   `csiSidecars.externalProvisioner.timeout` / `.retryIntervalMax`; they were
   the sidecar's defaults, 10s and 5m).
+- **A multi-replica volume's replicas are created at the same time**, not
+  one after another: a thick 3-replica volume binds in about the time of
+  one replica's zeroing instead of three.
+- **The csi-node ClusterRole reads PVCs** (`get`, `list`), for the orphan
+  sweep below. The sweep reads them only when some volume on the node has
+  no PV.
 
 ### Fixed
+
+- **The orphan sweep could delete a replica of a volume still being
+  created.** A node deletes a Flint lvol whose PV does not exist after
+  three sweeps 60 s apart; a volume has no PV until CreateVolume returns,
+  and replicas were created one after another, so replica 0 waited PV-less
+  while the others were made. With thick volumes zeroed as they are created
+  (about 1 s per GiB on i4i), that wait passes the three sweeps from about
+  96 GiB at 3 replicas, and the volume started with a replica missing. The
+  sweep now spares a volume whose PVC is still unbound (its PV will be
+  `pvc-<PVC uid>`), however long the create takes, and the replicas are
+  created at once. On EC2 (bench9, i4i): a 128 GiB thick 3-replica
+  volume on the driver before the fix bound after 376 s with replica 0
+  already swept, and its pod never started (`Failed to create RAID`);
+  with the fix it bound in 130 s, its replicas made within a second,
+  none swept.
 
 - **A CreateVolume that outlived the provisioner's deadline never
   finished.** The provisioner cancels the call at its `--timeout` and

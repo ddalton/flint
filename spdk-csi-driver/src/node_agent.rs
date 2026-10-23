@@ -5084,14 +5084,24 @@ impl NodeAgent {
             Err(_) => None,
         };
 
-        let input = crate::orphan_sweep::SweepInput {
+        let mut input = crate::orphan_sweep::SweepInput {
             lvols,
             subsystems,
             ublk_bdevs,
             all_bdevs,
             existing_pvs,
             pv_known_replica_uuids,
+            unbound_pvc_volumes: Default::default(),
         };
+        // A volume whose PVC is still unbound is being created, PV or not
+        // (a thick replica is zeroed for minutes). Read only when needed;
+        // an error skips the cycle, as for the PV list.
+        if input.needs_unbound_pvcs() {
+            let pvcs: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
+                Api::all(self.driver.kube_client.clone());
+            let items = pvcs.list(&ListParams::default()).await?.items;
+            input.unbound_pvc_volumes = crate::orphan_sweep::unbound_pvc_volumes(&items);
+        }
         let plan = {
             let mut strikes = self.orphan_strikes.lock().await;
             crate::orphan_sweep::plan_sweep(&input, &mut strikes, threshold)
