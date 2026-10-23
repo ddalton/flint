@@ -40,6 +40,18 @@ pub struct BaselineEntry {
     /// stamps it; `None` compares as "unknown" (`scan::stat_changed`).
     #[serde(default)]
     pub mtime_nanos: Option<u32>,
+    /// The mode (`scan::PERM_BITS` of it) the document cites for the
+    /// version this tree integrated — its own upload's, or the one it
+    /// materialised, which is the tree's whenever the write could apply
+    /// it. A `chmod` moves neither size nor mtime, so the scan compares
+    /// the tree's mode with this (`scan::stat_changed`); and it publishes
+    /// the same bytes under the same etag, so a consume owes an entry
+    /// whose cited mode is not this one (`cites_mode`). A mode the tree
+    /// cannot hold (a bit the kernel refuses an unprivileged owner)
+    /// scans as a change and publishes what the tree does hold, once.
+    /// `None` compares as "unknown", as above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
     /// CRC-64/NVME (wire form) of the object bytes this syncer
     /// integrated at this path — computed from the bytes it wrote or
     /// uploaded, never from a HEAD: content convergence compares it, and
@@ -52,6 +64,15 @@ pub struct BaselineEntry {
     /// scan hashes the file before calling it clean (`scan::confirm_racy`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub racy: bool,
+}
+
+impl BaselineEntry {
+    /// Whether `cited`, a document entry's mode, is the one this entry
+    /// integrated. With the etag, what a consume asks before it skips an
+    /// entry: a `chmod` publishes the same bytes, so the same etag.
+    pub fn cites_mode(&self, cited: u32) -> bool {
+        self.mode.is_none_or(|m| (m ^ cited) & super::scan::PERM_BITS == 0)
+    }
 }
 
 /// The persisted baseline snapshot: what this syncer believes the

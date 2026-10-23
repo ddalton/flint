@@ -355,7 +355,7 @@ impl Syncer {
 
         for (path, e) in &doc.entries {
             let be = baseline.entries.get(path).cloned();
-            if be.as_ref().is_some_and(|b| same(&b.etag, &e.etag)) {
+            if be.as_ref().is_some_and(|b| same(&b.etag, &e.etag) && b.cites_mode(e.mode)) {
                 continue;
             }
             let held = be.is_some() || scope.as_ref().is_none_or(|s| s.covers(path));
@@ -391,6 +391,11 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
+                            // The DOCUMENT's mode, as every entry records:
+                            // the bytes converged, the mode may not have,
+                            // and the tree's left here would never be
+                            // published.
+                            mode: Some(e.mode & scan::PERM_BITS),
                             racy: super::barrier::racy_stat(&st),
                             crc64_b64: Some(e.crc64_b64.clone()),
                         },
@@ -437,7 +442,10 @@ impl Syncer {
                     continue;
                 }
             }
-            let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
+            // The mode the DOCUMENT cites, as checkout applies — not the
+            // object's stamp, which a gateway write does not carry (its
+            // file came out 0644 here and its cited mode in a checkout).
+            let mode = Some(e.mode);
             consume_window("before-write", path);
             // H7: the licence to overwrite is re-checked with the temp
             // written, immediately before the rename; a write since is the
@@ -479,6 +487,7 @@ impl Syncer {
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
+                    mode: Some(e.mode & scan::PERM_BITS),
                     racy: super::barrier::racy_stat(&st),
                     crc64_b64: Some(got),
                 },
@@ -1928,6 +1937,8 @@ impl UploadOutcome {
                 size: scanned.size,
                 mtime_unix: scanned.mtime_unix,
                 mtime_nanos: Some(scanned.mtime_nanos),
+                // The mode the entry above cites.
+                mode: Some(scanned.mode & scan::PERM_BITS),
                 crc64_b64: Some(crc64_to_b64(crc)),
                 // Measured from the SCAN's stat, which precedes the read:
                 // an upload can take longer than the window, and the
@@ -2002,7 +2013,7 @@ pub(super) fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
         (Err(_), Some(_)) => true,                 // locally deleted vs baseline
         (Ok(_), None) => true,                     // local exists, never published
         (Ok(m), Some(b)) => {
-            scan::stat_changed(b.size, b.mtime_unix, b.mtime_nanos, m.len(), mtime_of(&m), mtime_nanos_of(&m))
+            scan::stat_changed(b, m.len(), mtime_of(&m), mtime_nanos_of(&m), mode_of(&m))
                 // RACY CLEAN: an unchanged stat recorded inside the window
                 // is believed only if the bytes agree (`scan::racy`).
                 || (b.racy && racy_bytes_differ(local, b))
@@ -2069,6 +2080,20 @@ pub(super) fn mtime_of(m: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// A file's `st_mode`, as the walk reports it (`scan::stat_changed`).
+pub(super) fn mode_of(m: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        m.mode()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        0o644
+    }
 }
 
 /// Validate `rel` under `root` WITHOUT creating anything — for callers

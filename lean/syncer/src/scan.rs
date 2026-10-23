@@ -59,12 +59,29 @@ pub fn racy(mtime_unix: i64, mtime_nanos: u32, at_nanos: i128) -> bool {
 /// to publish it as data (review 2026-09-12, atomicity-7).
 pub const TMP_SUFFIX: &str = ".flint-sync-tmp";
 
+/// The bits of `st_mode` a mode change can move and a checkout restores:
+/// permissions, setuid/setgid and sticky, never the file type.
+pub const PERM_BITS: u32 = 0o7777;
+
+/// Whether two modes differ in `PERM_BITS`. Never off unix, where the
+/// walk reports a constant and a cited mode could never be matched.
+pub fn mode_differs(a: u32, b: u32) -> bool {
+    cfg!(unix) && (a ^ b) & PERM_BITS != 0
+}
+
 /// Whether a file's stat differs from its baseline stamp. Size and
-/// seconds always; nanoseconds only when the baseline recorded them — a
-/// baseline written before nanoseconds were stamped has `None`, and
-/// comparing against a missing value would re-upload every file once.
-pub fn stat_changed(b_size: u64, b_mtime: i64, b_nanos: Option<u32>, size: u64, mtime: i64, nanos: u32) -> bool {
-    b_size != size || b_mtime != mtime || b_nanos.map(|n| n != nanos).unwrap_or(false)
+/// seconds always; nanoseconds and permission bits only when the
+/// baseline recorded them — a baseline written before either was
+/// stamped has `None`, and comparing against a missing value would
+/// re-upload every file once. The permission bits are here because a
+/// `chmod` moves only ctime: without them `chmod +x` was never
+/// published, and no checkout ever saw it. `mode` is the full
+/// `st_mode`.
+pub fn stat_changed(b: &super::state::BaselineEntry, size: u64, mtime: i64, nanos: u32, mode: u32) -> bool {
+    b.size != size
+        || b.mtime_unix != mtime
+        || b.mtime_nanos.map(|n| n != nanos).unwrap_or(false)
+        || b.mode.is_some_and(|m| mode_differs(m, mode))
 }
 
 /// Walk the workspace. Skips the state dir, the control namespace and
@@ -205,7 +222,7 @@ pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Clas
                 c.uploads.insert(path.clone());
             }
             Some(b) => {
-                if stat_changed(b.size, b.mtime_unix, b.mtime_nanos, s.size, s.mtime_unix, s.mtime_nanos) {
+                if stat_changed(b, s.size, s.mtime_unix, s.mtime_nanos, s.mode) {
                     c.uploads.insert(path.clone());
                 }
             }

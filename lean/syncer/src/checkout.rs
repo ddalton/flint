@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use flint_store::StoreError;
 
-use super::barrier::{contained_path, contained_path_stat, mtime_nanos_of, mtime_of, write_file_atomic};
+use super::barrier::{contained_path, contained_path_stat, mode_of, mtime_nanos_of, mtime_of, write_file_atomic};
 use super::manifest;
 use super::state::BaselineEntry;
 use super::{LeanError, LeanResult, Syncer};
@@ -453,7 +453,12 @@ impl Syncer {
                     // the walk already took, then crc of the local
                     // file. No bucket request either way — which is
                     // why it can be unconditional rather than a knob.
-                    let same = st.len() == entry.size
+                    //
+                    // And the mode, first: a chmod publishes a new
+                    // generation of the SAME bytes, and adopting the
+                    // old one would record its mode as the tree's own.
+                    let same = !super::scan::mode_differs(mode_of(&st), entry.mode)
+                        && st.len() == entry.size
                         && local_crc64_b64(&local)
                             .map(|got| got == entry.crc64_b64)
                             .unwrap_or(false);
@@ -468,6 +473,7 @@ impl Syncer {
                                 size: st.len(),
                                 mtime_unix: mtime_of(&st),
                                 mtime_nanos: Some(mtime_nanos_of(&st)),
+                                mode: Some(entry.mode & super::scan::PERM_BITS),
                                 racy: super::barrier::racy_stat(&st),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
                             }),
@@ -519,6 +525,7 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
+                            mode: Some(entry.mode & super::scan::PERM_BITS),
                             racy: super::barrier::racy_stat(&st),
                             // The fold above equalled it, or we would
                             // not be here.
@@ -655,6 +662,7 @@ impl Syncer {
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
+                        mode: Some(entry.mode & super::scan::PERM_BITS),
                         racy: super::barrier::racy_stat(&st),
                         crc64_b64: Some(got),
                     }),

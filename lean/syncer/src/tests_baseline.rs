@@ -16,6 +16,7 @@ fn entry(tag: u64) -> BaselineEntry {
         size: tag,
         mtime_unix: tag as i64,
         mtime_nanos: Some(tag as u32),
+        mode: (tag % 3 != 0).then_some(0o644 | (tag as u32 & 0o111)),
         crc64_b64: Some(format!("c{tag}")),
         racy: tag % 2 == 0,
     }

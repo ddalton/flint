@@ -1938,6 +1938,7 @@ async fn legacy_flint_citation_survives_upgrade() {
             size: meta.size,
             mtime_unix: 0,
             mtime_nanos: None,
+            mode: None,
             crc64_b64: meta.crc64_b64.clone(),
             racy: false,
         },
@@ -3475,6 +3476,293 @@ async fn an_unreadable_directory_stops_the_barrier_and_deletes_nothing() {
     for p in ["ok.txt", "locked/f.txt", "later.txt"] {
         assert!(m.manifest.entries.contains_key(p), "{p} is not cited");
     }
+}
+
+fn mode_at(root: &std::path::Path, rel: &str) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(root.join(rel)).unwrap().permissions().mode() & 0o7777
+}
+
+fn chmod(root: &std::path::Path, rel: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root.join(rel), std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+async fn cited_mode(store: &Arc<MemoryStore>, cfg: &LeanConfig, rel: &str) -> u32 {
+    manifest::load(store.as_ref(), cfg).await.unwrap().unwrap().manifest.entries[rel].mode & 0o7777
+}
+
+/// L7: the scan's stat comparison counts the permission bits, and only
+/// those. `st_mode` carries the file type too, and a baseline from
+/// before the mode was recorded must not re-upload every file once.
+#[test]
+fn the_scan_compares_permission_bits_never_the_file_type() {
+    use super::scan::stat_changed;
+    let b = super::state::BaselineEntry {
+        etag: "\"e\"".into(),
+        key: None,
+        generation: 1,
+        size: 3,
+        mtime_unix: 100,
+        mtime_nanos: Some(5),
+        mode: Some(0o644),
+        crc64_b64: None,
+        racy: false,
+    };
+    assert!(!stat_changed(&b, 3, 100, 5, 0o100644), "the file-type bits read as a change");
+    assert!(stat_changed(&b, 3, 100, 5, 0o100755), "chmod +x is not a change");
+    assert!(stat_changed(&b, 3, 100, 5, 0o100600), "chmod go-r is not a change");
+    assert!(stat_changed(&b, 3, 100, 5, 0o104644), "setuid is not a change");
+    // The consume's half: the same etag under another cited mode is owed.
+    assert!(b.cites_mode(0o100644) && b.cites_mode(0o644));
+    assert!(!b.cites_mode(0o100755), "a chmod's republish reads as already integrated");
+    let unknown = super::state::BaselineEntry { mode: None, ..b };
+    assert!(!stat_changed(&unknown, 3, 100, 5, 0o100755), "a baseline that recorded no mode re-uploads");
+    assert!(unknown.cites_mode(0o100755), "a baseline that recorded no mode re-fetches");
+}
+
+/// L7, end to end: `chmod +x` and nothing else. It moves neither size
+/// nor mtime, so the scan used to read the file as clean and the mode
+/// never left the tree. It is published once, reaches a live tree by its
+/// consume and a fresh tree by checkout, and then nothing re-publishes:
+/// every tree's baseline records the mode it holds.
+#[tokio::test]
+async fn a_chmod_alone_publishes_and_reaches_every_tree() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_a.path(), "run.sh", "#!/bin/sh\necho hi\n");
+    chmod(dir_a.path(), "run.sh", 0o644);
+    a.run_barrier().await.unwrap();
+    b.run_barrier().await.unwrap();
+    assert_eq!(mode_at(dir_b.path(), "run.sh"), 0o644);
+
+    let before = std::fs::metadata(dir_a.path().join("run.sh")).unwrap();
+    chmod(dir_a.path(), "run.sh", 0o755);
+    let after = std::fs::metadata(dir_a.path().join("run.sh")).unwrap();
+    // ANTI-VACUITY: nothing but the mode can publish this.
+    assert_eq!(
+        (before.len(), before.modified().unwrap()),
+        (after.len(), after.modified().unwrap()),
+        "the chmod moved size or mtime, so this does not test a chmod alone"
+    );
+    let ra = a.run_barrier().await.unwrap();
+    assert_eq!(ra.uploaded, vec!["run.sh".to_string()], "a chmod alone was not published");
+    assert_eq!(cited_mode(&store, &a.cfg, "run.sh").await, 0o755);
+
+    let rb = b.run_barrier().await.unwrap();
+    assert_eq!(rb.consumed, 1, "the live tree did not take the new mode: {rb:?}");
+    assert_eq!(mode_at(dir_b.path(), "run.sh"), 0o755);
+
+    let dir_c = tempfile::tempdir().unwrap();
+    let mut c = syncer(&store, dir_c.path()).await;
+    c.checkout().await.unwrap();
+    assert_eq!(mode_at(dir_c.path(), "run.sh"), 0o755, "checkout did not restore the cited mode");
+
+    for (who, sc) in [("writer", &mut a), ("consumer", &mut b), ("checkout", &mut c)] {
+        let r = sc.run_barrier().await.unwrap();
+        assert!(r.uploaded.is_empty(), "the {who}'s tree re-published after the mode settled: {r:?}");
+    }
+}
+
+/// The price of publishing a mode: it is published by uploading the
+/// bytes again, so a mode that locks the syncer out (`chmod 000`) fails
+/// the barrier, as an edit of an unreadable file always has. Nothing is
+/// published and nothing is lost meanwhile, and the barrier after the
+/// file is readable again publishes the backlog.
+#[tokio::test]
+async fn a_chmod_that_locks_the_syncer_out_fails_the_barrier_and_loses_nothing() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "published");
+    chmod(dir.path(), "f.txt", 0o644);
+    // Outside the racy window, so only the mode sends f.txt to the
+    // upload: a racy entry is hashed, and the hash of a locked file fails
+    // the barrier too, mode or no mode.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    std::fs::File::options().write(true).open(dir.path().join("f.txt")).unwrap().set_modified(old).unwrap();
+    a.run_barrier().await.unwrap();
+    assert!(
+        !a.state.load_baseline().unwrap().entries["f.txt"].racy,
+        "the fixture is racy: the hash, not the mode, would fail the barrier"
+    );
+
+    chmod(dir.path(), "f.txt", 0o000);
+    write(dir.path(), "later.txt", "written while locked");
+    let r = a.run_barrier().await;
+    chmod(dir.path(), "f.txt", 0o644);
+    assert!(r.is_err(), "a barrier that cannot read a file it must upload succeeded: {r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["f.txt"].mode & 0o7777, 0o644, "the locked mode was published");
+    assert!(!m.entries.contains_key("later.txt"), "a failed barrier published");
+
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["later.txt".to_string()], "the backlog did not publish alone: {r:?}");
+    assert_eq!(read(dir.path(), "f.txt").as_deref(), Some("published"));
+}
+
+/// A UI edit cites the mode the path had (the gateway keeps `was.mode`)
+/// but stamps no mode on its object. The consume applied the object's
+/// stamp, so an executable came out 0644 in every live tree, while a
+/// fresh checkout, which applies the document's, kept it executable.
+#[tokio::test]
+async fn a_ui_edit_keeps_the_mode_the_document_cites() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "run.sh", "#!/bin/sh\necho v1\n");
+    chmod(dir.path(), "run.sh", 0o755);
+    a.run_barrier().await.unwrap();
+
+    hitl_write(&store, &a.cfg, "run.sh", "#!/bin/sh\necho v2\n", "ui").await.unwrap();
+    assert_eq!(cited_mode(&store, &a.cfg, "run.sh").await, 0o755, "the fixture's UI edit dropped the mode itself");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1, "the UI edit was not consumed: {r:?}");
+    assert_eq!(read(dir.path(), "run.sh").as_deref(), Some("#!/bin/sh\necho v2\n"));
+    assert_eq!(mode_at(dir.path(), "run.sh"), 0o755, "the consume did not apply the cited mode");
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty(), "the consumed file re-published: {r:?}");
+}
+
+/// The consume's CONVERGED path: the tree already holds the document's
+/// bytes, under another mode. The baseline adopts the document's
+/// version, and its mode must be the document's too: recorded as the
+/// tree's, the scan finds nothing to publish, and the tree and the
+/// document disagree for good.
+#[tokio::test]
+async fn a_converged_consume_still_publishes_the_trees_own_mode() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    write(dir_a.path(), "x.sh", "the same bytes");
+    chmod(dir_a.path(), "x.sh", 0o644);
+    a.run_barrier().await.unwrap();
+    write(dir_b.path(), "x.sh", "the same bytes");
+    chmod(dir_b.path(), "x.sh", 0o755);
+
+    let rb = b.run_barrier().await.unwrap();
+    // ANTI-VACUITY: B's x.sh was never B's to publish before, so it is
+    // dirty; a consume that took it converged on the bytes.
+    assert_eq!(rb.consumed, 1, "the consume did not converge on x.sh: {rb:?}");
+    assert_eq!(rb.uploaded, vec!["x.sh".to_string()], "B's own mode was not published: {rb:?}");
+    assert_eq!(cited_mode(&store, &b.cfg, "x.sh").await, 0o755);
+    a.run_barrier().await.unwrap();
+    assert_eq!(mode_at(dir_a.path(), "x.sh"), 0o755);
+}
+
+/// Checkout's resume adopts a file already on disk when its bytes are
+/// the cited ones. A chmod publishes a new generation of the SAME bytes,
+/// so a checkout that died before the chmod and resumes after it finds
+/// the bytes right and the mode wrong. It must fetch again; adopting
+/// would record the stale mode as the tree's own, and nothing would
+/// ever correct it.
+#[tokio::test]
+async fn a_resumed_checkout_refetches_a_file_whose_mode_moved() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "run.sh", "#!/bin/sh\necho hi\n");
+    chmod(dir_a.path(), "run.sh", 0o644);
+    a.run_barrier().await.unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.checkout().await.unwrap();
+    assert_eq!(mode_at(dir_b.path(), "run.sh"), 0o644);
+
+    chmod(dir_a.path(), "run.sh", 0o755);
+    assert_eq!(a.run_barrier().await.unwrap().uploaded, vec!["run.sh".to_string()]);
+    // ANTI-VACUITY: size and bytes agree, so only the mode tells the
+    // generation on disk from the cited one.
+    assert_eq!(read(dir_b.path(), "run.sh").as_deref(), Some("#!/bin/sh\necho hi\n"));
+
+    std::fs::remove_file(dir_b.path().join(".flint-sync/checkout-complete")).unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(mode_at(dir_b.path(), "run.sh"), 0o755, "the resume adopted the old generation's mode");
+    assert_eq!(b.state.load_baseline().unwrap().entries["run.sh"].mode, Some(0o755));
+}
+
+/// `sync`'s own "already integrated" test is the consume's: the same
+/// etag under another cited mode is owed, or a peer's chmod never
+/// reaches a tree that only syncs.
+#[tokio::test]
+async fn a_sync_takes_a_peers_chmod() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    let mut b = syncer(&store, dir_b.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "run.sh", "#!/bin/sh\necho hi\n");
+    chmod(dir_a.path(), "run.sh", 0o644);
+    a.run_barrier().await.unwrap();
+    b.checkout().await.unwrap();
+    assert_eq!(mode_at(dir_b.path(), "run.sh"), 0o644);
+
+    chmod(dir_a.path(), "run.sh", 0o755);
+    assert_eq!(a.run_barrier().await.unwrap().uploaded, vec!["run.sh".to_string()]);
+    let r = b.sync().await.unwrap();
+    assert!(r.applied.contains(&"run.sh".to_string()), "sync skipped the republished mode: {r:?}");
+    assert_eq!(mode_at(dir_b.path(), "run.sh"), 0o755);
+}
+
+/// `sync` applies the document's mode as the consume does, and its
+/// re-honor path (bytes already the remote's, baseline stale from a crash
+/// mid-apply) records the document's mode too: an agent's chmod made
+/// meanwhile still publishes.
+#[tokio::test]
+async fn a_sync_applies_the_cited_mode_and_its_rehonor_keeps_a_local_chmod() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "run.sh", "#!/bin/sh\necho v1\n");
+    chmod(dir.path(), "run.sh", 0o755);
+    a.run_barrier().await.unwrap();
+
+    hitl_write(&store, &a.cfg, "run.sh", "#!/bin/sh\necho v2\n", "ci").await.unwrap();
+    let pre = a.state.load_baseline().unwrap();
+    let r = a.sync().await.unwrap();
+    assert!(r.applied.contains(&"run.sh".to_string()));
+    assert_eq!(mode_at(dir.path(), "run.sh"), 0o755, "sync did not apply the cited mode");
+
+    // The crash shape of `sync_rehonor_no_phantom_conflicts`, and the
+    // agent's chmod on top of it.
+    let mut b = a.state.load_baseline().unwrap();
+    let stale = b.entries.get_mut("run.sh").unwrap();
+    stale.etag = "\"stale-pre-sync-etag\"".into();
+    stale.mtime_unix -= 10;
+    stale.size = 1;
+    b.seq = pre.seq;
+    b.manifest_etag = pre.manifest_etag.clone();
+    a.state.save_baseline(&b).unwrap();
+    chmod(dir.path(), "run.sh", 0o700);
+    let r = a.sync().await.unwrap();
+    assert!(r.applied.contains(&"run.sh".to_string()), "the re-honor did not adopt identical bytes: {r:?}");
+    assert_eq!(mode_at(dir.path(), "run.sh"), 0o700, "the sync overwrote the agent's chmod");
+
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, vec!["run.sh".to_string()], "the agent's chmod was not published: {r:?}");
+    assert_eq!(cited_mode(&store, &a.cfg, "run.sh").await, 0o700);
 }
 
 #[tokio::test]

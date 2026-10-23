@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, PosixStamps, StoreError};
+use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, StoreError};
 
 use super::barrier::{mtime_nanos_of, mtime_of};
 use super::state::{BaselineEntry, ConflictRecord};
@@ -241,7 +241,13 @@ impl Syncer {
 
         // 4. Apply adds/changes (remote differs from the baseline).
         for (path, (etag, key)) in &remote {
-            if baseline.entries.get(path).map(|b| &b.etag == etag).unwrap_or(false) {
+            let cited_mode = theirs.entries.get(path).map(|e| e.mode);
+            if baseline
+                .entries
+                .get(path)
+                .map(|b| &b.etag == etag && cited_mode.is_none_or(|m| b.cites_mode(m)))
+                .unwrap_or(false)
+            {
                 continue;
             }
             if !held(&baseline, path) {
@@ -297,6 +303,9 @@ impl Syncer {
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
+                            // The document's, as every entry records: a
+                            // local mode change still publishes.
+                            mode: cited_mode.map(|m| m & scan::PERM_BITS),
                             racy: super::barrier::racy_stat(&st),
                             crc64_b64: local_crc,
                         },
@@ -326,7 +335,8 @@ impl Syncer {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let mode = PosixStamps::from_meta(&meta.meta).map(|p| p.mode);
+            // The document's mode, as the consume and checkout apply.
+            let mode = cited_mode;
             // VERIFIED before it is written, exactly as checkout's fresh
             // fetch is: against the writer's CRC for this etag (the
             // manifest's), else the backend's attestation when it offers
@@ -413,6 +423,7 @@ impl Syncer {
                     size: st.len(),
                     mtime_unix: mtime_of(&st),
                     mtime_nanos: Some(mtime_nanos_of(&st)),
+                    mode: cited_mode.map(|m| m & scan::PERM_BITS),
                     racy: super::barrier::racy_stat(&st),
                     crc64_b64: Some(got),
                 },

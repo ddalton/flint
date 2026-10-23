@@ -116,6 +116,30 @@ covered by the stability guarantee.
   60 s by default) unless its agent publishes first. The one-second poll
   reads only the agent's local `.flint/` files. The README now says so.
 
+- **lean: a `chmod` on its own is published.** The manifest cites each
+  file's mode and checkout restores it, but the barrier's scan compared
+  only size and mtime, and a `chmod` moves neither. A `chmod +x` with no
+  edit stayed in the tree that made it until the file next changed. The
+  baseline now records the mode each file's version is cited with, and
+  the scan compares the tree's against it, so the new mode is published
+  by the next barrier. A consume used to skip any entry whose etag it
+  already held, and a mode change publishes the same bytes under the
+  same etag; it now skips only when the cited mode matches too, so the
+  new mode reaches every live tree as well as every checkout. A change
+  of mode alone uploads the file again under a new handle, and each
+  live tree fetches it again, as for an edit. A file the syncer cannot
+  read after the change (`chmod 000`) fails the barrier the way an
+  edited unreadable file does. Ownership is not published: no syncer
+  could restore it without privilege.
+
+- **lean: a live tree applies the mode the document cites.** The barrier's
+  consume and `sync` set a file's mode from its object's stamp, and a
+  UI edit through the gateway stamps none, so a UI edit of an executable
+  came out `0644` in every live tree while a fresh checkout kept it
+  executable. Both now apply the document's mode, as checkout does. A
+  resumed checkout no longer adopts a file on disk whose bytes are the
+  cited ones but whose mode is not.
+
 ## [1.60.3] - 2026-10-23
 
 A patch release for a cross-tenant data leak and three defects. On a disk
