@@ -269,6 +269,9 @@ const INTENT: &str = "intent.json";
 /// When this writer last swept for untracked uploads (`untracked.rs`).
 const UNTRACKED_SWEEP: &str = "untracked-sweep";
 const ORPHAN_SWEEP: &str = "orphan-sweep";
+/// When this writer's commit section last ran the collection pass
+/// (`LeanConfig::collect_every_secs`, latency plan lever C).
+const COLLECT_AT: &str = "collect-at";
 /// The retire logs this writer has read (`untracked.rs`): immutable, so each
 /// is fetched once.
 const RETIRE_CACHE: &str = "retire-cache.json";
@@ -506,6 +509,16 @@ impl SyncerState {
 
     pub fn save_orphan_sweep_at(&self, at: u64) -> LeanResult<()> {
         write_atomic(&self.dir.join(ORPHAN_SWEEP), at.to_string().as_bytes())
+    }
+
+    /// The last collection pass, unix seconds; 0 = never (or unreadable,
+    /// which runs the pass: the safe direction is collecting).
+    pub fn load_collect_at(&self) -> u64 {
+        fs::read_to_string(self.dir.join(COLLECT_AT)).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    }
+
+    pub fn save_collect_at(&self, at: u64) -> LeanResult<()> {
+        write_atomic(&self.dir.join(COLLECT_AT), at.to_string().as_bytes())
     }
 
     /// The retire logs read so far, by key. A cache: unreadable reads as

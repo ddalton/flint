@@ -54,6 +54,15 @@
 //!   FLINT_SYNC_RETIRE_GRACE_SECS  how long a replaced handle or chunk stays
 //!                                 after the commit that retired it (M1;
 //!                                 default 600, 0 = at once)
+//!   FLINT_SYNC_COLLECT_EVERY_SECS how often a commit runs the collection
+//!                                 pass: retire ledger, reap, orphan,
+//!                                 generation and chunk sweeps (default
+//!                                 half the retire grace, 0 = every commit)
+//!   FLINT_SYNC_CHUNK_CACHE        "off" fetches every manifest chunk on
+//!                                 every load (default on: kept under
+//!                                 .flint-sync/chunk-cache, verified on use)
+//!   FLINT_SYNC_CHUNK_FETCH_PARALLELISM  chunk GETs a manifest load keeps in
+//!                                 flight (default 16; 1 = one at a time)
 //!   FLINT_SYNC_MAX_BYTES/_FILES   checkout budgets (0 = unlimited)
 //!   FLINT_SYNC_CHECKOUT_SCOPE     comma list of path prefixes; checkout
 //!                                 materialises ONLY what they cover.
@@ -283,6 +292,18 @@ async fn main() {
     cfg.untracked_sweep_secs = env_u64("FLINT_SYNC_UNTRACKED_SWEEP_SECS", 3600);
     // M1: a replaced handle or chunk stays this long after its retirement.
     cfg.retire_grace_secs = env_u64("FLINT_SYNC_RETIRE_GRACE_SECS", flint_lean::manifest::RETIRE_GRACE_SECS);
+    // Latency plan lever C: the collection pass runs on this cadence, not
+    // on every publish. Half the retire age by default, so a replaced
+    // version waits at most 1.5 x G before it is collected; a drill that
+    // sets the age to 0 collects at every commit, as it always did.
+    cfg.collect_every_secs = env_u64("FLINT_SYNC_COLLECT_EVERY_SECS", cfg.retire_grace_secs / 2);
+    // Latency plan lever A: the chunk cache, and how many chunk GETs a
+    // load keeps in flight.
+    if std::env::var("FLINT_SYNC_CHUNK_CACHE").as_deref() == Ok("off") {
+        cfg.chunk_cache = None;
+    }
+    cfg.chunk_fetch_parallelism =
+        env_u64("FLINT_SYNC_CHUNK_FETCH_PARALLELISM", flint_lean::CHUNK_FETCH_PARALLELISM as u64).max(1) as usize;
     // Drill-only: the sweep's grace, shortened so a host leg need not wait
     // ten minutes. The gateway's own overwrite grace does not move with it.
     cfg.untracked_grace_secs =

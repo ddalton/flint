@@ -1422,29 +1422,51 @@ impl Syncer {
                 tokio::time::sleep(std::time::Duration::from_secs(self.cfg.drill_hold_gc_secs)).await;
                 clock.lap("drill_hold");
             }
+            // THE COLLECTION PASS (latency plan 2026-10-23, lever C): the
+            // retire ledger, the reap, the orphan sweep, the generation and
+            // chunk sweeps, run together and only when
+            // `collect_every_secs` has passed since this writer last ran
+            // them — not on every publish, where they were three LISTs and
+            // four GETs under the lease. Still in the commit section, under
+            // the cell (DP2): only WHEN the collector runs moves, and the
+            // model's reap and sweeps are steps a commit section may take
+            // or not. Skipping one costs storage for the interval, never a
+            // citation: nothing is deleted while it is skipped.
+            let collect_at = now_unix();
+            let collect = self.cfg.collect_every_secs == 0 || {
+                let last = self.state.load_collect_at();
+                last == 0 || collect_at.saturating_sub(last) >= self.cfg.collect_every_secs
+            };
             // RETIRE-AGE G (M1): what this commit retired was LOGGED with its
             // CAS (`manifest::cas_write_retiring`), as the gateway's commits
             // log theirs. It is collected once the retirement is
             // `retire_grace_secs` old — at once when that is 0 — by whichever
-            // writer's commit section comes next; until then the sweeps spare
+            // writer's collection pass comes next; until then the sweeps spare
             // it, so a reader that loaded the document before this CAS can
             // still fetch it. No ledger, no sweep: a leak, never a deletion
             // a lagging reader meets.
-            let ledger = match self.retire_ledger(now_unix()).await {
-                Ok(l) => Some(l),
-                Err(e) => {
-                    eprintln!("flint-sync: could not read the retire logs ({e}); no sweep this time");
-                    None
-                }
+            let ledger = match collect {
+                false => None,
+                true => match self.retire_ledger(collect_at).await {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        eprintln!("flint-sync: could not read the retire logs ({e}); no sweep this time");
+                        None
+                    }
+                },
             };
-            clock.lap("retire_ledger");
+            if collect {
+                clock.lap("retire_ledger");
+            }
             if let Some(l) = &ledger {
                 match self.reap_retired(l, &installed, &flush_uuid).await {
                     Ok(n) => report.collected = n,
                     Err(e) => eprintln!("flint-sync: retired handles not collected (next time): {e}"),
                 }
             }
-            clock.lap("reap");
+            if collect {
+                clock.lap("reap");
+            }
             if !retired.is_empty() {
                 self.trace("gc", serde_json::json!({"flush": flush_uuid, "retired": retired.len(),
                     "collected": report.collected}));
@@ -1460,7 +1482,9 @@ impl Syncer {
                     Err(e) => eprintln!("flint-sync: orphan sweep (retrying next time it is due): {e}"),
                 }
             }
-            clock.lap("orphan_sweep");
+            if collect {
+                clock.lap("orphan_sweep");
+            }
 
             // Step 7: the baseline follows what this barrier published. What
             // theirs changed is owed, and the next consume derives it: the
@@ -1497,64 +1521,75 @@ impl Syncer {
             // The commit section's end (the model's `Finish`). No window is
             // written: under P2 a UI save never waits on one (G1).
             self.trace("window_clear", serde_json::json!({"flush": flush_uuid}));
-            // Reap superseded generations. Immutable metadata that is never
-            // collected is a leak that grows by a whole manifest per
-            // publish, and this also collects the orphan a crash between the
-            // entries PUT and the pointer CAS leaves behind. Best effort by
-            // design: a publish that succeeded is not un-done by a failure
-            // to tidy up after it.
-            // A deposal after the CAS stops every deletion after it (M3):
-            // what is left is a leak the next holder's sweeps take, never a
-            // deletion under a successor's cell. The reap and the orphan
-            // sweep renew between their batches (`delete_many_renewing`);
-            // these two renew once before they start.
-            let may_delete = self.lease.is_some() && super::lease::renew_if_due(self).await.is_ok();
-            let swept_generations = match may_delete {
-                false => Ok(0),
-                true => manifest::sweep_generations(self.store.as_ref(), &self.cfg).await,
-            };
-            let swept_generations = match swept_generations {
-                Ok(0) => 0,
-                Ok(n) => {
-                    eprintln!("flint-sync: reaped {n} superseded manifest generation(s)");
-                    n
+            // The rest of the collection pass (see above).
+            if collect {
+                // Reap superseded generations. Immutable metadata that is never
+                // collected is a leak that grows by a whole manifest per
+                // publish, and this also collects the orphan a crash between the
+                // entries PUT and the pointer CAS leaves behind. Best effort by
+                // design: a publish that succeeded is not un-done by a failure
+                // to tidy up after it.
+                // A deposal after the CAS stops every deletion after it (M3):
+                // what is left is a leak the next holder's sweeps take, never a
+                // deletion under a successor's cell. The reap and the orphan
+                // sweep renew between their batches (`delete_many_renewing`);
+                // these two renew once before they start.
+                let may_delete = self.lease.is_some() && super::lease::renew_if_due(self).await.is_ok();
+                let swept_generations = match may_delete {
+                    false => Ok(0),
+                    true => manifest::sweep_generations(self.store.as_ref(), &self.cfg).await,
+                };
+                let swept_generations = match swept_generations {
+                    Ok(0) => 0,
+                    Ok(n) => {
+                        eprintln!("flint-sync: reaped {n} superseded manifest generation(s)");
+                        n
+                    }
+                    Err(e) => {
+                        eprintln!("flint-sync: generation sweep: {e}");
+                        0
+                    }
+                };
+                self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "generations", "removed": swept_generations}));
+                clock.lap("generation_sweep");
+                // And the CHUNK reaper, same reason, same best-effort terms.
+                // `sweep_chunks` returns 0 without a request on a workspace that
+                // is not chunked, so this costs nothing until the layout moves.
+                //
+                // It was written to four model-established rules, guarded by six
+                // mutation configs, and called from nothing but its own tests —
+                // so with chunking on, every publish left its superseded chunks
+                // in the bucket forever. The rules ran in the model and in the
+                // suite and never once in production. `the_barrier_reaps...`
+                // below is the test that asks whether this line exists at all.
+                let may_delete = may_delete && self.lease.is_some() && super::lease::renew_if_due(self).await.is_ok();
+                let swept_chunks = match ledger.as_ref() {
+                    _ if !may_delete => Ok(0),
+                    None => Ok(0),
+                    Some(l) => manifest::sweep_chunks_sparing(self.store.as_ref(), &self.cfg, &l.spared).await,
+                };
+                let swept_chunks = match swept_chunks {
+                    Ok(0) => 0,
+                    Ok(n) => {
+                        eprintln!("flint-sync: reaped {n} unreferenced manifest chunk(s)");
+                        n
+                    }
+                    Err(e) => {
+                        eprintln!("flint-sync: chunk sweep: {e}");
+                        0
+                    }
+                };
+                self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "chunks", "removed": swept_chunks}));
+                clock.lap("chunk_sweep");
+                // The pass ran: the next is due `collect_every_secs` from
+                // now. A ledger that could not be read collected nothing,
+                // so the next commit tries again.
+                if ledger.is_some() {
+                    if let Err(e) = self.state.save_collect_at(collect_at) {
+                        eprintln!("flint-sync: could not record the collection pass ({e}); the next commit runs it again");
+                    }
                 }
-                Err(e) => {
-                    eprintln!("flint-sync: generation sweep: {e}");
-                    0
-                }
-            };
-            self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "generations", "removed": swept_generations}));
-            clock.lap("generation_sweep");
-            // And the CHUNK reaper, same reason, same best-effort terms.
-            // `sweep_chunks` returns 0 without a request on a workspace that
-            // is not chunked, so this costs nothing until the layout moves.
-            //
-            // It was written to four model-established rules, guarded by six
-            // mutation configs, and called from nothing but its own tests —
-            // so with chunking on, every publish left its superseded chunks
-            // in the bucket forever. The rules ran in the model and in the
-            // suite and never once in production. `the_barrier_reaps...`
-            // below is the test that asks whether this line exists at all.
-            let may_delete = may_delete && self.lease.is_some() && super::lease::renew_if_due(self).await.is_ok();
-            let swept_chunks = match ledger.as_ref() {
-                _ if !may_delete => Ok(0),
-                None => Ok(0),
-                Some(l) => manifest::sweep_chunks_sparing(self.store.as_ref(), &self.cfg, &l.spared).await,
-            };
-            let swept_chunks = match swept_chunks {
-                Ok(0) => 0,
-                Ok(n) => {
-                    eprintln!("flint-sync: reaped {n} unreferenced manifest chunk(s)");
-                    n
-                }
-                Err(e) => {
-                    eprintln!("flint-sync: chunk sweep: {e}");
-                    0
-                }
-            };
-            self.trace("sweep", serde_json::json!({"flush": flush_uuid, "what": "chunks", "removed": swept_chunks}));
-            clock.lap("chunk_sweep");
+            }
             Ok(())
         }
         .await;

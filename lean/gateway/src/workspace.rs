@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, ObjectStore, PutCondition, ReadOnly, StoreError};
 
 use flint_lean::inbox::{self, InboxDoc, RequestedVerb, VerbRequest};
+use flint_lean::chunkcache::MemoryChunkCache;
 use flint_lean::manifest::{self, LeanEntry, LeanManifest, LoadedManifest};
 
 /// A UI save's fresh handle, ready to cite (`Workspace::commit_save`).
@@ -67,8 +68,19 @@ pub struct Workspace {
 /// immutable per pointer etag, so a read checks the pointer — a few hundred
 /// bytes — and reuses the entries while it has not moved. Under P2 the
 /// gateway is a publisher and every UI read went through a full load.
+///
+/// It also holds the workspace's manifest CHUNKS, by content address
+/// (latency plan 2026-10-23, lever A): a pointer that moved names mostly
+/// chunks this gateway already has, so loading it fetches only the new ones
+/// (`flint_lean::chunkcache`; every body is verified against its address
+/// before it is used, and a load that used any still LISTs the chunk prefix
+/// once, so a chunk the bucket lost refuses the load as it always did). One
+/// manifest's worth per workspace, about 277 bytes per entry.
 #[derive(Default)]
-pub struct ManifestCache(std::sync::Mutex<Option<Arc<LoadedManifest>>>);
+pub struct ManifestCache {
+    doc: std::sync::Mutex<Option<Arc<LoadedManifest>>>,
+    chunks: Arc<MemoryChunkCache>,
+}
 
 /// One `ManifestCache` per workspace prefix, for a server that builds a
 /// `Workspace` per request.
@@ -501,14 +513,13 @@ impl Workspace {
     /// (`FLINT_SYNC_PREFIX`) and the gateway's `id=prefix` mapping
     /// named. A trailing slash is dropped.
     pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
-        Workspace {
-            store,
-            // Verbs never touch a local tree; the root is unused.
-            cfg: LeanConfig::new(prefix, "/nonexistent"),
-            max_put_bytes: WHOLE_PUT_MAX,
-            read_only: false,
-            manifests: Arc::default(),
-        }
+        let manifests: Arc<ManifestCache> = Arc::default();
+        // Verbs never touch a local tree; the root is unused, and so is the
+        // syncer's on-disk chunk cache under it: chunks are kept in memory,
+        // beside the manifest cache.
+        let mut cfg = LeanConfig::new(prefix, "/nonexistent");
+        cfg.chunk_cache = Some(manifests.chunks.clone());
+        Workspace { store, cfg, max_put_bytes: WHOLE_PUT_MAX, read_only: false, manifests }
     }
 
     /// The same workspace for a caller who may only read — a user whose
@@ -553,7 +564,17 @@ impl Workspace {
     }
 
     /// Share a manifest cache (a server: one per workspace, across requests).
+    /// Fetch every manifest chunk on every load and keep none in memory:
+    /// the shape before the latency plan's chunk cache (lever A). For an
+    /// embedder serving many large workspaces that would rather pay
+    /// requests than memory. A later `with_manifest_cache` turns it back on.
+    pub fn without_chunk_cache(mut self) -> Self {
+        self.cfg.chunk_cache = None;
+        self
+    }
+
     pub fn with_manifest_cache(mut self, cache: Arc<ManifestCache>) -> Self {
+        self.cfg.chunk_cache = Some(cache.chunks.clone());
         self.manifests = cache;
         self
     }
@@ -614,8 +635,9 @@ impl Workspace {
         }
         self.check_size(&body)?;
         // Judged once before any bytes move, so a stale caller costs no PUT.
-        let read = manifest::load(self.store.as_ref(), &self.cfg).await?;
-        self.judge_save(read.as_ref(), path, opts)?;
+        // Against the cached view: one pointer GET while nothing moved.
+        let read = self.view().await?;
+        self.judge_save(read.as_deref(), path, opts)?;
         let prev = read.as_ref().and_then(|l| l.manifest.entries.get(path)).cloned();
         let crc = crc64_nvme(&body);
         let size = body.len() as u64;
@@ -682,7 +704,12 @@ impl Workspace {
         flush: &str,
         edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), VerbError>,
     ) -> Result<(), VerbError> {
-        match manifest::commit_edit(self.store.as_ref(), &self.cfg, flush, edit).await {
+        // The first attempt edits the view — the document at the pointer
+        // just read, from the cache while the pointer has not moved — rather
+        // than loading it again; the CAS is If-Match on its etag, so a stale
+        // view loses and the next attempt loads (latency plan lever A).
+        let first = self.view().await?;
+        match manifest::commit_edit_from(self.store.as_ref(), &self.cfg, flush, Some(first), edit).await {
             Ok(()) => Ok(()),
             Err(manifest::EditError::Refused(e)) => Err(e),
             Err(manifest::EditError::Store(e)) => Err(e.into()),
@@ -844,12 +871,13 @@ impl Workspace {
         let Some(p) = manifest::load_pointer(self.store.as_ref(), &self.cfg).await? else {
             return Ok(manifest::load(self.store.as_ref(), &self.cfg).await?.map(Arc::new));
         };
-        if let Some(hit) = self.manifests.0.lock().unwrap().as_ref().filter(|c| c.etag == p.etag) {
+        if let Some(hit) = self.manifests.doc.lock().unwrap().as_ref().filter(|c| c.etag == p.etag) {
             return Ok(Some(hit.clone()));
         }
-        let loaded = manifest::load(self.store.as_ref(), &self.cfg).await?.map(Arc::new);
+        // The document behind THIS pointer read: no second GET of it.
+        let loaded = manifest::load_from(self.store.as_ref(), &self.cfg, Some(Some(p))).await?.map(Arc::new);
         if let Some(l) = &loaded {
-            *self.manifests.0.lock().unwrap() = Some(l.clone());
+            *self.manifests.doc.lock().unwrap() = Some(l.clone());
         }
         Ok(loaded)
     }

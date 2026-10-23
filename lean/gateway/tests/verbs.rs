@@ -1536,10 +1536,14 @@ async fn a_warm_read_fetches_the_pointer_and_the_object_and_no_manifest_entries(
     }
     let entries = |keys: &[String]| keys.iter().filter(|k| k.contains("/manifests/") || k.contains("/chunks/")).count();
 
+    // A reader that has seen nothing: `w` made the saves, and since the
+    // chunk cache (latency plan lever A) it holds the chunks they wrote, so
+    // its first read would not be cold.
+    let r = ws(&s);
     counting.drain();
-    w.get_file("d/f03.txt").await.unwrap();
+    r.get_file("d/f03.txt").await.unwrap();
     assert!(entries(&counting.drain()) > 0, "PRECONDITION: a cold read did not load the manifest");
-    w.get_file("d/f04.txt").await.unwrap();
+    r.get_file("d/f04.txt").await.unwrap();
     let warm = counting.drain();
     assert_eq!(entries(&warm), 0, "a warm read loaded the manifest's entries again: {warm:?}");
 

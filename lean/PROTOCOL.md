@@ -168,9 +168,12 @@ state a step writes, so the claim stays a predicate on a state.
 
 ## What this page does not cover
 
-The ingress namespace, the gateway's lost reply (a commit that landed
-behind a lost response is answered committed, MN2; tests only), and the
-gateway's read path (the manifest cache and the CRC
+The manifest chunk cache (latency plan 2026-10-23, lever A): a load
+returns the document at the pointer it read, as an uncached load does, so
+no rule here reads it; `SAFETY.md` §2 names what it assumes, and
+`tests_cache.rs` pins it. The ingress namespace, the gateway's lost reply
+(a commit that landed behind a lost response is answered committed, MN2;
+tests only), and the gateway's read path (the manifest cache and the CRC
 check, M8). The last is pinned by tests only
 (`a_warm_read_fetches_the_pointer_and_the_object_and_no_manifest_entries`,
 `a_read_whose_bytes_do_not_match_the_citation_is_refused`).

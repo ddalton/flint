@@ -312,6 +312,171 @@ pub async fn load_pointer(
 /// floor is measured in seconds.
 const LOAD_ATTEMPTS: u32 = 3;
 
+/// What `fetch_chunks` found for one pointer.
+enum Fetched {
+    /// Every chunk's body, in the pointer's order and each verified against
+    /// its address, and the decoded tombstones.
+    Complete { bodies: Vec<bytes::Bytes>, tombstones: BTreeMap<String, Tombstone> },
+    /// Something the pointer names is not in the bucket.
+    Missing(Hole),
+}
+
+/// The object a load found missing.
+enum Hole {
+    Chunk { addr: String, first: String },
+    Tombstones(String),
+}
+
+impl Hole {
+    fn refusal(&self, seq: u64) -> String {
+        match self {
+            Hole::Chunk { addr, first } => format!(
+                "manifest pointer at seq {seq} names chunk {addr} (first key {first:?}), which does \
+                 not exist — refusing to serve a manifest with a hole in it as though those entries \
+                 had been deleted"
+            ),
+            Hole::Tombstones(addr) => {
+                format!("manifest pointer at seq {seq} names tombstones {addr}, which do not exist")
+            }
+        }
+    }
+}
+
+/// The bodies of `refs` and the pointer's tombstones (latency plan lever A).
+///
+/// 1. The cache, where it has a body that hashes to the address asked for.
+///    One that does not is dropped and fetched: the cache vouches for
+///    nothing it has not just proved.
+/// 2. The rest from the bucket, `chunk_fetch_parallelism` at a time — they
+///    were one at a time, 220 sequential GETs at a million entries.
+/// 3. Beside those, ONE LIST of the chunk prefix when anything came from
+///    the cache: a body is proof of content, not of the object still being
+///    there, and a chunk the live pointer names that the bucket lost must
+///    still refuse the load. A LIST the credential may not make (or that
+///    fails) sends the cached chunks to the bucket instead: the check is
+///    never skipped, only paid for the old way.
+///
+/// Every fetched body is checked against its address before it is kept or
+/// used, so `chunk::assemble_verified` hashes nothing twice.
+async fn fetch_chunks(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    p: &Pointer,
+    refs: &[super::chunk::ChunkRef],
+) -> LeanResult<Fetched> {
+    use futures::stream::{self, StreamExt};
+    let cache = cfg.chunk_cache.as_deref();
+    let mut bodies: Vec<Option<bytes::Bytes>> = vec![None; refs.len()];
+    let mut tombstones: Option<BTreeMap<String, Tombstone>> = None;
+    if let Some(c) = cache {
+        for (slot, r) in bodies.iter_mut().zip(refs) {
+            if let Some(b) = c.get(&r.addr) {
+                if super::chunk::chunk_address(&b) == r.addr {
+                    *slot = Some(b);
+                } else {
+                    c.remove(&r.addr);
+                }
+            }
+        }
+        if let Some(addr) = &p.tombstones {
+            if let Some(b) = c.get(addr) {
+                match super::chunk::decode_tombstones(&b, addr) {
+                    Ok(t) => tombstones = Some(t),
+                    Err(_) => c.remove(addr),
+                }
+            }
+        }
+    }
+    let cached: Vec<usize> = (0..refs.len()).filter(|&i| bodies[i].is_some()).collect();
+    let tombstones_cached = tombstones.is_some();
+
+    // What to fetch: the misses, and on a failed LIST the hits as well.
+    let fetch_round = |want_chunks: Vec<usize>, want_tombstones: bool| async move {
+        let mut wants: Vec<(Option<usize>, String)> =
+            want_chunks.into_iter().map(|i| (Some(i), refs[i].addr.clone())).collect();
+        if want_tombstones {
+            if let Some(a) = &p.tombstones {
+                wants.push((None, a.clone()));
+            }
+        }
+        stream::iter(wants.into_iter().map(|(slot, addr)| async move {
+            let got = store.get_whole(&cfg.chunk_key(&addr), None).await;
+            (slot, addr, got)
+        }))
+        .buffer_unordered(cfg.chunk_fetch_parallelism.max(1))
+        .collect::<Vec<_>>()
+        .await
+    };
+    let misses: Vec<usize> = (0..refs.len()).filter(|&i| bodies[i].is_none()).collect();
+    let tombstones_missing = p.tombstones.is_some() && !tombstones_cached;
+    let listing = async {
+        if cached.is_empty() && !tombstones_cached {
+            return None;
+        }
+        Some(store.list(&format!("{}/{}/chunks/", cfg.prefix, super::LEAN_DIR)).await)
+    };
+    let (listing, fetched) = futures::join!(listing, fetch_round(misses, tombstones_missing));
+    let mut rounds = vec![fetched];
+    match listing {
+        None => {}
+        Some(Ok(listed)) => {
+            let present: std::collections::HashSet<&str> =
+                listed.iter().filter_map(|o| o.key.rsplit('/').next()).collect();
+            for &i in &cached {
+                if !present.contains(refs[i].addr.as_str()) {
+                    return Ok(Fetched::Missing(Hole::Chunk {
+                        addr: refs[i].addr.clone(),
+                        first: refs[i].first.clone(),
+                    }));
+                }
+            }
+            if let (true, Some(addr)) = (tombstones_cached, &p.tombstones) {
+                if !present.contains(addr.as_str()) {
+                    return Ok(Fetched::Missing(Hole::Tombstones(addr.clone())));
+                }
+            }
+        }
+        Some(Err(_)) => {
+            // Existence by the old route: fetch what the cache served.
+            rounds.push(fetch_round(cached, tombstones_cached).await);
+        }
+    }
+    for (slot, addr, got) in rounds.into_iter().flatten() {
+        let body = match got {
+            Ok((_, b)) => b,
+            Err(StoreError::NotFound(_)) => {
+                return Ok(Fetched::Missing(match slot {
+                    Some(i) => Hole::Chunk { addr, first: refs[i].first.clone() },
+                    None => Hole::Tombstones(addr),
+                }));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        match slot {
+            Some(i) => {
+                // The object was fetched BY address, so a mismatch means
+                // the store handed back something else — a stale read, a
+                // wrong key, a truncated body.
+                super::chunk::check_address_of(&body, &addr)?;
+                if let Some(c) = cache {
+                    c.put(&addr, &body);
+                }
+                bodies[i] = Some(body);
+            }
+            None => {
+                tombstones = Some(super::chunk::decode_tombstones(&body, &addr)?);
+                if let Some(c) = cache {
+                    c.put(&addr, &body);
+                }
+            }
+        }
+    }
+    Ok(Fetched::Complete {
+        bodies: bodies.into_iter().map(|b| b.expect("every chunk is cached or fetched")).collect(),
+        tombstones: tombstones.unwrap_or_default(),
+    })
+}
+
 pub async fn load(
     store: &dyn ObjectStore,
     cfg: &LeanConfig,
@@ -359,79 +524,47 @@ pub async fn load_from(
                 (m, meta.last_modified_unix)
             }
             Entries::Chunked(refs) => {
-                // Sequential on purpose for now: a chunk fetch is
-                // ordinary and the interesting property is that a hole
-                // FAILS rather than silently shortening the manifest.
-                let mut bodies = Vec::with_capacity(refs.len());
-                let mut raced = false;
-                for r in refs {
-                    let key = cfg.chunk_key(&r.addr);
-                    match store.get_whole(&key, None).await {
-                        Ok((_, b)) => bodies.push(b.to_vec()),
-                        Err(StoreError::NotFound(_)) => {
-                            // A chunk we need is gone. Which of two very
-                            // different things happened is decided by
-                            // the POINTER, not by the chunk:
-                            //
-                            // - the pointer MOVED ⇒ we raced a sweep
-                            //   that collected a generation we were
-                            //   still reading. The current generation is
-                            //   a complete snapshot, so start over
-                            //   against it: coherent, just newer. This
-                            //   is what makes a reader safe for a
-                            //   DURATION rather than for `Retain`
-                            //   publishes (chunked design §8.2,
-                            //   machine-checked by
-                            //   `LeanChunkGCSlowReader`).
-                            // - the pointer is UNCHANGED ⇒ the live
-                            //   manifest genuinely has a hole, and there
-                            //   is nothing newer to restart onto. Fail,
-                            //   and never as `Ok(None)`, which every
-                            //   caller reads as FIRST WRITE.
-                            let moved = match load_pointer(store, cfg).await? {
-                                Some(now) => now.etag != etag,
-                                None => true,
-                            };
-                            if moved && attempt + 1 < LOAD_ATTEMPTS {
-                                raced = true;
-                                break;
-                            }
-                            return Err(super::LeanError::State(format!(
-                                "manifest pointer at seq {} names chunk {} (first key {:?}), \
-                                 which does not exist — refusing to serve a manifest with a \
-                                 hole in it as though those entries had been deleted",
-                                p.seq, r.addr, r.first
-                            )));
+                // The bodies come from the chunk cache where it has them and
+                // from the bucket in parallel where it does not (latency
+                // plan lever A, `chunkcache`). A hole FAILS rather than
+                // silently shortening the manifest, however the bodies came.
+                let (bodies, tombstones) = match fetch_chunks(store, cfg, &p, refs).await? {
+                    Fetched::Complete { bodies, tombstones } => (bodies, tombstones),
+                    Fetched::Missing(hole) => {
+                        // A chunk we need is gone. Which of two very
+                        // different things happened is decided by the
+                        // POINTER, not by the chunk:
+                        //
+                        // - the pointer MOVED ⇒ we raced a sweep that
+                        //   collected a generation we were still reading.
+                        //   The current generation is a complete snapshot,
+                        //   so start over against it: coherent, just newer.
+                        //   This is what makes a reader safe for a DURATION
+                        //   rather than for `Retain` publishes (chunked
+                        //   design §8.2, machine-checked by
+                        //   `LeanChunkGCSlowReader`).
+                        // - the pointer is UNCHANGED ⇒ the live manifest
+                        //   genuinely has a hole, and there is nothing newer
+                        //   to restart onto. Fail, and never as `Ok(None)`,
+                        //   which every caller reads as FIRST WRITE.
+                        let moved = match load_pointer(store, cfg).await? {
+                            Some(now) => now.etag != etag,
+                            None => true,
+                        };
+                        if moved && attempt + 1 < LOAD_ATTEMPTS {
+                            continue;
                         }
-                        Err(e) => return Err(e.into()),
+                        return Err(super::LeanError::State(hole.refusal(p.seq)));
                     }
-                }
-                if raced {
-                    continue;
-                }
-                let entries = super::chunk::assemble(refs, &bodies)?;
-                let tombstones = match &p.tombstones {
-                    None => BTreeMap::new(),
-                    Some(addr) => match store.get_whole(&cfg.chunk_key(addr), None).await {
-                        Ok((_, b)) => super::chunk::decode_tombstones(&b, addr)?,
-                        // The same two cases as a missing chunk, decided the
-                        // same way: by whether the pointer moved.
-                        Err(StoreError::NotFound(_)) => {
-                            let moved = match load_pointer(store, cfg).await? {
-                                Some(now) => now.etag != etag,
-                                None => true,
-                            };
-                            if moved && attempt + 1 < LOAD_ATTEMPTS {
-                                continue;
-                            }
-                            return Err(super::LeanError::State(format!(
-                                "manifest pointer at seq {} names tombstones {addr}, which do not exist",
-                                p.seq
-                            )));
-                        }
-                        Err(e) => return Err(e.into()),
-                    },
                 };
+                let entries = super::chunk::assemble_verified(refs, &bodies)?;
+                // What the cache keeps from here is this document's chunks:
+                // the next load needs these and whatever is new.
+                if let Some(c) = cfg.chunk_cache.as_deref() {
+                    let mut live: std::collections::HashSet<String> = refs.iter().map(|r| r.addr.clone()).collect();
+                    live.extend(p.tombstones.clone());
+                    c.retain(&live);
+                }
                 (
                     LeanManifest {
                         seq: p.seq,
@@ -512,6 +645,23 @@ pub async fn commit_edit<E>(
     flush: &str,
     edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), E>,
 ) -> Result<(), EditError<E>> {
+    commit_edit_from(store, cfg, flush, None, edit).await
+}
+
+/// [`commit_edit`], whose FIRST attempt edits `first` — a document the
+/// caller loaded at the pointer it just read (the gateway's `view`, keyed by
+/// the pointer's etag) — instead of loading it again. `Some(None)`: the
+/// caller found no document. Safe because the CAS is If-Match on that
+/// document's etag: an attempt over a document that has since moved loses,
+/// and every later attempt loads the current one.
+pub async fn commit_edit_from<E>(
+    store: &dyn ObjectStore,
+    cfg: &LeanConfig,
+    flush: &str,
+    first: Option<Option<std::sync::Arc<LoadedManifest>>>,
+    edit: impl Fn(Option<&LoadedManifest>, &mut LeanManifest) -> Result<(), E>,
+) -> Result<(), EditError<E>> {
+    let mut first = first;
     // The document the last attempt sent, when its CAS answered 412 or
     // 409. An SDK retries a conditional PUT whose response was lost, and
     // the retry meets the object its first attempt wrote: if the document
@@ -522,7 +672,10 @@ pub async fn commit_edit<E>(
     // delete, raced) leaves the same document: committed either way.
     let mut sent: Option<LeanManifest> = None;
     for _ in 0..EDIT_CAS_ATTEMPTS {
-        let current = load(store, cfg).await.map_err(EditError::Store)?;
+        let current: Option<std::sync::Arc<LoadedManifest>> = match first.take() {
+            Some(read) => read,
+            None => load(store, cfg).await.map_err(EditError::Store)?.map(std::sync::Arc::new),
+        };
         if let (Some(s), Some(c)) = (sent.as_ref(), current.as_ref()) {
             if same_document(s, &c.manifest) {
                 return Ok(());
@@ -532,7 +685,7 @@ pub async fn commit_edit<E>(
         doc.seq += 1;
         doc.sole_writer = false;
         doc.boundary_source = None;
-        edit(current.as_ref(), &mut doc).map_err(EditError::Refused)?;
+        edit(current.as_deref(), &mut doc).map_err(EditError::Refused)?;
         let seq = doc.seq;
         doc.tombstones.retain(|_, t| seq.saturating_sub(t.seq) <= TOMBSTONE_KEEP_SEQS);
         let expected = current.as_ref().map(|l| l.handle());
@@ -767,6 +920,13 @@ async fn cas_write_chunked_refs(
         let key = cfg.chunk_key(&r.addr);
         let crc = crc64_nvme(body);
         store.put_whole(&key, body.clone().into(), &PutCondition::Unconditional, &stamps, crc).await?;
+        // This writer's next load of its own document fetches nothing it
+        // just wrote (latency plan lever A). Kept whether or not the CAS
+        // below lands: a body is right for its address either way, and a
+        // re-merge after a lost race mostly re-addresses to these.
+        if let Some(c) = cfg.chunk_cache.as_deref() {
+            c.put(&r.addr, body);
+        }
     }
 
     // The tombstones, one object beside the chunks (rewritten like an
@@ -776,6 +936,9 @@ async fn cas_write_chunked_refs(
     } else {
         let (addr, body) = super::chunk::encode_tombstones(&m.tombstones)?;
         let crc = crc64_nvme(&body);
+        if let Some(c) = cfg.chunk_cache.as_deref() {
+            c.put(&addr, &body);
+        }
         store.put_whole(&cfg.chunk_key(&addr), body.into(), &PutCondition::Unconditional, &stamps, crc).await?;
         Some(addr)
     };

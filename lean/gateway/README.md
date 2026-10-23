@@ -105,10 +105,11 @@ returns, with or without a syncer running.
 An agent pod's TREE takes it as it takes any other writer's publish: the
 syncer's next barrier sees the pointer has moved and, in its first step,
 writes the change into the tree wherever the tree is clean and the path is
-in its scope (by default within one cadence tick, or sooner on a
-`request_boundary`). Nothing is queued: what a tree is owed is derived from
-the manifest at each barrier (P1-lite). A path the agent has dirtied is its
-work, and its next publish records what it publishes over (R7).
+in its scope: within one cadence tick (`floorSecs`, 60 s by default), or
+sooner when the agent publishes or syncs. Nothing is queued: what a tree
+is owed is derived from the manifest at each barrier (P1-lite). A path
+the agent has dirtied is its work, and its next publish records what it
+publishes over (R7).
 
 A UI save never waits for the syncers (simplification step 5, P2). It
 does not take their lease and is not held back by a barrier in progress:
@@ -119,7 +120,9 @@ the person saving.
 **An editor autosaves to a draft, never with `put_file`.** A commit is
 about four writes (the bytes, the changed manifest chunk, the pointer,
 the retire log), moves the pointer every syncer and reader checks, costs
-each of them a full manifest load, makes a publishing agent lose its CAS
+each of them a manifest load (the pointer, one LIST and the changed chunk,
+since syncers and gateways keep the chunks they already have), makes a
+publishing agent lose its CAS
 and retry, and keeps the version it replaced for the retire age (600 s
 by default). At an editor's autosave rate that is paid by everyone
 holding the workspace, for keystrokes nobody else needs to see yet. A
@@ -127,9 +130,12 @@ draft save (`put_draft`, below) is two small PUTs under the user's own
 keys and touches nothing shared, and it never refuses. Commit — `put_file`,
 or `promote_draft` — when the person saves, at the pace a person saves.
 
-- `request_boundary(requestor)` asks the syncers to publish now. It
-  answers `recorded`, never `done`; a syncer honours it at its next poll
-  (about a second) outside its min-interval and hourly budget.
+- `request_boundary(requestor)` asks the syncers to publish. It answers
+  `recorded`, never `done`. A syncer reads the request at the start of its
+  next barrier, which is its next cadence tick (`floorSecs`, 60 s by
+  default) unless its agent publishes first, and that barrier carries it.
+  It is not a one-second door: the syncer's one-second poll looks only at
+  the agent's local `.flint/` files.
 - `wait_cited(path, etag, timeout, poll)` answers at once for a save
   (it is cited when acknowledged), and `CitationPending` (HTTP 202) for a
   version nothing cites when `timeout` passes.

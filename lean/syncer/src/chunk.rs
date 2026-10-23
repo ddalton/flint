@@ -87,6 +87,14 @@ pub fn chunk_address(body: &[u8]) -> String {
     d.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Is `addr` an address `chunk_address` could have minted: 32 lowercase
+/// hex digits? A pointer is read from the bucket, so an address in it is
+/// remote-supplied text. Anything that turns one into a LOCAL path (the
+/// chunk cache) must refuse every other shape, `..` and `/` above all.
+pub fn is_chunk_address(addr: &str) -> bool {
+    addr.len() == 32 && addr.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 // ── the wire format ─────────────────────────────────────────────────
 
 use std::collections::BTreeMap;
@@ -190,6 +198,19 @@ pub fn split(entries: &BTreeMap<String, LeanEntry>) -> LeanResult<Vec<(ChunkRef,
     split_with(entries, CHUNK_TARGET, CHUNK_MIN, CHUNK_MAX)
 }
 
+/// A body that does not hash to the address it was fetched by: the store
+/// handed back something else (a stale read, a wrong key, a truncated
+/// body), or a local copy was damaged.
+pub fn check_address_of(body: &[u8], addr: &str) -> LeanResult<()> {
+    let got = chunk_address(body);
+    if got != addr {
+        return Err(LeanError::State(format!(
+            "chunk {addr} does not match its address (body hashes to {got})"
+        )));
+    }
+    Ok(())
+}
+
 /// Rebuild the entry map from a chunk list and the fetched bodies.
 ///
 /// Every invariant the format depends on is CHECKED here rather than
@@ -204,6 +225,23 @@ pub fn split(entries: &BTreeMap<String, LeanEntry>) -> LeanResult<Vec<(ChunkRef,
 /// first key match what the pointer committed to; no chunk spills past
 /// the next chunk's first key; and no key arrives twice.
 pub fn assemble(refs: &[ChunkRef], bodies: &[Vec<u8>]) -> LeanResult<BTreeMap<String, LeanEntry>> {
+    assemble_checked(refs, bodies, true)
+}
+
+/// [`assemble`] over bodies whose addresses the caller has ALREADY checked
+/// one by one (`manifest::load_from` checks each as it arrives, so it can
+/// tell a stale cache entry from a bad fetch): every other check runs, and
+/// no body is hashed twice. A caller that has not checked must use
+/// `assemble`.
+pub fn assemble_verified<B: AsRef<[u8]>>(refs: &[ChunkRef], bodies: &[B]) -> LeanResult<BTreeMap<String, LeanEntry>> {
+    assemble_checked(refs, bodies, false)
+}
+
+fn assemble_checked<B: AsRef<[u8]>>(
+    refs: &[ChunkRef],
+    bodies: &[B],
+    check_address: bool,
+) -> LeanResult<BTreeMap<String, LeanEntry>> {
     if refs.len() != bodies.len() {
         return Err(LeanError::State(format!(
             "chunk list names {} chunks but {} bodies were fetched",
@@ -224,12 +262,9 @@ pub fn assemble(refs: &[ChunkRef], bodies: &[Vec<u8>]) -> LeanResult<BTreeMap<St
         // a truncated body. Content addressing makes this checkable for
         // one hash per chunk, and declining to check it would be
         // choosing not to know.
-        let got = chunk_address(b);
-        if got != r.addr {
-            return Err(LeanError::State(format!(
-                "chunk {} does not match its address (body hashes to {got})",
-                r.addr
-            )));
+        let b = b.as_ref();
+        if check_address {
+            check_address_of(b, &r.addr)?;
         }
         let body: ChunkBody = serde_json::from_slice(b)
             .map_err(|e| LeanError::State(format!("chunk {} parse: {e}", r.addr)))?;

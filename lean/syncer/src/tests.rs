@@ -24,6 +24,15 @@ pub(super) fn cfg_for(root: &std::path::Path) -> LeanConfig {
     // Collect retired handles and chunks at once, as before the retire age
     // (the battery asserts collection); its own tests set it.
     c.retire_grace_secs = 0;
+    // And run the collection pass at every commit, as before its cadence
+    // (latency plan lever C); `tests_cache` sets the shipped cadence.
+    // FLINT_TEST_COLLECT_EVERY_SECS overrides it, so the conformance
+    // scenarios can write their traces at the shipped cadence too
+    // (trace-check-core.sh).
+    c.collect_every_secs = std::env::var("FLINT_TEST_COLLECT_EVERY_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     c
 }
 
@@ -50,6 +59,7 @@ fn cfg_single(root: &std::path::Path) -> LeanConfig {
     c.chunked = false;
     instant_fence(&mut c);
     c.retire_grace_secs = 0;
+    c.collect_every_secs = 0;
     c
 }
 
@@ -5283,7 +5293,7 @@ fn chunk_boundaries_are_stable_and_content_addresses_are_not_crc() {
 
 // ── the chunked wire format ─────────────────────────────────────────
 
-fn entry_at(k: &str, seq: u64) -> super::manifest::LeanEntry {
+pub(super) fn entry_at(k: &str, seq: u64) -> super::manifest::LeanEntry {
     super::manifest::LeanEntry {
         key: format!("files/{k}"),
         etag: format!("e-{k}-{seq}"),
@@ -5296,7 +5306,7 @@ fn entry_at(k: &str, seq: u64) -> super::manifest::LeanEntry {
     }
 }
 
-fn manifest_of(n: usize, seq: u64) -> super::manifest::LeanManifest {
+pub(super) fn manifest_of(n: usize, seq: u64) -> super::manifest::LeanManifest {
     super::manifest::LeanManifest {
         seq,
         entries: (0..n).map(|i| (format!("src/f{i:05}.txt"), entry_at(&format!("f{i:05}"), seq))).collect(),
@@ -5509,7 +5519,43 @@ struct SweepMidRead {
     /// FALSE leaves the pointer alone: the chunk vanishes with no newer
     /// generation to restart onto, which must FAIL rather than restart.
     move_pointer: bool,
+    /// Where the sweep lands. FALSE: at the reader's GET of the doomed
+    /// chunk, which only an UNCACHED load makes. TRUE: at its LIST of the
+    /// chunk prefix, which is how a CACHED load (latency plan lever A)
+    /// learns that a chunk it holds a body for is gone from the bucket.
+    on_list: bool,
     fired: std::sync::atomic::AtomicBool,
+}
+
+impl SweepMidRead {
+    /// The sweep, once: the doomed chunk deleted, and with `move_pointer`
+    /// the pointer moved to the generation that no longer names it.
+    async fn sweep(&self) -> flint_store::StoreResult<bool> {
+        if self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(false);
+        }
+        if self.move_pointer {
+            let stamps = GenerationStamps {
+                generation: 9,
+                epoch: 1,
+                flush_uuid: "sweep".into(),
+                boundary_source: None,
+                posix: None,
+            };
+            let crc = crc64_nvme(&self.next_pointer);
+            self.inner
+                .put_whole(
+                    &self.current_key,
+                    Bytes::from(self.next_pointer.clone()),
+                    &PutCondition::Unconditional,
+                    &stamps,
+                    crc,
+                )
+                .await?;
+        }
+        self.inner.delete(&self.doomed_key).await?;
+        Ok(true)
+    }
 }
 
 #[async_trait::async_trait]
@@ -5548,29 +5594,7 @@ impl ObjectStore for SweepMidRead {
         key: &str,
         if_match: Option<&str>,
     ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
-        if key == self.doomed_key
-            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            if self.move_pointer {
-                let stamps = GenerationStamps {
-                    generation: 9,
-                    epoch: 1,
-                    flush_uuid: "sweep".into(),
-                    boundary_source: None,
-                    posix: None,
-                };
-                let crc = crc64_nvme(&self.next_pointer);
-                self.inner
-                    .put_whole(
-                        &self.current_key,
-                        Bytes::from(self.next_pointer.clone()),
-                        &PutCondition::Unconditional,
-                        &stamps,
-                        crc,
-                    )
-                    .await?;
-            }
-            self.inner.delete(&self.doomed_key).await?;
+        if !self.on_list && key == self.doomed_key && self.sweep().await? {
             return Err(flint_store::StoreError::NotFound(format!("swept: {key}")));
         }
         self.inner.get_whole(key, if_match).await
@@ -5591,6 +5615,9 @@ impl ObjectStore for SweepMidRead {
         self.inner.max_parts()
     }
     async fn list(&self, prefix: &str) -> flint_store::StoreResult<Vec<flint_store::ListedObject>> {
+        if self.on_list && prefix.ends_with("/chunks/") {
+            self.sweep().await?;
+        }
         self.inner.list(prefix).await
     }
     async fn delete(&self, key: &str) -> flint_store::StoreResult<()> {
@@ -5682,11 +5709,22 @@ impl ObjectStore for SweepMidRead {
 /// what decides "raced a sweep" from "the live manifest has a hole".
 #[tokio::test]
 async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
-    for move_pointer in [true, false] {
+    // Each arm twice: a reader without the chunk cache meets the sweep at
+    // its GET, one with it at its LIST (every chunk is cached: the writes
+    // below keep what they write). Same decision either way.
+    for (move_pointer, cached) in [(true, false), (false, false), (true, true), (false, true)] {
         let inner = Arc::new(MemoryStore::new());
         let plain: Arc<dyn ObjectStore> = inner.clone();
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = cfg_for(dir.path());
+        if cached {
+            // The cache lives in the state dir, which a syncer's state
+            // opens; without it nothing is cached and this arm would
+            // decide nothing (the assertion after the load says so).
+            std::fs::create_dir_all(cfg.state_dir()).unwrap();
+        } else {
+            cfg.chunk_cache = None;
+        }
         cfg.chunk_target = 64;
         cfg.chunk_min = 16;
         cfg.chunk_max = 256;
@@ -5749,10 +5787,15 @@ async fn a_reader_swept_mid_read_restarts_onto_the_current_generation() {
             doomed_key: cfg.chunk_key(&doomed.addr),
             next_pointer: ptr2_bytes.clone(),
             move_pointer,
+            on_list: cached,
             fired: std::sync::atomic::AtomicBool::new(false),
         });
 
         let got = manifest::load(store.as_ref(), &cfg).await;
+        assert!(
+            inner.head(&cfg.chunk_key(&doomed.addr)).await.is_err(),
+            "the sweep never ran (cached: {cached}): this arm decided nothing"
+        );
         if move_pointer {
             let loaded = got.expect("a reader swept mid-read did not restart").unwrap();
             assert_eq!(

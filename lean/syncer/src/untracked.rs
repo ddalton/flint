@@ -309,26 +309,41 @@ impl Syncer {
     }
 
     /// List the retire logs and read the ones not read before. One LIST per
-    /// commit section; a GET per log, once.
+    /// collection pass; a GET per log, once, the new ones in parallel — a
+    /// pass that runs every few minutes (`collect_every_secs`) meets every
+    /// log written since the last, and reads them under the lease.
     pub(crate) async fn retire_ledger(&self, now: u64) -> LeanResult<RetireLedger> {
+        use futures::stream::{self, StreamExt};
         let listed = self.store.list(&manifest::retired_prefix(&self.cfg)).await?;
         let mut cache = self.state.load_retire_cache();
         let present: std::collections::BTreeSet<&str> = listed.iter().map(|o| o.key.as_str()).collect();
         cache.retain(|k, _| present.contains(k.as_str()));
+        let unread: Vec<&str> = listed
+            .iter()
+            .filter(|o| manifest::retire_log_at(&self.cfg, &o.key).is_some() && !cache.contains_key(&o.key))
+            .map(|o| o.key.as_str())
+            .collect();
+        let fetched: Vec<(&str, Result<(flint_store::ObjectMeta, bytes::Bytes), StoreError>)> =
+            stream::iter(unread.into_iter().map(|key| async move { (key, self.store.get_whole(key, None).await) }))
+                .buffer_unordered(self.cfg.chunk_fetch_parallelism.max(1))
+                .collect()
+                .await;
+        for (key, got) in fetched {
+            match got {
+                // A log nobody can parse spares nothing and is reaped
+                // when due: its handles fall to the write-age rule.
+                Ok((_, body)) => {
+                    cache.insert(key.to_string(), serde_json::from_slice(&body).unwrap_or_default());
+                }
+                // Reaped by another writer since the LIST.
+                Err(StoreError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         let mut ledger = RetireLedger::default();
         for o in &listed {
             let Some(at) = manifest::retire_log_at(&self.cfg, &o.key) else { continue };
-            let log = match cache.get(&o.key) {
-                Some(l) => l.clone(),
-                None => match self.store.get_whole(&o.key, None).await {
-                    // A log nobody can parse spares nothing and is reaped
-                    // when due: its handles fall to the write-age rule.
-                    Ok((_, body)) => serde_json::from_slice(&body).unwrap_or_default(),
-                    Err(StoreError::NotFound(_)) => continue,
-                    Err(e) => return Err(e.into()),
-                },
-            };
-            cache.insert(o.key.clone(), log.clone());
+            let Some(log) = cache.get(&o.key).cloned() else { continue };
             if now.saturating_sub(at) >= self.cfg.retire_grace_secs {
                 ledger.due.push((o.key.clone(), log));
             } else {

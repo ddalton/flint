@@ -20,6 +20,9 @@
 #   FLINT_SYNC_CONFORMANCE_DIR=<dir> \
 #     cargo test --manifest-path lean/syncer/Cargo.toml --lib conformance_
 # TRACES=<dir> checks a saved set instead (traces-core/ is the 2026-10-14 one).
+# The scenarios run the collection pass at every commit; with
+# FLINT_TEST_COLLECT_EVERY_SECS=300 they run it at the shipped cadence
+# (latency plan lever C), so a commit that skips it is checked too.
 set -u
 cd "$(dirname "$0")"
 CHECKER="${TRACE_CHECKER:-tla-mc}"

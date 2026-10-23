@@ -52,6 +52,7 @@
 pub mod barrier;
 pub mod checkout;
 pub mod chunk;
+pub mod chunkcache;
 pub mod conformance;
 pub mod control;
 pub mod gauges;
@@ -77,6 +78,7 @@ mod tests;
 #[cfg(test)] mod tests_conformance;
 #[cfg(test)] mod tests_bench;
 #[cfg(test)] mod tests_steps;
+#[cfg(test)] mod tests_cache;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +92,15 @@ pub const LEAN_DIR: &str = ".flint/lean";
 /// The syncer's durable bookkeeping directory inside the workspace
 /// (emptyDir-scoped: survives container restarts, dies with the pod).
 pub const STATE_DIR: &str = ".flint-sync";
+
+/// The chunk cache's directory inside the state dir (`chunkcache`).
+pub const CHUNK_CACHE_DIR: &str = "chunk-cache";
+
+/// Chunk GETs a manifest load keeps in flight (`LeanConfig::
+/// chunk_fetch_parallelism`). A chunk is about 1 MiB, so this many is
+/// 16 MiB in flight; the bodies are all held until the document is
+/// assembled anyway, as they were when they were fetched one at a time.
+pub const CHUNK_FETCH_PARALLELISM: usize = 16;
 
 /// The workspace-local control namespace (boundary-verbs plan D0): the
 /// agent's side of the file protocol. Reserved exactly as the gateway
@@ -295,6 +306,27 @@ pub struct LeanConfig {
     /// it cites. 0 = collect at once (the shape before; the battery's
     /// default). `FLINT_SYNC_RETIRE_GRACE_SECS`.
     pub retire_grace_secs: u64,
+    /// THE COLLECTION CADENCE (latency plan 2026-10-23, lever C): how often
+    /// a writer's commit section runs the collection pass — read the retire
+    /// logs, reap what is due, the orphan sweep when it is due too, the
+    /// generation and chunk sweeps. Each pass is a LIST of `retired/`, of
+    /// `manifests/` and of `chunks/`, and pointer GETs, all under the
+    /// lease; run on every publish they were seven sequential requests
+    /// added to every commit. Between passes nothing is deleted, so what a
+    /// commit retires waits up to G plus this long: storage, never safety
+    /// (the model's reap and sweeps may run at any commit, or never).
+    /// 0 = every commit, as before (the battery's setting).
+    /// `FLINT_SYNC_COLLECT_EVERY_SECS`.
+    pub collect_every_secs: u64,
+    /// Manifest chunks kept locally by content address, verified on every
+    /// use (`chunkcache`; latency plan lever A). `None` fetches every
+    /// chunk of every load, as before. The syncer keeps them under its
+    /// state dir, the gateway in memory.
+    pub chunk_cache: Option<Arc<dyn chunkcache::ChunkCache>>,
+    /// Chunk fetches a load keeps in flight at once: the misses of a
+    /// cached load, every chunk of an uncached one. 1 = one at a time,
+    /// the shape before. `FLINT_SYNC_CHUNK_FETCH_PARALLELISM`.
+    pub chunk_fetch_parallelism: usize,
     pub chunk_target: usize,
     pub chunk_min: usize,
     pub chunk_max: usize,
@@ -486,9 +518,12 @@ fn flush_looks_minted(flush: &str) -> bool {
 
 impl LeanConfig {
     pub fn new(prefix: &str, root: impl Into<PathBuf>) -> Self {
+        let root: PathBuf = root.into();
+        let chunk_cache: Arc<dyn chunkcache::ChunkCache> =
+            Arc::new(chunkcache::DiskChunkCache::new(root.join(STATE_DIR).join(CHUNK_CACHE_DIR)));
         LeanConfig {
             prefix: prefix.trim_end_matches('/').to_string(),
-            root: root.into(),
+            root,
             floor_secs: 60,
             // Off by default: a workspace an agent WORKS IN wants the
             // S3-wins arm, where an object past its citation is a human
@@ -499,6 +534,9 @@ impl LeanConfig {
             chunked: true,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,
             retire_grace_secs: manifest::RETIRE_GRACE_SECS,
+            collect_every_secs: manifest::RETIRE_GRACE_SECS / 2,
+            chunk_cache: Some(chunk_cache),
+            chunk_fetch_parallelism: CHUNK_FETCH_PARALLELISM,
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,
             chunk_max: chunk::CHUNK_MAX,

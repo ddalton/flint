@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 use flint_store::{crc64_nvme, GenerationStamps, ObjectStore, PutCondition, StoreError};
 
 use crate::workspace::{normalize_etag, path_ok, Save, VerbError, Workspace};
-use flint_lean::manifest::{self, LoadedManifest};
+use flint_lean::manifest::LoadedManifest;
 use flint_lean::{now_unix, LeanConfig};
 
 /// What a draft was edited against, and by whom.
@@ -391,8 +391,8 @@ impl Workspace {
             let current = doc.and_then(|l| l.manifest.entries.get(path)).map(|e| e.etag.clone());
             judge_promote(path, current.as_deref(), meta.base_etag.as_deref())
         };
-        let read = manifest::load(self.store().as_ref(), cfg).await?;
-        judge(read.as_ref())?;
+        let read = self.view().await?;
+        judge(read.as_deref())?;
 
         let author = author.map(str::to_string).unwrap_or_else(|| meta.author.clone());
         let added_unix = now_unix();

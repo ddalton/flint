@@ -193,6 +193,19 @@ pub struct MemoryStore {
     /// `get_range_delay_ms`, so a test can observe whether whole-body
     /// uploads OVERLAP — and how many bytes they hold while they do.
     put_whole_delay_ms: AtomicU64,
+    /// A latency EVERY request pays, in ms (`inject_request_delay_ms`): the
+    /// double's stand-in for a store's round trip, on every call a real
+    /// store would send — GETs, HEADs, LISTs, PUTs, DELETEs, the lease
+    /// cell's reads and writes — so a measurement can show what a chain of
+    /// sequential requests costs against one that overlaps.
+    request_delay_ms: AtomicU64,
+    /// Requests inside that delay right now, and the most there have ever
+    /// been at once: overlap, observed rather than timed.
+    inflight_requests: AtomicU64,
+    peak_requests: AtomicU64,
+    /// While set, a LIST whose prefix contains this answers 403: a
+    /// credential whose policy grants reads but not the listing.
+    deny_list_matching: Mutex<Option<String>>,
     /// While set, every whole PUT parks at the door until
     /// `release_held_puts`: a stalled upload a test can run something
     /// BESIDE (a batch beside a fold's upload), with the ordering held
@@ -295,6 +308,10 @@ impl MemoryStore {
             stall_next_get_range_ms: AtomicU64::new(0),
             get_range_delay_ms: AtomicU64::new(0),
             put_whole_delay_ms: AtomicU64::new(0),
+            request_delay_ms: AtomicU64::new(0),
+            inflight_requests: AtomicU64::new(0),
+            peak_requests: AtomicU64::new(0),
+            deny_list_matching: Mutex::new(None),
             hold_puts: AtomicBool::new(false),
             hold_puts_matching: Mutex::new(None),
             held_puts: Mutex::new(Vec::new()),
@@ -340,6 +357,41 @@ impl MemoryStore {
     /// scheduler's luck.
     pub fn inject_put_whole_delay_ms(&self, ms: u64) {
         self.put_whole_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// Every request from now on sleeps `ms` first (0 turns it off). The
+    /// per-kind delays above stay as they are and add to this one.
+    pub fn inject_request_delay_ms(&self, ms: u64) {
+        self.request_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// The most requests that were ever inside the injected delay at once.
+    /// Only a delay makes overlap observable: with none, a request never
+    /// yields, so this stays at 0 or 1.
+    pub fn peak_requests_in_flight(&self) -> u64 {
+        self.peak_requests.load(Ordering::SeqCst)
+    }
+
+    pub fn reset_peak_requests_in_flight(&self) {
+        self.peak_requests.store(0, Ordering::SeqCst);
+    }
+
+    /// Every LIST whose prefix contains `m` answers 403 (`StoreError::Auth`)
+    /// from now on; `None` lets them through again.
+    pub fn deny_list_matching(&self, m: Option<&str>) {
+        *self.deny_list_matching.lock().unwrap() = m.map(str::to_string);
+    }
+
+    /// The injected round trip (`inject_request_delay_ms`).
+    async fn pace(&self) {
+        let ms = self.request_delay_ms.load(Ordering::SeqCst);
+        if ms == 0 {
+            return;
+        }
+        let now = self.inflight_requests.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_requests.fetch_max(now, Ordering::SeqCst);
+        let _left = InFlight(&self.inflight_requests);
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
     }
 
     /// Every write from here on reports no version id — a proxy that
@@ -774,6 +826,7 @@ impl ObjectStore for MemoryStore {
         crc64: u64,
     ) -> StoreResult<ObjectMeta> {
         self.bump("put_whole");
+        self.pace().await;
         let held = self.hold_puts.load(Ordering::SeqCst)
             && match self.hold_puts_matching.lock().unwrap().as_deref() {
                 None => true,
@@ -849,6 +902,7 @@ impl ObjectStore for MemoryStore {
         stamps: &GenerationStamps,
     ) -> StoreResult<ObjectMeta> {
         self.bump("copy_object");
+        self.pace().await;
         let mut inner = self.inner.lock().unwrap();
         let src = inner
             .current(src_key)
@@ -892,6 +946,7 @@ impl ObjectStore for MemoryStore {
 
     async fn compose_generation(&self, spec: &ComposeSpec<'_>) -> StoreResult<ObjectMeta> {
         self.bump("compose_generation");
+        self.pace().await;
         if spec.parts.is_empty() {
             return Err(StoreError::Other("compose: no parts".into()));
         }
@@ -916,6 +971,7 @@ impl ObjectStore for MemoryStore {
 
     async fn head(&self, key: &str) -> StoreResult<ObjectMeta> {
         self.bump("head");
+        self.pace().await;
         if self
             .fail_head_count
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1))
@@ -977,6 +1033,7 @@ impl ObjectStore for MemoryStore {
         if_match: Option<&str>,
     ) -> StoreResult<(ObjectMeta, Bytes)> {
         self.bump("get_whole");
+        self.pace().await;
         let inner = self.inner.lock().unwrap();
         let o = inner
             .current(key)
@@ -1031,6 +1088,7 @@ impl ObjectStore for MemoryStore {
         if_match: &str,
     ) -> StoreResult<Bytes> {
         self.bump("get_range");
+        self.pace().await;
         let _in_flight = {
             let now = self.inflight_get_range.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak_get_range.fetch_max(now, Ordering::SeqCst);
@@ -1069,6 +1127,11 @@ impl ObjectStore for MemoryStore {
 
     async fn list(&self, prefix: &str) -> StoreResult<Vec<ListedObject>> {
         self.bump("list");
+        self.pace().await;
+        let denied = self.deny_list_matching.lock().unwrap().as_deref().is_some_and(|m| prefix.contains(m));
+        if denied {
+            return Err(StoreError::Auth(format!("injected: no listing of {prefix}")));
+        }
         Ok(self
             .inner
             .lock()
@@ -1091,6 +1154,7 @@ impl ObjectStore for MemoryStore {
 
     async fn delete(&self, key: &str) -> StoreResult<()> {
         self.bump("delete");
+        self.pace().await;
         self.inner.lock().unwrap().push_delete_marker(key);
         Ok(())
     }
@@ -1098,6 +1162,7 @@ impl ObjectStore for MemoryStore {
     async fn delete_if_match(&self, key: &str, etag: &str) -> StoreResult<()> {
         // Counted as the one DELETE request it is on the wire.
         self.bump("delete");
+        self.pace().await;
         let mut inner = self.inner.lock().unwrap();
         let refused = match inner.current(key) {
             None => Some(StoreError::NotFound(key.to_string())),
@@ -1120,6 +1185,7 @@ impl ObjectStore for MemoryStore {
         let mut report = DeleteManyReport::default();
         for chunk in keys.chunks(1000) {
             self.bump("delete");
+            self.pace().await;
             let mut inner = self.inner.lock().unwrap();
             for key in chunk {
                 inner.push_delete_marker(key);
@@ -1131,6 +1197,7 @@ impl ObjectStore for MemoryStore {
 
     async fn head_version(&self, key: &str, version_id: &str) -> StoreResult<ObjectMeta> {
         self.bump("head_version");
+        self.pace().await;
         self.inner
             .lock()
             .unwrap()
@@ -1141,6 +1208,7 @@ impl ObjectStore for MemoryStore {
 
     async fn get_version(&self, key: &str, version_id: &str) -> StoreResult<(ObjectMeta, Bytes)> {
         self.bump("get_version");
+        self.pace().await;
         let inner = self.inner.lock().unwrap();
         let o = inner
             .version(key, version_id)
@@ -1150,6 +1218,7 @@ impl ObjectStore for MemoryStore {
 
     async fn delete_version(&self, key: &str, version_id: &str) -> StoreResult<()> {
         self.bump("delete_version");
+        self.pace().await;
         // Idempotent, exactly as S3: deleting an absent version is Ok —
         // the GC pass and the operator sweep race each other by design.
         self.inner.lock().unwrap().remove_version(key, version_id);
@@ -1158,6 +1227,7 @@ impl ObjectStore for MemoryStore {
 
     async fn list_versions(&self, prefix: &str) -> StoreResult<Vec<ListedVersion>> {
         self.bump("list_versions");
+        self.pace().await;
         let inner = self.inner.lock().unwrap();
         let mut out = vec![];
         for (k, chain) in inner.chains.range(prefix.to_string()..) {
@@ -1182,6 +1252,7 @@ impl ObjectStore for MemoryStore {
 
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
         self.bump("list_uploads");
+        self.pace().await;
         let inner = self.inner.lock().unwrap();
         let mut v: Vec<PendingUpload> = inner
             .uploads
@@ -1199,6 +1270,7 @@ impl ObjectStore for MemoryStore {
 
     async fn abort_upload(&self, _key: &str, upload_id: &str) -> StoreResult<()> {
         self.bump("abort_upload");
+        self.pace().await;
         // Absent is Ok: abort races the lifecycle rule by design.
         self.inner.lock().unwrap().uploads.remove(upload_id);
         Ok(())
@@ -1206,6 +1278,7 @@ impl ObjectStore for MemoryStore {
 
     async fn bootstrap(&self, _prefix: &str) -> StoreResult<BootstrapReport> {
         self.bump("bootstrap");
+        self.pace().await;
         Ok(BootstrapReport {
             notes: vec!["memory store: no bucket posture to verify".into()],
             ..Default::default()
@@ -1214,6 +1287,7 @@ impl ObjectStore for MemoryStore {
 
     async fn lifecycle_rules(&self) -> StoreResult<Vec<LifecycleView>> {
         self.bump("lifecycle_rules");
+        self.pace().await;
         Ok(self.inner.lock().unwrap().lifecycle.clone())
     }
 
@@ -1223,6 +1297,7 @@ impl ObjectStore for MemoryStore {
         days: u64,
     ) -> StoreResult<RetentionOutcome> {
         self.bump("ensure_noncurrent_retention");
+        self.pace().await;
         if self.fail_lifecycle_writes.load(Ordering::SeqCst) {
             return Err(StoreError::Other("lifecycle writes are denied".into()));
         }
@@ -1254,6 +1329,7 @@ impl ObjectStore for MemoryStore {
 
     async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>> {
         self.bump("epoch_read");
+        self.pace().await;
         let inner = self.inner.lock().unwrap();
         let Some(o) = inner.current(key) else {
             return Ok(None);
@@ -1279,6 +1355,7 @@ impl ObjectStore for MemoryStore {
         supersede: Option<&EpochState>,
     ) -> StoreResult<EpochLease> {
         self.bump("epoch_acquire");
+        self.pace().await;
         let epoch = supersede.map_or(1, |s| s.epoch + 1);
         let waiters: Vec<String> = supersede
             .map(|s| s.waiters.iter().filter(|w| w.as_str() != holder_id).cloned().collect())
@@ -1309,6 +1386,7 @@ impl ObjectStore for MemoryStore {
         echo: Option<&str>,
     ) -> StoreResult<EpochLease> {
         self.bump("epoch_renew");
+        self.pace().await;
         if self
             .fail_epoch_renew_count
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| c.checked_sub(1))
@@ -1338,6 +1416,7 @@ impl ObjectStore for MemoryStore {
 
     async fn epoch_release(&self, key: &str, lease: &EpochLease) -> StoreResult<()> {
         self.bump("epoch_release");
+        self.pace().await;
         // Mark, never delete — deleting restarts epoch numbering at 1.
         // A released cell reports no live syncer: clearing the echo is
         // the point, not an omission (the tier hub's rule; lean's
@@ -1364,6 +1443,7 @@ impl ObjectStore for MemoryStore {
         echo: Option<&str>,
     ) -> StoreResult<()> {
         self.bump("epoch_handoff");
+        self.pace().await;
         let mut rest = lease.waiters.clone();
         let head = if rest.is_empty() { None } else { Some(rest.remove(0)) };
         self.epoch_store(
@@ -1388,6 +1468,7 @@ impl ObjectStore for MemoryStore {
         holder_id: &str,
     ) -> StoreResult<EpochState> {
         self.bump("epoch_enqueue");
+        self.pace().await;
         let mut waiters = observed.waiters.clone();
         if !waiters.iter().any(|w| w == holder_id) {
             waiters.push(holder_id.to_string());

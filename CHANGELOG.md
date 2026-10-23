@@ -38,6 +38,49 @@ covered by the stability guarantee.
   files. At 1M about 96% of that time grows with the size of the
   workspace, not with the change.
 
+### Changed
+
+- **lean: a manifest load fetches only the chunks it does not already
+  have** (`docs/plans/flint-lean-latency-plan-2026-10-23.md`, lever A).
+  Every load used to fetch every chunk of the manifest, one at a time:
+  220 sequential GETs at 1M files, on every pointer move, in a barrier's
+  consume and again in its commit, and twice per UI save. The syncer now
+  keeps chunks under `.flint-sync/chunk-cache/` and the gateway keeps
+  them in memory. Each body is checked against its content address
+  before it is used. A load fetches the rest 16 at a time, and lists the
+  chunk prefix once to prove the chunks it took from the cache are still
+  in the bucket, so a manifest with a missing chunk is still refused,
+  never served short. A UI save on a workspace the gateway holds reads the
+  pointer twice instead of loading the whole manifest twice.
+  Measured at 25 ms per request on the in-memory store, taking a peer's
+  one-file change at 200k files went from 2.7 s and 50 GETs to 1.5 s and
+  5 requests, and a publish's manifest load from 1.4 s to 0.25 s; at memory
+  speed both shapes take the same time. `FLINT_SYNC_CHUNK_CACHE=off` and
+  `FLINT_SYNC_CHUNK_FETCH_PARALLELISM` are the syncer's knobs, and
+  `Workspace::without_chunk_cache` the gateway's.
+
+- **lean: garbage collection runs every few minutes, not on every
+  publish** (lever C). The retire ledger, the reap and the orphan,
+  generation and chunk sweeps were three LISTs and four GETs inside every
+  commit section, under the lease. They now run as one pass, still under
+  the lease, once `FLINT_SYNC_COLLECT_EVERY_SECS` has passed since the
+  writer's last pass: half the retire age by default, 300 s. A replaced
+  version is collected within about 1.5 times the retire age instead of
+  once it. The pass reads the retire logs it has not seen in parallel.
+  0 collects at every commit, as before. With A, a one-file publish at
+  200k files went from 3.6 s and 66 requests to 2.2 s and 13 at 25 ms per
+  request (20k files: 867 ms to 570 ms; 1M files: 16.2 s and 238 requests
+  to 10.3 s and 13).
+
+### Fixed
+
+- **lean gateway docs: a boundary request is not a one-second door.**
+  `lean/gateway/README.md` said a syncer honours `request_boundary` "at
+  its next poll (about a second)". A syncer reads the request at the
+  start of its next barrier, which is its next cadence tick (`floorSecs`,
+  60 s by default) unless its agent publishes first. The one-second poll
+  reads only the agent's local `.flint/` files. The README now says so.
+
 ## [1.60.3] - 2026-10-23
 
 A patch release for a cross-tenant data leak and three defects. On a disk

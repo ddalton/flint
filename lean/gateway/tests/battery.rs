@@ -20,7 +20,11 @@ use flint_lean_gateway::{PutFile, VerbError, Workspace};
 const PREFIX: &str = "tenant/proj1";
 
 fn cfg_for(root: &std::path::Path) -> LeanConfig {
-    LeanConfig::new(PREFIX, root)
+    let mut c = LeanConfig::new(PREFIX, root);
+    // The collection pass at every commit, as before its cadence (latency
+    // plan lever C): these legs assert what a commit collects.
+    c.collect_every_secs = 0;
+    c
 }
 
 async fn syncer(store: &Arc<MemoryStore>, root: &std::path::Path) -> Syncer {
