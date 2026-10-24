@@ -95,7 +95,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none: the same document, chunk list and retire set | **built**, the commit side (§12); the consume side is G2 |
 | G2 | the consume derives only where the document moved since its last derive: a chunk-list diff | nothing measurable on the shipped allocator (§14) | a new rule and claim (`ddoc`, `Inv_DiffSound`) | **dropped** (user, 2026-10-23); archived on the local branch `lean-latency-g2-dropped` |
 | GW | the gateway's UI commits by path: an overlay re-chunked by chunk, the installed document held, mimalloc | at 1M, about 3.7 s of every UI save, rename and delete (§16) | none: the same document, chunk list and retire set | **built** (§16) |
-| RH | the post-checkout re-hash: a checkout measures its racy flags at the agent's gate, after waiting out the last window when that is many files | up to the whole tree hashed by the first barrier after a checkout: 107 s at 1M, 20 s at 200k, with disk timing (§17) | LeanScanRacy gains the gate (`MeasureAtGate`); re-proved, 38 obligations; the wait is ticks before the gate | **built** (§17) |
+| RH | the post-checkout re-hash: a checkout measures its racy flags at the agent's gate, after waiting out the last window when that is many files | the whole tree hashed by the first barrier after a checkout: 107 s at 1M, 21.6 s at 200k (§17) | LeanScanRacy gains the gate (`MeasureAtGate`); re-proved, 38 obligations; the wait is ticks before the gate | **built** (§17) |
 
 **What the two measurements say about order.** On S3 and at 20k–200k
 files, requests dominate, so A, C and B come first. At 1M, CPU dominates,
@@ -1095,22 +1095,11 @@ The glibc figures were 7.0 → 3.1 s and 1.5 → 0.87 s.
 **What it was.** The racy-clean rule (L-138) says a baseline entry whose
 stat was taken within 2 s of the file's mtime cannot vouch for the bytes.
 A same-size write in the same coarse tick leaves the stat identical, so
-the next scan hashes the file (`scan::confirm_racy`). A checkout writes
-every file it records, so the first barrier after it hashed whatever the
-checkout had left racy, and how much that was depended on disk timing.
-
-The checkout measured each flag when the file's write task came back
-(`barrier::racy_stat`, against the time then). A write pool that kept up
-measured each file microseconds after writing it, so every entry was
-racy. A pool that fell behind measured late, and fewer were. On the box:
-- earlier benches: 21 s of the first barrier at 200k and 107 s at 1M,
-  against about 0.4 s and 2.2 s for any later idle tick;
-- a quiet box with the store at 25 ms: 19.9 s at 200k;
-- a loaded box at 0 ms: 32,000–46,000 of 200k files racy (4.9–7.7 s);
-  none at 1M, and none at 200k with the store at 25 ms.
-
-That late measure is the model's `MeasureLate` mutation. It was safe at a
-checkout only because of the gate below, which nothing stated.
+the next scan hashes the file (`scan::confirm_racy`). A checkout stats
+each file the moment it writes it (`barrier::racy_stat`), so every entry
+was racy, and the first barrier after it hashed the whole tree: 21.6 s at
+200k files and 107 s at 1M, against about 0.5 s and 2.2 s for any later
+idle tick.
 
 **Why most of it was never needed.** No one but the checkout writes the
 tree before its marker (`checkout-complete`) exists. The CSI node plugin
@@ -1181,20 +1170,27 @@ ignores its threshold, R5 the wait cut short. The syncer: 378 passed;
 the gateway: 67; both binaries build (the one warning is the drain arm's,
 as before); the code-trace check passes 84/84.
 
-**Results.** The bench (musl with mimalloc), stopped after the first idle
-scan. The box was loaded by another session's kind cluster, so the counts
-matter more than the times.
+**Results.** The bench (musl with mimalloc), a quiet box, the store at
+25 ms, stopped after the first idle scan (`FLINT_BENCH_STOP=idle0`):
 
-| 200k files | the shape before | the gate | the gate and the wait |
+| | the shape before (`nogate`) | the gate alone (`nowait`) | the gate and the wait |
 |---|---|---|---|
-| store at 0 ms | 46,296 and 32,333 racy; first scan 7.7, 4.9 s | 39,662 (measured before the sync), 29,936, and 0; 6.2, 4.5, 0.7 s | **0; 0.62 s** |
-| store at 25 ms | 0; 0.60 s | 0; 0.76 s | **0; 0.77 s** |
+| 200k: racy after the checkout | 200,000 | 87,141 | **0** |
+| 200k: the first idle scan | 21.6 s | 10.0 s | **0.51 s** |
+| 200k: the checkout | 3.9 s | 3.9 s | 4.8 s |
+| 1M: racy after the checkout | 1,000,000 | not run | **0** |
+| 1M: the first idle scan | 107.8 s | not run | **2.4 s** |
+| 1M: the checkout | 17.9 s | not run | 18.2 s |
 
-At 1M every arm left none (first scan 2.9–4.0 s). The checkout took the
-same time with and without the wait (7.1 against 7.0 s at 0 ms, 7.0
-against 7.4 s at 25 ms), within the box's noise.
+The wait costs the checkout what is left of the window (0.9 s at 200k,
+0.3 s at 1M) and saves the first barrier the re-hash (21 s and 105 s). With the wait, no run left an entry racy:
+ten more on a loaded box (200k and 1M, the store at 0 and 25 ms), first
+scan 0.42–0.77 s at 200k. The gate alone left 30,000–32,000 of 200k on
+the loaded box at 0 ms.
 
-The gate alone leaves whatever the checkout wrote in its last two
-seconds, from none to 15% of the tree in these runs; the wait leaves none
-in every run. Not yet measured: the wait on a quiet box, where the shape
-before took 19.9 s at 200k.
+**The arms, corrected.** The runs behind 8778646f's numbers compared
+nothing: `bench_arm()` sent every arm it did not list to `shipped`, so
+`nogate` and `nowait` ran the shipped configuration, and the differences
+were run-to-run noise. It now lists both and refuses an unknown arm, and
+each result line records the arm the binary printed. Every number above
+is from runs whose log says `arm=nogate`, `arm=nowait` or `arm=shipped`.

@@ -70,7 +70,14 @@ fn bench_arm() -> &'static str {
         Ok("control") => "control",
         // Lever G's control: everything shipped but the chunk view.
         Ok("noview") => "noview",
-        _ => "shipped",
+        // The re-hash's (latency plan §17): the shape before, and the gate
+        // without its wait.
+        Ok("nogate") => "nogate",
+        Ok("nowait") => "nowait",
+        Ok("shipped") | Err(_) => "shipped",
+        // An arm this list lacks would run as shipped and time as a
+        // control that is not one.
+        Ok(other) => panic!("FLINT_BENCH_ARM={other}: no such arm"),
     }
 }
 

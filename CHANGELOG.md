@@ -178,16 +178,16 @@ covered by the stability guarantee.
   0.2 s.
 - **lean: the first barrier after a checkout no longer re-reads the
   tree.** The racy-clean rule (L-138) hashes a file whose stat was taken
-  within two seconds of its mtime. A checkout measured that as each write
-  came back, so how much of the tree the first scan hashed depended on
-  disk timing: on a fast disk nearly all of it (107 s at a million files,
-  20 s at 200,000). No agent can write the tree before the checkout's
-  marker exists, so the checkout now measures each flag then, just before
-  the marker. When the files it wrote in its last two seconds are many
-  (`FLINT_SYNC_RACY_WAIT_MIN`, 10,000), it first waits until they are two
-  seconds old, at most 2 s, and the first scan hashes none. At 200,000
-  files on a loaded box the first scan took 0.6 to 0.8 s in every run,
-  and 0.6 to 7.7 s before. The racy model (`LeanScanRacy.tla`) gained
+  within two seconds of its mtime, and a checkout stats each file the
+  moment it writes it, so the first scan hashed every file it had just
+  written (21.6 s at 200,000 files, 107 s at a million). No agent can
+  write the tree before the checkout's marker exists, so the checkout now
+  measures each flag then, just before the marker. When the files it
+  wrote in its last two seconds are many (`FLINT_SYNC_RACY_WAIT_MIN`,
+  10,000), it first waits until they are two seconds old, at most 2 s,
+  and the first scan hashes none. The first scan went from 21.6 s to
+  0.5 s at 200,000 files and from 108 s to 2.4 s at a million; the
+  checkout took 0.9 and 0.3 s longer. The racy model (`LeanScanRacy.tla`) gained
   that gate and was re-proved; an agent writing before the marker is the
   mutation that breaks it. `FLINT_SYNC_RACY_AT_GATE=off` keeps the shape
   before.
