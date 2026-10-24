@@ -1,0 +1,50 @@
+LeanScanRacy with the checkout's gate (latency plan §17), 2026-10-23
+
+The checkout measures its entries' racy flags when it opens the agent's
+gate (the marker), not when it wrote each file. The model gains `gate`
+(shut while the checkout runs), `Open` (writes the marker; under
+MeasureAtGate it clears the flag of an entry whose mtime is a window
+before the clock), and the assumption WritesWaitForGate (an agent's Write
+needs the gate open). Ticks before Open are the rest of the checkout, so
+a checkout that waits before its gate is the same model.
+
+Inputs (md5; record.out prints them, and they equal the committed files):
+  fbbd25cec784b82828b1889d7bd02136  LeanScanRacy.tla
+  89340d15821a8cecc589a7756c533a22  LeanScanRacyProof.tla
+Box 10.0.0.249, /mnt/nvme/lean-racy-gate; run-racy-gate.sh. (It prints
+the md5s rather than asserting them before the run; they were compared
+after, against these files.)
+
+TLC (tla-mc 0.1.2, -workers 2):
+  LeanScanRacy               HOLDS   3,452 distinct
+  LeanScanRacyWide           HOLDS   156,072 distinct
+  LeanScanRacyBefore         HOLDS   3,452 distinct  (MeasureAtGate FALSE, the shape before)
+  LeanScanRacyNoRule         Inv_NoMissedChange violated   13 distinct
+  LeanScanRacyMeasureLate    Inv_NoMissedChange violated  413 distinct
+  LeanScanRacyClearEarly     Inv_NoMissedChange violated   26 distinct
+  LeanScanRacyNoGate         Inv_NoMissedChange violated   56 distinct
+                             (WritesWaitForGate FALSE: an agent's write
+                             before the marker, hidden by the gate's clear)
+  LeanScanRacyProbe          ProbeNoSameTickRewrite reached  10 distinct
+  LeanScanRacyProbeGate      ProbeGateClears reached          8 distinct
+
+TLAPS: THEOREM NoMissedChange == Spec => []Inv_NoMissedChange under
+Shipped (RacyClean, MeasureAtRead, ClearOutsideWindow, MeasureAtGate,
+WritesWaitForGate TRUE) and Const (any writes, ticks, window >= 1).
+Ind gains GateOK: before the gate the file is exactly what the checkout
+recorded, and no upload is in flight.
+tlapm bfa9468, --toolbox 0 0 --cleanfp --stretch 4 --threads 1, nice -n 10.
+
+RECORD 2026-10-23T23:28:27Z: "All 38 obligations proved." 0.87 s wall,
+37 MB peak RSS.
+
+CONTROLS (the one Shipped line set FALSE; lines are LeanScanRacyProof.tla's):
+  RacyClean = FALSE           3/38 failed: 56 IndInit, 69 Record, 80 IndSafe
+  MeasureAtRead = FALSE       1/38 failed: 69 Record
+  ClearOutsideWindow = FALSE  1/38 failed: 71 ClearRacy
+  WritesWaitForGate = FALSE   1/38 failed: 63 Write (an agent's write
+                              while the gate is shut breaks GateOK)
+  (tlapm --toolbox exits 0 on failed obligations; read the [ERROR] line.)
+
+Logs (record.out, ctl-*.out, tlc-*.out) stay on the box; they are
+generated output.

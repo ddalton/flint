@@ -464,7 +464,7 @@ code holds the HITL window across both).
   install a peer's bytes over it. **`LeanScanRacy.tla` now checks the
   refinement** — with the racy-clean rule as shipped, the code never
   calls clean what the oracle calls dirty (`Inv_NoMissedChange`):
-  HOLDS at 3,438 distinct (`LeanScanRacy.cfg`) and 156,048
+  HOLDS at 3,452 distinct (`LeanScanRacy.cfg`) and 156,072
   (`LeanScanRacyWide.cfg`, 6 writes, 6 ticks, a 2-tick window); the
   probe `ProbeNoSameTickRewrite` is reached at depth 3; and each part of
   the rule is a mutation that loses a change — no rule
@@ -472,12 +472,20 @@ code holds the HITL window across both).
   built rather than when the bytes were read (`LeanScanRacyMeasureLate`:
   read at tick 0, a rewrite in tick 0, the upload records at tick 1 "not
   racy"), and the flag cleared inside the window
-  (`LeanScanRacyClearEarly`). TLC 2.19, `-workers 1`, model md5
-  18f15bfe. **Proved for every bound** (2026-10-20,
-  `LeanScanRacyProof.tla`, TLAPS: `THEOREM NoMissedChange == Spec =>
-  []Inv_NoMissedChange`, any writes, ticks and window >= 1, 35
-  obligations); each rule detail set FALSE fails exactly the step that
-  relies on it (`results/2026-10-20-tlaps-racy/RESULTS.txt`).
+  (`LeanScanRacyClearEarly`). Since 2026-10-23 it also has the
+  checkout's gate (latency plan §17): the checkout measures its flags
+  when it writes the marker (`Open`, `MeasureAtGate`), which is sound
+  because no agent writes before the marker (`WritesWaitForGate`); an
+  agent that did is the mutation that loses a change
+  (`LeanScanRacyNoGate`), the shape before still HOLDS
+  (`LeanScanRacyBefore`), and `ProbeGateClears` is reached. tla-mc
+  0.1.2, model md5 fbbd25ce. **Proved for every bound**
+  (`LeanScanRacyProof.tla`, TLAPS: `THEOREM NoMissedChange == Spec =>
+  []Inv_NoMissedChange`, any writes, ticks and window >= 1, 38
+  obligations, 35 before the gate); each rule detail set FALSE fails
+  exactly the step that relies on it
+  (`results/2026-10-23-racy-gate/RESULTS.txt`; before the gate,
+  `results/2026-10-20-tlaps-racy/RESULTS.txt`).
   `LeanP1.tla` is unchanged: its oracle is now a proved abstraction, not
   an assumption.
 - The 6-quiet-poll takeover observation is one `ClaimB` action; the

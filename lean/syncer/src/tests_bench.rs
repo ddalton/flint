@@ -85,6 +85,12 @@ fn bench_syncer(store: &Arc<dyn ObjectStore>, root: &std::path::Path, prefix: &s
     if bench_arm() == "noview" {
         cfg.chunk_view = false;
     }
+    if bench_arm() == "nogate" {
+        cfg.racy_at_gate = false;
+    }
+    if bench_arm() == "nowait" {
+        cfg.racy_wait_min = 0;
+    }
     let state = super::state::SyncerState::open(cfg.state_dir()).unwrap();
     Syncer {
         store: store.clone(),
@@ -186,8 +192,18 @@ async fn barrier_cost_against_workspace_size() {
         m.inject_request_delay_ms(delay);
     }
     println!("BENCH n={n} arm={} delay_ms={delay}", bench_arm());
+    // How many entries the first scan must hash (latency plan §17).
+    let racy = |b: &Syncer| b.state.load_baseline().map(|x| x.entries.values().filter(|e| e.racy).count()).unwrap_or(0);
+    println!("BENCH n={n} racy_after_checkout={}", racy(&b));
     for k in 0..3 {
         timed(&mut b, &mut ops, n, kind, &format!("idle{k}")).await;
+        if k == 0 {
+            println!("BENCH n={n} racy_after_idle0={}", racy(&b));
+            // FLINT_BENCH_STOP=idle0: the post-checkout re-hash alone.
+            if std::env::var("FLINT_BENCH_STOP").as_deref() == Ok("idle0") {
+                return;
+            }
+        }
     }
 
     // A peer's one-file change: its publish, then B's barriers until the

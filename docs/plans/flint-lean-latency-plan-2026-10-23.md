@@ -95,6 +95,7 @@ None changes a LeanP1 rule. "Model" says what the formal side needs.
 | G | the document under the lease merged and serialised incrementally, by chunk | at 1M, 3.8 s of a 10 s publish (38%) | none: the same document, chunk list and retire set | **built**, the commit side (§12); the consume side is G2 |
 | G2 | the consume derives only where the document moved since its last derive: a chunk-list diff | nothing measurable on the shipped allocator (§14) | a new rule and claim (`ddoc`, `Inv_DiffSound`) | **dropped** (user, 2026-10-23); archived on the local branch `lean-latency-g2-dropped` |
 | GW | the gateway's UI commits by path: an overlay re-chunked by chunk, the installed document held, mimalloc | at 1M, about 3.7 s of every UI save, rename and delete (§16) | none: the same document, chunk list and retire set | **built** (§16) |
+| RH | the post-checkout re-hash: a checkout measures its racy flags at the agent's gate, after waiting out the last window when that is many files | up to the whole tree hashed by the first barrier after a checkout: 107 s at 1M, 20 s at 200k, with disk timing (§17) | LeanScanRacy gains the gate (`MeasureAtGate`); re-proved, 38 obligations; the wait is ticks before the gate | **built** (§17) |
 
 **What the two measurements say about order.** On S3 and at 20k–200k
 files, requests dominate, so A, C and B come first. At 1M, CPU dominates,
@@ -1088,3 +1089,112 @@ due, 25 ms a request:
 - 200k: 1,694 → 857 ms (1,061 → 204 ms).
 
 The glibc figures were 7.0 → 3.1 s and 1.5 → 0.87 s.
+
+## 17. The post-checkout re-hash
+
+**What it was.** The racy-clean rule (L-138) says a baseline entry whose
+stat was taken within 2 s of the file's mtime cannot vouch for the bytes.
+A same-size write in the same coarse tick leaves the stat identical, so
+the next scan hashes the file (`scan::confirm_racy`). A checkout writes
+every file it records, so the first barrier after it hashed whatever the
+checkout had left racy, and how much that was depended on disk timing.
+
+The checkout measured each flag when the file's write task came back
+(`barrier::racy_stat`, against the time then). A write pool that kept up
+measured each file microseconds after writing it, so every entry was
+racy. A pool that fell behind measured late, and fewer were. On the box:
+- earlier benches: 21 s of the first barrier at 200k and 107 s at 1M,
+  against about 0.4 s and 2.2 s for any later idle tick;
+- a quiet box with the store at 25 ms: 19.9 s at 200k;
+- a loaded box at 0 ms: 32,000–46,000 of 200k files racy (4.9–7.7 s);
+  none at 1M, and none at 200k with the store at 25 ms.
+
+That late measure is the model's `MeasureLate` mutation. It was safe at a
+checkout only because of the gate below, which nothing stated.
+
+**Why most of it was never needed.** No one but the checkout writes the
+tree before its marker (`checkout-complete`) exists. The CSI node plugin
+binds the tree into the agent's pod only after the marker
+(`node.rs::resume_lean`), and a checkout returns at the marker without
+touching a live tree. So an entry's stat cannot go stale before that gate,
+and a write after it has a later mtime than any file written a window
+before it.
+
+**The gate.** The checkout measures each flag at the gate: after the
+tree's `syncfs`, just before its baseline and marker. The sync must come
+first anyway, and its time counts toward the window for free. The measure
+is taken before the marker, so earlier than the gate: the safe direction.
+Only what the checkout wrote in its last window stays racy.
+
+**The wait.** On a fast disk that last window is a large part of the
+tree. When at least `racy_wait_min` files are still racy at the gate
+(10,000 by default), the checkout waits until the newest of them is a
+window old, at most 2 s, and measures again: none is left. The threshold
+is about where hashing them costs the first scan more than the wait costs
+the agent's start (the box hashes a checked-out file in about 150 µs, so
+2 s is about 13,000 files). Waiting is ticks before `Open`, which the
+model already allows, so nothing in it changes. An mtime in the future,
+or a clock that steps back, leaves those entries racy: the safe direction.
+
+**The model.** `LeanScanRacy.tla` gains the gate: a `gate` variable, shut
+at the checkout. `Open` writes the marker and, under `MeasureAtGate`,
+clears the entry's flag if its mtime is a window old. The agent's `Write`
+waits for the gate (`WritesWaitForGate`, the assumption).
+
+TLC (tla-mc 0.1.2):
+- the shipped rule HOLDS at 3,452 distinct and at 156,072 (Wide);
+- `MeasureAtGate = FALSE`, the shape before, HOLDS;
+- the old mutations still lose a change (NoRule, MeasureLate,
+  ClearEarly);
+- **`WritesWaitForGate = FALSE` loses one** (NoGate, 56 distinct): an
+  agent that wrote before the marker could be hidden by the gate's clear.
+- `ProbeGateClears` fires.
+
+The proof (`LeanScanRacyProof.tla`) gains `GateOK`: before the gate, the
+file is exactly what the checkout recorded. **All 38 obligations proved**
+(35 before the gate; tlapm bfa9468, 0.87 s). Each control fails its own
+step: `RacyClean` 3/38, `MeasureAtRead` 1/38, `ClearOutsideWindow` 1/38,
+and `WritesWaitForGate` 1/38, at `Write`, which breaks `GateOK`
+(`lean/formal/results/2026-10-23-racy-gate/RESULTS.txt`).
+
+**The code.** In `checkout.rs`, after `sync_tree` and before the baseline
+commit and the marker: the wait, then each entry's `racy` re-measured with
+`scan::racy` against the time now (an unknown nanosecond reads as the
+latest in its second, the safe direction). The rescope's widen is not
+gated, because the agent runs then, and it keeps the flags as written.
+- `LeanConfig::racy_at_gate`, `FLINT_SYNC_RACY_AT_GATE=off`: the shape
+  before (bench arm `nogate`).
+- `LeanConfig::racy_wait_min`, `FLINT_SYNC_RACY_WAIT_MIN` (10,000; 0
+  never waits): the gate without the wait (bench arm `nowait`).
+
+**Tests.** `tests_rehash.rs` has five arms over a 20-file checkout:
+- the gate held a window past the writes: no entry is racy, and an
+  agent's same-size rewrite right after the gate is still published;
+- the gate at once, no wait: all 20 racy;
+- the switch off: all 20 racy;
+- the wait at 20 files: none racy, and the rewrite is still published;
+- the wait at 21 files, one more than are racy: all 20 racy.
+
+Mutation controls each fail it: R1 the gate settles nothing, R2 the gate
+read past every write, R3 the wait never re-reads the gate, R4 the wait
+ignores its threshold, R5 the wait cut short. The syncer: 378 passed;
+the gateway: 67; both binaries build (the one warning is the drain arm's,
+as before); the code-trace check passes 84/84.
+
+**Results.** The bench (musl with mimalloc), stopped after the first idle
+scan. The box was loaded by another session's kind cluster, so the counts
+matter more than the times.
+
+| 200k files | the shape before | the gate | the gate and the wait |
+|---|---|---|---|
+| store at 0 ms | 46,296 and 32,333 racy; first scan 7.7, 4.9 s | 39,662 (measured before the sync), 29,936, and 0; 6.2, 4.5, 0.7 s | **0; 0.62 s** |
+| store at 25 ms | 0; 0.60 s | 0; 0.76 s | **0; 0.77 s** |
+
+At 1M every arm left none (first scan 2.9–4.0 s). The checkout took the
+same time with and without the wait (7.1 against 7.0 s at 0 ms, 7.0
+against 7.4 s at 25 ms), within the box's noise.
+
+The gate alone leaves whatever the checkout wrote in its last two
+seconds, from none to 15% of the tree in these runs; the wait leaves none
+in every run. Not yet measured: the wait on a quiet box, where the shape
+before took 19.9 s at 200k.

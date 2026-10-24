@@ -319,11 +319,15 @@ every rule constant TRUE):
 cannot see. `formal/LeanScanRacyProof.tla` proves the code's stat-based
 judgment never misses a change the oracle sees, for every number of writes,
 clock ticks and racy window (`NoMissedChange`, `Spec =>
-[]Inv_NoMissedChange` of `LeanScanRacy.tla`, 35 obligations, the
-racy-clean rule as shipped). Its controls: dropping the rule, measuring
-racy when the entry is built, or clearing the flag inside the window each
-fails the one step that relies on it
-(`formal/results/2026-10-20-tlaps-racy/RESULTS.txt`).
+[]Inv_NoMissedChange` of `LeanScanRacy.tla`, 38 obligations, the
+racy-clean rule as shipped). Since 2026-10-23 that includes the checkout's
+gate (latency plan §17): a checkout measures its flags when it writes the
+marker, which holds only because no agent writes the tree before the
+marker. Its controls: dropping the rule, measuring racy when the entry is
+built, clearing the flag inside the window, or an agent writing before the
+marker each fails the one step that relies on it
+(`formal/results/2026-10-23-racy-gate/RESULTS.txt`; before the gate,
+`formal/results/2026-10-20-tlaps-racy/RESULTS.txt`).
 
 **Rows 15-17 (2026-10-15 to 2026-10-16):** the model gained the publish
 request and its answer (`Touch`, `Honor`, `HonorReader`, `RetireByAck`),

@@ -93,6 +93,7 @@ mod tests;
 static TEST_GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(test)] mod tests_rechunk;
 #[cfg(test)] mod tests_docview;
+#[cfg(test)] mod tests_rehash;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -350,6 +351,17 @@ pub struct LeanConfig {
     /// merge and asserts the same document, chunk list, retire set and
     /// per-path decisions (latency plan §12, "Verification").
     pub g_shadow: bool,
+    /// A checkout measures its entries' racy flags when it opens the
+    /// agent's gate, not when it wrote each file (latency plan §17;
+    /// LeanScanRacy's `MeasureAtGate`), so the first scan hashes only what
+    /// it wrote in its last window. `false` leaves every checked-out entry
+    /// racy, the shape before. `FLINT_SYNC_RACY_AT_GATE=off`.
+    pub racy_at_gate: bool,
+    /// The fewest files still racy at the gate for which the checkout opens
+    /// it the rest of their window later (at most two seconds), so the
+    /// first scan hashes none of them: about where hashing them costs more
+    /// than the wait. 0 never waits. `FLINT_SYNC_RACY_WAIT_MIN`.
+    pub racy_wait_min: usize,
     /// This workspace's chunks' aliases, by address (`docview`): what lets
     /// a commit answer "who else cites this handle" without the document.
     /// Shared by every clone of the config, so a syncer's views share it.
@@ -582,6 +594,8 @@ impl LeanConfig {
             chunk_fetch_parallelism: CHUNK_FETCH_PARALLELISM,
             chunk_view: true,
             g_shadow: false,
+            racy_at_gate: true,
+            racy_wait_min: 10_000,
             alias_cache: Arc::default(),
             chunk_target: chunk::CHUNK_TARGET,
             chunk_min: chunk::CHUNK_MIN,

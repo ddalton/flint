@@ -919,6 +919,49 @@ impl Syncer {
         // the next scan cannot read a zero-length survivor as a local
         // edit and publish it over the good version.
         self.state.sync_tree()?;
+        // THE GATE (latency plan §17; LeanScanRacy's `Open`). Every file
+        // above was stat'ed in the tick it was written, so it is racy, and
+        // the first scan would hash the whole tree. But nothing writes the
+        // tree before the marker below exists (the CSI node plugin binds it
+        // into the pod only then), so each flag is measured now: a file
+        // written a window before the gate cannot hide a write, which can
+        // only come after it. What this checkout wrote in its last window
+        // stays racy, and the first scan hashes only that. Measured before
+        // the marker, so earlier than the gate: the safe direction. After
+        // the sync above, so its time counts toward the window for free.
+        super::barrier::consume_window("before-gate", "");
+        let mut gate = super::scan::now_nanos();
+        // When what it wrote in its last window is many files, the gate
+        // opens the rest of their window later instead: at most a window on
+        // the agent's start, against hashing every one of them in the first
+        // scan. Nothing writes before the gate, so it may open at any tick.
+        if self.cfg.racy_at_gate && self.cfg.racy_wait_min > 0 {
+            let (n, newest) = baseline
+                .entries
+                .values()
+                .filter(|e| e.racy && super::scan::racy(e.mtime_unix, e.mtime_nanos.unwrap_or(999_999_999), gate))
+                .map(|e| e.mtime_unix as i128 * 1_000_000_000 + e.mtime_nanos.unwrap_or(999_999_999) as i128)
+                .fold((0usize, i128::MIN), |(n, m), t| (n + 1, m.max(t)));
+            if n >= self.cfg.racy_wait_min {
+                // A clock that runs backwards, or an mtime in the future,
+                // leaves those entries racy: the safe direction.
+                let rest = (newest + super::scan::RACY_WINDOW_NANOS - gate).clamp(0, super::scan::RACY_WINDOW_NANOS);
+                tokio::time::sleep(std::time::Duration::from_nanos(rest as u64 + 1_000_000)).await;
+                gate = super::scan::now_nanos();
+            }
+        }
+        let settled: Vec<String> = baseline
+            .entries
+            .iter()
+            .filter(|_| self.cfg.racy_at_gate)
+            .filter(|(_, e)| e.racy && !super::scan::racy(e.mtime_unix, e.mtime_nanos.unwrap_or(999_999_999), gate))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in settled {
+            if let Some(e) = baseline.entries.get_mut(&p) {
+                e.racy = false;
+            }
+        }
         self.state.commit_baseline(baseline)?;
         // Before the marker, always — including the `None` case, which
         // REMOVES any scope a crashed predecessor left behind. The

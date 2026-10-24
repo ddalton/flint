@@ -14,6 +14,9 @@
 (*   - an entry NOT flagged racy was recorded (or cleared) at least a     *)
 (*     window after its mtime, so a write since then has a strictly later *)
 (*     mtime and changes the stat (BaseOK).                               *)
+(*   - before the checkout opens the gate nothing has written the file   *)
+(*     since the checkout recorded it (GateOK, latency plan §17), so the  *)
+(*     gate may clear a flag a window after its mtime.                    *)
 (* A racy entry needs no clause: the rule itself compares the bytes.      *)
 (*                                                                         *)
 (* Controls (results/2026-10-20-tlaps-racy): each mutation, put in Shipped *)
@@ -29,6 +32,8 @@ ASSUME Shipped ==
   /\ RacyClean = TRUE
   /\ MeasureAtRead = TRUE
   /\ ClearOutsideWindow = TRUE
+  /\ MeasureAtGate = TRUE
+  /\ WritesWaitForGate = TRUE
 
 ReadOK ==
   read.on => /\ read.size \in Sizes
@@ -41,29 +46,35 @@ BaseOK ==
                 /\ \/ ver = base.ver
                    \/ base.mtime < mtime
 
-Ind == TypeOK /\ mtime <= clock /\ ReadOK /\ BaseOK
+GateOK ==
+  ~gate => /\ ver = base.ver /\ size = base.size /\ mtime = base.mtime
+           /\ ~read.on
+
+Ind == TypeOK /\ mtime <= clock /\ ReadOK /\ BaseOK /\ GateOK
 
 LEMMA IndInit == Init => Ind
-  BY Const, Shipped DEF Init, Ind, TypeOK, ReadOK, BaseOK, NoRead
+  BY Const, Shipped DEF Init, Ind, TypeOK, ReadOK, BaseOK, GateOK, NoRead
 
 LEMMA IndNext == Ind /\ [Next]_vars => Ind'
 <1> SUFFICES ASSUME Ind, [Next]_vars PROVE Ind'
   OBVIOUS
-<1> USE Const, Shipped DEF Ind, TypeOK, ReadOK, BaseOK
+<1> USE Const, Shipped DEF Ind, TypeOK, ReadOK, BaseOK, GateOK
 <1>1. CASE Write
   BY <1>1 DEF Write
 <1>2. CASE Tick
   BY <1>2 DEF Tick
 <1>3. CASE ReadUpload
-  BY <1>3 DEF ReadUpload
+  BY <1>3 DEF ReadUpload, CodeDirty, StatChanged
 <1>4. CASE Record
   BY <1>4 DEF Record, IsRacy, NoRead
 <1>5. CASE ClearRacy
   BY <1>5 DEF ClearRacy, IsRacy, StatChanged
+<1>7. CASE Open
+  BY <1>7 DEF Open, IsRacy
 <1>6. CASE UNCHANGED vars
   BY <1>6 DEF vars
 <1> QED
-  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6 DEF Next
+  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7 DEF Next
 
 LEMMA IndSafe == Ind => Inv_NoMissedChange
   BY Shipped DEF Ind, TypeOK, BaseOK, Inv_NoMissedChange, OracleDirty,

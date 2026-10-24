@@ -66,6 +66,13 @@
 //!   FLINT_SYNC_CHUNK_VIEW         "off" loads and merges the whole manifest
 //!                                 at every commit (default on: only the
 //!                                 chunks the commit's paths fall in)
+//!   FLINT_SYNC_RACY_AT_GATE       "off" leaves every file a checkout wrote
+//!                                 racy, so the first scan hashes the tree
+//!                                 (default on: measured at the agent's gate)
+//!   FLINT_SYNC_RACY_WAIT_MIN      when at least this many files a checkout
+//!                                 wrote are still racy at the gate, open it
+//!                                 the rest of their window later, at most
+//!                                 2 s (default 10000; 0 = never wait)
 //!   FLINT_SYNC_NEWS_POLL_SECS     while the workspace is active, read the
 //!                                 pointer (a writer the cell too) this
 //!                                 often and run the barrier early on news
@@ -320,6 +327,11 @@ async fn main() {
     if std::env::var("FLINT_SYNC_CHUNK_VIEW").as_deref() == Ok("off") {
         cfg.chunk_view = false;
     }
+    // The post-checkout re-hash: racy measured at the agent's gate.
+    if std::env::var("FLINT_SYNC_RACY_AT_GATE").as_deref() == Ok("off") {
+        cfg.racy_at_gate = false;
+    }
+    cfg.racy_wait_min = env_u64("FLINT_SYNC_RACY_WAIT_MIN", cfg.racy_wait_min as u64) as usize;
     // Latency plan lever B: the news arm's poll, its active window, and the
     // fewest seconds between two early barriers.
     cfg.news_poll_secs = env_u64("FLINT_SYNC_NEWS_POLL_SECS", cfg.news_poll_secs);
