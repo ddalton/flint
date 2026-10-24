@@ -192,23 +192,29 @@ covered by the stability guarantee.
   mutation that breaks it. `FLINT_SYNC_RACY_AT_GATE=off` keeps the shape
   before.
 
-- **lean: the scan walks the tree with several threads** (lever E). The
-  walk read one directory at a time and stat'ed every entry by its full
-  path. Workers now take directories from one queue and stat each entry
-  relative to its directory. They find exactly what the one-thread walk
-  found, and a directory none of them can list still fails the whole
-  walk. `FLINT_SYNC_SCAN_THREADS` sets the number of workers (default:
-  the CPUs the process may use, at most 8; 1 is one worker). In the
-  barrier's `steps`, `scan` is now `walk` and `classify`. Built as
-  shipped (static musl, mimalloc), on the in-memory store with 8 cores:
-  at 200k files the idle tick went from 419 ms to 197 ms and a one-file
-  publish from about 1220 ms to about 970 ms; at 1M files (one run) from
-  2.1 s to 1.0 s and from 6.4 s to 5.2 s. With one CPU (a CPU limit of
-  1) the walk runs on the syncer's own thread, and at 1M the idle tick
-  is 10% and a publish 4% faster. No memory cost. Two names that give
-  one relative path (`a\b` and `a/b`) now keep the same file from one
-  walk to the next. inotify was considered and not used: it cannot see
-  every completed write, so a publish would still have to walk.
+- **lean: the scan walks the tree with several threads, and without the
+  libc** (lever E). The walk read one directory at a time and stat'ed
+  every entry by its full path. Workers now take directories from one
+  queue, read each with `getdents64` and stat each name relative to the
+  directory's descriptor, making both calls themselves: std made the stat
+  relative on glibc only, and on musl, which `flint-sync` ships with, it
+  stat'ed by the full path and read directories 2 KiB at a time. The
+  workers find exactly what the one-thread walk found, and an error still
+  fails the whole walk (what the syncer may not read is now held instead;
+  see Fixed). `FLINT_SYNC_SCAN_THREADS` sets the number of workers
+  (default: the CPUs the process may use, at most 8; 1 walks on the
+  syncer's own thread). In the barrier's `steps`, `scan` is now `walk` and
+  `classify`. Built as shipped (static musl, mimalloc), on the in-memory
+  store with 8 cores, against main before it: at 200k files the idle tick
+  went from about 445 ms to about 185 ms and a one-file publish from about
+  480 ms to about 205 ms; at 1M files from 2.3 s to 0.96 s and from 2.3 s
+  to 0.98 s. With one CPU, at 1M both go from 2.3 s to 1.7 s. Peak memory
+  is about 40 MiB higher at 200k files and not measurably higher at 1M.
+  Two names that give one relative path (`a\b` and `a/b`) now keep the
+  same file from one walk to the next. inotify was considered and not
+  used: it cannot see every completed write, so a publish would still
+  have to walk. `flint-lean` now depends on `rustix` (already built for
+  its tests).
 
 ### Fixed
 

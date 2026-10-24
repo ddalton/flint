@@ -92,6 +92,14 @@ fn awkward_tree(root: &Path) {
     // Mode bits are part of what is found.
     put(root, "dir/run.sh", "#!/bin/sh");
     std::fs::set_permissions(root.join("dir/run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // A name that is not UTF-8: its relative path is the lossy one.
+    use std::os::unix::ffi::OsStrExt;
+    std::fs::write(root.join("dir").join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt")), "latin-1").unwrap();
+    // A modification time before the epoch reads as (0, 0).
+    put(root, "dir/old.txt", "old");
+    let old = std::ffi::CString::new(root.join("dir/old.txt").to_str().unwrap()).unwrap();
+    let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec { tv_sec: -100, tv_nsec: 5 }];
+    assert_eq!(unsafe { libc::utimensat(libc::AT_FDCWD, old.as_ptr(), times.as_ptr(), 0) }, 0);
 }
 
 #[test]
@@ -101,6 +109,8 @@ fn the_parallel_walk_finds_what_the_sequential_walk_found() {
     let want = reference(dir.path());
     assert!(want.iter().any(|e| e.0 == format!("dir/{STATE_DIR}/kept.txt")), "fixture: depth exclusion");
     assert!(!want.iter().any(|e| e.0.ends_with(TMP_SUFFIX)), "fixture: temporaries");
+    assert!(want.iter().any(|e| e.0 == "dir/caf\u{FFFD}.txt"), "fixture: a name that is not UTF-8");
+    assert!(want.iter().any(|e| e.0 == "dir/old.txt" && (e.2, e.3) == (0, 0)), "fixture: before the epoch");
     for threads in [1, 2, 8] {
         let got = scan_with(dir.path(), threads).unwrap();
         assert!(got.held.is_empty(), "{threads} threads: held {:?}", got.held);

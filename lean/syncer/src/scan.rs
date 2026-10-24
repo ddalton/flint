@@ -204,9 +204,9 @@ pub fn default_threads() -> usize {
 
 /// `scan`, by `threads` workers (lever E). They take directories from one
 /// queue, so a tree that is one huge directory and a tree of thousands of
-/// small ones both spread. Each entry is stat'ed relative to its directory
-/// (`DirEntry::metadata`: fstatat/statx with `AT_SYMLINK_NOFOLLOW`), not by
-/// its full path. What it returns is what the one-thread walk returned:
+/// small ones both spread. Each entry is stat'ed relative to its
+/// directory's descriptor, not by its full path (`read_dir_entries`). What
+/// it returns is what the one-thread walk returned:
 /// the same entries under the same exclusions, and the first error any
 /// worker meets fails the whole walk (`Queue::failed`), never dropped
 /// with the worker that met it. One worker walks on the calling thread.
@@ -312,14 +312,25 @@ fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Found {
 /// One directory: its files into `out`, its subdirectories onto `subdirs`.
 /// `prefix` is the directory's path relative to the root, with a trailing
 /// `/`; empty at the root.
+///
+/// The directory is read with `getdents64` and each name is stat'ed
+/// relative to the directory's own descriptor (`fstatat`,
+/// `AT_SYMLINK_NOFOLLOW`): no entry's full path is built, and the kernel
+/// resolves one name, not every component of the path. std's
+/// `DirEntry::metadata` does the same on glibc, but on musl, which
+/// flint-sync ships with, it joins the full path and `lstat`s it, and
+/// musl's `readdir` reads 2 KiB at a time (latency plan §13).
 fn read_dir_entries(
     dir: &Path,
     prefix: &str,
     out: &mut Found,
     subdirs: &mut Vec<(PathBuf, String)>,
 ) -> std::io::Result<()> {
-    let listing = match std::fs::read_dir(dir) {
-        Ok(l) => l,
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+    let opened = rustix::fs::open(dir, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty());
+    let fd = match opened.map_err(std::io::Error::from) {
+        Ok(fd) => fd,
         // Held, not failed, below the root (`scan`).
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !prefix.is_empty() => {
             out.held.push(prefix.to_string());
@@ -327,10 +338,14 @@ fn read_dir_entries(
         }
         Err(e) => return Err(e),
     };
-    for entry in listing {
+    let mut entries = rustix::fs::Dir::new(fd)?;
+    while let Some(entry) = entries.read() {
         let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
+        let bytes = entry.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let name = String::from_utf8_lossy(bytes);
         if prefix.is_empty() {
             // The state dir and the control namespace (boundary-verbs
             // plan D0). Without the second exclusion `.flint/publish`
@@ -343,8 +358,9 @@ fn read_dir_entries(
         if name.ends_with(TMP_SUFFIX) {
             continue;
         }
-        let meta = match entry.metadata() {
-            Ok(m) => m,
+        let stat = rustix::fs::statat(entries.fd()?, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW);
+        let st = match stat.map_err(std::io::Error::from) {
+            Ok(st) => st,
             // A directory the syncer may list but not search: each name
             // in it is held, file or directory alike.
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -356,35 +372,38 @@ fn read_dir_entries(
             }
             Err(e) => return Err(e),
         };
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.is_dir() {
-            let mut rel = String::with_capacity(prefix.len() + name.len() + 1);
-            rel.push_str(prefix);
-            push_name(&mut rel, &name);
-            rel.push('/');
-            subdirs.push((entry.path(), rel));
-        } else if meta.is_file() {
-            #[cfg(unix)]
-            let mode = {
-                use std::os::unix::fs::MetadataExt;
-                meta.mode()
-            };
-            #[cfg(not(unix))]
-            let mode = 0o644;
-            let (mtime_unix, mtime_nanos) = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
-                .unwrap_or((0, 0));
-            out.names.push_str(prefix);
-            push_name(&mut out.names, &name);
-            out.files.push((
-                out.names.len(),
-                ScanEntry { size: meta.len(), mtime_unix, mtime_nanos, mode, seen_nanos: now_nanos() },
-            ));
+        match FileType::from_raw_mode(st.st_mode as _) {
+            FileType::Directory => {
+                let mut rel = String::with_capacity(prefix.len() + name.len() + 1);
+                rel.push_str(prefix);
+                push_name(&mut rel, &name);
+                rel.push('/');
+                subdirs.push((dir.join(std::ffi::OsStr::from_bytes(bytes)), rel));
+            }
+            FileType::RegularFile => {
+                // As std's `modified()` and `duration_since(UNIX_EPOCH)`
+                // gave it: a time before the epoch is (0, 0).
+                let (mtime_unix, mtime_nanos) = if st.st_mtime >= 0 && (st.st_mtime_nsec as u64) < 1_000_000_000 {
+                    (st.st_mtime as i64, st.st_mtime_nsec as u32)
+                } else {
+                    (0, 0)
+                };
+                out.names.push_str(prefix);
+                push_name(&mut out.names, &name);
+                out.files.push((
+                    out.names.len(),
+                    ScanEntry {
+                        size: st.st_size as u64,
+                        mtime_unix,
+                        mtime_nanos,
+                        mode: st.st_mode as u32,
+                        seen_nanos: now_nanos(),
+                    },
+                ));
+            }
+            // Symlinks are never followed, and what is neither a
+            // directory nor a regular file is not data.
+            _ => {}
         }
     }
     Ok(())

@@ -904,9 +904,12 @@ item 5), and the same 2.0 s of every idle tick.
 **What it is.** `scan::scan_with(root, threads)`. Workers take directories
 from one queue (a mutex and a condition variable), so a tree that is one
 huge directory and a tree of thousands of small ones both spread. Each
-entry is stat'ed relative to its directory (`DirEntry::metadata`: `statx`
-or `fstatat` on the directory's descriptor, `AT_SYMLINK_NOFOLLOW`), not by
-its full path. One worker walks on the calling thread, and the calling
+directory is read with `getdents64` and each entry is stat'ed relative to
+the directory's descriptor (`fstatat`, `AT_SYMLINK_NOFOLLOW`), not by its
+full path, the walk making both calls itself (rustix): std's
+`DirEntry::metadata` stats relative to the directory on glibc only, and
+on musl, which ships, by the full path ("The walk without the libc",
+below). One worker walks on the calling thread, and the calling
 thread makes every key the map keeps ("The fix", below). The results
 are sorted and built into the map in bulk, not by a million inserts.
 `LeanConfig::scan_threads` defaults to the CPUs the process may use
@@ -921,7 +924,7 @@ only, the syncer's temporaries at any depth, symlinks and non-regular
 files skipped), with the same size, mtime and mode. Any error a worker
 meets fails the whole walk, as before: the first is kept in the queue, the
 other workers stop taking directories, and the walk returns it. The one
-exception came after E: a path the syncer may not read (EACCES) is held,
+exception came after E: a path the syncer may not read (EACCES or EPERM) is held,
 not failed (`Scan::held`, the same set at any thread count), so one
 unreadable directory no longer stops every publish (c24beeb7 had named
 that price).
@@ -1077,11 +1080,102 @@ buffer not advanced).
   about a fifth (200k: about 1220 to 970 ms; 1M: 6.4 to 5.2 s). With one
   CPU, the relative stat alone: the idle tick 10% and a publish 4% at
   1M. No memory cost.
-- **Still open (user to decide):** on one thread the walk is 20–25%
-  slower under musl than under glibc (flint-e4's comparison, 2.15
-  against 1.69 s at 1M). If a profile puts that in musl's `readdir`
-  and `fstatat` wrappers, the walk could call `getdents64` and `statx`
-  directly (`rustix`, already in the lockfile).
+- **Then the walk without the libc** (below): on one thread the walk
+  was 20–25% slower under musl than under glibc (flint-e4's comparison,
+  2.15 against 1.69 s at 1M).
+
+**The walk without the libc (option 2; user, 2026-10-23, §15: the walk's
+gap is to be won inside musl).** First a profile of the walk alone
+(`tests_bench::walk_cost_alone`: one 1M-file tree built once on
+`/mnt/nvme`, walked 5 times a run, warm cache), E as above on both
+libcs, both with mimalloc. Logs in `/mnt/nvme/e-prof3/`.
+
+| 1M files, the walk alone | wall | user CPU | system CPU |
+|---|---:|---:|---:|
+| glibc, 1 thread | ~955 ms | ~295 ms | ~660 ms |
+| musl, 1 thread | ~1370 ms | ~615 ms | ~755 ms |
+| glibc, 8 threads | ~303 ms | ~395 ms | ~1005 ms |
+| musl, 8 threads | ~460 ms | ~800 ms | ~1220 ms |
+
+- **musl's extra time is mostly user CPU**, and `perf` (user cycles, one
+  thread) puts 32% of musl's in `memcpy` and 16% in `memcmp`. glibc's
+  whole libc is 26% of its smaller total.
+- **Most of that `memcpy` is std's, not the walk's.** By call graph
+  (LBR), 12 of the 32 points are `DirEntry::metadata`: on musl std does
+  not stat relative to the directory but joins the entry's full path
+  (6.8 points) and copies it into a C string for `lstat` (4.0). Another 6 are
+  the C string std's `readdir` makes per entry and `file_name()`'s copy.
+  `memcmp` is the sort's comparisons, with musl's byte-at-a-time loop.
+- **The syscalls say the same**: one walk on musl is 1,001,001 `lstat`
+  calls, by full path, so the kernel resolves every component again,
+  and 17,020 `getdents64` (musl's `readdir` reads 2 KiB at a time). On
+  glibc it is `statx` relative to the directory, and 2,005 `getdents64`.
+  So E's "relative to its directory" held on glibc only; on musl E's
+  gain came from the workers and from fewer allocations, not the stat.
+
+The change: `read_dir_entries` opens each directory, reads it with
+`getdents64` and `fstatat`s each name on the directory's descriptor
+(`AT_SYMLINK_NOFOLLOW`), through rustix's raw-Linux backend, so the
+libc is not in the walk at all. Both libcs now issue the same calls: at
+1M, 1,001,000 `newfstatat` and 7,010 `getdents64` (rustix's buffer grows
+from 768 bytes). What it finds is unchanged; the oracle gains two
+fixtures the walk now maps itself (a name that is not UTF-8, an mtime
+before the epoch), and five more controls fire (those two, symlinks
+followed, the mode without its type bits, a fifo read as a file).
+flint-05's held paths keep their three sites and their guards verbatim.
+
+The same profile bench, E (with flint-05's held paths, `01686093`) against
+the direct walk (`36dd538a`'s tree), 5 walks a run, two runs in
+forward-then-reversed order, walks 1–4 of both. Logs in
+`/mnt/nvme/e2h/`.
+
+| 1M files, the walk alone (ms) | E wall | direct wall | E user | direct user | E sys | direct sys |
+|---|---:|---:|---:|---:|---:|---:|
+| musl, 1 thread | 1373–1386 | 1064–1086 | 583–617 | 384–432 | 762–791 | 633–679 |
+| musl, 8 threads | 444–465 | 383–394 | 769–821 | 527–560 | 1175–1255 | 953–990 |
+| glibc, 1 thread | 957–965 | 905–910 | 282–315 | 239–263 | 646–674 | 643–667 |
+| glibc, 8 threads | 299–317 | 292–308 | 372–408 | 322–350 | 984–1057 | 984–1018 |
+
+- **On musl the walk is 22% faster on one thread and 14% on eight**,
+  user and system CPU both down; on glibc 5% and within noise. musl's gap
+  to glibc on one thread went from about 415 ms to about 170.
+- **What is left is musl's string routines**: in the new walk's profile
+  `memcpy` is 24% and `memcmp` 22% of user CPU, the sort's comparisons
+  and the copies of the names and keys, which no syscall path removes.
+
+The barrier bench as shipped (static musl + mimalloc, in-memory store,
+8 cores), the same two builds, interleaved; at 1 thread one run each.
+
+| barrier | 200k E (n=3) | 200k direct (n=3) | 1M E (n=2) | 1M direct (n=2) | 1M E, 1 thread | 1M direct, 1 thread |
+|---|---:|---:|---:|---:|---:|---:|
+| idle tick | 193–197 ms | 179–181 ms | 1024–1058 ms | 975–983 ms | 1986 ms | 1665 ms |
+| one-file publish, collection not due | 210–224 ms | 197–206 ms | 1045–1080 ms | 975–994 ms | 1999 ms | 1698 ms |
+| that publish's `walk` | 96–106 ms | 80–81 ms | 515–538 ms | 449–458 ms | 1469 ms | 1163 ms |
+| that publish's `classify` | 88–93 ms | 89–95 ms | 464–470 ms | 463–469 ms | 466 ms | 470 ms |
+| peak RSS, whole bench process | 1031–1061 MiB | 1062–1074 MiB | 4811–4914 MiB | 4891–4915 MiB | 4917 MiB | 4916 MiB |
+
+Since G and the re-hash fix (§12, §17) a one-file publish at 1M is about
+a second, nearly all of it `walk` and `classify`, so the walk's share
+of a barrier is now large. Against main as it stands (`8c47ebb3`:
+`e02e9c38` and the gateway's lockfile), as shipped, interleaved:
+
+| barrier | 200k main (n=3) | 200k E, direct (n=3) | 1M main (n=2) | 1M E, direct (n=2) |
+|---|---:|---:|---:|---:|
+| idle tick | 445–447 ms | 182–187 ms | 2306–2313 ms | 958–961 ms |
+| taking a peer's one-file change | 807–822 ms | 495–521 ms | 4148–4176 ms | 2594–2621 ms |
+| one-file publish, collection not due | 473–485 ms | 199–212 ms | 2321–2333 ms | 983–986 ms |
+| one-file publish, collection due | 773–779 ms | 470–481 ms | 3838–3852 ms | 2403–2427 ms |
+| that publish's `scan` (main), `walk` + `classify` (E) | 442–453 ms | 79–94 + 90–96 ms | 2242–2256 ms | 450–452 + 468–469 ms |
+| peak RSS, whole bench process | 1021–1036 MiB | 1061–1075 MiB | 4892–4955 MiB | 4768–4915 MiB |
+
+- **As it ships, E makes the idle tick and a one-file publish about 2.4
+  times faster** at 200k and at 1M with 8 CPUs. With one CPU (the walk on
+  the syncer's own thread), at 1M the idle tick is 2.3 s to 1.7 s and a
+  publish the same (one run of each against main's two).
+- **Memory: about 40 MiB more at the peak at 200k (4%); none measurable
+  at 1M.**
+- **Next at 1M is `classify`**, 470 ms on one thread: about half of
+  what is left of an idle tick or a publish.
 
 **What the bench does not measure.** The tree was just written, so its
 directories and inodes were in the kernel's cache, and the walk was CPU,
@@ -1181,7 +1275,10 @@ the same G2 tree; ms; 200k at 0 ms a request, 1M at 25 ms):
   instead. Profile both walks at 1M first; if the libc wrappers are the
   cost, call `getdents64`/`statx` directly (rustix's raw-Linux backend; the
   build already pulls in `linux-raw-sys`), which makes the walk
-  independent of the libc. That is lever E's code (§13): handed to it. The
+  independent of the libc. That is lever E's code (§13): handed to it
+  (done: §13, "The walk without the libc"; at 1M on one thread the walk's
+  gap to glibc went from about 415 ms to about 170, the rest musl's
+  string routines in the sort). The
   cost of the choice: a static binary carries its own musl, so a musl CVE
   needs a `flint-sync` rebuild, and image scanners may not see it.
 - **Every per-step figure above §15 is glibc's.** The relative gains of A,

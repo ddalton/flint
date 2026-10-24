@@ -51,6 +51,9 @@ required-features = ["s3", "http"]
 flint-store = { version = "0.2.0", path = "../../crates/flint-store" }
 futures = "0.3"
 libc = "0.2"
+# The scan's walk: getdents64 and fstatat relative to a directory's
+# descriptor (scan.rs `read_dir_entries`).
+rustix = { version = "1.1", features = ["fs"] }
 bytes = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
