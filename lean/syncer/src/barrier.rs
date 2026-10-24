@@ -46,6 +46,14 @@ pub struct BarrierReport {
     /// Paths whose transfer drifted or was swept mid-compose: nothing
     /// published, nothing advanced; the next scan re-queues them.
     pub deferred: Vec<String>,
+    /// Paths the syncer may not read (`scan::Scan::held`): a directory
+    /// it may not list (with its trailing `/`), an entry it may not
+    /// lstat, a file it may not open, an absence it may not confirm.
+    /// Nothing at or under one was published or deleted, and the rest of
+    /// the tree was. A boundary that holds anything is not complete: a
+    /// sentinel's ack is `partial` and names them, and the drain refuses
+    /// to attest it.
+    pub held: Vec<String>,
     /// Paths whose object the collector LEFT BEHIND because this store
     /// does not enforce `If-Match` on DELETE (`conformance.rs`). The
     /// delete still reached the boundary; only the object survives.
@@ -625,7 +633,11 @@ impl Syncer {
     /// second observation costs one syscall per transiently-absent
     /// path — never a second full pass. The cadence path is unchanged
     /// and still waits for the second walk.
-    pub(crate) fn confirm_absences(&self, classified: &mut scan::Classified) -> LeanResult<usize> {
+    pub(crate) fn confirm_absences(
+        &self,
+        classified: &mut scan::Classified,
+        held: &mut BTreeSet<String>,
+    ) -> LeanResult<usize> {
         if classified.first_absence.is_empty() {
             return Ok(0);
         }
@@ -634,13 +646,18 @@ impl Syncer {
             // ONLY NotFound is absence. Every other errno — EACCES on a
             // parent, EIO, EMFILE, ELOOP — used to read as "the agent
             // deleted it", and this is the oracle that PUBLISHES the
-            // delete and then DELETES THE OBJECT. An unreadable file is
-            // the one case where guessing is unrecoverable, so it fails
-            // CLOSED, exactly as the walk does at `scan.rs`'s
-            // `symlink_metadata(&path)?`. Two call sites, one syscall:
+            // delete and then DELETES THE OBJECT. An unreadable path is
+            // the one case where guessing is unrecoverable, so it is never
+            // a delete: EACCES holds it, as the walk holds what it may not
+            // read (`scan::Scan::held`), and every other errno fails the
+            // barrier, as it fails the walk. Two call sites, one syscall:
             // they must not have opposite error policies.
             let gone = match std::fs::symlink_metadata(self.cfg.root.join(&path)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    held.insert(path);
+                    continue;
+                }
                 Err(e) => {
                     classified.first_absence.insert(path.clone());
                     return Err(LeanError::State(format!(
@@ -774,7 +791,7 @@ impl Syncer {
         // store and handed back at each end of the barrier (lever D).
         let mut baseline = self.state.take_baseline()?;
         clock.lap("baseline_load");
-        let scanned = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
+        let mut scanned = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
         clock.lap("walk");
         let mut classified = scan::classify(&scanned, &baseline);
         let racy_cleared = scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
@@ -783,10 +800,23 @@ impl Syncer {
                 e.racy = false;
             }
         }
+        // A file the syncer may not read is held, not uploaded
+        // (`Scan::held`). Asked here, before the idle check, so a standing
+        // `chmod 000` leaves an otherwise idle tick idle.
+        let unreadable: Vec<String> =
+            classified.uploads.iter().filter(|p| !scan::may_read(&self.cfg.root, p)).cloned().collect();
+        for p in unreadable {
+            classified.uploads.remove(&p);
+            scanned.held.insert(p);
+        }
         if declared {
-            report.absences_confirmed = self.confirm_absences(&mut classified)?;
+            report.absences_confirmed = self.confirm_absences(&mut classified, &mut scanned.held)?;
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
+        report.held = scanned.held.iter().cloned().collect();
+        if !report.held.is_empty() {
+            note_held(&report.held);
+        }
         clock.lap("classify");
 
         // Skip-on-no-diff: nothing local, and the bucket manifest where the
@@ -845,7 +875,7 @@ impl Syncer {
                 // way: the store writes what changed, and nothing when
                 // nothing did. `sync_to` walks both sorted sides and copies
                 // only the paths that came or went.
-                baseline.prev_scan.sync_to(scanned.keys());
+                baseline.prev_scan.sync_to(scanned.present(&baseline.entries));
                 self.state.commit_baseline(baseline)?;
                 clock.lap("idle_check");
                 report.steps = clock.steps;
@@ -907,7 +937,7 @@ impl Syncer {
                     let mut part: Vec<(String, LeanResult<UploadOutcome>)> =
                         stream::iter(group.iter().map(|path| {
                             let path = *path;
-                            let scanned_entry = &scanned[path];
+                            let scanned_entry = &scanned.entries[path];
                             let base = baseline.entries.get(path);
                             let flush_uuid = &flush_uuid;
                             async move {
@@ -944,6 +974,15 @@ impl Syncer {
                 UploadOutcome::Deferred => {
                     self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "outcome": "deferred"}));
                     report.deferred.push(path.clone());
+                }
+                UploadOutcome::Unreadable => {
+                    // Made unreadable since `may_read` asked: held, as it
+                    // would have been then.
+                    self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "outcome": "held"}));
+                    classified.uploads.remove(path);
+                    scanned.held.insert(path.clone());
+                    report.held.push(path.clone());
+                    note_held(std::slice::from_ref(path));
                 }
             }
         }
@@ -1033,7 +1072,7 @@ impl Syncer {
                 report.foreign_queued = foreign;
                 baseline.seq = seq;
                 baseline.manifest_etag = Some(etag.clone());
-                baseline.prev_scan.sync_to(scanned.keys());
+                baseline.prev_scan.sync_to(scanned.present(&baseline.entries));
                 self.state.commit_baseline(baseline)?;
                 self.state.clear_intent_keys()?;
                 clock.lap("pull_only");
@@ -1670,7 +1709,7 @@ impl Syncer {
             self.note_carrier_uncited(&carried_at)?;
             baseline.seq = installed_seq;
             baseline.manifest_etag = Some(installed_etag);
-            baseline.prev_scan.sync_to(scanned.keys());
+            baseline.prev_scan.sync_to(scanned.present(&baseline.entries));
             self.state.commit_baseline(baseline)?;
             self.state.clear_intent_keys()?;
             clock.lap("baseline");
@@ -1935,6 +1974,7 @@ impl Syncer {
         // component only. The file is opened by a walk that follows no
         // link at any depth, and everything below — the stamps, the
         // size, the bytes — comes from that one descriptor.
+        consume_window("before-upload", path);
         let file = match super::safefs::open_beneath_nofollow(&self.cfg.root, path) {
             Ok(f) => f,
             Err(e)
@@ -1954,6 +1994,7 @@ impl Syncer {
                 })?;
                 return Ok(UploadOutcome::Deferred);
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(UploadOutcome::Unreadable),
             Err(e) => return Err(LeanError::State(format!("stat {}: {e}", local_path.display()))),
         };
         let lmeta = file
@@ -2044,6 +2085,9 @@ enum UploadOutcome {
     /// or the assembly was swept: publish nothing, advance nothing —
     /// the next scan re-queues the path.
     Deferred,
+    /// The syncer may not open the file (EACCES): held (`scan::Scan::
+    /// held`), and nothing advanced, so the next scan asks again.
+    Unreadable,
 }
 
 impl UploadOutcome {
@@ -2301,9 +2345,25 @@ fn note_carried(
     // a_local_delete_and_names_the_version_it_
     // deleted_over`), so the second clause is a
     // backstop no barrier reaches.
-    c.dropped.extend(report.parked.iter().chain(&report.deferred).cloned());
+    c.dropped.extend(report.parked.iter().chain(&report.deferred).chain(&report.held).cloned());
     c.dropped.extend(classified.deletes.iter().filter(|p| cites(p.as_str())).cloned());
     intent.carrier = Some(c);
+}
+
+/// Says what a barrier held, on every barrier that holds anything: until
+/// the tree's owner makes it readable, nothing there reaches the bucket
+/// and no boundary is complete, and the operator has to be told which
+/// paths. Ten at most; the report carries them all.
+fn note_held(held: &[String]) {
+    const SHOWN: usize = 10;
+    let more = held.len().saturating_sub(SHOWN);
+    eprintln!(
+        "flint-sync: held {} path(s) the syncer may not read (EACCES): {:?}{} — nothing at or \
+         under them is published or deleted until they are readable; the rest of the tree is",
+        held.len(),
+        &held[..held.len().min(SHOWN)],
+        if more > 0 { format!(" and {more} more") } else { String::new() },
+    );
 }
 
 pub(super) fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {

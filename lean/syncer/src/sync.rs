@@ -140,6 +140,18 @@ impl Syncer {
                 || classified.deletes.contains(path)
                 || classified.first_absence.contains(path)
         };
+        // A path the syncer may not read (`scan::Scan::held`) is neither
+        // taken nor removed: what is there is unknown, and may be the
+        // agent's. Named, so the agent learns why.
+        let unreadable = |path: &str| ConflictRecord {
+            path: path.to_string(),
+            foreign_etag: String::new(),
+            preserved_key: None,
+            kind: "sync-unreadable: the syncer may not read this path (EACCES); the bucket's \
+                   change to it is not applied until it is readable"
+                .into(),
+            at_unix: now_unix(),
+        };
 
         // 2. Remote truth: the committed document (since P2 the gateway
         //    commits each UI verb, so there is no inbox overlay).
@@ -214,6 +226,14 @@ impl Syncer {
                 report.out_of_scope_foreign += 1;
                 continue;
             }
+            // Before `exists`, which answers false for a path it may not
+            // stat: that is unseen, not gone.
+            if scanned.holds(&path) {
+                self.state.append_conflict(&unreadable(&path))?;
+                report.conflicts.push(path.clone());
+                dirty_skips.insert(path.clone());
+                continue;
+            }
             let local = self.cfg.root.join(&path);
             if !local.exists() {
                 baseline.entries.remove(&path);
@@ -257,6 +277,12 @@ impl Syncer {
                 // D4: NOT integrated — it stays owed, and the next
                 // barrier's consume takes it.
                 report.out_of_scope_foreign += 1;
+                continue;
+            }
+            if scanned.holds(path) {
+                self.state.append_conflict(&unreadable(path))?;
+                report.conflicts.push(path.clone());
+                dirty_skips.insert(path.clone());
                 continue;
             }
             if locally_dirty(path) {
@@ -457,7 +483,7 @@ impl Syncer {
             }
         }
         let rescan = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
-        baseline.prev_scan.sync_to(rescan.keys());
+        baseline.prev_scan.sync_to(rescan.present(&baseline.entries));
         // Materialised files before the baseline that vouches for them.
         self.state.sync_tree()?;
         // What the trace reports, read before the baseline is handed back.

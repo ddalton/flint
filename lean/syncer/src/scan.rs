@@ -85,21 +85,114 @@ pub fn stat_changed(b: &super::state::BaselineEntry, size: u64, mtime: i64, nano
         || b.mode.is_some_and(|m| mode_differs(m, mode))
 }
 
+/// What a walk found: every regular file it could stat, and every path
+/// it was refused (`held`).
+#[derive(Debug, Default)]
+pub struct Scan {
+    pub entries: BTreeMap<String, ScanEntry>,
+    /// Paths the syncer may not read (EACCES), each standing for itself
+    /// and everything under it: a directory it may not list (written with
+    /// its trailing `/`), an entry it may not lstat (a name in a directory
+    /// it may list but not search, so even its type is unknown). The
+    /// barrier adds the files it may not open and the absences it may not
+    /// confirm. Nothing held is published or deleted, and no boundary is
+    /// complete while anything is held.
+    pub held: BTreeSet<String>,
+}
+
+impl Scan {
+    /// Whether `path` is held: a held path itself, or under one.
+    pub fn holds(&self, path: &str) -> bool {
+        !self.held.is_empty()
+            && self.held.iter().any(|h| {
+                let base = h.strip_suffix('/').unwrap_or(h);
+                path.strip_prefix(base).is_some_and(|r| r.is_empty() || r.starts_with('/'))
+            })
+    }
+
+    /// What `prev_scan` records after this scan, in order: every path the
+    /// walk saw, and every path in `cited` that it held. A held path is
+    /// unseen, not absent, so it is recorded PRESENT: a path that turns
+    /// out to be gone once it is readable again is then a first absence,
+    /// and the two-scan rule withholds its delete one more scan, exactly
+    /// as for a path seen a scan ago.
+    pub fn present<'a, V>(&'a self, cited: &'a BTreeMap<String, V>) -> impl Iterator<Item = &'a String> + 'a {
+        let mut unseen: Vec<&'a String> = self.held.iter().flat_map(|h| under(cited, h)).collect();
+        unseen.sort_unstable();
+        unseen.dedup();
+        let mut seen = self.entries.keys().peekable();
+        let mut unseen = unseen.into_iter().peekable();
+        std::iter::from_fn(move || match (seen.peek(), unseen.peek()) {
+            (Some(a), Some(b)) => match a.cmp(b) {
+                std::cmp::Ordering::Less => seen.next(),
+                std::cmp::Ordering::Greater => unseen.next(),
+                std::cmp::Ordering::Equal => {
+                    unseen.next();
+                    seen.next()
+                }
+            },
+            (Some(_), None) => seen.next(),
+            (None, _) => unseen.next(),
+        })
+    }
+}
+
+/// The keys of `cited` at or under the held path `held`. Two lookups,
+/// not one run: `d-1` and `d.txt` sort between `d` and `d/`.
+fn under<'a, V>(cited: &'a BTreeMap<String, V>, held: &'a str) -> impl Iterator<Item = &'a String> + 'a {
+    use std::ops::Bound;
+    let base = held.strip_suffix('/').unwrap_or(held);
+    let dir = format!("{base}/");
+    let exact = cited.get_key_value(base).map(|(k, _)| k);
+    let below: Vec<&'a String> = cited
+        .range::<str, _>((Bound::Included(dir.as_str()), Bound::Unbounded))
+        .map(|(k, _)| k)
+        .take_while(|k| k.starts_with(dir.as_str()))
+        .collect();
+    exact.into_iter().chain(below)
+}
+
+/// Whether the syncer may read the file at `rel`: false only when the
+/// kernel answers EACCES. Asked of each upload before the barrier's idle
+/// check, so a file it may not read is held there and an otherwise idle
+/// tick stays idle; `upload_one` holds one that turns unreadable after
+/// this. The syncer's real and effective uids are one, so `access` is
+/// the open's answer.
+pub fn may_read(root: &Path, rel: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(root.join(rel).as_os_str().as_bytes()) else { return true };
+        if unsafe { libc::access(c.as_ptr(), libc::R_OK) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().kind() != std::io::ErrorKind::PermissionDenied
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, rel);
+        true
+    }
+}
+
 /// Walk the workspace. Skips the state dir, the control namespace and
 /// symlinks (v1 non-goal, as the tier manifest's).
 ///
-/// Anything it cannot read FAILS the walk, and with it the barrier: a
-/// directory it cannot list, an entry it cannot lstat. Never skipped.
-/// `classify` reads a path missing from two scans as the agent's
-/// delete, and the barrier then publishes the deletion and deletes the
-/// object, so a skipped directory would cost every file under it.
-/// `Syncer::confirm_absences` keeps the same policy for the same
-/// syscall, and a file the walk can stat but `upload_one` cannot open
-/// fails the barrier the same way. The price is that nothing publishes
-/// until the tree is readable again: an app running as a uid other than
-/// the CR's that makes a 0700 directory stops the whole workspace (as
-/// mkfs's root-owned `lost+found` did, before the quota removed it).
-pub fn scan(root: &Path) -> LeanResult<BTreeMap<String, ScanEntry>> {
+/// What the syncer may not read (EACCES) is HELD (`Scan::held`), never
+/// skipped: a directory it may not list, an entry it may not lstat.
+/// `classify` reads a path missing from two scans as the agent's delete,
+/// and the barrier then publishes the deletion and deletes the object,
+/// so a skipped directory would cost every file under it; a held one
+/// costs nothing, because `classify` neither uploads nor deletes a path
+/// at or under it, and `Scan::present` keeps it in `prev_scan`. The rest
+/// of the tree publishes. The walk used to FAIL instead (c24beeb7), and
+/// then one 0700 directory made by an app running as a uid other than
+/// the CR's stopped every publish in the workspace until it was readable.
+///
+/// Every other error FAILS the walk, and with it the barrier: an EIO is
+/// not a standing condition the tree's owner set, and an unreadable ROOT
+/// fails too (nothing could publish; the error names why).
+pub fn scan(root: &Path) -> LeanResult<Scan> {
     scan_with(root, default_threads())
 }
 
@@ -117,7 +210,8 @@ pub fn default_threads() -> usize {
 /// the same entries under the same exclusions, and the first error any
 /// worker meets fails the whole walk (`Queue::failed`), never dropped
 /// with the worker that met it. One worker walks on the calling thread.
-pub fn scan_with(root: &Path, threads: usize) -> LeanResult<BTreeMap<String, ScanEntry>> {
+/// What it holds is the same set at any thread count.
+pub fn scan_with(root: &Path, threads: usize) -> LeanResult<Scan> {
     let queue = Mutex::new(Queue { dirs: vec![(root.to_path_buf(), String::new())], busy: 0, failed: None });
     let wake = Condvar::new();
     let found: Vec<Found> = if threads <= 1 {
@@ -138,7 +232,9 @@ pub fn scan_with(root: &Path, threads: usize) -> LeanResult<BTreeMap<String, Sca
     // commit's documents) on cold pages: at 1M files, 480 ms more across
     // classify, load, merge, cas and retire_set (latency plan §13).
     let mut all: Vec<(String, ScanEntry)> = Vec::with_capacity(found.iter().map(|f| f.files.len()).sum());
+    let mut held = BTreeSet::new();
     for f in found {
+        held.extend(f.held);
         let mut start = 0;
         for (end, e) in f.files {
             all.push((f.names[start..end].to_string(), e));
@@ -153,7 +249,7 @@ pub fn scan_with(root: &Path, threads: usize) -> LeanResult<BTreeMap<String, Sca
     // inserts).
     let stat =|e: &ScanEntry| (e.size, e.mtime_unix, e.mtime_nanos, e.mode);
     all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| stat(&a.1).cmp(&stat(&b.1))));
-    Ok(all.into_iter().collect())
+    Ok(Scan { entries: all.into_iter().collect(), held })
 }
 
 /// The walk's shared state: directories not yet read (with the relative
@@ -167,11 +263,13 @@ struct Queue {
 
 /// What one worker found: the files' relative paths end to end in one
 /// buffer, and per file where its path ends there and what was stat'ed.
-/// A few large allocations per worker, not one per file.
+/// A few large allocations per worker, not one per file. And what it
+/// held (`Scan::held`), which is rare.
 #[derive(Default)]
 struct Found {
     names: String,
     files: Vec<(usize, ScanEntry)>,
+    held: Vec<String>,
 }
 
 fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Found {
@@ -220,7 +318,16 @@ fn read_dir_entries(
     out: &mut Found,
     subdirs: &mut Vec<(PathBuf, String)>,
 ) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+    let listing = match std::fs::read_dir(dir) {
+        Ok(l) => l,
+        // Held, not failed, below the root (`scan`).
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !prefix.is_empty() => {
+            out.held.push(prefix.to_string());
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    for entry in listing {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -236,7 +343,19 @@ fn read_dir_entries(
         if name.ends_with(TMP_SUFFIX) {
             continue;
         }
-        let meta = entry.metadata()?;
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            // A directory the syncer may list but not search: each name
+            // in it is held, file or directory alike.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let mut rel = String::with_capacity(prefix.len() + name.len());
+                rel.push_str(prefix);
+                push_name(&mut rel, &name);
+                out.held.push(rel);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         if meta.file_type().is_symlink() {
             continue;
         }
@@ -318,13 +437,13 @@ pub fn is_control_path(path: &str) -> bool {
 /// may clear the flag. Run after `classify`, before anything trusts it.
 pub fn confirm_racy(
     root: &Path,
-    scan: &BTreeMap<String, ScanEntry>,
+    scan: &Scan,
     baseline: &Baseline,
     c: &mut Classified,
 ) -> Vec<String> {
     let now = now_nanos();
     let mut cleared = vec![];
-    for (path, s) in scan {
+    for (path, s) in &scan.entries {
         let Some(b) = baseline.entries.get(path) else { continue };
         if !b.racy || c.uploads.contains(path) {
             continue;
@@ -343,9 +462,9 @@ pub fn confirm_racy(
     cleared
 }
 
-pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Classified {
+pub fn classify(scan: &Scan, baseline: &Baseline) -> Classified {
     let mut c = Classified::default();
-    for (path, s) in scan {
+    for (path, s) in &scan.entries {
         match baseline.entries.get(path) {
             None => {
                 c.uploads.insert(path.clone());
@@ -358,7 +477,11 @@ pub fn classify(scan: &BTreeMap<String, ScanEntry>, baseline: &Baseline) -> Clas
         }
     }
     for path in baseline.entries.keys() {
-        if scan.contains_key(path) {
+        if scan.entries.contains_key(path) {
+            continue;
+        }
+        if scan.holds(path) {
+            // Unseen, not absent: neither a delete nor a first absence.
             continue;
         }
         if is_control_path(path) {

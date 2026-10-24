@@ -1,7 +1,9 @@
 //! Lever E: the scan walks the tree with several threads. It must find
 //! exactly what the one-thread walk found (the same entries under the same
-//! exclusions) and fail exactly where it failed. The oracle is the walk as
-//! it shipped before E, kept here verbatim.
+//! exclusions) and fail exactly where it failed, except where the syncer
+//! may not read, which it now holds (`Scan::held`), the same set at any
+//! thread count. The oracle is the walk as it shipped before E, kept here
+//! verbatim.
 
 use super::scan::{scan_with, ScanEntry, TMP_SUFFIX};
 use super::{CONTROL_DIR, STATE_DIR};
@@ -100,8 +102,9 @@ fn the_parallel_walk_finds_what_the_sequential_walk_found() {
     assert!(want.iter().any(|e| e.0 == format!("dir/{STATE_DIR}/kept.txt")), "fixture: depth exclusion");
     assert!(!want.iter().any(|e| e.0.ends_with(TMP_SUFFIX)), "fixture: temporaries");
     for threads in [1, 2, 8] {
-        let got = found(&scan_with(dir.path(), threads).unwrap());
-        assert_eq!(got, want, "{threads} threads");
+        let got = scan_with(dir.path(), threads).unwrap();
+        assert!(got.held.is_empty(), "{threads} threads: held {:?}", got.held);
+        assert_eq!(found(&got.entries), want, "{threads} threads");
     }
 }
 
@@ -131,7 +134,7 @@ fn random_trees_walk_the_same_at_any_thread_count() {
         let want = reference(dir.path());
         assert_eq!(want.len(), files as usize, "fixture: shape {shape}");
         for threads in [1, 3, 8] {
-            assert_eq!(found(&scan_with(dir.path(), threads).unwrap()), want, "shape {shape}, {threads} threads");
+            assert_eq!(found(&scan_with(dir.path(), threads).unwrap().entries), want, "shape {shape}, {threads} threads");
         }
     }
 }
@@ -150,7 +153,7 @@ fn two_names_for_one_path_keep_the_same_one_every_walk() {
     }
     for threads in [1, 2, 8] {
         for _ in 0..20 {
-            let got = scan_with(dir.path(), threads).unwrap();
+            let got = scan_with(dir.path(), threads).unwrap().entries;
             assert_eq!(got.len(), 33, "{threads} threads");
             assert_eq!(got["a/b"].size, 3, "{threads} threads: kept the other name");
         }
@@ -158,9 +161,10 @@ fn two_names_for_one_path_keep_the_same_one_every_walk() {
 }
 
 /// An unreadable directory deep in a tree that keeps the other workers
-/// busy: the error is the walk's, whichever worker met it.
+/// busy is HELD, whichever worker met it: the walk finds everything else,
+/// and the held set is the same at any thread count.
 #[test]
-fn a_directory_no_worker_can_list_fails_the_whole_walk() {
+fn a_directory_no_worker_can_list_is_held_at_any_thread_count() {
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
         return;
@@ -176,11 +180,75 @@ fn a_directory_no_worker_can_list_fails_the_whole_walk() {
     std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
     let got: Vec<_> = [1, 2, 8].iter().map(|t| scan_with(dir.path(), *t)).collect();
     std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let want: Vec<_> =
+        reference(dir.path()).into_iter().filter(|e| !e.0.starts_with("d31/deeper/locked/")).collect();
+    assert_eq!(want.len(), 64 * 50, "fixture");
     for (threads, g) in [1, 2, 8].iter().zip(got) {
-        match g {
-            Err(crate::LeanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{threads} threads: {e}"),
-            Err(e) => panic!("{threads} threads: failed, but not on the directory: {e}"),
-            Ok(s) => panic!("{threads} threads: an unlistable directory scanned as {} entries", s.len()),
+        let g = g.unwrap_or_else(|e| panic!("{threads} threads: an unlistable directory failed the walk: {e}"));
+        assert_eq!(g.held.iter().collect::<Vec<_>>(), ["d31/deeper/locked/"], "{threads} threads");
+        assert_eq!(found(&g.entries), want, "{threads} threads");
+    }
+}
+
+/// A directory the syncer may list but not search (`r--`): its names are
+/// read, but none can be lstat'ed, so whether each is a file or a
+/// directory is unknown too. Each name is held, without a trailing `/`,
+/// and covers whatever is under it.
+#[test]
+fn a_directory_listable_but_not_searchable_holds_each_name() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "ok.txt", "x");
+    put(dir.path(), "half/a.txt", "x");
+    put(dir.path(), "half/sub/b.txt", "x");
+    let half = dir.path().join("half");
+    std::fs::set_permissions(&half, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
+    let got: Vec<_> = [1, 2, 8].iter().map(|t| scan_with(dir.path(), *t)).collect();
+    std::fs::set_permissions(&half, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    for (threads, g) in [1, 2, 8].iter().zip(got) {
+        let g = g.unwrap_or_else(|e| panic!("{threads} threads: {e}"));
+        assert_eq!(g.held.iter().collect::<Vec<_>>(), ["half/a.txt", "half/sub"], "{threads} threads");
+        assert_eq!(g.entries.keys().collect::<Vec<_>>(), ["ok.txt"], "{threads} threads");
+        assert!(g.holds("half/sub/b.txt"), "{threads} threads");
+    }
+}
+
+/// Every errno but EACCES still fails the walk: an error the tree's owner
+/// did not choose is no standing condition to publish around. A directory
+/// whose full path is longer than PATH_MAX is one the walk can be handed
+/// deterministically: it is listed by that path, and that fails
+/// ENAMETOOLONG. Built a level at a time through descriptors, as no full
+/// path could be.
+#[test]
+fn an_error_other_than_eacces_still_fails_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "ok.txt", "x");
+    let name = std::ffi::CString::new("n".repeat(200)).unwrap();
+    let root = std::ffi::CString::new(dir.path().to_str().unwrap()).unwrap();
+    let mut fd = unsafe { libc::open(root.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY) };
+    assert!(fd >= 0, "fixture: open the root");
+    for _ in 0..25 {
+        assert_eq!(unsafe { libc::mkdirat(fd, name.as_ptr(), 0o755) }, 0, "fixture: mkdirat");
+        let next = unsafe { libc::openat(fd, name.as_ptr(), libc::O_DIRECTORY | libc::O_RDONLY) };
+        assert!(next >= 0, "fixture: openat");
+        unsafe { libc::close(fd) };
+        fd = next;
+    }
+    unsafe { libc::close(fd) };
+    for threads in [1, 2, 8] {
+        match scan_with(dir.path(), threads) {
+            Err(crate::LeanError::Io(e)) => {
+                assert_eq!(e.raw_os_error(), Some(libc::ENAMETOOLONG), "{threads} threads: {e}")
+            }
+            Err(e) => panic!("{threads} threads: failed, but not on the long path: {e}"),
+            Ok(s) => panic!(
+                "{threads} threads: a walk that could not list a directory returned {} entries, held {:?}",
+                s.entries.len(),
+                s.held
+            ),
         }
     }
 }

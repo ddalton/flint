@@ -801,9 +801,9 @@ impl Syncer {
         // NOT carry the agent's file — `ok` promised "the boundary is in
         // the bucket". It is `partial`, and `report.dropped` names the
         // paths, as it does an upload that published nothing (a transfer
-        // that drifted or was swept).
+        // that drifted or was swept) and a path the syncer may not read.
         let dropped: Vec<String> =
-            report.parked.iter().chain(&report.deferred).cloned().collect();
+            report.parked.iter().chain(&report.deferred).chain(&report.held).cloned().collect();
         // Review 2026-09-18, H10: the installs that CARRIED this declaration
         // are journalled with their CAS, and are not always this barrier —
         // a restart past step 7, an ack write that failed, or an honor that
@@ -961,6 +961,9 @@ pub struct FloorOutcome {
     pub withheld_reason: Option<String>,
     /// A foreign 412 parked at least one path on this tick.
     pub parked: usize,
+    /// Paths this tick's barrier held because the syncer may not read
+    /// them (`BarrierReport::held`).
+    pub held: usize,
     /// Carried out of the barrier only to feed the news ticker.
     observed_etag: Option<String>,
 }
@@ -1131,6 +1134,7 @@ impl Syncer {
             out.deleted = r.deleted.len();
             out.consumed = r.consumed;
             out.parked = r.parked.len();
+            out.held = r.held.len();
             out.observed_etag = r.observed_etag.clone();
             r.observed_seq
         });
@@ -1149,7 +1153,12 @@ impl Syncer {
                 // those paths are not ours to publish at all, and
                 // saying "quiesce-pending" would send an operator
                 // looking for a clock instead of a conflict record.
-                let forced = (out.parked > 0).then_some(super::gauges::Withheld::Parked412);
+                // A held path sends them to the tree's permissions.
+                let forced = if out.parked > 0 {
+                    Some(super::gauges::Withheld::Parked412)
+                } else {
+                    (out.held > 0).then_some(super::gauges::Withheld::Unreadable)
+                };
                 out.withheld_reason = self.write_gauges(forced)?.withheld_reason;
                 Ok(out)
             }
@@ -1227,6 +1236,15 @@ impl Syncer {
                         "drain: not in this boundary — uploads that published nothing {:?} — not \
                          attesting",
                         r.deferred
+                    )));
+                }
+                // Nor one that held a path: what is under it may be the
+                // agent's only copy, and the syncer could not read it.
+                if !r.held.is_empty() {
+                    return Err(LeanError::State(format!(
+                        "drain: not in this boundary — paths the syncer may not read {:?} — not \
+                         attesting",
+                        r.held
                     )));
                 }
         }

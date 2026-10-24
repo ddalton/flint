@@ -243,9 +243,29 @@ covered by the stability guarantee.
   new mode reaches every live tree as well as every checkout. A change
   of mode alone uploads the file again under a new handle, and each
   live tree fetches it again, as for an edit. A file the syncer cannot
-  read after the change (`chmod 000`) fails the barrier the way an
-  edited unreadable file does. Ownership is not published: no syncer
-  could restore it without privilege.
+  read after the change (`chmod 000`) is held, as an edited unreadable
+  file is (next entry). Ownership is not published: no syncer could
+  restore it without privilege.
+
+- **lean: one unreadable directory stopped every publish in its
+  workspace.** The barrier's walk failed on anything the syncer may not
+  read, and so did an upload it could not open. So a `0700` directory
+  made by a process running as a uid other than the workspace's, or a
+  file set to `chmod 000`, kept the whole tree from publishing until it
+  was readable again. Skipping such a path would be worse: a path missing
+  from two scans is published as deleted. It is now held: nothing at or
+  under it is published or deleted, its citation and object stay, and
+  the rest of the tree publishes. A path removed while it was held is,
+  once readable, a first absence, so its delete still waits for a second
+  scan. While anything is held, a `publish` ack is `partial` and
+  `report.dropped` names it, the gauges' `withheld_reason` is
+  `unreadable` (`flint_lean_withheld_reason` 2), the preStop drain does
+  not attest the tree, `sync` leaves it with a `sync-unreadable` record,
+  a narrow keeps it, and each barrier logs the held paths. Every other
+  error still fails the barrier, and so does an unreadable workspace
+  root. Each file a barrier is about to upload is first asked about with
+  one `access(2)` call, so a tick whose only change is a held file stays
+  idle.
 
 - **lean: a live tree applies the mode the document cites.** The barrier's
   consume and `sync` set a file's mode from its object's stamp, and a

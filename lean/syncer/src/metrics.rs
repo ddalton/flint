@@ -47,6 +47,7 @@ fn withheld_code(s: Option<&str>) -> u64 {
     match s {
         None => 0,
         Some("parked-412") => 1,
+        Some("unreadable") => 2,
         Some(_) => 99,
     }
 }
@@ -77,7 +78,7 @@ fn series(g: &Gauges) -> Vec<(&'static str, &'static str, u64)> {
         ),
         (
             "flint_lean_withheld_reason",
-            "why visibility is withheld: 0=none 1=parked-412",
+            "why visibility is withheld: 0=none 1=parked-412 2=unreadable",
             withheld_code(g.withheld_reason.as_deref()),
         ),
         (

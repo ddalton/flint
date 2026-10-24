@@ -1862,11 +1862,11 @@ async fn flint_dir_never_scanned() {
     touch_sentinel(dir.path(), control::REMOTE_SEQ, "{}");
 
     let scanned = super::scan::scan(dir.path()).unwrap();
-    assert!(scanned.contains_key("real.txt"));
+    assert!(scanned.entries.contains_key("real.txt"));
     assert!(
-        !scanned.keys().any(|k| k.starts_with(".flint")),
+        !scanned.entries.keys().any(|k| k.starts_with(".flint")),
         "the scan yielded a control path: {:?}",
-        scanned.keys().collect::<Vec<_>>()
+        scanned.entries.keys().collect::<Vec<_>>()
     );
 
     a.run_barrier().await.unwrap();
@@ -2334,6 +2334,49 @@ async fn a_retried_honour_still_names_a_file_an_earlier_carry_deferred() {
     std::fs::remove_dir_all(&squat).unwrap();
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     assert!(m.entries.contains_key("notes.txt") && !m.entries.contains_key("model.bin"), "fixture: not the deferral");
+
+    std::fs::remove_file(dir.path().join("model.bin")).unwrap();
+    hitl_write(&store, &a.cfg, "model.bin", "the reviewer's model", "reviewer").await.unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, true).await.unwrap().expect("nothing was answered");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["model.bin"].crc64_b64, crc_of("the reviewer's model"), "fixture: the agent's model.bin was published");
+    assert_eq!(ack.status, "partial", "the ack says the declared model.bin is in seq {:?}: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["model.bin".to_string()], "{ack:?}");
+}
+
+/// The carrier's half for a HELD file, as for a deferred one above: the
+/// carrying barrier held the declared file (the syncer may not read it)
+/// and installed the rest, and its ack write failed. By the retry the agent
+/// has removed the file and the UI saved other bytes there, so only the
+/// carrier's `dropped` remembers that the declaration was not carried.
+#[tokio::test]
+async fn a_retried_honour_still_names_a_file_an_earlier_carry_held() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+
+    write(dir.path(), "model.bin", "the agent's model");
+    write(dir.path(), "notes.txt", "n");
+    chmod(dir.path(), "model.bin", 0o000);
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    let squat = dir.path().join(super::CONTROL_DIR).join(control::PUBLISH_ACK);
+    std::fs::create_dir_all(squat.join("occupied")).unwrap();
+    clear_min_interval(&a);
+    let first = a.honor_pending(Verb::Publish, false).await;
+    chmod(dir.path(), "model.bin", 0o644);
+    assert!(first.is_err(), "fixture: the ack write did not fail");
+    std::fs::remove_dir_all(&squat).unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("notes.txt") && !m.entries.contains_key("model.bin"), "fixture: not the hold");
 
     std::fs::remove_file(dir.path().join("model.bin")).unwrap();
     hitl_write(&store, &a.cfg, "model.bin", "the reviewer's model", "reviewer").await.unwrap();
@@ -2855,7 +2898,7 @@ async fn write_file_atomic_refuses_symlink_escape() {
     std::os::unix::fs::symlink(outside.path(), dir.path().join("inputs")).unwrap();
     assert!(dir.path().join("inputs/secret.txt").exists());
     let scanned = super::scan::scan(dir.path()).unwrap();
-    assert!(!scanned.keys().any(|k| k.starts_with("inputs")));
+    assert!(!scanned.entries.keys().any(|k| k.starts_with("inputs")));
 
     // Every workspace write path refuses it.
     assert!(super::barrier::contained_path(dir.path(), "inputs/secret.txt").is_err());
@@ -3372,9 +3415,11 @@ async fn only_a_declared_barrier_confirms_a_first_absence() {
 /// published deletion, and a published deletion DELETES THE OBJECT. It
 /// used to ask `symlink_metadata(...).is_err()`, so EACCES on a parent
 /// directory, EIO, EMFILE or ELOOP all read as "the agent deleted it".
-/// The walk asks the same syscall with `?` and fails closed; two call
-/// sites of one syscall must not have opposite error policies, and the
-/// one that can destroy data is not the one to guess in.
+/// EACCES now HOLDS the path, as the walk holds what it may not read:
+/// neither a delete nor a first absence (it is not back on disk; it is
+/// unseen). Every other errno still fails the barrier, as it fails the
+/// walk. Two call sites of one syscall must not have opposite error
+/// policies, and the one that can destroy data is not the one to guess in.
 #[tokio::test]
 async fn an_unreadable_path_is_not_confirmed_as_deleted() {
     let store = Arc::new(MemoryStore::new());
@@ -3394,30 +3439,40 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
 
     let mut classified = super::scan::Classified::default();
     classified.first_absence.insert("locked/f.txt".into());
+    let mut held = std::collections::BTreeSet::new();
+    let got = a.confirm_absences(&mut classified, &mut held);
+    // Restore so the tempdir can be cleaned up.
+    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
-    let err = a
-        .confirm_absences(&mut classified)
-        .expect_err("an unreadable path must not confirm a deletion");
-    assert!(
-        format!("{err}").contains("refusing to publish a deletion"),
-        "the refusal must say what it refused: {err}"
-    );
+    assert_eq!(got.expect("EACCES holds the path; it does not fail the barrier"), 0);
     assert!(
         classified.deletes.is_empty(),
         "NOTHING may be queued for deletion off an errno that is not NotFound: {:?}",
         classified.deletes
     );
+    assert!(classified.first_absence.is_empty(), "a held path is unseen, not back on disk: {classified:?}");
+    assert_eq!(held.iter().collect::<Vec<_>>(), ["locked/f.txt"]);
 
-    // Restore so the tempdir can be cleaned up.
-    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // Any other errno fails, as it did: ENOTDIR, a path through a file.
+    write(dir.path(), "plain.txt", "a file, not a directory");
+    let mut classified = super::scan::Classified::default();
+    classified.first_absence.insert("plain.txt/f".into());
+    let err = a
+        .confirm_absences(&mut classified, &mut held)
+        .expect_err("ENOTDIR must not confirm a deletion, nor be held");
+    assert!(format!("{err}").contains("refusing to publish a deletion"), "the refusal must say what it refused: {err}");
+    assert!(classified.deletes.is_empty(), "{:?}", classified.deletes);
+    assert_eq!(held.len(), 1, "a non-EACCES errno was held: {held:?}");
 }
 
-/// The walk's half of the same rule: a directory it cannot list FAILS
-/// the scan. It never scans as empty, because `classify` reads a path
-/// missing from two scans as the agent's delete. An app running as a
-/// uid other than the CR's gets here by making a 0700 directory.
+/// The walk's half of the same rule: a directory it may not list is HELD,
+/// with its trailing `/`. It never scans as empty, because `classify`
+/// reads a path missing from two scans as the agent's delete; and it no
+/// longer fails the walk, which stopped every publish in the workspace.
+/// An app running as a uid other than the CR's gets here by making a 0700
+/// directory.
 #[test]
-fn the_walk_fails_closed_on_a_directory_it_cannot_list() {
+fn the_walk_holds_a_directory_it_may_not_list() {
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
         return;
@@ -3430,55 +3485,321 @@ fn the_walk_fails_closed_on_a_directory_it_cannot_list() {
     let got = super::scan::scan(dir.path());
     std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
-    match got {
-        Err(crate::LeanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}"),
-        Err(e) => panic!("the walk failed, but not on the directory it cannot list: {e}"),
-        Ok(s) => panic!("a directory the walk cannot list scanned as {:?}, not as an error", s.keys().collect::<Vec<_>>()),
-    }
+    let s = got.expect("a directory the walk may not list is held, not an error");
+    assert_eq!(s.entries.keys().collect::<Vec<_>>(), ["ok.txt"]);
+    assert_eq!(s.held.iter().collect::<Vec<_>>(), ["locked/"]);
 }
 
-/// End to end, on the cadence path, where nothing re-checks an absence
-/// by lstat: the second scan that misses a path IS the delete. A
-/// published file whose directory turns unreadable survives two
-/// barriers (both fail), cited and in the store. Nothing else publishes
-/// meanwhile — the cost `scan`'s doc names — and once the directory is
-/// readable the next barrier publishes the backlog and deletes nothing.
-#[tokio::test]
-async fn an_unreadable_directory_stops_the_barrier_and_deletes_nothing() {
+/// The root is the exception: a workspace whose root the syncer may not
+/// list could publish nothing, so that is an error naming why.
+#[test]
+fn an_unreadable_root_fails_the_walk() {
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
         return;
     }
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "f.txt", "x");
+    std::fs::set_permissions(dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let got = super::scan::scan(dir.path());
+    std::fs::set_permissions(dir.path(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    match got {
+        Err(crate::LeanError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}"),
+        Err(e) => panic!("the walk failed, but not on the root: {e}"),
+        Ok(s) => panic!("an unreadable root scanned as {} entries, held {:?}", s.entries.len(), s.held),
+    }
+}
+
+/// What a held path covers, and what `prev_scan` records around one. Two
+/// sibling-prefix traps: `d-1` and `d.txt` sort between `d` and `d/`, and
+/// `e/fg` begins with `e/f`. Neither is under a held path.
+#[test]
+fn a_held_path_covers_itself_and_what_is_under_it_and_nothing_beside_it() {
+    let entry = || super::scan::ScanEntry { size: 1, mtime_unix: 1, mtime_nanos: 0, mode: 0o644, seen_nanos: 0 };
+    let mut s = super::scan::Scan::default();
+    s.held.insert("d/".into());
+    s.held.insert("e/f".into());
+    for p in ["d", "d/x", "d/x/y", "e/f", "e/f/g"] {
+        assert!(s.holds(p), "{p} is under a held path");
+    }
+    for p in ["d-1", "d.txt", "dx/y", "e", "e/fg", "e/f.txt", "a.txt"] {
+        assert!(!s.holds(p), "{p} is beside a held path, not under one");
+    }
+    for p in ["a.txt", "d-1", "e/f.txt"] {
+        s.entries.insert(p.into(), entry());
+    }
+    let cited: std::collections::BTreeMap<String, ()> = ["a.txt", "d", "d-1", "d.txt", "d/x", "d/x/y", "e/f", "e/f/g", "e/fg", "z"]
+        .into_iter()
+        .map(|p| (p.to_string(), ()))
+        .collect();
+    assert_eq!(
+        s.present(&cited).collect::<Vec<_>>(),
+        ["a.txt", "d", "d-1", "d/x", "d/x/y", "e/f", "e/f.txt", "e/f/g"],
+        "what the walk saw and the cited paths it held, in order, each once"
+    );
+}
+
+/// End to end, on the cadence path, where nothing re-checks an absence
+/// by lstat: the second scan that misses a path IS the delete. A
+/// published directory that turns unreadable is HELD: its files stay
+/// cited and in the store through every barrier, while the rest of the
+/// tree publishes — an edit, a new file, a delete. A file removed while
+/// the syncer could not see it is, once it can, a FIRST absence: the
+/// two-scan rule still stands between one walk and the object. The floor
+/// tick's gauge names why the tree is not all published.
+#[tokio::test]
+async fn an_unreadable_directory_is_held_and_the_rest_of_the_tree_publishes() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
     let store = Arc::new(MemoryStore::new());
     let dir = tempfile::tempdir().unwrap();
     let mut a = syncer(&store, dir.path()).await;
     assert!(claim_until_held(&mut a, 3).await);
     a.checkout().await.unwrap();
-    write(dir.path(), "ok.txt", "readable");
-    write(dir.path(), "locked/f.txt", "published");
+    for p in ["ok.txt", "gone.txt", "locked/f.txt", "locked/g.txt"] {
+        write(dir.path(), p, "published");
+    }
     let r = a.run_barrier().await.unwrap();
-    assert_eq!(r.uploaded.len(), 2);
+    assert_eq!(r.uploaded.len(), 4);
 
     let locked = dir.path().join("locked");
-    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let lock = |mode: u32| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode)).unwrap();
+    lock(0o000);
+    write(dir.path(), "ok.txt", "edited while locked");
     write(dir.path(), "later.txt", "written while locked");
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
     let r1 = a.run_barrier().await;
     let r2 = a.run_barrier().await;
-    std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // Removed behind the syncer's back, where it cannot look.
+    lock(0o755);
+    std::fs::remove_file(locked.join("g.txt")).unwrap();
+    lock(0o000);
+    let floor = a.floor_tick().await;
+    lock(0o755);
+    let (r1, r2, floor) = (r1.unwrap(), r2.unwrap(), floor.unwrap());
 
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
-    assert!(m.manifest.entries.contains_key("locked/f.txt"), "an unreadable file was cited out: {r1:?} / {r2:?}");
-    assert!(object_at(&store, &a.cfg, "locked/f.txt").await, "an unreadable file's object was deleted");
-    assert!(r1.is_err() && r2.is_err(), "a barrier over an unreadable directory must fail: {r1:?} / {r2:?}");
-    assert!(!m.manifest.entries.contains_key("later.txt"), "a failed barrier published");
-
-    let r3 = a.run_barrier().await.unwrap();
-    assert!(r3.uploaded.contains(&"later.txt".to_string()), "uploaded {:?}", r3.uploaded);
-    assert!(r3.deleted.is_empty(), "deleted {:?}", r3.deleted);
-    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap();
-    for p in ["ok.txt", "locked/f.txt", "later.txt"] {
-        assert!(m.manifest.entries.contains_key(p), "{p} is not cited");
+    for r in [&r1, &r2] {
+        assert_eq!(r.held, ["locked/"], "{r:?}");
     }
+    assert!(r1.uploaded.contains(&"ok.txt".to_string()) && r1.uploaded.contains(&"later.txt".to_string()), "{r1:?}");
+    assert!(r1.deleted.is_empty() && r1.first_absence == ["gone.txt"], "{r1:?}");
+    assert_eq!(r2.deleted, ["gone.txt"], "the rest of the tree's delete did not publish: {r2:?}");
+    assert_eq!(floor.held, 1, "{floor:?}");
+    assert_eq!(floor.withheld_reason.as_deref(), Some("unreadable"), "{floor:?}");
+    assert_eq!(floor.deleted, 0, "{floor:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    for p in ["ok.txt", "later.txt", "locked/f.txt", "locked/g.txt"] {
+        assert!(m.entries.contains_key(p), "{p} is not cited: {:?}", m.entries.keys());
+        assert!(object_at(&store, &a.cfg, p).await, "{p}'s object is gone");
+    }
+    assert!(!m.entries.contains_key("gone.txt"));
+    let prev = a.state.load_baseline().unwrap().prev_scan.iter().cloned().collect::<Vec<_>>();
+    assert!(prev.contains(&"locked/g.txt".to_string()), "an unseen path left prev_scan: {prev:?}");
+
+    // Readable again: g.txt is gone, and its delete waits one scan more.
+    let r4 = a.run_barrier().await.unwrap();
+    assert!(r4.held.is_empty(), "{r4:?}");
+    assert!(r4.deleted.is_empty(), "one walk's miss of a once-held path published a delete: {r4:?}");
+    assert_eq!(r4.first_absence, ["locked/g.txt"], "{r4:?}");
+    let r5 = a.floor_tick().await.unwrap();
+    assert_eq!(r5.deleted, 1, "{r5:?}");
+    assert_eq!(r5.withheld_reason, None, "{r5:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("locked/f.txt") && !m.entries.contains_key("locked/g.txt"), "{:?}", m.entries.keys());
+}
+
+/// A file made unreadable after the barrier asked (`scan::may_read`) and
+/// before it opened the file is held all the same: the upload's open
+/// meets EACCES, and the rest of the tree publishes.
+#[tokio::test]
+async fn a_file_locked_between_the_ask_and_the_open_is_held() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let v1 = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["f.txt"].etag.clone();
+
+    write(dir.path(), "f.txt", "v2, longer");
+    write(dir.path(), "other.txt", "other");
+    let f = dir.path().join("f.txt");
+    let lock = f.clone();
+    super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+        *h.borrow_mut() = Some((
+            "f.txt".into(),
+            "before-upload",
+            Box::new(move || std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap()),
+        ))
+    });
+    let r = a.run_barrier().await;
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+    let r = r.expect("a file locked before its open failed the barrier");
+    assert_eq!(r.held, ["f.txt"], "{r:?}");
+    assert_eq!(r.uploaded, ["other.txt"], "{r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries["f.txt"].etag, v1, "a held file's citation moved");
+
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, ["f.txt"], "readable again, the held edit did not publish: {r:?}");
+}
+
+/// A declared boundary that holds a path is not complete: the ack is
+/// `partial` and names it, and what could be read is in the seq it names.
+#[tokio::test]
+async fn a_publish_that_holds_a_path_is_partial_and_names_it() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "locked/f.txt", "published");
+    a.run_barrier().await.unwrap();
+
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    write(dir.path(), "model.json", "{}");
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    let acks = a.sentinel_tick().await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let acks = acks.unwrap();
+    assert_eq!(acks.len(), 1, "the sentinel was not honored");
+    let ack = &acks[0];
+    assert_eq!(ack.status, "partial", "{ack:?}");
+    assert_eq!(ack.report.dropped, ["locked/"], "{ack:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(ack.seq, Some(m.seq));
+    assert!(m.entries.contains_key("model.json") && m.entries.contains_key("locked/f.txt"), "{:?}", m.entries.keys());
+}
+
+/// The barrier's OWN half: the held directory is the whole declaration, so
+/// the barrier installs nothing and journals no carrier; only its own
+/// report knows the declaration was not carried.
+#[tokio::test]
+async fn an_honour_whose_only_change_is_held_is_partial_with_no_carrier() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    let posture = a.sentinel_preflight().unwrap();
+    a.write_capabilities(&posture).unwrap();
+    a.checkout().await.unwrap();
+    write(dir.path(), "seed.txt", "s");
+    a.floor_tick().await.unwrap();
+    a.floor_tick().await.unwrap();
+
+    write(dir.path(), "locked/model.bin", "the agent's only copy");
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    touch_sentinel(dir.path(), control::PUBLISH, r#"{"nonce":"n-1"}"#);
+    a.poll_sentinels().unwrap();
+    clear_min_interval(&a);
+    let ack = a.honor_pending(Verb::Publish, false).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ack = ack.unwrap().expect("nothing was answered");
+    let carrier = a.state.load_intent().unwrap().carrier;
+    assert!(
+        carrier.as_ref().map_or(true, |c| c.dropped.is_empty()),
+        "fixture: a carrier names the hold, so this does not isolate the barrier's own report: {carrier:?}"
+    );
+    assert_eq!(ack.status, "partial", "the ack says locked/ is in seq {:?}: {ack:?}", ack.seq);
+    assert_eq!(ack.report.dropped, vec!["locked/".to_string()], "{ack:?}");
+}
+
+/// The drain does not attest a tree that holds a path: what is under it
+/// may be the agent's only copy, and an attested drain lets the node
+/// remove the tree. Readable again, the retry publishes it and attests.
+#[tokio::test]
+async fn a_drain_that_holds_a_path_does_not_attest() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "ok.txt", "x");
+    write(dir.path(), "locked/only-copy.txt", "never published");
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let drained = a.drain().await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = drained.expect_err("the drain attested a tree it could not read all of");
+    assert!(format!("{err}").contains("locked/"), "the refusal does not name the held path: {err}");
+
+    a.drain().await.expect("readable again, the retry did not drain");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert!(m.entries.contains_key("locked/only-copy.txt"), "{:?}", m.entries.keys());
+}
+
+/// `sync` neither removes a held path nor forgets it. A peer's delete of a
+/// file the syncer may not see is named (`sync-unreadable`) and left. The
+/// check comes before `exists()`, which answers false for a path it may
+/// not stat: read as "already gone", that dropped the citation from the
+/// baseline, and once readable the scan found an uncited file and
+/// published it again, undoing the peer's delete.
+#[tokio::test]
+async fn sync_leaves_a_held_path_cited_and_in_place() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "locked/f.txt", "published");
+    write(dir.path(), "locked/g.txt", "published");
+    a.run_barrier().await.unwrap();
+    hitl_remove(&store, &a.cfg, "locked/f.txt", "peer").await;
+    hitl_write(&store, &a.cfg, "locked/g.txt", "the peer's edit", "peer").await.unwrap();
+
+    let locked = dir.path().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let r = a.sync().await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let r = r.unwrap();
+    assert_eq!(r.conflicts, ["locked/f.txt", "locked/g.txt"], "{r:?}");
+    assert!(r.deleted.is_empty() && r.applied.is_empty(), "{r:?}");
+    let kinds: Vec<String> = a.state.load_conflicts().unwrap().into_iter().map(|c| c.kind).collect();
+    assert!(
+        kinds.iter().filter(|k| k.starts_with("sync-unreadable")).count() == 2,
+        "the records do not say why: {kinds:?}"
+    );
+    assert!(a.state.load_baseline().unwrap().entries.contains_key("locked/f.txt"), "sync forgot a path it could not see");
+    assert_eq!(read(dir.path(), "locked/f.txt").as_deref(), Some("published"));
+    assert_eq!(read(dir.path(), "locked/g.txt").as_deref(), Some("published"));
+
+    let r = a.sync().await.unwrap();
+    assert_eq!(r.deleted, ["locked/f.txt"], "readable again, the peer's delete was not taken: {r:?}");
+    assert_eq!(r.applied, ["locked/g.txt"], "readable again, the peer's edit was not taken: {r:?}");
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty(), "the peer's delete was undone: {r:?}");
 }
 
 fn mode_at(root: &std::path::Path, rel: &str) -> u32 {
@@ -3573,12 +3894,14 @@ async fn a_chmod_alone_publishes_and_reaches_every_tree() {
 }
 
 /// The price of publishing a mode: it is published by uploading the
-/// bytes again, so a mode that locks the syncer out (`chmod 000`) fails
-/// the barrier, as an edit of an unreadable file always has. Nothing is
-/// published and nothing is lost meanwhile, and the barrier after the
-/// file is readable again publishes the backlog.
+/// bytes again, so a mode that locks the syncer out (`chmod 000`) leaves
+/// it nothing to upload. The file is HELD: its cited version stays, the
+/// rest of the tree publishes, and a tick with nothing else to do stays
+/// idle — it is held at the ask (`scan::may_read`), before the idle
+/// check, so it never reaches the uploads, the claim or a document load.
+/// Back at its old mode, there is nothing to publish.
 #[tokio::test]
-async fn a_chmod_that_locks_the_syncer_out_fails_the_barrier_and_loses_nothing() {
+async fn a_chmod_that_locks_the_syncer_out_is_held_and_loses_nothing() {
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
         return;
@@ -3591,27 +3914,33 @@ async fn a_chmod_that_locks_the_syncer_out_fails_the_barrier_and_loses_nothing()
     write(dir.path(), "f.txt", "published");
     chmod(dir.path(), "f.txt", 0o644);
     // Outside the racy window, so only the mode sends f.txt to the
-    // upload: a racy entry is hashed, and the hash of a locked file fails
-    // the barrier too, mode or no mode.
+    // upload: a racy entry is hashed, and a locked file's hash cannot be
+    // read either, mode or no mode.
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
     std::fs::File::options().write(true).open(dir.path().join("f.txt")).unwrap().set_modified(old).unwrap();
     a.run_barrier().await.unwrap();
     assert!(
         !a.state.load_baseline().unwrap().entries["f.txt"].racy,
-        "the fixture is racy: the hash, not the mode, would fail the barrier"
+        "the fixture is racy: the hash, not the mode, would hold the file"
     );
 
     chmod(dir.path(), "f.txt", 0o000);
     write(dir.path(), "later.txt", "written while locked");
     let r = a.run_barrier().await;
+    let idle = a.run_barrier().await;
     chmod(dir.path(), "f.txt", 0o644);
-    assert!(r.is_err(), "a barrier that cannot read a file it must upload succeeded: {r:?}");
+    let (r, idle) = (r.unwrap(), idle.unwrap());
+    assert_eq!(r.held, ["f.txt"], "{r:?}");
+    assert_eq!(r.uploaded, ["later.txt"], "{r:?}");
     let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
     assert_eq!(m.entries["f.txt"].mode & 0o7777, 0o644, "the locked mode was published");
-    assert!(!m.entries.contains_key("later.txt"), "a failed barrier published");
+    assert!(m.entries.contains_key("later.txt"));
+    assert!(idle.no_change && idle.held == ["f.txt"], "{idle:?}");
+    let steps: Vec<_> = idle.steps.iter().map(|s| s.step).collect();
+    assert!(!steps.contains(&"upload"), "a tick whose only change is held went past the idle check: {steps:?}");
 
     let r = a.run_barrier().await.unwrap();
-    assert_eq!(r.uploaded, vec!["later.txt".to_string()], "the backlog did not publish alone: {r:?}");
+    assert!(r.uploaded.is_empty() && r.held.is_empty(), "{r:?}");
     assert_eq!(read(dir.path(), "f.txt").as_deref(), Some("published"));
 }
 
@@ -3781,7 +4110,7 @@ async fn the_confirmation_never_deletes_a_path_the_walk_merely_missed() {
     classified.first_absence.insert("renamed.txt".into());
     classified.first_absence.insert("truly-gone.txt".into());
 
-    let confirmed = a.confirm_absences(&mut classified).unwrap();
+    let confirmed = a.confirm_absences(&mut classified, &mut Default::default()).unwrap();
     assert_eq!(confirmed, 1);
     assert_eq!(
         classified.deletes.iter().cloned().collect::<Vec<_>>(),
@@ -8022,6 +8351,31 @@ async fn a_narrow_unwatches_without_publishing_a_single_deletion() {
     // The bucket still holds everything, and still CITES everything.
     let m = manifest::load(store.as_ref(), &b.cfg).await.unwrap().unwrap().manifest;
     assert_eq!(m.entries.len(), 8, "a narrow published a deletion: {:?}", m.entries.keys());
+}
+
+/// A narrow refuses to drop a path it may not read, as it refuses a dirty
+/// one: what is there is unknown and may be the agent's. The door is the
+/// strict posture (a crash's replay keeps such paths instead), so the old
+/// scope stands, nothing is uncited and nothing is unlinked.
+#[tokio::test]
+async fn a_narrow_refuses_to_drop_what_it_may_not_read() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let _keep = scoped_fixture(&store).await;
+    let (dir, mut b) = rescope_fixture(&store).await;
+    let outputs = dir.path().join("outputs");
+    std::fs::set_permissions(&outputs, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let r = b.rescope(Some(vec!["inputs".into()])).await;
+    std::fs::set_permissions(&outputs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = r.expect_err("a narrow dropped paths it could not see");
+    assert!(format!("{err}").contains("outputs/big-0.bin") && format!("{err}").contains("may not read"), "{err}");
+    assert_eq!(b.state.load_scope().unwrap(), None, "the old scope did not stand");
+    assert_eq!(b.state.load_baseline().unwrap().entries.len(), 8, "a refused narrow uncited something");
+    assert!(read(dir.path(), "outputs/big-0.bin").is_some(), "a refused narrow unlinked a file");
 }
 
 /// ANTI-VACUITY for the leg above, and the design's first mutation

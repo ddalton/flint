@@ -154,8 +154,10 @@ JSON, not written as `[]`.
   finished. Or another writer deleted a file of yours after your
   boundary published it, and before this answer was written (the
   syncer restarted, or its first answer failed): the file is still in
-  your tree, and leaves it at the next boundary. Treat it as a failure
-  for those paths and touch again.
+  your tree, and leaves it at the next boundary. Or the syncer may not
+  read it, and holds it (see "What gets published"): a directory is
+  named with its trailing `/`. Treat it as a failure for those paths
+  and touch again.
 - `boundary: "sentinel-deferred"` — your touch was honoured by the
   cadence tick rather than at once: it arrived inside
   `sentinel_min_interval_secs` of the previous boundary, or the hourly
@@ -289,11 +291,23 @@ yours.
   executable). Symlinks are skipped and never published. Empty
   directories are not tracked: a fresh checkout will not have them.
   Sockets, FIFOs and devices are ignored.
-- **A file has changed if its size or its mtime differs** from the last
-  boundary (mtime to the nanosecond). So never preserve or restore
+- **A file has changed if its size, its mtime or its mode bits differ**
+  from the last boundary (mtime to the nanosecond). So never preserve or restore
   timestamps after editing (`cp -p`, `touch -d`, `rsync -t`): a rewrite
   to the same size that keeps the old mtime is invisible until the file
   changes again. Plain editors and `cp` are fine.
+- **What the syncer may not read is held: neither published nor
+  deleted.** The syncer runs as the workspace's uid. A file it may not
+  read (`chmod 000`, or a file another uid owns with no read bit for
+  it) or a directory it may not list (a `0700` directory made by a
+  process running as another uid) is held: nothing at or under it is
+  published or deleted, the bucket keeps its last published version,
+  and the rest of the tree publishes as usual. While anything is held,
+  a `publish` ack is `partial` and `report.dropped` names it,
+  `gauges.json` says `withheld_reason: "unreadable"`, `sync` leaves it
+  as it is (a `sync-unreadable` record), and the syncer's final
+  boundary when the pod stops does not attest the tree. Make it
+  readable to the workspace's uid and the next boundary publishes it.
 - **A delete is published** once the path is absent from two consecutive
   scans, and a declared boundary (`publish`) takes the second look at
   once: `rm` then `publish` deletes it in the bucket.
@@ -326,6 +340,8 @@ Do not:
 - touch sentinels in a loop, or expect a boundary faster than
   `sentinel_min_interval_secs`;
 - preserve timestamps when copying edited files into the tree;
+- make a file or directory the workspace's uid may not read: it is
+  held, not published;
 - rely on symlinks or empty directories surviving a checkout;
 - expect anything you write to be published when `access` is `"read"`;
 - treat an ack as proof for anyone but yourself: acks are files any

@@ -1072,8 +1072,9 @@ impl Syncer {
         let dirty = self.dirty_among(&leaving)?;
         if !dirty.is_empty() {
             return Err(LeanError::State(format!(
-                "these paths would leave the scope but have unpublished local changes: {:?} — \
-                 publish or discard them first",
+                "these paths would leave the scope but have unpublished local changes, or the \
+                 syncer may not read them: {:?} — publish or discard them, or make them readable, \
+                 first",
                 dirty
             )));
         }
@@ -1119,7 +1120,11 @@ impl Syncer {
         Ok(paths
             .iter()
             .filter(|p| {
-                c.uploads.contains(*p) || c.deletes.contains(*p) || c.first_absence.contains(*p)
+                c.uploads.contains(*p)
+                    || c.deletes.contains(*p)
+                    || c.first_absence.contains(*p)
+                    // Unseen: kept, as a dirty path is.
+                    || scanned.holds(p)
             })
             .cloned()
             .collect())

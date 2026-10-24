@@ -918,10 +918,13 @@ scans and checkout's rescan all use it.
 **What it returns is what the one-thread walk returned**: the same entries
 under the same exclusions (the state and control directories at the root
 only, the syncer's temporaries at any depth, symlinks and non-regular
-files skipped), with the same size, mtime and mode. A directory any worker
-cannot list fails the whole walk, as before (flint-05's fail-closed rule,
-`c24beeb7`): the first error is kept in the queue, the other workers stop
-taking directories, and the walk returns it.
+files skipped), with the same size, mtime and mode. Any error a worker
+meets fails the whole walk, as before: the first is kept in the queue, the
+other workers stop taking directories, and the walk returns it. The one
+exception came after E: a path the syncer may not read (EACCES) is held,
+not failed (`Scan::held`, the same set at any thread count), so one
+unreadable directory no longer stops every publish (c24beeb7 had named
+that price).
 
 **Found on the way: two names for one path.** The walk turns a `\` in a
 name into `/`, so on Linux a file named `a\b` and the file `b` in
