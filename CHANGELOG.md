@@ -218,6 +218,17 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **lean: re-verifying the files a checkout finds already in the tree no
+  longer allocates 1 MiB per file.** A checkout resumed after it was
+  interrupted, and a scope widen that finds its files already present,
+  check each file's CRC-64 against the manifest before adopting it. Each
+  check allocated and zeroed a fresh 1 MiB read buffer, even for an
+  8 KiB file. The buffer is now the file's size, at most 1 MiB. The
+  result of the check is unchanged. Measured on the shipped build (musl
+  + mimalloc), warm page cache: re-verifying 200k files of 8 KiB took
+  1.24 s instead of 4.26 s (6.2 µs a file instead of 21.3, nearly all of
+  it user CPU); 300 MiB files are unchanged. About 0.15 s saved on a
+  10,000-file workspace's resume.
 - **lean gateway docs: a boundary request is not a one-second door.**
   `lean/gateway/README.md` said a syncer honours `request_boundary` "at
   its next poll (about a second)". A syncer reads the request at the

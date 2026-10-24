@@ -256,6 +256,15 @@ async fn fetch_ranged(
     Ok(Some(bytes))
 }
 
+/// A read buffer for streaming a file of `size` bytes: the file's size,
+/// at least one byte, at most 1 MiB. A fixed 1 MiB, zeroed and faulted
+/// in afresh for every file, was most of the CPU of re-verifying a tree
+/// of small files. The size only chunks the reads: the loop reads to the
+/// end whatever the file does meanwhile.
+fn read_buf_len(size: u64) -> usize {
+    size.clamp(1, 1 << 20) as usize
+}
+
 /// CRC-64/NVME of a local file, in the same base64 form the manifest
 /// carries. Streamed: a resumed checkout may be verifying a 20 GiB
 /// workspace and must not hold it in memory.
@@ -263,7 +272,7 @@ fn local_crc64_b64(path: &std::path::Path) -> Option<String> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).ok()?;
     let mut h = flint_store::Crc64Nvme::new();
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; read_buf_len(f.metadata().ok()?.len())];
     loop {
         let n = f.read(&mut buf).ok()?;
         if n == 0 {
