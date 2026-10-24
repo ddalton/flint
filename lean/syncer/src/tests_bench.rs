@@ -29,6 +29,8 @@
 //!   commit — from the same binary. The default arm is the shipped config.
 //! - `FLINT_BENCH_SCAN_THREADS`: the threads the scan walks with (lever E;
 //!   1 = one worker). Unset, the shipped default.
+//! - `walk_cost_alone`: the walk by itself, `FLINT_BENCH_WALKS` times, with
+//!   the user and system CPU each walk took.
 
 use super::*;
 use flint_store::memory::MemoryStore;
@@ -83,6 +85,17 @@ fn bench_arm() -> &'static str {
     }
 }
 
+/// The walk's thread count (`FLINT_BENCH_SCAN_THREADS`), if set. A value
+/// that is not a count would walk at the default and time as an arm it
+/// is not.
+fn bench_scan_threads() -> Option<usize> {
+    let v = std::env::var("FLINT_BENCH_SCAN_THREADS").ok()?;
+    match v.parse() {
+        Ok(n) if n >= 1 => Some(n),
+        _ => panic!("FLINT_BENCH_SCAN_THREADS={v}: not a thread count"),
+    }
+}
+
 /// A syncer with the shipped configuration, under `prefix`.
 fn bench_syncer(store: &Arc<dyn ObjectStore>, root: &std::path::Path, prefix: &str) -> Syncer {
     let mut cfg = LeanConfig::new(prefix, root);
@@ -101,7 +114,7 @@ fn bench_syncer(store: &Arc<dyn ObjectStore>, root: &std::path::Path, prefix: &s
         cfg.racy_wait_min = 0;
     }
     // Lever E's arms from one binary: the walk's thread count.
-    if let Some(n) = std::env::var("FLINT_BENCH_SCAN_THREADS").ok().and_then(|v| v.parse().ok()) {
+    if let Some(n) = bench_scan_threads() {
         cfg.scan_threads = n;
     }
     let state = super::state::SyncerState::open(cfg.state_dir()).unwrap();
@@ -162,6 +175,54 @@ async fn timed(sc: &mut Syncer, ops: &mut Ops, n: usize, store: &str, label: &st
     r
 }
 
+/// The walk alone, for profiling it (lever E): `FLINT_BENCH_N` files, a
+/// thousand a directory, walked `FLINT_BENCH_WALKS` times (default 5) at
+/// `FLINT_BENCH_SCAN_THREADS`, each walk's wall time with the user and
+/// system CPU it took. Where a libc spends the walk's time shows as user
+/// time (its wrappers, its string routines) or system time (the syscalls
+/// it issues). With `FLINT_BENCH_WALK_DIR` the tree is built there once
+/// and walked again by later runs, so a profiler or `strace` attached to a
+/// later run sees the walk and not the build.
+#[test]
+#[ignore]
+fn walk_cost_alone() {
+    let n: usize = std::env::var("FLINT_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let walks: usize = std::env::var("FLINT_BENCH_WALKS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+    let threads = bench_scan_threads().unwrap_or_else(super::scan::default_threads);
+    let tmp = tempfile::tempdir().unwrap();
+    let root = match std::env::var_os("FLINT_BENCH_WALK_DIR") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => tmp.path().to_path_buf(),
+    };
+    if std::fs::read_dir(&root).map_or(true, |mut d| d.next().is_none()) {
+        for i in 0..n {
+            put(&root, i, "x");
+        }
+        unsafe { libc::sync() };
+        println!("WALK n={n} built {}", root.display());
+    }
+    // User and system CPU of this process so far, in microseconds.
+    let cpu = || {
+        let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r) };
+        let us = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
+        (us(r.ru_utime), us(r.ru_stime))
+    };
+    for k in 0..walks {
+        let (u0, s0) = cpu();
+        let t = Instant::now();
+        let got = super::scan::scan_with(&root, threads).unwrap();
+        let ms = t.elapsed().as_millis();
+        let (u1, s1) = cpu();
+        assert_eq!((got.entries.len(), got.held.len()), (n, 0));
+        println!(
+            "WALK n={n} threads={threads} walk={k} ms={ms} user_ms={} sys_ms={}",
+            (u1 - u0) / 1000,
+            (s1 - s0) / 1000
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn barrier_cost_against_workspace_size() {
@@ -204,7 +265,7 @@ async fn barrier_cost_against_workspace_size() {
     if let Some(m) = mem.as_ref().filter(|_| delay > 0) {
         m.inject_request_delay_ms(delay);
     }
-    println!("BENCH n={n} arm={} delay_ms={delay}", bench_arm());
+    println!("BENCH n={n} arm={} delay_ms={delay} scan_threads={}", bench_arm(), b.cfg.scan_threads);
     // How many entries the first scan must hash (latency plan §17).
     let racy = |b: &Syncer| b.state.load_baseline().map(|x| x.entries.values().filter(|e| e.racy).count()).unwrap_or(0);
     println!("BENCH n={n} racy_after_checkout={}", racy(&b));

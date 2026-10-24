@@ -1023,8 +1023,8 @@ malloc: `flint-sync` sets mimalloc as its global allocator in
 bench of this plan ran, never had it (found by flint-e4, 2026-10-23). The
 same three arms as first built (`f974132a`), as shipped: static musl
 with mimalloc, the test binary given the syncer's allocator by one
-`lib.rs` line in the bench's copies only (flint-e4 commits it on G2's
-branch). Both binaries were
+`lib.rs` line in the bench's copies only (since committed by flint-e4,
+`5a516e83`, so every test binary now runs it). Both binaries were
 checked static, and mimalloc reports its start in both; the battery
 passes on that build, 373. 200k three repetitions, 1M one run. Logs in
 `/mnt/nvme/e-musl/`.
