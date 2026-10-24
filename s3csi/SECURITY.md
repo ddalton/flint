@@ -251,7 +251,13 @@ operator listed (2026-10-05, §4.15).
    overrides the CR's `spec.uid`** (as built; the design doc §3.6 said the
    opposite order and is corrected). It is presentation inside the pod's
    own mount and the class key for sharing, not a grant; `--uid 0` reaches
-   mount-s3 while the worker process maps 0 to 65534. **For LEAN the CR
+   mount-s3 while the worker process maps 0 to 65534. Modes are as fixed
+   as the owner: mount-s3 1.24.0 shows `--file-mode`/`--dir-mode` (0644 and
+   0755 by default) and ignores the mode and owner in every `setattr`,
+   create and mkdir, refusing `chmod`/`chown`/`utime` on an existing file
+   with EPERM. So a pod cannot make a file private inside the mount:
+   `chmod 600` fails, and every process in the pod sees the mount's file
+   mode (0644 unless the CR set another). **For LEAN the CR
    decides** (closed 2026-10-24): the syncer runs as the uid, and the
    tree and its credential files are chowned to it, so a
    pod's `chert.us/uid`/`chert.us/gid` may only restate the CR's

@@ -55,6 +55,20 @@ spec:
             sharing it. Writes are sequential writes to whole objects —
             no rename, no append, no in-place modification, at any
             setting. A pod that needs those wants flint-lean.
+
+            Ownership and modes are fixed when the mount is made, and
+            the bucket stores neither. Every file and directory shows
+            the mount's owner (see uid) and mount-s3's modes: 0644 for
+            files and 0755 for directories, unless mountOptions passes
+            --file-mode or --dir-mode. chmod, chown and chgrp on an
+            existing file or directory fail with EPERM ("Operation not
+            permitted"); on a file the pod is still writing they
+            succeed and change nothing, so a file created 0755 still
+            shows 0644. touch fails the same way on an existing file:
+            times can be set only on a file still being written.
+            Extended attributes are not supported. So chmod +x cannot
+            make a script executable; only --file-mode can, and then
+            for every file in the mount.
           properties:
             spec:
               type: object
@@ -149,7 +163,8 @@ spec:
                     as. A mount owned by a uid the workload does not
                     have is one it can read and cannot write — EACCES
                     on the first create, which looks like a bucket
-                    policy problem.
+                    policy problem. chown cannot change it afterwards
+                    (EPERM), and the bucket does not record it.
                   format: int64
                 gid:
                   type: integer
@@ -165,6 +180,9 @@ spec:
                     Extra mount-s3 arguments, appended verbatim as ARGV
                     (never through a shell). A flag and its value are
                     two entries: ["--metadata-ttl", "60"].
+                    ["--file-mode", "0755"] and ["--dir-mode", "0775"]
+                    are the only way to change the modes the mount shows
+                    (default 0644 and 0755): chmod is refused.
                   items:
                     type: string
                 cache:

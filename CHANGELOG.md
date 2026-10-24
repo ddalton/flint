@@ -141,6 +141,18 @@ covered by the stability guarantee.
   start of its next barrier, which is its next cadence tick (`floorSecs`,
   60 s by default) unless its agent publishes first. The one-second poll
   reads only the agent's local `.flint/` files. The README now says so.
+- **passthrough docs: chmod, chown and touch were undocumented.** They
+  are refused. mount-s3 1.24.0 shows every file with the mount's owner
+  and its `--file-mode`/`--dir-mode` (0644 and 0755 by default). It
+  ignores the mode and owner in every `setattr`, create and mkdir, and
+  refuses `chmod`, `chown`, `chgrp` and `touch` on an existing file
+  with EPERM; on a file still being written they succeed and change
+  nothing. The bucket stores neither owner nor mode. So `chmod +x`
+  cannot make a script executable; only `--file-mode` in the CR's
+  `mountOptions` can, and then for every file. The FlintPassthroughMount
+  CRD (top, `uid`, `mountOptions`), both charts' NOTES and
+  `s3csi/SECURITY.md` now say so. Read from mount-s3 1.24.0's source and
+  semantics doc; not yet drilled on a flint mount.
 
 - **lean: a `chmod` on its own is published.** The manifest cites each
   file's mode and checkout restores it, but the barrier's scan compared

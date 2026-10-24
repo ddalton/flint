@@ -32,3 +32,12 @@ Then give a pod the mount as ONE volume:
 A pod naming a CR that does not exist, or whose ServiceAccount is not a
 consumer, stays ContainerCreating with a FailedMount event that names
 the reason.
+
+OWNERSHIP AND MODES ARE FIXED AT MOUNT, and the bucket stores neither.
+Every file shows the mount's owner (the volume's chert.us/uid, else
+spec.uid, else 65534) and mount-s3's modes: 0644 for files, 0755 for
+directories, unless spec.mountOptions passes --file-mode/--dir-mode.
+chmod, chown and chgrp on an existing file fail with EPERM; on a file
+still being written they succeed and change nothing. touch fails on an
+existing file the same way. So chmod +x cannot make a script
+executable: only --file-mode can, and then for every file.

@@ -19,6 +19,20 @@
 //! A pod that wants `git`, `pip install` or sqlite wants flint-lean,
 //! whose publish boundary is the thing that makes those safe.
 //!
+//! OWNERSHIP AND MODES ARE MOUNT-TIME CONSTANTS, and the bucket stores
+//! neither. mount-s3 (1.24.0, `Dockerfile.passthrough`) reports
+//! `--uid`/`--gid` and `--file-mode`/`--dir-mode` (0644/0755 unless
+//! `mountOptions` sets them) for every inode. Its FUSE `setattr` drops the
+//! mode, uid and gid it is handed (`mountpoint-s3-fs/src/fuse.rs`), and
+//! `create`/`mkdir` drop the requested mode. Any `setattr` on an inode that
+//! is not being written is EPERM (`SetAttrNotPermittedOnRemoteInode`). So
+//! `chmod`, `chown` and `touch` on an existing file fail with EPERM, and on
+//! a file still being written they succeed without effect, times aside.
+//! The kernel enforces the reported modes (`default_permissions`). The CRD
+//! description and the chart NOTES say this to users; lean, which restores
+//! mode bits from its manifest, is the front end for a tree whose modes
+//! matter.
+//!
 //! The type is plain serde over the CR's `spec` object (the node plugin
 //! fetches the CR as a `DynamicObject`), so the CRD schema in
 //! `flint-passthrough-chart/crds/` is the single source of truth for
