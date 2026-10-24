@@ -840,7 +840,7 @@ def plate_06():
     s.text(48, 494, "drilled: 12 falsifiers green (EC2 2026-09-04, rights on Cilium 2026-09-05) · 10 GiB and 40 GiB pushes on real S3 · the takeover window closed against a real challenger", "t4b")
     s.text(48, 514, "open: a pack's parts upload one at a time · a full repack every 24 pushes re-uploads the repository · a roll mid-push costs that push · agents in another cluster are not drilled", "t4")
     s.box(M, 542, W - 2 * M, 44, None, "warn")
-    s.text(48, 569, "nothing in-tree terminates TLS — the token rides two cleartext hops; X-Remote-User is a NetworkPolicy the operator renders only when told where the door runs; the server runs as root", "t4b c-red")
+    s.text(48, 569, "nothing in-tree terminates TLS — the token rides two cleartext hops; X-Remote-User is a NetworkPolicy the operator renders only when told where the door runs", "t4b c-red")
     s.legend(M + 4, 618, [("data", "data path"), ("ctl", "control"), ("red", "hazard / trust boundary")])
     s.h = 642
     return s
@@ -932,7 +932,7 @@ def plate_08():
         ("forge", "flint-forge — one door, one pod per repository",
          ("the HOME cluster — install here", ["flint-forge-operator and the FlintRepo CRD; per repository, the Deployment, headless Service, ConfigMap and — when door.namespace is set — a NetworkPolicy it renders; the door: door.deploy=true, or a lite gateway that has the git arm", ("b", "Agents in this cluster need two lines of pod spec and stock git.")]),
          ("another cluster — an identity problem, not an install", ["Nothing of flint's is in the data path, but the door proves a token against ITS apiserver, so an agent elsewhere carries nothing it can verify. The bucket is a rendezvous for READERS only: a dumb clone works with the server down; a second server is fenced into a straggler that exits.", ("b", "Cross-cluster agents fall back to the human bearer path. Not drilled.")]),
-         ("what it costs you", ["One pod per repository in the data path — egress binds before CPU on a clone storm, and the lever (bundles from S3) needs the CLIENT to opt in. The server runs as root in both images."])),
+         ("what it costs you", ["One pod per repository in the data path — egress binds before CPU on a clone storm, and the lever (bundles from S3) needs the CLIENT to opt in."])),
     ]
     for i, (fe, title, home, cons, cost) in enumerate(cols):
         x = col_x(i)
@@ -955,7 +955,7 @@ def plate_08():
         ("pass", "flint-passthrough — the prefix, as mounted", False,
          ["The pod has whatever the mount has: the prefix in the CR, at the CR's readOnly setting, with keys that are short-lived, scoped, and never in the pod's env. The tightest of the four, for a dull reason: there is nothing else there to take.", ("b", "Scope the CR and you have scoped the breach; readOnly: true is a real control. The residual is the one uid: pod-level isolation is user-level isolation.")]),
         ("forge", "flint-forge — a ServiceAccount's pushes", False,
-         ["No bucket credential of any kind — those sit on the syncer container of the server pod — and no privilege: no sidecar, no /dev/fuse, no webhook. What it gains is the pod's projected token: push as that ServiceAccount to repositories listing it, bounded by policy to agentPattern branches and refs/for proposals. Revocation is pod deletion or SA rotation, felt within the ≤ 60 s review cache.", ("b", "Not smaller: a shared ServiceAccount reaches every sibling's agent/* branch, and the server pod runs as root.")]),
+         ["No bucket credential of any kind — those sit on the syncer container of the server pod — and no privilege: no sidecar, no /dev/fuse, no webhook. What it gains is the pod's projected token: push as that ServiceAccount to repositories listing it, bounded by policy to agentPattern branches and refs/for proposals. Revocation is pod deletion or SA rotation, felt within the ≤ 60 s review cache.", ("b", "Not smaller: a shared ServiceAccount reaches every sibling's agent/* branch.")]),
     ]
     cw = (W - 2 * M - 44 - 3 * GAP) / 4
     for i, (fe, head, warn, items) in enumerate(cards):
@@ -1051,7 +1051,7 @@ def plate_10():
          [[("r", "The whole share, as anyone."), "It has the mount, asserts any uid, and the permission check logs by default. Not the bucket — the hub holds that credential. Nothing per-client to revoke; containment is the network boundary."],
           [("b", "Its own workspace, and nothing that outlives it."), "No S3 credential in the agent container in either deployment mode; the syncer holds it, unprivileged. Revocation is killing the token or the pod. Ceiling: a deposed writer's uncited versions remain readable by a raw key."],
           [("b", "The prefix, as mounted."), "Short-lived scoped keys it never sees, at the CR's readOnly setting; no sidecar, no privilege. Scope the CR and you have scoped the breach; the residual is the single uid."],
-          [("b", "Its ServiceAccount's push rights."), "No bucket credential — they land on the syncer container only — and no privilege. It can push as that SA to repositories listing it, within policy; revoked by pod deletion or SA rotation within the review cache. Ceiling: a shared SA reaches every sibling's agent/* branch, and the server runs as root."]]),
+          [("b", "Its ServiceAccount's push rights."), "No bucket credential — they land on the syncer container only — and no privilege. It can push as that SA to repositories listing it, within policy; revoked by pod deletion or SA rotation within the review cache. Ceiling: a shared SA reaches every sibling's agent/* branch."]]),
         ("Does it fail closed?", "secure defaults, refusal over silent degradation",
          [[("r", "No, by default."), "security.enforcePermissions is false — evaluate, log, allow — and even enforced the hub holds CAP_DAC_OVERRIDE. SECINFO now advertises AUTH_SYS first and AUTH_NONE last, pinned by a test, so a stock mount negotiates sec=sys."],
           [("b", "Detection becomes refusal."), "A barrier that lost the publish fence mid-commit installs nothing and is retried, never acked; the plugin refuses to clean up a published tree; the chart refuses to render on credential misconfig; the drain refuses to attest a boundary that left a path parked."],
@@ -1371,7 +1371,7 @@ def portrait_p6():
         y = s.para(24, y, t, 592) + 2
     s.text(24, y + 6, "A crash before step 6 fails every push in the batch at the client; the restart restores from the snapshot.", "t4b")
     s.card(8, 292, 306, 136, "Idle, storm, export", ["one idle rung to replicas 0; the door holds a wake up to 180 s. Clone bundles and LFS are presigned, client-to-store. The export publishes main as a lean workspace that lean and passthrough readers mount with no git."], fe, lh=13)
-    s.card(326, 292, 306, 136, "Honest edges", ["nothing in-tree terminates TLS: the token rides two cleartext hops; the X-Remote-User boundary is an opt-in NetworkPolicy; the built idle clock counts pushes only; the server runs as root. Twelve falsifiers went green, eleven on EC2 and the twelfth on Cilium; agents in another cluster are not drilled."], None, "warn", lh=13)
+    s.card(326, 292, 306, 136, "Honest edges", ["nothing in-tree terminates TLS: the token rides two cleartext hops; the X-Remote-User boundary is an opt-in NetworkPolicy; the built idle clock counts pushes only. Twelve falsifiers went green, eleven on EC2 and the twelfth on Cilium; agents in another cluster are not drilled."], None, "warn", lh=13)
     return s
 
 

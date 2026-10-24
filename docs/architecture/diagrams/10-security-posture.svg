@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1050" role="img"
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1035" role="img"
      aria-label="The security posture of the four front ends across seven questions: how a writer proves who it is, what protects the wire, what a credential-less peer can do, what keeps tenants apart, whether two sessions on one project can hold different rights, what an attacker who owns an agent pod gains, and whether the posture fails closed under operator error. flint-lite's port 2049 authenticates nobody and its boundary is the network; flint-lean and flint-passthrough prove the pod's ServiceAccount to a broker and hand out short-lived scoped keys; flint-forge proves the same ServiceAccount at a door and rides two cleartext hops inside the cluster.">
 <style>
   text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#0f172a}
@@ -189,8 +189,8 @@
 <text class="t4b c-red" x="1254" y="668">Until a branches block exists, every consumer may</text>
 <text class="t4b c-red" x="1254" y="683">push.</text>
 <line class="hair" x1="24" y1="702" x2="1576" y2="702"/>
-<rect x="24" y="702" width="220" height="131" rx="0" class="lbl"/>
-<rect x="244" y="702" width="1332" height="131" rx="0" class="rowb"/>
+<rect x="24" y="702" width="220" height="116" rx="0" class="lbl"/>
+<rect x="244" y="702" width="1332" height="116" rx="0" class="rowb"/>
 <text class="t2" x="38" y="724">What an owned agent pod gains</text>
 <text class="t4" x="38" y="742">and how fast the gain is revoked</text>
 <text class="t4b c-red" x="258" y="724">The whole share, as anyone.</text>
@@ -213,53 +213,52 @@
 <text class="t4" x="1254" y="754">only — and no privilege. It can push as that SA to</text>
 <text class="t4" x="1254" y="769">repositories listing it, within policy; revoked by pod deletion</text>
 <text class="t4" x="1254" y="784">or SA rotation within the review cache. Ceiling: a shared SA</text>
-<text class="t4" x="1254" y="799">reaches every sibling's agent/* branch, and the server runs</text>
-<text class="t4" x="1254" y="814">as root.</text>
-<line class="hair" x1="24" y1="833" x2="1576" y2="833"/>
-<rect x="24" y="833" width="220" height="131" rx="0" class="lbl"/>
-<text class="t2" x="38" y="855">Does it fail closed?</text>
-<text class="t4" x="38" y="873">secure defaults, refusal over silent</text>
-<text class="t4" x="38" y="888">degradation</text>
-<text class="t4b c-red" x="258" y="855">No, by default.</text>
-<text class="t4" x="258" y="870">security.enforcePermissions is false — evaluate, log, allow</text>
-<text class="t4" x="258" y="885">— and even enforced the hub holds CAP_DAC_OVERRIDE.</text>
-<text class="t4" x="258" y="900">SECINFO now advertises AUTH_SYS first and</text>
-<text class="t4" x="258" y="915">AUTH_NONE last, pinned by a test, so a stock mount</text>
-<text class="t4" x="258" y="930">negotiates sec=sys.</text>
-<text class="t4b" x="590" y="855">Detection becomes refusal.</text>
-<text class="t4" x="590" y="870">A barrier that lost the publish fence mid-commit installs</text>
-<text class="t4" x="590" y="885">nothing and is retried, never acked; the plugin refuses to</text>
-<text class="t4" x="590" y="900">clean up a published tree; the chart refuses to render on</text>
-<text class="t4" x="590" y="915">credential misconfig; the drain refuses to attest a boundary</text>
-<text class="t4" x="590" y="930">that left a path parked.</text>
-<text class="t4b" x="922" y="855">Deny is the default.</text>
-<text class="t4" x="922" y="870">consumers absent means deny; the</text>
-<text class="t4" x="922" y="885">ValidatingAdmissionPolicy — not the namespace label —</text>
-<text class="t4" x="922" y="900">fences the workers namespace to the plugin's own node; a</text>
-<text class="t4" x="922" y="915">dead mounter strands the pod on ENOTCONN rather than</text>
-<text class="t4" x="922" y="930">serving stale bytes.</text>
-<text class="t4b" x="1254" y="855">Closed where it counts, open on two defaults.</text>
-<text class="t4" x="1254" y="870">An unparseable policy refuses; a MISSING pre-receive does</text>
-<text class="t4" x="1254" y="885">not open the repository; a snapshot naming a missing pack</text>
-<text class="t4" x="1254" y="900">refuses to serve.</text>
-<text class="t4b c-red" x="1254" y="915">No door.namespace renders no NetworkPolicy, and an</text>
-<text class="t4b c-red" x="1254" y="930">absent branches block is permissive: both documented,</text>
-<text class="t4b c-red" x="1254" y="945">neither refuses.</text>
-<line class="hair" x1="24" y1="964" x2="1576" y2="964"/>
-<rect x="24" y="62" width="1552" height="902" rx="0" class="frame"/>
-<line class="hair" x1="576" y1="62" x2="576" y2="964"/>
-<line class="hair" x1="908" y1="62" x2="908" y2="964"/>
-<line class="hair" x1="1240" y1="62" x2="1240" y2="964"/>
-<text class="t4" x="24" y="990">Read it down a column. The identity chain lean and passthrough share is the strongest thing on the page, and forge borrows its shape at the door; the hub's is the weakest, and its boundary is drawn with the network. Every cell is the deck's own claim, made on the pages before this one, or the approach</text>
-<text class="t4" x="24" y="1005">radar's verified Security cell.</text>
-<rect x="28" y="1023" width="14" height="14" rx="3" class="f-lite"/>
-<text class="t4" x="48" y="1034">flint-lite</text>
-<rect x="110" y="1023" width="14" height="14" rx="3" class="f-lean"/>
-<text class="t4" x="130" y="1034">flint-lean</text>
-<rect x="197" y="1023" width="14" height="14" rx="3" class="f-pass"/>
-<text class="t4" x="217" y="1034">flint-passthrough</text>
-<rect x="324" y="1023" width="14" height="14" rx="3" class="f-forge"/>
-<text class="t4" x="344" y="1034">flint-forge</text>
-<rect x="416" y="1023" width="5" height="14" rx="2" class="f-red"/>
-<text class="t4" x="428" y="1034">hazard / trust boundary</text>
+<text class="t4" x="1254" y="799">reaches every sibling's agent/* branch.</text>
+<line class="hair" x1="24" y1="818" x2="1576" y2="818"/>
+<rect x="24" y="818" width="220" height="131" rx="0" class="lbl"/>
+<text class="t2" x="38" y="840">Does it fail closed?</text>
+<text class="t4" x="38" y="858">secure defaults, refusal over silent</text>
+<text class="t4" x="38" y="873">degradation</text>
+<text class="t4b c-red" x="258" y="840">No, by default.</text>
+<text class="t4" x="258" y="855">security.enforcePermissions is false — evaluate, log, allow</text>
+<text class="t4" x="258" y="870">— and even enforced the hub holds CAP_DAC_OVERRIDE.</text>
+<text class="t4" x="258" y="885">SECINFO now advertises AUTH_SYS first and</text>
+<text class="t4" x="258" y="900">AUTH_NONE last, pinned by a test, so a stock mount</text>
+<text class="t4" x="258" y="915">negotiates sec=sys.</text>
+<text class="t4b" x="590" y="840">Detection becomes refusal.</text>
+<text class="t4" x="590" y="855">A barrier that lost the publish fence mid-commit installs</text>
+<text class="t4" x="590" y="870">nothing and is retried, never acked; the plugin refuses to</text>
+<text class="t4" x="590" y="885">clean up a published tree; the chart refuses to render on</text>
+<text class="t4" x="590" y="900">credential misconfig; the drain refuses to attest a boundary</text>
+<text class="t4" x="590" y="915">that left a path parked.</text>
+<text class="t4b" x="922" y="840">Deny is the default.</text>
+<text class="t4" x="922" y="855">consumers absent means deny; the</text>
+<text class="t4" x="922" y="870">ValidatingAdmissionPolicy — not the namespace label —</text>
+<text class="t4" x="922" y="885">fences the workers namespace to the plugin's own node; a</text>
+<text class="t4" x="922" y="900">dead mounter strands the pod on ENOTCONN rather than</text>
+<text class="t4" x="922" y="915">serving stale bytes.</text>
+<text class="t4b" x="1254" y="840">Closed where it counts, open on two defaults.</text>
+<text class="t4" x="1254" y="855">An unparseable policy refuses; a MISSING pre-receive does</text>
+<text class="t4" x="1254" y="870">not open the repository; a snapshot naming a missing pack</text>
+<text class="t4" x="1254" y="885">refuses to serve.</text>
+<text class="t4b c-red" x="1254" y="900">No door.namespace renders no NetworkPolicy, and an</text>
+<text class="t4b c-red" x="1254" y="915">absent branches block is permissive: both documented,</text>
+<text class="t4b c-red" x="1254" y="930">neither refuses.</text>
+<line class="hair" x1="24" y1="949" x2="1576" y2="949"/>
+<rect x="24" y="62" width="1552" height="887" rx="0" class="frame"/>
+<line class="hair" x1="576" y1="62" x2="576" y2="949"/>
+<line class="hair" x1="908" y1="62" x2="908" y2="949"/>
+<line class="hair" x1="1240" y1="62" x2="1240" y2="949"/>
+<text class="t4" x="24" y="975">Read it down a column. The identity chain lean and passthrough share is the strongest thing on the page, and forge borrows its shape at the door; the hub's is the weakest, and its boundary is drawn with the network. Every cell is the deck's own claim, made on the pages before this one, or the approach</text>
+<text class="t4" x="24" y="990">radar's verified Security cell.</text>
+<rect x="28" y="1008" width="14" height="14" rx="3" class="f-lite"/>
+<text class="t4" x="48" y="1019">flint-lite</text>
+<rect x="110" y="1008" width="14" height="14" rx="3" class="f-lean"/>
+<text class="t4" x="130" y="1019">flint-lean</text>
+<rect x="197" y="1008" width="14" height="14" rx="3" class="f-pass"/>
+<text class="t4" x="217" y="1019">flint-passthrough</text>
+<rect x="324" y="1008" width="14" height="14" rx="3" class="f-forge"/>
+<text class="t4" x="344" y="1019">flint-forge</text>
+<rect x="416" y="1008" width="5" height="14" rx="2" class="f-red"/>
+<text class="t4" x="428" y="1019">hazard / trust boundary</text>
 </svg>

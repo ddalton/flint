@@ -135,7 +135,7 @@
 <text class="t2" x="1216" y="408">what it costs you</text>
 <text class="t4" x="1216" y="428">One pod per repository in the data path — egress binds before CPU</text>
 <text class="t4" x="1216" y="443">on a clone storm, and the lever (bundles from S3) needs the</text>
-<text class="t4" x="1216" y="458">CLIENT to opt in. The server runs as root in both images.</text>
+<text class="t4" x="1216" y="458">CLIENT to opt in.</text>
 <line class="l-forge" x1="1387" y1="494" x2="1387" y2="526" marker-end="url(#a-forge)"/>
 <rect x="24" y="530" width="1552" height="44" rx="7" class="s3"/>
 <text class="t2" x="46" y="558">S3 — the one thing every cluster, every front end and every fleet shape has in common. It is where the data lives; everything above is a way of reaching it.</text>
@@ -186,7 +186,7 @@
 <text class="t4" x="1206" y="762">proposals. Revocation is pod deletion or SA rotation, felt within</text>
 <text class="t4" x="1206" y="776">the ≤ 60 s review cache.</text>
 <text class="t4b" x="1206" y="790">Not smaller: a shared ServiceAccount reaches every</text>
-<text class="t4b" x="1206" y="804">sibling's agent/* branch, and the server pod runs as root.</text>
+<text class="t4b" x="1206" y="804">sibling's agent/* branch.</text>
 <rect x="28" y="861" width="14" height="14" rx="3" class="f-lite"/>
 <text class="t4" x="48" y="872">flint-lite</text>
 <rect x="110" y="861" width="14" height="14" rx="3" class="f-lean"/>

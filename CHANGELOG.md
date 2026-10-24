@@ -24,6 +24,20 @@ covered by the stability guarantee.
   kubelet hands the container, has them too. The loop mount is
   `loop,nodev,nosuid,noatime`. Passthrough mounts were already
   `nodev,nosuid`.
+- **forge: the server pod ran as root.** The operator rendered it with
+  no securityContext, and both server images inherit wolfi-base's
+  default user, root. So `git http-backend`, the receive hooks and the
+  syncer ran as uid 0 with the runtime's default capabilities, and
+  every pushed pack was unpacked as root. A namespace that enforces Pod
+  Security `restricted` refused the pod outright: the Deployment
+  existed and the repository never served. Both containers now run as
+  `nonroot` (65532:65532, an account the images already carry), with
+  every capability dropped, no privilege escalation, seccomp
+  `RuntimeDefault` and a read-only root filesystem (`/tmp` is an
+  emptyDir). The two share one uid because git's `receive-pack` refuses
+  a repository that another uid owns. The images are unchanged. Upgrading the
+  operator recreates each server pod, which restores from its bucket
+  as on any restart.
 
 ### Added
 

@@ -27,10 +27,11 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource, EnvFromSource,
-    EnvVar, EnvVarSource, HTTPGetAction, ObjectFieldSelector, PodSpec, PodTemplateSpec, Probe,
-    ResourceRequirements, SecretEnvSource, Service, ServicePort, ServiceSpec, TCPSocketAction,
-    SecretKeySelector, Volume, VolumeMount,
+    Capabilities, ConfigMap, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource,
+    EnvFromSource, EnvVar, EnvVarSource, HTTPGetAction, ObjectFieldSelector, PodSecurityContext,
+    PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SeccompProfile, SecretEnvSource,
+    SecurityContext, Service, ServicePort, ServiceSpec, TCPSocketAction, SecretKeySelector, Volume,
+    VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
@@ -59,6 +60,24 @@ pub const STATUS_PORT: i32 = 9848;
 /// third port keeps that test true and makes the separation structural
 /// rather than a route table nobody can regress.
 pub const FILE_PORT: i32 = 9850;
+/// The uid and gid of both server containers: the `nonroot` account
+/// (65532:65532, home `/home/nonroot`) both server images inherit from
+/// wolfi-base.
+///
+/// Until 2026-10-23 the pod set no securityContext, and wolfi-base's
+/// default user is root, so both containers ran as uid 0 with the
+/// runtime's default capabilities: the git container unpacked every
+/// pushed pack and ran the hooks as root. Nothing needed it. The ports
+/// are unprivileged, everything the pod writes is on the `repo`
+/// emptyDir, and the syncer runs git with `HOME=/nonexistent`.
+///
+/// Both containers MUST share the uid. `receive-pack` in the git
+/// container refuses a repository another uid owns ("dubious
+/// ownership"), and the repository is the one the syncer restored.
+/// `upload-pack` does not refuse, so a split would pass every clone and
+/// fail the first push. The hook `receive-pack` runs connects to the
+/// syncer's socket, which needs write permission on the socket file.
+pub const SERVER_UID: i64 = 65532;
 
 #[derive(Debug, Clone)]
 pub struct RenderDefaults {
@@ -442,6 +461,19 @@ fn git_sized() -> ResourceRequirements {
     }
 }
 
+/// Both server containers: no capability, no way to gain one, and an
+/// image they cannot write. The uid is the pod's ([`SERVER_UID`]) and is
+/// deliberately not set here, so the two cannot drift apart.
+fn server_container_security() -> SecurityContext {
+    SecurityContext {
+        allow_privilege_escalation: Some(false),
+        capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), add: None }),
+        read_only_root_filesystem: Some(true),
+        privileged: Some(false),
+        ..Default::default()
+    }
+}
+
 pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deployment {
     let n = names(repo);
     let s = &repo.spec;
@@ -462,10 +494,22 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
             }),
             ..Default::default()
         },
+        Volume {
+            // The root filesystem is read-only; a git that wants a
+            // temporary file outside the repository still gets one.
+            name: "tmp".to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        },
     ];
     let repo_mount = VolumeMount {
         name: "repo".to_string(),
         mount_path: REPO_ROOT.to_string(),
+        ..Default::default()
+    };
+    let tmp_mount = VolumeMount {
+        name: "tmp".to_string(),
+        mount_path: "/tmp".to_string(),
         ..Default::default()
     };
     let policy_mount = VolumeMount {
@@ -726,7 +770,8 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
         args: Some(vec![]),
         env: Some(env),
         env_from,
-        volume_mounts: Some(vec![repo_mount.clone(), policy_mount]),
+        volume_mounts: Some(vec![repo_mount.clone(), policy_mount, tmp_mount.clone()]),
+        security_context: Some(server_container_security()),
         ports: Some({
             let mut p = vec![ContainerPort {
                 name: Some("status".to_string()),
@@ -801,7 +846,8 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
             // own auto-gc would be a second, unowned writer of both.
             EnvVar { name: "GIT_HTTP_EXPORT_ALL".into(), value: Some("1".into()), ..Default::default() },
         ]),
-        volume_mounts: Some(vec![repo_mount]),
+        volume_mounts: Some(vec![repo_mount, tmp_mount]),
+        security_context: Some(server_container_security()),
         ports: Some(vec![ContainerPort {
             name: Some("git".to_string()),
             container_port: GIT_PORT,
@@ -850,6 +896,20 @@ pub fn deployment(repo: &FlintRepo, d: &RenderDefaults, replicas: i32) -> Deploy
                 spec: Some(PodSpec {
                     containers: vec![syncer, git_http],
                     volumes: Some(volumes),
+                    // Non-root, one uid for both containers (see
+                    // `SERVER_UID`), and the default seccomp profile:
+                    // what Pod Security's `restricted` level asks.
+                    security_context: Some(PodSecurityContext {
+                        run_as_non_root: Some(true),
+                        run_as_user: Some(SERVER_UID),
+                        run_as_group: Some(SERVER_UID),
+                        fs_group: Some(SERVER_UID),
+                        seccomp_profile: Some(SeccompProfile {
+                            type_: "RuntimeDefault".into(),
+                            localhost_profile: None,
+                        }),
+                        ..Default::default()
+                    }),
                     termination_grace_period_seconds: Some(d.termination_grace_secs),
                     ..Default::default()
                 }),
@@ -1065,6 +1125,55 @@ mod tests {
             vols.iter().all(|v| v.persistent_volume_claim.is_none()),
             "a repository has no PVC; its bucket is the only durable copy"
         );
+    }
+
+    /// Pod Security's `restricted` level, field by field. Until
+    /// 2026-10-23 the pod ran as root and a namespace enforcing that
+    /// level refused it: the Deployment existed and the repository never
+    /// served.
+    #[test]
+    fn the_server_pod_meets_the_restricted_pod_security_level() {
+        let dep = deployment(&repo(), &RenderDefaults::default(), 1);
+        let pod = dep.spec.unwrap().template.spec.unwrap();
+        let psc = pod.security_context.as_ref().expect("a pod securityContext");
+        assert_eq!(psc.run_as_non_root, Some(true));
+        assert!(psc.run_as_user.is_some_and(|u| u != 0), "a uid, and not root's");
+        assert_eq!(psc.seccomp_profile.as_ref().map(|s| s.type_.as_str()), Some("RuntimeDefault"));
+        for c in &pod.containers {
+            let sc = c.security_context.as_ref().unwrap_or_else(|| panic!("{}: no securityContext", c.name));
+            assert_eq!(sc.allow_privilege_escalation, Some(false), "{}", c.name);
+            assert_ne!(sc.privileged, Some(true), "{}", c.name);
+            assert_ne!(sc.run_as_non_root, Some(false), "{}", c.name);
+            let caps = sc.capabilities.as_ref().unwrap();
+            assert_eq!(caps.drop.as_deref(), Some(&["ALL".to_string()][..]), "{}", c.name);
+            assert!(caps.add.as_ref().is_none_or(|a| a.is_empty()), "{}: adds a capability", c.name);
+            assert_eq!(sc.read_only_root_filesystem, Some(true), "{}", c.name);
+            let mounts = c.volume_mounts.as_ref().unwrap();
+            assert!(mounts.iter().any(|m| m.mount_path == "/tmp"), "{}: no writable /tmp", c.name);
+        }
+        for v in pod.volumes.as_ref().unwrap() {
+            assert!(v.empty_dir.is_some() || v.config_map.is_some(), "{}: a volume type restricted refuses", v.name);
+        }
+        assert_ne!(pod.host_network, Some(true));
+        assert_ne!(pod.host_pid, Some(true));
+        assert_ne!(pod.host_ipc, Some(true));
+    }
+
+    /// One uid for the whole pod. A container that overrode it would
+    /// split the two: `receive-pack` in the git container would refuse
+    /// the repository the syncer restored, and the hook could not open
+    /// the syncer's socket.
+    #[test]
+    fn both_server_containers_run_as_the_one_pod_uid() {
+        let dep = deployment(&repo(), &RenderDefaults::default(), 1);
+        let pod = dep.spec.unwrap().template.spec.unwrap();
+        let psc = pod.security_context.as_ref().unwrap();
+        assert_eq!(psc.run_as_user, Some(SERVER_UID));
+        assert_eq!(psc.run_as_group, Some(SERVER_UID));
+        for c in &pod.containers {
+            let sc = c.security_context.as_ref().unwrap();
+            assert_eq!((sc.run_as_user, sc.run_as_group), (None, None), "{} sets its own uid", c.name);
+        }
     }
 
     /// Rolling the pod to change who may push would drop every clone in

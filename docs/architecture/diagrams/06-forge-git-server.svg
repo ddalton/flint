@@ -138,7 +138,7 @@
 <text class="t4" x="48" y="514">open: a pack's parts upload one at a time · a full repack every 24 pushes re-uploads the repository · a roll mid-push costs that push · agents in another cluster are not drilled</text>
 <rect x="24" y="542" width="1552" height="44" rx="7" class="bx"/>
 <path class="f-red" d="M24,549 A7,7 0 0 1 31,542 H29 V586 H31 A7,7 0 0 1 24,579 Z"/>
-<text class="t4b c-red" x="48" y="569">nothing in-tree terminates TLS — the token rides two cleartext hops; X-Remote-User is a NetworkPolicy the operator renders only when told where the door runs; the server runs as root</text>
+<text class="t4b c-red" x="48" y="569">nothing in-tree terminates TLS — the token rides two cleartext hops; X-Remote-User is a NetworkPolicy the operator renders only when told where the door runs</text>
 <line class="l-ink" x1="28" y1="614" x2="54" y2="614"/>
 <text class="t4" x="60" y="618">data path</text>
 <line class="l-ctl" x1="127.98" y1="614" x2="153.98000000000002" y2="614" stroke-dasharray="6 5"/>
