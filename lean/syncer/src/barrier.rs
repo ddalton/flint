@@ -648,10 +648,10 @@ impl Syncer {
             // deleted it", and this is the oracle that PUBLISHES the
             // delete and then DELETES THE OBJECT. An unreadable path is
             // the one case where guessing is unrecoverable, so it is never
-            // a delete: EACCES holds it, as the walk holds what it may not
-            // read (`scan::Scan::held`), and every other errno fails the
-            // barrier, as it fails the walk. Two call sites, one syscall:
-            // they must not have opposite error policies.
+            // a delete: EACCES or EPERM holds it, as the walk holds what it
+            // may not read (`scan::Scan::held`), and every other errno
+            // fails the barrier, as it fails the walk. Two call sites, one
+            // syscall: they must not have opposite error policies.
             let gone = match std::fs::symlink_metadata(self.cfg.root.join(&path)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -2085,8 +2085,9 @@ enum UploadOutcome {
     /// or the assembly was swept: publish nothing, advance nothing —
     /// the next scan re-queues the path.
     Deferred,
-    /// The syncer may not open the file (EACCES): held (`scan::Scan::
-    /// held`), and nothing advanced, so the next scan asks again.
+    /// The syncer may not open the file (EACCES or EPERM): held
+    /// (`scan::Scan::held`), and nothing advanced, so the next scan asks
+    /// again.
     Unreadable,
 }
 
@@ -2358,7 +2359,8 @@ fn note_held(held: &[String]) {
     const SHOWN: usize = 10;
     let more = held.len().saturating_sub(SHOWN);
     eprintln!(
-        "flint-sync: held {} path(s) the syncer may not read (EACCES): {:?}{} — nothing at or \
+        "flint-sync: held {} path(s) the syncer may not read (EACCES or EPERM): {:?}{} — \
+         nothing at or \
          under them is published or deleted until they are readable; the rest of the tree is",
         held.len(),
         &held[..held.len().min(SHOWN)],

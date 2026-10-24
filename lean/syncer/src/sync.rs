@@ -147,8 +147,8 @@ impl Syncer {
             path: path.to_string(),
             foreign_etag: String::new(),
             preserved_key: None,
-            kind: "sync-unreadable: the syncer may not read this path (EACCES); the bucket's \
-                   change to it is not applied until it is readable"
+            kind: "sync-unreadable: the syncer may not read this path (EACCES or EPERM); the \
+                   bucket's change to it is not applied until it is readable"
                 .into(),
             at_unix: now_unix(),
         };

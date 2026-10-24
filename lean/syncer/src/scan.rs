@@ -90,8 +90,10 @@ pub fn stat_changed(b: &super::state::BaselineEntry, size: u64, mtime: i64, nano
 #[derive(Debug, Default)]
 pub struct Scan {
     pub entries: BTreeMap<String, ScanEntry>,
-    /// Paths the syncer may not read (EACCES), each standing for itself
-    /// and everything under it: a directory it may not list (written with
+    /// Paths the syncer may not read (EACCES or EPERM, which std reports
+    /// alike as `PermissionDenied`: either is a refusal the tree's owner
+    /// set), each standing for itself and everything under it: a
+    /// directory it may not list (written with
     /// its trailing `/`), an entry it may not lstat (a name in a directory
     /// it may list but not search, so even its type is unknown). The
     /// barrier adds the files it may not open and the absences it may not
@@ -153,11 +155,11 @@ fn under<'a, V>(cited: &'a BTreeMap<String, V>, held: &'a str) -> impl Iterator<
 }
 
 /// Whether the syncer may read the file at `rel`: false only when the
-/// kernel answers EACCES. Asked of each upload before the barrier's idle
-/// check, so a file it may not read is held there and an otherwise idle
-/// tick stays idle; `upload_one` holds one that turns unreadable after
-/// this. The syncer's real and effective uids are one, so `access` is
-/// the open's answer.
+/// kernel answers EACCES or EPERM. Asked of each upload before the
+/// barrier's idle check, so a file it may not read is held there and an
+/// otherwise idle tick stays idle; `upload_one` holds one that turns
+/// unreadable after this. The syncer's real and effective uids are one,
+/// so `access` is the open's answer.
 pub fn may_read(root: &Path, rel: &str) -> bool {
     #[cfg(unix)]
     {
@@ -178,8 +180,8 @@ pub fn may_read(root: &Path, rel: &str) -> bool {
 /// Walk the workspace. Skips the state dir, the control namespace and
 /// symlinks (v1 non-goal, as the tier manifest's).
 ///
-/// What the syncer may not read (EACCES) is HELD (`Scan::held`), never
-/// skipped: a directory it may not list, an entry it may not lstat.
+/// What the syncer may not read (EACCES or EPERM) is HELD (`Scan::held`),
+/// never skipped: a directory it may not list, an entry it may not lstat.
 /// `classify` reads a path missing from two scans as the agent's delete,
 /// and the barrier then publishes the deletion and deletes the object,
 /// so a skipped directory would cost every file under it; a held one
