@@ -38,6 +38,18 @@ covered by the stability guarantee.
   a repository that another uid owns. The images are unchanged. Upgrading the
   operator recreates each server pod, which restores from its bucket
   as on any restart.
+- **lean: a pod chose the uid its workspace's syncer ran as.** A pod's
+  `chert.us/uid` and `chert.us/gid` volume attributes replaced the
+  workspace's `spec.uid`/`spec.gid`, and stood in for a missing
+  `spec.uid`. So any pod allowed to mount a workspace chose the uid of
+  its syncer, and of the host files chowned to it: the tree and the
+  syncer's credential files. The workspace's uid now comes from the CR,
+  as the design always said. A pod may restate it; a pod that names a
+  different uid or gid, or names one where the CR has none, fails to
+  mount with an error naming the attribute. `spec.uid` and `spec.gid`
+  values outside the id range, which used to wrap, are refused too.
+  Passthrough is unchanged: there the pod's uid is only what its own
+  mount presents.
 
 ### Added
 

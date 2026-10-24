@@ -247,11 +247,18 @@ operator listed (2026-10-05, §4.15).
    ~~Lean's `launch.json` carries the arm's env, static keys included,
    with default permissions in the comm dir~~ (closed 2026-10-05: born
    0600, `persist_launch`).
-7. **uid/gid: the pod's `volumeAttributes.chert.us/uid` overrides the
-   CR's `spec.uid`** (as built; the design doc §3.6 said the opposite
-   order and is corrected). It is presentation inside the pod's own
-   mount and the class key for sharing, not a grant; `--uid 0` reaches
-   mount-s3 while the worker process maps 0 to 65534.
+7. **uid/gid: for PASSTHROUGH, the pod's `volumeAttributes.chert.us/uid`
+   overrides the CR's `spec.uid`** (as built; the design doc §3.6 said the
+   opposite order and is corrected). It is presentation inside the pod's
+   own mount and the class key for sharing, not a grant; `--uid 0` reaches
+   mount-s3 while the worker process maps 0 to 65534. **For LEAN the CR
+   decides** (closed 2026-10-24): the syncer runs as the uid, and the
+   tree and its credential files are chowned to it, so a
+   pod's `chert.us/uid`/`chert.us/gid` may only restate the CR's
+   `spec.uid`/`spec.gid` (gid defaults to the uid). A different value, or
+   a value where the CR names none, refuses the publish naming the key.
+   Until then the pod's value won for lean too, so any consumer chose the
+   uid its workspace's syncer ran as.
 8. ~~**The ceiling is check-then-act** (P11).~~ Fixed 2026-10-04: S36
    put nine workers on a node capped at seven with 1.57.1 (six pods at
    once, room for one); a node-wide lock now spans the count and the

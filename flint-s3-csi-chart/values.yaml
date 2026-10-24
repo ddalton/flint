@@ -80,11 +80,13 @@
 # webhook world: a mounter crash is still ENOTCONN for containers that
 # already opened the mount (recreate the pod), and the mount presents as
 # ONE uid, because NodePublish never sees the pod's securityContext and
-# so has nothing to default from. The order is the VOLUME ATTRIBUTE
-# FIRST: chert.us/uid if set, else the CR's spec.uid, else 65534 (gid
-# the same, defaulting to whatever uid resolved to). A lean workspace
-# has no default at all — it refuses to publish without a uid, and
-# refuses uid 0.
+# so has nothing to default from. For passthrough the order is the
+# VOLUME ATTRIBUTE FIRST: chert.us/uid if set, else the CR's spec.uid,
+# else 65534 (gid the same, defaulting to whatever uid resolved to). A
+# lean workspace takes its uid from the CR alone, because its syncer runs
+# as it: it refuses to publish without spec.uid, refuses uid 0, and
+# refuses a pod whose chert.us/uid or chert.us/gid differs from the CR's
+# (the pod may restate them; gid defaults to the uid).
 # ─────────────────────────────────────────────────────────────────────
 
 # ── The node plugin ──────────────────────────────────────────────────

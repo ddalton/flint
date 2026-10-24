@@ -2005,19 +2005,8 @@ impl S3Node {
                 "this node driver has no FLINT_S3CSI_LEAN_IMAGE; FlintLeanWorkspace volumes are not enabled",
             ));
         };
-        let owner_uid = pr.uid.or(spec.uid.map(|u| u as u32)).ok_or_else(|| {
-            Status::failed_precondition(format!(
-                "FlintLeanWorkspace {}/{name} has no spec.uid — REQUIRED under the CSI delivery: the syncer runs \
-                 as the app's uid so it can read every file the app writes (set spec.uid/spec.gid, or the \
-                 pod's volumeAttributes {})",
-                pr.pod_namespace,
-                attrs::ATTR_UID
-            ))
-        })?;
-        let owner_gid = pr.gid.or(spec.gid.map(|g| g as u32)).unwrap_or(owner_uid);
-        if owner_uid == 0 {
-            return Err(Status::failed_precondition("uid 0 is refused for a lean workspace: the syncer runs non-root"));
-        }
+        let (owner_uid, owner_gid) = lean_owner((spec.uid, spec.gid), (pr.uid, pr.gid))
+            .map_err(|m| Status::failed_precondition(format!("FlintLeanWorkspace {}/{name} {m}", pr.pod_namespace)))?;
         crate::lean_operator::boundary::validate_spec(&spec)
             .map_err(|r| Status::failed_precondition(format!("FlintLeanWorkspace {}/{name}: {}", pr.pod_namespace, r.message)))?;
         let tree = dir.join("tree");
@@ -2787,6 +2776,44 @@ fn prepare_cache_dir(dir: &Path, uid: u32, gid: u32) -> std::io::Result<()> {
     std::fs::create_dir(dir)?;
     std::os::unix::fs::chown(dir, Some(uid), Some(gid))?;
     std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+}
+
+/// A lean workspace's owner: the CR's, never the pod's (design §3.5
+/// step 6). The syncer runs as this uid, and the tree (or its loop
+/// image) and the credential files are chowned to it, so it is policy,
+/// and the CR is the policy object. The pod's `chert.us/uid` and `chert.us/gid`
+/// may restate it. A pod that names a different identity, or names one
+/// the CR does not, is refused rather than obeyed.
+///
+/// Until 2026-10-24 the pod's value won (`pr.uid.or(spec.uid)`), so any
+/// consumer of a workspace chose the uid its syncer ran as. Passthrough
+/// keeps the pod-first order on purpose: there the uid is what `stat`
+/// presents inside the pod's own mount and a sharing class, not who
+/// reads the tree.
+fn lean_owner(cr: (Option<i64>, Option<i64>), pod: (Option<u32>, Option<u32>)) -> Result<(u32, u32), String> {
+    let id = |v: i64, field: &str| u32::try_from(v).map_err(|_| format!("has spec.{field} {v}, which is not a valid id"));
+    let Some(uid) = cr.0 else {
+        return Err(format!(
+            "has no spec.uid — REQUIRED under the CSI delivery: the syncer runs as the app's uid so it can read \
+             every file the app writes. Set spec.uid (and spec.gid); the pod's volumeAttributes {} cannot \
+             stand in for it",
+            attrs::ATTR_UID
+        ));
+    };
+    let uid = id(uid, "uid")?;
+    if uid == 0 {
+        return Err("has spec.uid 0, which is refused: the syncer runs non-root".into());
+    }
+    let gid = cr.1.map(|g| id(g, "gid")).transpose()?.unwrap_or(uid);
+    for (key, asked, owned) in [(attrs::ATTR_UID, pod.0, uid), (attrs::ATTR_GID, pod.1, gid)] {
+        if let Some(a) = asked.filter(|&a| a != owned) {
+            return Err(format!(
+                "is owned by {uid}:{gid}, and the pod's volumeAttributes {key} asks for {a}. A lean workspace's \
+                 owner is the CR's, because its syncer runs as it: the pod may restate it, not change it"
+            ));
+        }
+    }
+    Ok((uid, gid))
 }
 
 /// The uid/gid the worker RUNS as (never root: a root owner maps to
@@ -3606,6 +3633,38 @@ mod tests {
         let s = exchange_status("ws", ExchangeError::Refused("403: AccessDenied: bob is not a consumer".into()));
         assert_eq!(s.code(), tonic::Code::PermissionDenied);
         assert!(s.message().contains("bob"), "{}", s.message());
+    }
+
+    /// The syncer's uid is the CR's. Until 2026-10-24 a pod's
+    /// `chert.us/uid` replaced the CR's `spec.uid`, and stood in for a
+    /// missing one, so any consumer chose the uid the syncer ran as.
+    #[test]
+    fn a_lean_owner_is_the_crs_and_the_pod_may_only_restate_it() {
+        assert_eq!(lean_owner((Some(1001), None), (None, None)), Ok((1001, 1001)), "gid defaults to the uid");
+        assert_eq!(lean_owner((Some(1001), Some(2002)), (None, None)), Ok((1001, 2002)));
+        assert_eq!(lean_owner((Some(1001), Some(2002)), (Some(1001), Some(2002))), Ok((1001, 2002)), "restated");
+        assert_eq!(lean_owner((Some(1001), None), (Some(1001), Some(1001))), Ok((1001, 1001)), "restates the default gid");
+
+        let e = lean_owner((Some(1001), Some(1001)), (Some(4242), None)).unwrap_err();
+        assert!(e.contains(attrs::ATTR_UID) && e.contains("4242") && e.contains("1001:1001"), "{e}");
+        let e = lean_owner((Some(1001), Some(1001)), (None, Some(0))).unwrap_err();
+        assert!(e.contains(attrs::ATTR_GID), "a pod may not move the group either, to root's least of all: {e}");
+        let e = lean_owner((Some(1001), None), (None, Some(4242))).unwrap_err();
+        assert!(e.contains(attrs::ATTR_GID), "the CR's uid pins the default gid: {e}");
+    }
+
+    #[test]
+    fn a_lean_owner_the_cr_does_not_name_is_refused_whatever_the_pod_says() {
+        for pod in [(None, None), (Some(1001), None), (Some(1001), Some(1001))] {
+            let e = lean_owner((None, None), pod).unwrap_err();
+            assert!(e.contains("no spec.uid") && e.contains(attrs::ATTR_UID), "{pod:?}: {e}");
+        }
+        assert!(lean_owner((None, Some(1001)), (Some(1001), None)).is_err(), "a CR gid alone names no uid");
+        assert!(lean_owner((Some(0), None), (None, None)).unwrap_err().contains("non-root"));
+        for bad in [-1, 1 << 32] {
+            assert!(lean_owner((Some(bad), None), (None, None)).is_err(), "spec.uid {bad} once wrapped to a u32");
+            assert!(lean_owner((Some(1001), Some(bad)), (None, None)).is_err(), "spec.gid {bad}");
+        }
     }
 }
 

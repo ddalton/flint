@@ -101,8 +101,10 @@ volume's chert.us/uid attribute if set, ELSE the CR's spec.uid, else
 65534 — the ATTRIBUTE WINS over the CR. gid resolves the same way and
 defaults to whatever uid resolved to. With nothing declared, files no
 longer present as root as they did under the webhook. A lean workspace
-has no default: it refuses to publish without a uid, and refuses uid 0,
-because the syncer must run as the app's uid to read what the app wrote.
+is the exception: its uid is the CR's spec.uid alone, because the syncer
+must run as the app's uid to read what the app wrote. It refuses to
+publish without one, refuses uid 0, and refuses a pod whose chert.us/uid
+or chert.us/gid differs from the CR's (restating them is fine).
 {{- if not .Values.workers.admissionPolicy.enabled }}
 
 WARNING: workers.admissionPolicy.enabled is false. Nothing but RBAC
