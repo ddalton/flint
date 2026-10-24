@@ -48,7 +48,8 @@ pub struct BarrierReport {
     pub deferred: Vec<String>,
     /// Paths the syncer may not read (`scan::Scan::held`): a directory
     /// it may not list (with its trailing `/`), an entry it may not
-    /// lstat, a file it may not open, an absence it may not confirm.
+    /// lstat, a file it may not open, an absence it may not confirm; and
+    /// a file or directory whose name is not UTF-8, which no key names.
     /// Nothing at or under one was published or deleted, and the rest of
     /// the tree was. A boundary that holds anything is not complete: a
     /// sentinel's ack is `partial` and names them, and the drain refuses
@@ -2352,16 +2353,17 @@ fn note_carried(
 }
 
 /// Says what a barrier held, on every barrier that holds anything: until
-/// the tree's owner makes it readable, nothing there reaches the bucket
-/// and no boundary is complete, and the operator has to be told which
-/// paths. Ten at most; the report carries them all.
+/// the tree's owner makes it readable (or renames a name that is not
+/// UTF-8), nothing there reaches the bucket and no boundary is complete,
+/// and the operator has to be told which paths. Ten at most; the report
+/// carries them all.
 fn note_held(held: &[String]) {
     const SHOWN: usize = 10;
     let more = held.len().saturating_sub(SHOWN);
     eprintln!(
-        "flint-sync: held {} path(s) the syncer may not read (EACCES or EPERM): {:?}{} — \
-         nothing at or \
-         under them is published or deleted until they are readable; the rest of the tree is",
+        "flint-sync: held {} path(s) the syncer may not read (EACCES or EPERM) or name (not UTF-8, \
+         shown with U+FFFD): {:?}{} — nothing at or \
+         under them is published or deleted until they are readable and named in UTF-8; the rest of the tree is",
         held.len(),
         &held[..held.len().min(SHOWN)],
         if more > 0 { format!(" and {more} more") } else { String::new() },

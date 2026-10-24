@@ -962,7 +962,7 @@ pub struct FloorOutcome {
     /// A foreign 412 parked at least one path on this tick.
     pub parked: usize,
     /// Paths this tick's barrier held because the syncer may not read
-    /// them (`BarrierReport::held`).
+    /// them, or because their names are not UTF-8 (`BarrierReport::held`).
     pub held: usize,
     /// Carried out of the barrier only to feed the news ticker.
     observed_etag: Option<String>,
@@ -1242,7 +1242,7 @@ impl Syncer {
                 // agent's only copy, and the syncer could not read it.
                 if !r.held.is_empty() {
                     return Err(LeanError::State(format!(
-                        "drain: not in this boundary — paths the syncer may not read {:?} — not \
+                        "drain: not in this boundary — paths the syncer may not read or name {:?} — not \
                          attesting",
                         r.held
                     )));

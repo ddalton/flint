@@ -38,8 +38,9 @@ pub enum Withheld {
     /// A foreign 412 parked at least one path (it is NOT ours to
     /// publish, and the conflict record says so).
     Parked412,
-    /// The barrier held at least one path the syncer may not read
-    /// (`BarrierReport::held`); the rest of the tree publishes.
+    /// The barrier held at least one path the syncer may not read, or
+    /// whose name is not UTF-8 (`BarrierReport::held`); the rest of the
+    /// tree publishes.
     Unreadable,
 }
 

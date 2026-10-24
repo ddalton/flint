@@ -939,6 +939,9 @@ re-hash of `a/b` per barrier. The upload reads `root.join(rel)`, the real
 `a/b`, either way. So the order is now a rule of the tree (by path, then
 by size, mtime and mode, and the last kept). That a `\` name is published
 under another path at all is older than E and is not changed here.
+(Changed after E, 2026-10-24, L-142: a lone `a\b` was keyed `a/b`, a file
+that is not there, and its upload's ENOENT failed every barrier. A `\` is
+now a byte of the key, the two names are two paths, and the rule is gone.)
 
 **Steps.** The `scan` step of `BarrierReport::steps` is now two: `walk`
 (the tree) and `classify` (against the baseline, the racy recheck, the

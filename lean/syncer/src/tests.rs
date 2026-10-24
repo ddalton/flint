@@ -3611,6 +3611,100 @@ async fn an_unreadable_directory_is_held_and_the_rest_of_the_tree_publishes() {
     assert!(m.entries.contains_key("locked/f.txt") && !m.entries.contains_key("locked/g.txt"), "{:?}", m.entries.keys());
 }
 
+/// L-141: a name that is not UTF-8 has no key. The walk keyed it by its
+/// lossy form, a file that is not there, and the upload's ENOENT failed
+/// every barrier in the workspace. It is held now, a file and a directory
+/// with what is under it alike, and the rest of the tree publishes; once
+/// renamed to UTF-8 it publishes too.
+#[tokio::test]
+async fn a_name_that_is_not_utf8_is_held_and_the_rest_of_the_tree_publishes() {
+    use std::os::unix::ffi::OsStrExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "ok.txt", "published");
+    a.run_barrier().await.unwrap();
+
+    let latin = |b: &[u8]| dir.path().join(std::ffi::OsStr::from_bytes(b));
+    std::fs::write(latin(b"caf\xe9.txt"), "latin-1").unwrap();
+    std::fs::create_dir(latin(b"d\xe9")).unwrap();
+    std::fs::write(latin(b"d\xe9").join("inner.txt"), "under a name that is not UTF-8").unwrap();
+    write(dir.path(), "ok.txt", "edited beside them");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, ["ok.txt"], "{r:?}");
+    assert_eq!(r.held, ["caf\u{FFFD}.txt", "d\u{FFFD}/"], "{r:?}");
+    let floor = a.floor_tick().await.unwrap();
+    assert_eq!(floor.withheld_reason.as_deref(), Some("unreadable"), "{floor:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.keys().collect::<Vec<_>>(), ["ok.txt"]);
+    assert_eq!(m.entries["ok.txt"].size, "edited beside them".len() as u64);
+
+    std::fs::rename(latin(b"caf\xe9.txt"), dir.path().join("café.txt")).unwrap();
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, ["café.txt"], "{r:?}");
+    assert_eq!(r.held, ["d\u{FFFD}/"], "{r:?}");
+}
+
+/// L-142: a `\` is a byte of a name on Linux, not a separator. The walk
+/// turned it into `/`, so an agent's `a\b` was keyed `a/b`, a file that
+/// is not there, and the upload's ENOENT failed every barrier; so did a
+/// file in a directory named `p\q`.
+#[tokio::test]
+async fn an_agents_backslash_name_is_published_under_that_name() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "a\\b", "the agent's");
+    write(dir.path(), "p\\q/f.txt", "in a directory with a backslash");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, ["a\\b", "p\\q/f.txt"], "{r:?}");
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty() && r.deleted.is_empty() && r.held.is_empty(), "{r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.keys().collect::<Vec<_>>(), ["a\\b", "p\\q/f.txt"]);
+}
+
+/// L-142 from the gateway's side: it takes `x\y` as a path, the consume
+/// and a checkout write it as one name, and the walk then keyed it `x/y`,
+/// so from that moment every barrier in each tree that held it failed.
+/// Now the tree that consumed it, and a tree checked out afresh, take the
+/// file under its own name and their barriers publish nothing.
+#[tokio::test]
+async fn a_ui_write_with_a_backslash_is_taken_and_publishes_nothing() {
+    let store = Arc::new(MemoryStore::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir_a.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "ok.txt", "published");
+    a.run_barrier().await.unwrap();
+
+    hitl_write(&store, &a.cfg, "x\\y", "the UI's", "ui").await.unwrap();
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1, "{r:?}");
+    assert_eq!(read(dir_a.path(), "x\\y").as_deref(), Some("the UI's"));
+    for _ in 0..2 {
+        let r = a.run_barrier().await.unwrap();
+        assert!(r.uploaded.is_empty() && r.deleted.is_empty() && r.first_absence.is_empty(), "{r:?}");
+    }
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "x\\y").as_deref(), Some("the UI's"));
+    assert!(!dir_b.path().join("x").exists(), "the checkout made a directory of the `\\`");
+    for _ in 0..2 {
+        let r = b.run_barrier().await.unwrap();
+        assert!(r.uploaded.is_empty() && r.deleted.is_empty() && r.first_absence.is_empty(), "{r:?}");
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.keys().collect::<Vec<_>>(), ["ok.txt", "x\\y"]);
+}
+
 /// A file made unreadable after the barrier asked (`scan::may_read`) and
 /// before it opened the file is held all the same: the upload's open
 /// meets EACCES, and the rest of the tree publishes.

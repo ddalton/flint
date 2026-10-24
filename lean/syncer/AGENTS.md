@@ -308,6 +308,10 @@ yours.
   as it is (a `sync-unreadable` record), and the syncer's final
   boundary when the pod stops does not attest the tree. Make it
   readable to the workspace's uid and the next boundary publishes it.
+- **A name must be UTF-8.** A file or directory whose name is not (a
+  Latin-1 `caf\xe9.txt`, say) is held the same way, shown with U+FFFD
+  in its place, until it is renamed. A `\` is an ordinary character in
+  a name: `a\b` is one file, published as `a\b`.
 - **A delete is published** once the path is absent from two consecutive
   scans, and a declared boundary (`publish`) takes the second look at
   once: `rm` then `publish` deletes it in the bucket.
@@ -340,8 +344,8 @@ Do not:
 - touch sentinels in a loop, or expect a boundary faster than
   `sentinel_min_interval_secs`;
 - preserve timestamps when copying edited files into the tree;
-- make a file or directory the workspace's uid may not read: it is
-  held, not published;
+- make a file or directory the workspace's uid may not read, or give
+  one a name that is not UTF-8: it is held, not published;
 - rely on symlinks or empty directories surviving a checkout;
 - expect anything you write to be published when `access` is `"read"`;
 - treat an ack as proof for anyone but yourself: acks are files any

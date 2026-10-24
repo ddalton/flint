@@ -3,15 +3,17 @@
 //! exclusions) and fail exactly where it failed, except where the syncer
 //! may not read, which it now holds (`Scan::held`), the same set at any
 //! thread count. The oracle is the walk as it shipped before E, kept here
-//! verbatim.
+//! verbatim but for what a key is (L-141, L-142).
 
 use super::scan::{scan_with, ScanEntry, TMP_SUFFIX};
 use super::{CONTROL_DIR, STATE_DIR};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The walk before lever E, verbatim but for its name: sequential, every
-/// entry `lstat`ed by its full path.
+/// The walk before lever E, verbatim but for its name and its key:
+/// sequential, every entry `lstat`ed by its full path. The key was the
+/// lossy relative path with each `\` as `/`; it is now the path's names
+/// byte for byte, and a path that is not UTF-8 has none (L-141, L-142).
 fn reference_walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>) -> crate::LeanResult<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -33,7 +35,8 @@ fn reference_walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, ScanEntry>
         if meta.is_dir() {
             reference_walk(root, &path, out)?;
         } else if meta.is_file() {
-            let rel = path.strip_prefix(root).expect("walk stays under root").to_string_lossy().replace('\\', "/");
+            let Some(rel) = path.strip_prefix(root).expect("walk stays under root").to_str() else { continue };
+            let rel = rel.to_string();
             use std::os::unix::fs::MetadataExt;
             let mode = meta.mode();
             let (mtime_unix, mtime_nanos) = meta
@@ -85,16 +88,20 @@ fn awkward_tree(root: &Path) {
     // Not a regular file: skipped.
     let fifo = std::ffi::CString::new(root.join("dir/a-fifo").to_str().unwrap()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
-    // Empty directories, and a name with a backslash (the relative path's
-    // `\` becomes `/`, as the reference does).
+    // Empty directories, and a name with a backslash: a byte of the name,
+    // not a separator (L-142).
     std::fs::create_dir_all(root.join("empty/emptier")).unwrap();
     put(root, "dir/back\\slash.txt", "b");
     // Mode bits are part of what is found.
     put(root, "dir/run.sh", "#!/bin/sh");
     std::fs::set_permissions(root.join("dir/run.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    // A name that is not UTF-8: its relative path is the lossy one.
+    // Names that are not UTF-8, a file's and a directory's: held, never
+    // keyed by the lossy form, which names another file or none (L-141).
     use std::os::unix::ffi::OsStrExt;
     std::fs::write(root.join("dir").join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt")), "latin-1").unwrap();
+    let latin = root.join("dir").join(std::ffi::OsStr::from_bytes(b"d\xe9"));
+    std::fs::create_dir(&latin).unwrap();
+    std::fs::write(latin.join("inner.txt"), "under a name that is not UTF-8").unwrap();
     // A modification time before the epoch reads as (0, 0).
     put(root, "dir/old.txt", "old");
     let old = std::ffi::CString::new(root.join("dir/old.txt").to_str().unwrap()).unwrap();
@@ -109,11 +116,13 @@ fn the_parallel_walk_finds_what_the_sequential_walk_found() {
     let want = reference(dir.path());
     assert!(want.iter().any(|e| e.0 == format!("dir/{STATE_DIR}/kept.txt")), "fixture: depth exclusion");
     assert!(!want.iter().any(|e| e.0.ends_with(TMP_SUFFIX)), "fixture: temporaries");
-    assert!(want.iter().any(|e| e.0 == "dir/caf\u{FFFD}.txt"), "fixture: a name that is not UTF-8");
+    assert!(want.iter().any(|e| e.0 == "dir/back\\slash.txt"), "fixture: a backslash");
+    assert!(!want.iter().any(|e| e.0.contains('\u{FFFD}')), "fixture: names that are not UTF-8");
     assert!(want.iter().any(|e| e.0 == "dir/old.txt" && (e.2, e.3) == (0, 0)), "fixture: before the epoch");
     for threads in [1, 2, 8] {
         let got = scan_with(dir.path(), threads).unwrap();
-        assert!(got.held.is_empty(), "{threads} threads: held {:?}", got.held);
+        let held: Vec<&str> = got.held.iter().map(String::as_str).collect();
+        assert_eq!(held, ["dir/caf\u{FFFD}.txt", "dir/d\u{FFFD}/"], "{threads} threads");
         assert_eq!(found(&got.entries), want, "{threads} threads");
     }
 }
@@ -149,12 +158,12 @@ fn random_trees_walk_the_same_at_any_thread_count() {
     }
 }
 
-/// `a\b` at the root and `a/b` are one relative path. The one-thread walk
-/// kept whichever `read_dir` listed later; workers would keep whichever
-/// they happened to read later, a different file from one scan to the
-/// next. The rule is the tree's: the larger stat.
+/// `a\b` at the root and `a/b` are two files and two keys (L-142). The
+/// walk turned the `\` into `/`, so they were one key, and it kept one of
+/// them by a rule of the tree; a lone `a\b` was keyed `a/b`, a file that
+/// is not there, and its upload's ENOENT failed every barrier.
 #[test]
-fn two_names_for_one_path_keep_the_same_one_every_walk() {
+fn a_backslash_is_a_byte_of_the_name_not_a_separator() {
     let dir = tempfile::tempdir().unwrap();
     put(dir.path(), "a\\b", "x");
     put(dir.path(), "a/b", "xyz");
@@ -162,11 +171,9 @@ fn two_names_for_one_path_keep_the_same_one_every_walk() {
         put(dir.path(), &format!("a/d{d}/f.txt"), "keeps the workers busy");
     }
     for threads in [1, 2, 8] {
-        for _ in 0..20 {
-            let got = scan_with(dir.path(), threads).unwrap().entries;
-            assert_eq!(got.len(), 33, "{threads} threads");
-            assert_eq!(got["a/b"].size, 3, "{threads} threads: kept the other name");
-        }
+        let got = scan_with(dir.path(), threads).unwrap().entries;
+        assert_eq!(got.len(), 34, "{threads} threads");
+        assert_eq!((got["a\\b"].size, got["a/b"].size), (1, 3), "{threads} threads");
     }
 }
 

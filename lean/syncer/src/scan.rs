@@ -95,7 +95,9 @@ pub struct Scan {
     /// set), each standing for itself and everything under it: a
     /// directory it may not list (written with
     /// its trailing `/`), an entry it may not lstat (a name in a directory
-    /// it may list but not search, so even its type is unknown). The
+    /// it may list but not search, so even its type is unknown). And a
+    /// file or directory whose name is not UTF-8, which no key can name:
+    /// held under its lossy form (`read_dir_entries`). The
     /// barrier adds the files it may not open and the absences it may not
     /// confirm. Nothing held is published or deleted, and no boundary is
     /// complete while anything is held.
@@ -191,6 +193,12 @@ pub fn may_read(root: &Path, rel: &str) -> bool {
 /// then one 0700 directory made by an app running as a uid other than
 /// the CR's stopped every publish in the workspace until it was readable.
 ///
+/// A path's key is its names, byte for byte, so the barrier opens the
+/// file it scanned. A name that is not UTF-8 has no such key and is held
+/// too (L-141); a `\` in a name is a byte like any other (L-142). Either
+/// used to give a key that named another file or none, and the upload's
+/// ENOENT failed every barrier in the workspace.
+///
 /// Every other error FAILS the walk, and with it the barrier: an EIO is
 /// not a standing condition the tree's owner set, and an unreadable ROOT
 /// fails too (nothing could publish; the error names why).
@@ -243,14 +251,12 @@ pub fn scan_with(root: &Path, threads: usize) -> LeanResult<Scan> {
             start = end;
         }
     }
-    // Two names can give one relative path (a `\` in a name becomes `/`).
-    // The one-thread walk kept the later in `read_dir` order; here which
-    // worker read which is chance, so the order is a rule of the tree: by
-    // path, then by what was stat'ed, and the last of equal paths is kept
-    // (`from_iter` sorts stably, then builds in bulk, not by a million
-    // inserts).
-    let stat =|e: &ScanEntry| (e.size, e.mtime_unix, e.mtime_nanos, e.mode);
-    all.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| stat(&a.1).cmp(&stat(&b.1))));
+    // No two files give one key: a key is the names on the file's path,
+    // byte for byte (`read_dir_entries`). Two did once, when a `\` became
+    // `/` and a name not UTF-8 was keyed by its lossy form, and the walk
+    // had to choose one by a rule of the tree. Sorted here, `from_iter`
+    // finds the order made and builds in bulk, not by a million inserts.
+    all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     Ok(Scan { entries: all.into_iter().collect(), held })
 }
 
@@ -348,6 +354,10 @@ fn read_dir_entries(
             continue;
         }
         let name = String::from_utf8_lossy(bytes);
+        // A name that is not UTF-8 has no key. Its lossy form names another
+        // file or none, so the upload opened that and its ENOENT failed the
+        // barrier at every tick (L-141). Held, under the lossy form.
+        let keyless = matches!(name, std::borrow::Cow::Owned(_));
         if prefix.is_empty() {
             // The state dir and the control namespace (boundary-verbs
             // plan D0). Without the second exclusion `.flint/publish`
@@ -366,22 +376,22 @@ fn read_dir_entries(
             // A directory the syncer may list but not search: each name
             // in it is held, file or directory alike.
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                let mut rel = String::with_capacity(prefix.len() + name.len());
-                rel.push_str(prefix);
-                push_name(&mut rel, &name);
-                out.held.push(rel);
+                out.held.push(format!("{prefix}{name}"));
                 continue;
             }
             Err(e) => return Err(e),
         };
         match FileType::from_raw_mode(st.st_mode as _) {
             FileType::Directory => {
-                let mut rel = String::with_capacity(prefix.len() + name.len() + 1);
-                rel.push_str(prefix);
-                push_name(&mut rel, &name);
-                rel.push('/');
-                subdirs.push((dir.join(std::ffi::OsStr::from_bytes(bytes)), rel));
+                let rel = format!("{prefix}{name}/");
+                if keyless {
+                    // Nothing under it has a key either.
+                    out.held.push(rel);
+                } else {
+                    subdirs.push((dir.join(std::ffi::OsStr::from_bytes(bytes)), rel));
+                }
             }
+            FileType::RegularFile if keyless => out.held.push(format!("{prefix}{name}")),
             FileType::RegularFile => {
                 // As std's `modified()` and `duration_since(UNIX_EPOCH)`
                 // gave it: a time before the epoch is (0, 0).
@@ -391,7 +401,7 @@ fn read_dir_entries(
                     (0, 0)
                 };
                 out.names.push_str(prefix);
-                push_name(&mut out.names, &name);
+                out.names.push_str(&name);
                 out.files.push((
                     out.names.len(),
                     ScanEntry {
@@ -409,17 +419,6 @@ fn read_dir_entries(
         }
     }
     Ok(())
-}
-
-/// `name` onto `to`, with a `\` in it as `/`, as the one-thread walk wrote
-/// a relative path.
-fn push_name(to: &mut String, name: &str) {
-    for (i, part) in name.split('\\').enumerate() {
-        if i > 0 {
-            to.push('/');
-        }
-        to.push_str(part);
-    }
 }
 
 #[derive(Debug, Default)]

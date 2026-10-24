@@ -210,11 +210,9 @@ covered by the stability guarantee.
   480 ms to about 205 ms; at 1M files from 2.3 s to 0.96 s and from 2.3 s
   to 0.98 s. With one CPU, at 1M both go from 2.3 s to 1.7 s. Peak memory
   is about 40 MiB higher at 200k files and not measurably higher at 1M.
-  Two names that give one relative path (`a\b` and `a/b`) now keep the
-  same file from one walk to the next. inotify was considered and not
-  used: it cannot see every completed write, so a publish would still
-  have to walk. `flint-lean` now depends on `rustix` (already built for
-  its tests).
+  inotify was considered and not used: it cannot see every completed
+  write, so a publish would still have to walk. `flint-lean` now depends
+  on `rustix` (already built for its tests).
 
 ### Fixed
 
@@ -283,6 +281,21 @@ covered by the stability guarantee.
   root. Each file a barrier is about to upload is first asked about with
   one `access(2)` call, so a tick whose only change is a held file stays
   idle.
+
+- **lean: one file name that is not UTF-8, or that holds a `\`, stopped
+  every publish in its workspace.** The barrier's walk made each path's
+  key from a lossy copy of its names, with each `\` turned into `/`. So
+  the key of a Latin-1 `caf\xe9.txt` was `caf\u{FFFD}.txt` and the key of
+  `a\b` was `a/b`, files that are not there. The upload opened the key,
+  failed with ENOENT, and the barrier failed with it, at every tick, until
+  the file was renamed or removed. The gateway takes a `\` in a path, so
+  one UI save of `x\y` stopped every tree that then held the file. A key
+  is now the path's names byte for byte, so `a\b` is published, consumed
+  and checked out as `a\b`. A name that is not UTF-8 cannot be a key: it
+  is held, as an unreadable path is (previous entry), and logged with
+  U+FFFD in place of each invalid byte, until it is renamed. No two files
+  share a key any more, so the walk's rule for choosing between two names
+  for one path is gone.
 
 - **lean: a live tree applies the mode the document cites.** The barrier's
   consume and `sync` set a file's mode from its object's stamp, and a
