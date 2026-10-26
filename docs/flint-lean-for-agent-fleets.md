@@ -30,7 +30,7 @@ Everything below was run end to end on 2026-09-15 against the published
 charts `flint-lean` 0.11.0 and `flint-s3-csi` 0.3.0 (images 1.54.0), on a
 kind cluster (Kubernetes 1.36) with MinIO standing in for the bucket — the
 only change for that was `endpoint:` and the keys. The commands pin
-`flint-lean` 0.14.8 and `flint-s3-csi` 0.5.6 (images 1.60.3), this
+`flint-lean` 0.14.9 and `flint-s3-csi` 0.5.7 (images 1.61.0), this
 release: it carries lean syncer fixes and the same install surface.
 Commands are copy-pasteable, not illustrative.
 
@@ -64,13 +64,13 @@ kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_REGION=us-west-1
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.8 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.9 \
   -n flint-system \
   --set operatorCredentialsSecret=s3
   # add --set endpoint=http://... for a non-AWS store
 
 helm install flint-s3-csi \
-  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.6 \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.7 \
   -n flint-system \
   --set broker.static.secretRef=s3 \
   --set node.region=us-west-1
@@ -300,9 +300,29 @@ cat /workspace/.flint/publish.ack
 
 `status: "ok"` means **the named boundary is in the bucket** — not
 queued, not scheduled — and it carries your change. `partial` means the
-boundary landed without some path (named in `report.dropped`: another
-writer's edit outranked your delete, or an upload changed under the
-syncer), and the next boundary publishes it. A boundary that lost its turn
+boundary landed without some path, named in `report.dropped`: an upload
+that changed under the syncer, which the next boundary publishes, or a
+path another writer or the UI deleted after your boundary carried it,
+where their delete stands (write the file again to bring it back). Your
+delete over their newer version is not dropped: it lands, and their
+version is kept under a conflict record.
+
+`partial` also means something is **held**, and a held path stays held
+until it is fixed. The syncer runs as the workspace's uid, so a file it
+may not read (`chmod 000`, or another uid's file with no read bit for
+it), a directory it may not list, and a name that is not UTF-8 (a
+Latin-1 `caf\xe9.txt`, shown with U+FFFD) are held: nothing at or under
+them is published or deleted, the bucket keeps their last published
+version, and the rest of the tree publishes as usual. `report.dropped`
+names them, `.flint-sync/gauges.json` says `withheld_reason:
+"unreadable"`, and the syncer's last boundary when the pod stops does
+not attest the tree. Make it readable to the workspace's uid, or rename
+it, and the next boundary publishes it. (Before 1.61.0 any one of them
+stopped every publish in the workspace.) A `\` is an ordinary character
+in a name: `a\b` is one file, published as `a\b`. A `chmod` on its own
+is published.
+
+A boundary that lost its turn
 at the publish fence is retried by the cadence, so an ack is late rather
 than refused. `uploaded: 0` on an `ok` just means nothing had changed
 since the last boundary.
@@ -379,7 +399,15 @@ worker's 1Gi limit.
 linear in entries, which is why the v1 cap is ~250k files. For scale,
 the loopback floors: 100k files check out in 49.5 s (first publish 65 s,
 idle tick 1.85 s); 1M files in 7 m 05 s, with a 264 MiB manifest at
-~277 B/entry.
+~277 B/entry. Those floors (2026-08-25) predate chunked manifests and
+1.61.0's latency work. On 1.61.0's shipped build against an in-memory
+store (8 cores, 2026-10-24), an idle tick and a one-file publish take
+about 0.2 s at 200k files and 1 s at 1M; with every request paying
+25 ms, a checkout takes about 45 s at 200k files of 8 KiB and 225 s at
+1M of 4 KiB, one GET per file with 128 in flight. Against real S3 the
+request rate (AWS documents 5,500 GET/s per prefix) bounds a checkout
+the same way. Each lever's numbers are in the CHANGELOG and in
+`docs/plans/flint-lean-latency-plan-2026-10-23.md`.
 
 ### Conflict copies, and a lifecycle rule to expire them
 

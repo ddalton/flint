@@ -12,6 +12,46 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.61.0] - 2026-10-26
+
+A minor release: three security fixes, lean's latency work, and four
+lean defects that each stopped a whole workspace from publishing.
+
+Security: a lean workspace is now mounted `nodev,nosuid`, so a
+checked-out setuid binary cannot run as the workspace's uid; a lean
+workspace's uid is its CR's, and a pod that names a different one is
+refused (a pod may restate it); and the forge server pod runs as
+non-root, so a Pod Security `restricted` namespace admits it.
+
+Lean: the levers of `docs/plans/flint-lean-latency-plan-2026-10-23.md`
+cut the work a barrier does in proportion to the workspace; each lever's
+measured effect is under Changed (the last of them, the parallel walk,
+took a 1M-file idle tick and one-file publish from 2.3 s to about 1 s on
+the shipped build). A peer's change reaches an active agent within
+seconds instead of at the next minute, the first barrier after a checkout
+no longer re-hashes the tree, and at a million files a UI save in the
+gateway takes 0.17 s instead of 3.7 s. A `chmod` on its own is now
+published. One unreadable directory (L-140), one file name that is not
+UTF-8 (L-141), and one name holding a `\`, which a UI save could create
+(L-142), each stopped every publish in its workspace: the first two are
+now held while the rest of the tree publishes, and the third is
+published under its own name. A lean workspace that filled its s3csi
+quota stopped publishing and could not drain (L-143); its image now keeps
+a reserve that only the syncer's bookkeeping may spend.
+
+Validated 2026-10-24 to 2026-10-26 on a kind rig with MinIO, each suite
+run on the release's code and, as a control, on 1.60.3. The s3csi lean
+legs (S11-S14, S17, S17f, S18, S20, S33, S34): 172 checks pass, and the
+two that fail (S12, S13) read an object by its path, which lean stopped
+using as a key in September, and fail on 1.60.3 too. The lean
+boundary-verbs suite: 16 of 16 legs on 1.60.3; on the release, four legs
+whose fixtures predated latency levers B and D failed, and once their
+fixtures were corrected they pass on both builds. The lean syncer's lib
+suite passes 399 as a non-root uid with none skipped, the gateway's 67,
+the code-trace check 84 of 84; spdk-csi-driver's lib 2,694, and its
+root-only mount tests 15 of 15 as root. The CSI driver's restart gate is
+waived: nothing on its restart path changed since 1.60.3.
+
 ### Security
 
 - **A lean workspace was mounted `suid` and `dev`.** Checkout restores
@@ -10940,7 +10980,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.60.3...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.61.0...HEAD
+[1.61.0]: https://github.com/ddalton/flint/compare/v1.60.3...v1.61.0
 [1.60.3]: https://github.com/ddalton/flint/compare/v1.60.2...v1.60.3
 [1.60.2]: https://github.com/ddalton/flint/compare/v1.60.1...v1.60.2
 [1.60.1]: https://github.com/ddalton/flint/compare/v1.60.0...v1.60.1
