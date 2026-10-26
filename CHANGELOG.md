@@ -54,6 +54,27 @@ covered by the stability guarantee.
   s3csi workspace, mounted `nosuid` since 1.61.0, the bit did nothing
   anyway.
 
+- **lean: a held path withheld deletes that were not its own** (L-147,
+  and the collision L-141 accepted). A held path stood for itself and
+  everything under the name it was shown by. So a file the syncer may not
+  read, standing where a published directory was, kept every file of that
+  directory cited (a first absence at every barrier) for as long as it
+  stayed unreadable; and a directory whose name is not UTF-8, `caf\xe9/`
+  shown as `caf\u{FFFD}/`, kept the deleted files of a real directory
+  spelled `caf\u{FFFD}` cited for as long as it stood. What a held path
+  stands for is now kept apart from how it is shown: a directory the walk
+  may not list, or a name it may not stat, holds everything under it; a
+  file holds itself; a name that is not UTF-8 holds no key at all.
+
+- **lean gateway: a file under a `.flint-sync` directory below the
+  workspace root could be neither read, saved, removed nor renamed**
+  (L-148). The syncer reserves `.flint` and `.flint-sync` at the root
+  only, and publishes `notes/.flint-sync/x` like any file; the gateway
+  refused a `.flint-sync` segment at any depth, and its every file verb
+  asks that rule. It now asks the syncer's own (`scan::is_control_path`),
+  so the two can no longer disagree. AGENTS.md said files under
+  `.flint-sync/` are never published; it now says at the root.
+
 ## [1.61.0] - 2026-10-26
 
 A minor release: three security fixes, lean's latency work, and four

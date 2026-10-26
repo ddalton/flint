@@ -322,7 +322,8 @@ yours.
 - **A rename or move is a delete plus a fresh upload** of every byte
   under the new path: the object key is the path. Moving a large
   directory re-uploads it. Edit in place where you can.
-- Files under `.flint/` and `.flint-sync/` are never published.
+- Files under `.flint/` and `.flint-sync/` at the workspace root are never
+  published. Below the root they are ordinary names.
 - A name ending in `.flint-sync-tmp` is reserved for the syncer's own
   temporary files at every depth: it is never published, never
   materialised from the bucket, and the gateway refuses it.

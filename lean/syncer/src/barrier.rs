@@ -642,7 +642,7 @@ impl Syncer {
     pub(crate) fn confirm_absences(
         &self,
         classified: &mut scan::Classified,
-        held: &mut BTreeSet<String>,
+        held: &mut scan::Scan,
     ) -> LeanResult<usize> {
         if classified.first_absence.is_empty() {
             return Ok(0);
@@ -666,7 +666,7 @@ impl Syncer {
                 Err(e) => match scan::name_error(&e) {
                     scan::NameError::Gone | scan::NameError::Replaced => true,
                     scan::NameError::Refused => {
-                        held.insert(path);
+                        held.hold(path, scan::Hold::File);
                         continue;
                     }
                     scan::NameError::Other => {
@@ -810,7 +810,7 @@ impl Syncer {
         let unkeyed: Vec<String> = scanned.entries.keys().filter(|p| !self.cfg.key_fits(p)).cloned().collect();
         for p in unkeyed {
             scanned.entries.remove(&p);
-            scanned.held.insert(p);
+            scanned.hold(p, scan::Hold::File);
         }
         clock.lap("walk");
         let mut classified = scan::classify(&scanned, &baseline);
@@ -827,10 +827,10 @@ impl Syncer {
             classified.uploads.iter().filter(|p| !scan::may_read(&self.cfg.root, p)).cloned().collect();
         for p in unreadable {
             classified.uploads.remove(&p);
-            scanned.held.insert(p);
+            scanned.hold(p, scan::Hold::File);
         }
         if declared {
-            report.absences_confirmed = self.confirm_absences(&mut classified, &mut scanned.held)?;
+            report.absences_confirmed = self.confirm_absences(&mut classified, &mut scanned)?;
         }
         report.first_absence = classified.first_absence.iter().cloned().collect();
         report.held = scanned.held.iter().cloned().collect();
@@ -1000,7 +1000,7 @@ impl Syncer {
                     // would have been then.
                     self.trace("upload", serde_json::json!({"flush": flush_uuid, "path": path, "outcome": "held"}));
                     classified.uploads.remove(path);
-                    scanned.held.insert(path.clone());
+                    scanned.hold(path.clone(), scan::Hold::File);
                     report.held.push(path.clone());
                     note_held(std::slice::from_ref(path));
                 }

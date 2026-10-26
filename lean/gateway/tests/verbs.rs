@@ -336,6 +336,29 @@ async fn a_path_too_long_for_a_key_is_refused_and_the_longest_that_fits_is_taken
     assert!(!keys.iter().any(|k| k.contains(&long)), "something landed under the long path");
 }
 
+/// L-148: the syncer's two directories are reserved at the workspace root
+/// and nowhere else, by the syncer's own rule (`scan::is_control_path`),
+/// as its walk and its checkout reserve them. Below the root they are
+/// ordinary names: the agent publishes `notes/.flint-sync/x`, and the UI
+/// reads, saves, renames and removes it. `.flint-sync` was refused at every
+/// depth here, so such a file was listed and could be touched by no verb.
+#[tokio::test]
+async fn the_syncers_directories_are_reserved_at_the_root_only() {
+    let s = store();
+    let w = ws(&s);
+    for p in ["notes/.flint-sync/x", "notes/.flint/y", "a/b/.flint-sync"] {
+        let etag = w.put_file(p, Bytes::from("ordinary"), &PutFile::default()).await.unwrap_or_else(|e| panic!("{p}: {e}"));
+        assert_eq!(w.get_file(p).await.unwrap().etag, etag, "{p}");
+        let to = format!("{p}.moved");
+        w.rename_file(p, &to, None).await.unwrap_or_else(|e| panic!("{p}: {e}"));
+        w.remove_file(&to, None, None).await.unwrap_or_else(|e| panic!("{to}: {e}"));
+    }
+    for bad in [".flint-sync", ".flint-sync/x", ".flint", ".flint/x"] {
+        let err = w.put_file(bad, Bytes::from("x"), &PutFile::default()).await.unwrap_err();
+        assert!(matches!(err, VerbError::BadPath(_)), "{bad}: {err}");
+    }
+}
+
 #[tokio::test]
 async fn path_hygiene_the_size_cap_and_a_missing_file() {
     let s = store();

@@ -101,17 +101,61 @@ pub struct Scan {
     /// barrier adds the files it may not open and the absences it may not
     /// confirm. Nothing held is published or deleted, and no boundary is
     /// complete while anything is held.
+    ///
+    /// This is how each one is SHOWN (in the report, the ack, the log).
+    /// What each one stands for is its `Hold`, kept apart (`hold`): the
+    /// lossy form of a name that is not UTF-8 may spell a real name, and a
+    /// file has nothing under it.
     pub held: BTreeSet<String>,
+    /// The held paths that stand for everything under them (`Hold::Tree`),
+    /// each without a trailing `/`.
+    held_trees: BTreeSet<String>,
+    /// The held paths that stand for themselves alone (`Hold::File`).
+    held_files: BTreeSet<String>,
+}
+
+/// What a held path stands for: which keys it makes unseen rather than
+/// absent (`Scan::holds`, `Scan::present`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// It and everything under it: a directory the walk may not list, or
+    /// a name it may not stat, which may be a directory.
+    Tree,
+    /// Itself alone: a file the syncer may not read, a path too long for
+    /// a key, an absence it may not confirm. Nothing can be under a file:
+    /// held as a tree, a file standing where a cited directory was kept
+    /// every citation under it, a first absence at every barrier (L-147).
+    File,
+    /// No key at all: a name that is not UTF-8, shown with U+FFFD. No
+    /// cited path can be at or under it, and its lossy form may spell a
+    /// real name, which held as a tree it held too, withholding that
+    /// name's deletes (the collision L-141 accepted).
+    Unnamed,
 }
 
 impl Scan {
-    /// Whether `path` is held: a held path itself, or under one.
+    /// Hold the path shown as `shown` (a directory with its trailing `/`).
+    pub fn hold(&mut self, shown: String, kind: Hold) {
+        match kind {
+            Hold::Tree => {
+                self.held_trees.insert(shown.strip_suffix('/').unwrap_or(&shown).to_string());
+            }
+            Hold::File => {
+                self.held_files.insert(shown.clone());
+            }
+            Hold::Unnamed => {}
+        }
+        self.held.insert(shown);
+    }
+
+    /// Whether `path` is held: a held file itself, or at or under a held
+    /// tree.
     pub fn holds(&self, path: &str) -> bool {
-        !self.held.is_empty()
-            && self.held.iter().any(|h| {
-                let base = h.strip_suffix('/').unwrap_or(h);
-                path.strip_prefix(base).is_some_and(|r| r.is_empty() || r.starts_with('/'))
-            })
+        self.held_files.contains(path)
+            || self
+                .held_trees
+                .iter()
+                .any(|base| path.strip_prefix(base.as_str()).is_some_and(|r| r.is_empty() || r.starts_with('/')))
     }
 
     /// What `prev_scan` records after this scan, in order: every path the
@@ -121,7 +165,12 @@ impl Scan {
     /// and the two-scan rule withholds its delete one more scan, exactly
     /// as for a path seen a scan ago.
     pub fn present<'a, V>(&'a self, cited: &'a BTreeMap<String, V>) -> impl Iterator<Item = &'a String> + 'a {
-        let mut unseen: Vec<&'a String> = self.held.iter().flat_map(|h| under(cited, h)).collect();
+        let mut unseen: Vec<&'a String> = self
+            .held_trees
+            .iter()
+            .flat_map(|h| under(cited, h))
+            .chain(self.held_files.iter().filter_map(|f| cited.get_key_value(f.as_str()).map(|(k, _)| k)))
+            .collect();
         unseen.sort_unstable();
         unseen.dedup();
         let mut seen = self.entries.keys().peekable();
@@ -296,9 +345,11 @@ pub fn scan_with(root: &Path, threads: usize) -> LeanResult<Scan> {
     // commit's documents) on cold pages: at 1M files, 480 ms more across
     // classify, load, merge, cas and retire_set (latency plan §13).
     let mut all: Vec<(String, ScanEntry)> = Vec::with_capacity(found.iter().map(|f| f.files.len()).sum());
-    let mut held = BTreeSet::new();
+    let mut scan = Scan::default();
     for f in found {
-        held.extend(f.held);
+        for (shown, kind) in f.held {
+            scan.hold(shown, kind);
+        }
         let mut start = 0;
         for (end, e) in f.files {
             all.push((f.names[start..end].to_string(), e));
@@ -311,7 +362,8 @@ pub fn scan_with(root: &Path, threads: usize) -> LeanResult<Scan> {
     // had to choose one by a rule of the tree. Sorted here, `from_iter`
     // finds the order made and builds in bulk, not by a million inserts.
     all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    Ok(Scan { entries: all.into_iter().collect(), held })
+    scan.entries = all.into_iter().collect();
+    Ok(scan)
 }
 
 /// The walk's shared state: directories not yet read (with the relative
@@ -331,7 +383,7 @@ struct Queue {
 struct Found {
     names: String,
     files: Vec<(usize, ScanEntry)>,
-    held: Vec<String>,
+    held: Vec<(String, Hold)>,
 }
 
 fn walk_worker(queue: &Mutex<Queue>, wake: &Condvar) -> Found {
@@ -400,7 +452,7 @@ fn read_dir_entries(
         Err(e) if !prefix.is_empty() => match name_error(&e) {
             NameError::Gone | NameError::Replaced => return Ok(()),
             NameError::Refused => {
-                out.held.push(prefix.to_string());
+                out.held.push((prefix.to_string(), Hold::Tree));
                 return Ok(());
             }
             NameError::Other => return Err(e),
@@ -441,7 +493,7 @@ fn read_dir_entries(
                 // A directory the syncer may list but not search: each
                 // name in it is held, file or directory alike.
                 NameError::Refused => {
-                    out.held.push(format!("{prefix}{name}"));
+                    out.held.push((format!("{prefix}{name}"), if keyless { Hold::Unnamed } else { Hold::Tree }));
                     continue;
                 }
                 NameError::Other => return Err(e),
@@ -452,12 +504,12 @@ fn read_dir_entries(
                 let rel = format!("{prefix}{name}/");
                 if keyless {
                     // Nothing under it has a key either.
-                    out.held.push(rel);
+                    out.held.push((rel, Hold::Unnamed));
                 } else {
                     subdirs.push((dir.join(std::ffi::OsStr::from_bytes(bytes)), rel));
                 }
             }
-            FileType::RegularFile if keyless => out.held.push(format!("{prefix}{name}")),
+            FileType::RegularFile if keyless => out.held.push((format!("{prefix}{name}"), Hold::Unnamed)),
             FileType::RegularFile => {
                 // As std's `modified()` and `duration_since(UNIX_EPOCH)`
                 // gave it: a time before the epoch is (0, 0).

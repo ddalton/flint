@@ -434,15 +434,19 @@ pub fn path_ok(path: &str) -> bool {
             seg.is_empty()
                 || seg == "."
                 || seg == ".."
-                || seg == flint_lean::STATE_DIR
                 // The syncer's temp-sibling suffix (review 2026-09-18, C1):
                 // the walk skips the name at every depth, so a write under
                 // it was materialised by the consume, cited once as a first
                 // absence, and collected as a delete at the next barrier.
                 || seg.ends_with(flint_lean::scan::TMP_SUFFIX)
         })
-        && !path.starts_with(".flint/")
-        && path != ".flint"
+        // The syncer's two directories, `.flint` and `.flint-sync`, at the
+        // root, by the syncer's own rule: the walk skips them there and
+        // nowhere else, and checkout refuses them there and nowhere else.
+        // `.flint-sync` was refused at every depth here, so a file the
+        // agent published under `d/.flint-sync/` could be neither read,
+        // saved, removed nor renamed through the gateway (L-148).
+        && !flint_lean::scan::is_control_path(path)
 }
 
 /// The ONE entity-tag normalisation rule in this crate.

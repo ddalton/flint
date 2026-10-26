@@ -67,16 +67,8 @@ struct Known {
 
 const KNOWN: &[Known] = &[
     Known {
-        name: "lossy-hold-collision",
-        what: "L-141, accepted: a keyless name held under its lossy form also holds a real name spelled with U+FFFD",
-    },
-    Known {
         name: "agent-set-mtime",
         what: "AGENTS.md: a same-size rewrite whose mtime the agent set to the published one is invisible (ctime would see it)",
-    },
-    Known {
-        name: "file-hold-covers-subtree",
-        what: "L-147: an unreadable file where a cited directory was keeps the citations under it, forever a first absence",
     },
 ];
 
@@ -115,7 +107,7 @@ const UI_NAMES: &[&str] = &[
     "new\nline", "tab\there", "%41", "q?", "h#", "star*", "at@", "f@ui-1",
     "n@ui-1700000000-00000000-0000-0000-0000-000000000000", "\u{65e5}\u{672c}\u{8a9e}", "caf\u{e9}",
     "cafe\u{301}", "\u{202e}txt.exe", "zero\u{200b}width", ".hidden", "..dots", "...", "caf\u{fffd}",
-    "-dash", "UPPER", "upper", "emoji\u{1f600}", ".flint", "~", "@",
+    "-dash", "UPPER", "upper", "emoji\u{1f600}", ".flint", ".flint-sync", "~", "@",
 ];
 
 /// Names that are not UTF-8: held, never published (L-141).
@@ -131,11 +123,8 @@ const DIR_MODES: &[u32] = &[0o755, 0o755, 0o755, 0o700, 0o000, 0o300, 0o500, 0o6
 fn path_ok(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
-        && !path.split('/').any(|seg| {
-            seg.is_empty() || seg == "." || seg == ".." || seg == STATE_DIR || seg.ends_with(TMP_SUFFIX)
-        })
-        && !path.starts_with(".flint/")
-        && path != ".flint"
+        && !path.split('/').any(|seg| seg.is_empty() || seg == "." || seg == ".." || seg.ends_with(TMP_SUFFIX))
+        && !super::scan::is_control_path(path)
 }
 
 // ── the disk, seen through every permission ──────────────────────────
@@ -503,22 +492,15 @@ impl Case {
         (0..len).map(|_| self.rng.next() as u8).collect()
     }
 
-    /// A name from `UI_NAMES`, less one spelled with U+FFFD while the
-    /// collision with a keyless name's lossy form is not generated.
     fn listed_name(&mut self) -> &'static str {
-        loop {
-            let n = *self.rng.pick(UI_NAMES);
-            if !n.contains('\u{fffd}') || known_enabled("lossy-hold-collision") {
-                return n;
-            }
-        }
+        self.rng.pick(UI_NAMES)
     }
 
     fn agent_name(&mut self, at_root: bool) -> Vec<u8> {
         match self.rng.below(100) {
             0..=49 => {
                 let n = self.listed_name();
-                if at_root && n == CONTROL_DIR { b"a".to_vec() } else { n.as_bytes().to_vec() }
+                if at_root && (n == CONTROL_DIR || n == STATE_DIR) { b"a".to_vec() } else { n.as_bytes().to_vec() }
             }
             50..=64 => format!("f{}", self.rng.below(1000)).into_bytes(),
             65..=74 => self.rng.pick(KEYLESS).to_vec(),
@@ -540,7 +522,7 @@ impl Case {
             return format!("u{}.txt", self.rng.below(1000));
         }
         let n = self.listed_name();
-        if at_root && n == CONTROL_DIR { "u.txt".into() } else { n.to_string() }
+        if at_root && (n == CONTROL_DIR || n == STATE_DIR) { "u.txt".into() } else { n.to_string() }
     }
 
     /// The UI's turn, before the agent's: at most one save or delete, of
@@ -900,25 +882,9 @@ impl Case {
         (!c.is_empty()).then(|| c[self.rng.below(c.len())].clone())
     }
 
-    /// While `file-hold-covers-subtree` is not generated: a file the
-    /// syncer may not read, at a path the document still cites something
-    /// under, is made readable.
-    fn spare_file_holds(&mut self, s: &Snap, d: &Doc) {
-        if known_enabled("file-hold-covers-subtree") {
-            return;
-        }
-        for (p, n) in s {
-            let Node::File { perm, .. } = n else { continue };
-            if perm & 0o400 == 0 && d.keys().any(|k| under(k.as_bytes(), p)) {
-                let _ = chmod(&abs(&self.root, p), perm | 0o400);
-                self.note(format!("(KNOWN file-hold-covers-subtree not generated: {} made readable)", show(p)));
-            }
-        }
-    }
-
     /// Maybe arm a mutation of one file this tick wrote, for the moment
     /// between the walk and the open.
-    fn arm(&mut self, s: &Snap, d: &Doc, touched: &[Vec<u8>], frozen: &[Vec<u8>]) -> Option<Inj> {
+    fn arm(&mut self, s: &Snap, touched: &[Vec<u8>], frozen: &[Vec<u8>]) -> Option<Inj> {
         if !self.rng.pct(40) {
             return None;
         }
@@ -933,8 +899,7 @@ impl Case {
             .collect();
         let x = self.pick_where(&cands, |_| true)?;
         let mut kinds = vec![InjKind::Delete, InjKind::SwapDir, InjKind::SwapLink, InjKind::SwapFifo, InjKind::Grow];
-        let covers = d.keys().any(|k| under(k.as_bytes(), &x)) && !known_enabled("file-hold-covers-subtree");
-        if self.perms && !covers {
+        if self.perms {
             kinds.push(InjKind::Chmod000);
             if !parent(&x).is_empty() {
                 kinds.push(InjKind::LockParent);
@@ -1318,9 +1283,8 @@ async fn run_case(seed: u64, idx: usize, ticks: usize, perms: bool) -> Result<Ta
             stamped.entry(k.clone()).or_default().push(b.size as usize);
         }
         let touched = c.agent_turn(&frozen, &stamped);
-        c.spare_file_holds(&snapshot(&root), &dprev);
         let s = snapshot(&root);
-        let inj = c.arm(&s, &dprev, &touched, &frozen);
+        let inj = c.arm(&s, &touched, &frozen);
         let (_, after, inj) = barrier!(format!("tick {tick} barrier"), ui, inj);
         s0 = after;
         last_inj = inj;

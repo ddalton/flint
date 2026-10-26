@@ -3439,8 +3439,8 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
 
     let mut classified = super::scan::Classified::default();
     classified.first_absence.insert("locked/f.txt".into());
-    let mut held = std::collections::BTreeSet::new();
-    let got = a.confirm_absences(&mut classified, &mut held);
+    let mut scanned = super::scan::Scan::default();
+    let got = a.confirm_absences(&mut classified, &mut scanned);
     // Restore so the tempdir can be cleaned up.
     std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
 
@@ -3451,7 +3451,8 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
         classified.deletes
     );
     assert!(classified.first_absence.is_empty(), "a held path is unseen, not back on disk: {classified:?}");
-    assert_eq!(held.iter().collect::<Vec<_>>(), ["locked/f.txt"]);
+    assert_eq!(scanned.held.iter().collect::<Vec<_>>(), ["locked/f.txt"]);
+    assert!(scanned.holds("locked/f.txt"), "an absence the syncer may not confirm is unseen");
 
     // A path through a file cannot be there (ENOTDIR): the agent replaced
     // a directory with a file, and the walk does not descend a file
@@ -3461,10 +3462,10 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
     write(dir.path(), "plain.txt", "a file, not a directory");
     let mut classified = super::scan::Classified::default();
     classified.first_absence.insert("plain.txt/f".into());
-    let got = a.confirm_absences(&mut classified, &mut held).expect("a path through a file is absent");
+    let got = a.confirm_absences(&mut classified, &mut scanned).expect("a path through a file is absent");
     assert_eq!(got, 1);
     assert_eq!(classified.deletes.iter().collect::<Vec<_>>(), ["plain.txt/f"]);
-    assert_eq!(held.len(), 1, "an absence was held: {held:?}");
+    assert_eq!(scanned.held.len(), 1, "an absence was held: {:?}", scanned.held);
 
     // Any other errno fails, as it did: ENAMETOOLONG, a path longer than
     // PATH_MAX, which says nothing about whether it is there.
@@ -3472,11 +3473,11 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
     let mut classified = super::scan::Classified::default();
     classified.first_absence.insert(long.clone());
     let err = a
-        .confirm_absences(&mut classified, &mut held)
+        .confirm_absences(&mut classified, &mut scanned)
         .expect_err("ENAMETOOLONG must not confirm a deletion, nor be held");
     assert!(format!("{err}").contains("refusing to publish a deletion"), "the refusal must say what it refused: {err}");
     assert!(classified.deletes.is_empty(), "{:?}", classified.deletes);
-    assert_eq!(held.len(), 1, "a non-EACCES errno was held: {held:?}");
+    assert_eq!(scanned.held.len(), 1, "a non-EACCES errno was held: {:?}", scanned.held);
 }
 
 /// The walk's half of the same rule: a directory it may not list is HELD,
@@ -3531,8 +3532,9 @@ fn an_unreadable_root_fails_the_walk() {
 fn a_held_path_covers_itself_and_what_is_under_it_and_nothing_beside_it() {
     let entry = || super::scan::ScanEntry { size: 1, mtime_unix: 1, mtime_nanos: 0, mode: 0o644, seen_nanos: 0 };
     let mut s = super::scan::Scan::default();
-    s.held.insert("d/".into());
-    s.held.insert("e/f".into());
+    // A directory the walk may not list, and a name it may not stat.
+    s.hold("d/".into(), super::scan::Hold::Tree);
+    s.hold("e/f".into(), super::scan::Hold::Tree);
     for p in ["d", "d/x", "d/x/y", "e/f", "e/f/g"] {
         assert!(s.holds(p), "{p} is under a held path");
     }
@@ -3551,6 +3553,82 @@ fn a_held_path_covers_itself_and_what_is_under_it_and_nothing_beside_it() {
         ["a.txt", "d", "d-1", "d/x", "d/x/y", "e/f", "e/f.txt", "e/f/g"],
         "what the walk saw and the cited paths it held, in order, each once"
     );
+}
+
+/// A held FILE stands for itself alone, and a name that is not UTF-8 for
+/// no key at all, though each is reported like any held path (L-147, and
+/// the collision L-141 accepted). Both used to stand for everything under
+/// their shown form: a file where a cited directory was kept the
+/// citations under it, and `caf\xe9/` (shown `caf\u{FFFD}/`) held a real
+/// directory named `caf\u{FFFD}`.
+#[test]
+fn a_held_file_covers_itself_and_a_name_with_no_key_covers_nothing() {
+    use super::scan::Hold;
+    let mut s = super::scan::Scan::default();
+    s.hold("f".into(), Hold::File);
+    s.hold("caf\u{FFFD}/".into(), Hold::Unnamed);
+    assert_eq!(s.held.iter().collect::<Vec<_>>(), ["caf\u{FFFD}/", "f"], "both are reported");
+    assert!(s.holds("f"));
+    for p in ["f/x", "caf\u{FFFD}", "caf\u{FFFD}/x"] {
+        assert!(!s.holds(p), "{p} is not held");
+    }
+    let cited: std::collections::BTreeMap<String, ()> =
+        ["f", "f/x", "caf\u{FFFD}/x"].into_iter().map(|p| (p.to_string(), ())).collect();
+    assert_eq!(s.present(&cited).collect::<Vec<_>>(), ["f"], "only the held file itself is unseen");
+}
+
+/// L-147 end to end: the agent replaces a published directory with a file
+/// the syncer may not read. The file is held, and the citations under the
+/// old directory go by the two-scan rule; they used to stay, a first
+/// absence at every barrier, for as long as the file stayed unreadable.
+#[tokio::test]
+async fn an_unreadable_file_where_a_cited_directory_was_lets_its_citations_go() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, mode bits cannot induce EACCES");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "d/f.txt", "under a directory");
+    a.run_barrier().await.unwrap();
+    std::fs::remove_dir_all(dir.path().join("d")).unwrap();
+    write(dir.path(), "d", "a file the syncer may not read");
+    let d = dir.path().join("d");
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let r1 = a.run_barrier().await;
+    let r2 = a.run_barrier().await;
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (r1, r2) = (r1.unwrap(), r2.unwrap());
+    assert_eq!((r1.held.as_slice(), r1.first_absence.as_slice()), (&["d".to_string()][..], &["d/f.txt".to_string()][..]), "{r1:?}");
+    assert_eq!(r2.deleted, ["d/f.txt"], "the citation under the held file stayed: {r2:?}");
+}
+
+/// The collision L-141 accepted, end to end: a name that is not UTF-8
+/// (`caf\xe9/`, shown `caf\u{FFFD}/`) is held, and a real directory whose
+/// name is spelled with U+FFFD beside it is not: a file deleted there is
+/// deleted in the bucket. It used to stay cited for as long as the other
+/// name stood.
+#[tokio::test]
+async fn a_name_with_no_key_does_not_hold_a_real_name_spelled_like_it() {
+    use std::os::unix::ffi::OsStrExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "caf\u{FFFD}/x.txt", "a real name");
+    a.run_barrier().await.unwrap();
+    let keyless = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir(&keyless).unwrap();
+    std::fs::write(keyless.join("y.txt"), "no key").unwrap();
+    std::fs::remove_file(dir.path().join("caf\u{FFFD}/x.txt")).unwrap();
+    let r1 = a.run_barrier().await.unwrap();
+    assert_eq!(r1.held, ["caf\u{FFFD}/"], "{r1:?}");
+    assert_eq!(r1.first_absence, ["caf\u{FFFD}/x.txt"], "{r1:?}");
+    let r2 = a.run_barrier().await.unwrap();
+    assert_eq!(r2.deleted, ["caf\u{FFFD}/x.txt"], "the keyless name held the real one: {r2:?}");
 }
 
 /// End to end, on the cadence path, where nothing re-checks an absence
