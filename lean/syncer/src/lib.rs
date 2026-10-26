@@ -95,6 +95,7 @@ static TEST_GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(test)] mod tests_rechunk;
 #[cfg(test)] mod tests_docview;
 #[cfg(test)] mod tests_rehash;
+#[cfg(all(test, target_os = "linux"))] mod tests_fuzz;
 
 use std::path::PathBuf;
 use std::sync::Arc;
