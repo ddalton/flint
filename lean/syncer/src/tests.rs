@@ -1944,6 +1944,7 @@ async fn legacy_flint_citation_survives_upgrade() {
             mode: None,
             crc64_b64: meta.crc64_b64.clone(),
             racy: false,
+            change: None,
         },
     );
     b.prev_scan.insert(".flint/legacy.txt".into());
@@ -3530,7 +3531,14 @@ fn an_unreadable_root_fails_the_walk() {
 /// `e/fg` begins with `e/f`. Neither is under a held path.
 #[test]
 fn a_held_path_covers_itself_and_what_is_under_it_and_nothing_beside_it() {
-    let entry = || super::scan::ScanEntry { size: 1, mtime_unix: 1, mtime_nanos: 0, mode: 0o644, seen_nanos: 0 };
+    let entry = || super::scan::ScanEntry {
+        size: 1,
+        mtime_unix: 1,
+        mtime_nanos: 0,
+        mode: 0o644,
+        seen_nanos: 0,
+        change: Default::default(),
+    };
     let mut s = super::scan::Scan::default();
     // A directory the walk may not list, and a name it may not stat.
     s.hold("d/".into(), super::scan::Hold::Tree);
@@ -3995,6 +4003,166 @@ async fn a_checkout_and_a_consume_keep_setuid_and_setgid_and_publish_nothing() {
     }
 }
 
+/// Whether `rel`'s baseline entry is past its racy window: what a hash
+/// would leave once the window is over. These tests set it rather than
+/// sleep two seconds.
+fn settle(sc: &Syncer, rel: &str) {
+    let mut b = sc.state.load_baseline().unwrap();
+    b.entries.get_mut(rel).unwrap().racy = false;
+    sc.state.save_baseline(&b).unwrap();
+}
+
+/// The file's stat now, as the walk would key it.
+fn stamp_of(root: &std::path::Path, rel: &str) -> super::scan::ChangeStamp {
+    super::scan::ChangeStamp::of(&std::fs::symlink_metadata(root.join(rel)).unwrap())
+}
+
+/// THE TIMESTAMP HOLE (AGENTS.md's old rule; LeanScanRacy's
+/// `AgentSetsMtime`): a same-size rewrite under the mtime the baseline
+/// recorded (`cp -p`, `rsync -t`, `touch -d`) left size and mtime as
+/// recorded, so an entry past its racy window called it clean, and the
+/// rewrite was never published. Its ctime moved, which no agent can set:
+/// the entry is unsure, its bytes differ, and it publishes.
+#[tokio::test]
+async fn a_same_size_rewrite_under_a_restored_mtime_is_published() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1 bytes");
+    let f = dir.path().join("f.txt");
+    // An old mtime, as a file copied in with `cp -p` has: measured from it
+    // alone, the window is long over.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(old).unwrap();
+    a.run_barrier().await.unwrap();
+    settle(&a, "f.txt");
+    let recorded = std::fs::metadata(&f).unwrap().modified().unwrap();
+    std::fs::write(&f, "v2 BYTES").unwrap();
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(recorded).unwrap();
+    assert_eq!(std::fs::metadata(&f).unwrap().modified().unwrap(), recorded, "fixture: the mtime is not the recorded one");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.uploaded, ["f.txt"], "a rewrite under a restored mtime was not published: {r:?}");
+    assert_eq!(cited_bytes(&store, &a.cfg, "f.txt").await.as_deref(), Some(&b"v2 BYTES"[..]));
+    // And it is recorded racy: its window runs from its ctime, just now,
+    // not from the old mtime, so a second same-size `cp -p` inside the
+    // same tick is hashed too (the model's `RacyOnChange`).
+    assert!(a.state.load_baseline().unwrap().entries["f.txt"].racy, "a cp -p'd file was recorded past its window");
+}
+
+/// The other half: a change stamp that moved over the SAME bytes (a chmod
+/// to the mode it had, a hard link made or removed, a rename) costs a
+/// hash, never an upload, and the hash records the new stamp, so the next
+/// barrier does not hash it again.
+#[tokio::test]
+async fn a_change_stamp_that_moved_over_the_same_bytes_is_hashed_once_and_not_published() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "the same bytes");
+    a.run_barrier().await.unwrap();
+    settle(&a, "f.txt");
+    let before = stamp_of(dir.path(), "f.txt");
+    let f = dir.path().join("f.txt");
+    let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+    std::fs::hard_link(&f, dir.path().join("g.txt")).unwrap();
+    std::fs::remove_file(dir.path().join("g.txt")).unwrap();
+    let after = stamp_of(dir.path(), "f.txt");
+    assert_ne!(before, after, "fixture: the change stamp did not move");
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty(), "the same bytes were published again: {r:?}");
+    let e = a.state.load_baseline().unwrap().entries["f.txt"].clone();
+    assert_eq!(e.change, Some(after), "the hash did not record the stamp it vouched for");
+}
+
+/// The consume's half of the hole, which LOST the agent's edit: a UI save
+/// of a file the agent rewrote under its recorded mtime found the tree's
+/// stat as recorded and installed the UI's bytes over the agent's, which
+/// no barrier had published. The change stamp makes the tree's copy
+/// unsure, its bytes differ, so it is the agent's: the save is not
+/// installed over it, and the barrier publishes the agent's bytes (mine
+/// wins, the UI's recorded). A stamp that moved over the SAME bytes is
+/// clean, and the save lands.
+#[tokio::test]
+async fn a_consume_never_installs_over_bytes_rewritten_under_a_restored_mtime() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "edited.txt", "v1 bytes");
+    write(dir.path(), "touched.txt", "v1 bytes");
+    a.run_barrier().await.unwrap();
+    settle(&a, "edited.txt");
+    settle(&a, "touched.txt");
+    let edited = dir.path().join("edited.txt");
+    let recorded = std::fs::metadata(&edited).unwrap().modified().unwrap();
+    std::fs::write(&edited, "AGENT v2").unwrap();
+    std::fs::File::options().write(true).open(&edited).unwrap().set_modified(recorded).unwrap();
+    let touched = dir.path().join("touched.txt");
+    let mode = std::fs::metadata(&touched).unwrap().permissions().mode();
+    std::fs::set_permissions(&touched, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    hitl_write(&store, &a.cfg, "edited.txt", "the UI's save", "ui").await.unwrap();
+    hitl_write(&store, &a.cfg, "touched.txt", "the UI's save", "ui").await.unwrap();
+    a.run_barrier().await.unwrap();
+    assert_eq!(read(dir.path(), "edited.txt").as_deref(), Some("AGENT v2"), "the consume installed over the agent's edit");
+    assert_eq!(read(dir.path(), "touched.txt").as_deref(), Some("the UI's save"), "a stamp alone kept a save out");
+    a.run_barrier().await.unwrap();
+    assert_eq!(cited_bytes(&store, &a.cfg, "edited.txt").await.as_deref(), Some(&b"AGENT v2"[..]));
+}
+
+/// A tree records the change stamp its files END with (LeanScanRacy's
+/// `Record`): after a checkout, whole and ranged, and after a consume,
+/// each entry's stamp is the file's. Taken before the rename, which moves
+/// ctime, every file a checkout wrote would read as moved and the first
+/// scan would hash the whole tree again (latency plan §17).
+#[tokio::test]
+async fn a_tree_records_the_change_stamp_its_files_end_with() {
+    let store = Arc::new(MemoryStore::new());
+    let da = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, da.path()).await;
+    a.checkout().await.unwrap();
+    write(da.path(), "small.txt", "small");
+    write(da.path(), "big.bin", &"b".repeat(64 * 1024));
+    a.run_barrier().await.unwrap();
+    // On the crate's own filesystem, not /tmp: tmpfs leaves ctime where it
+    // was on a rename, so there a stamp taken before the rename passes too.
+    // ext4 moves it, and a lean tree is ext4 (the s3csi image) or the
+    // node's disk (an emptyDir).
+    let db = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    {
+        let (p, q) = (db.path().join("probe"), db.path().join("probe2"));
+        std::fs::write(&p, "x").unwrap();
+        let before = super::scan::ChangeStamp::of(&std::fs::metadata(&p).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::rename(&p, &q).unwrap();
+        if super::scan::ChangeStamp::of(&std::fs::metadata(&q).unwrap()) == before {
+            eprintln!("SKIPPED: a rename does not move ctime under {}: the after-the-rename half is vacuous here", db.path().display());
+        }
+        std::fs::remove_file(&q).unwrap();
+    }
+    let mut b = syncer(&store, db.path()).await;
+    b.cfg.range_get_min_bytes = 16 * 1024;
+    b.cfg.range_get_chunk_bytes = 16 * 1024;
+    b.checkout().await.unwrap();
+    // Before any barrier: a barrier's confirm would hash a file whose
+    // recorded stamp is stale and record the right one, hiding the cost.
+    let base = b.state.load_baseline().unwrap();
+    for p in ["small.txt", "big.bin"] {
+        assert_eq!(base.entries[p].change, Some(stamp_of(db.path(), p)), "{p}: the checkout recorded a stamp the file no longer has");
+    }
+    // A consume, read back after its barrier (whose scan would have healed
+    // a stale stamp the same way, at the price of a hash).
+    hitl_write(&store, &b.cfg, "consumed.txt", "the UI's", "ui").await.unwrap();
+    b.run_barrier().await.unwrap();
+    let base = b.state.load_baseline().unwrap();
+    assert_eq!(base.entries["consumed.txt"].change, Some(stamp_of(db.path(), "consumed.txt")));
+}
+
 /// A declared boundary that holds a path is not complete: the ack is
 /// `partial` and names it, and what could be read is in the seq it names.
 #[tokio::test]
@@ -4173,6 +4341,7 @@ fn the_scan_compares_permission_bits_never_the_file_type() {
         mode: Some(0o644),
         crc64_b64: None,
         racy: false,
+        change: None,
     };
     assert!(!stat_changed(&b, 3, 100, 5, 0o100644), "the file-type bits read as a change");
     assert!(stat_changed(&b, 3, 100, 5, 0o100755), "chmod +x is not a change");
@@ -4256,9 +4425,10 @@ async fn a_chmod_that_locks_the_syncer_out_is_held_and_loses_nothing() {
     chmod(dir.path(), "f.txt", 0o644);
     // Outside the racy window, so only the mode sends f.txt to the
     // upload: a racy entry is hashed, and a locked file's hash cannot be
-    // read either, mode or no mode.
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
-    std::fs::File::options().write(true).open(dir.path().join("f.txt")).unwrap().set_modified(old).unwrap();
+    // read either, mode or no mode. Waited, not faked: setting the mtime
+    // back moves ctime to now, and the window runs from the later of the
+    // two (`scan::later`).
+    tokio::time::sleep(std::time::Duration::from_nanos(super::scan::RACY_WINDOW_NANOS as u64 + 100_000_000)).await;
     a.run_barrier().await.unwrap();
     assert!(
         !a.state.load_baseline().unwrap().entries["f.txt"].racy,
@@ -13934,17 +14104,13 @@ async fn a_racy_entry_the_hash_vouches_for_is_cleared_and_saved() {
     a.checkout().await.unwrap();
     write(dir.path(), "f.txt", "v1");
     a.run_barrier().await.unwrap();
-    // Time passes: the file and its baseline stat both ten seconds old,
-    // still agreeing, the entry still racy.
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
-    std::fs::File::options().write(true).open(dir.path().join("f.txt")).unwrap().set_modified(old).unwrap();
-    let st = std::fs::metadata(dir.path().join("f.txt")).unwrap();
-    let mut b = a.state.load_baseline().unwrap();
-    let e = b.entries.get_mut("f.txt").unwrap();
-    e.mtime_unix = super::barrier::mtime_of(&st);
-    e.mtime_nanos = Some(super::barrier::mtime_nanos_of(&st));
-    assert!(e.racy);
-    a.state.save_baseline(&b).unwrap();
+    assert!(a.state.load_baseline().unwrap().entries["f.txt"].racy, "fixture: the entry is not racy");
+    // Time passes: the file and its baseline stat both past the window,
+    // still agreeing, the entry still racy. Waited, not faked: setting the
+    // mtime back, as this test once did, moves ctime to now, and the window
+    // is measured from the later of the two (`scan::later`), so the entry
+    // rightly stays racy.
+    tokio::time::sleep(std::time::Duration::from_nanos(super::scan::RACY_WINDOW_NANOS as u64 + 100_000_000)).await;
 
     let r = a.run_barrier().await.unwrap();
     assert!(r.uploaded.is_empty(), "the bytes did not change, nothing to publish: {r:?}");

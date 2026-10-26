@@ -485,6 +485,7 @@ impl Syncer {
                                 mtime_nanos: Some(mtime_nanos_of(&st)),
                                 mode: Some(entry.mode & super::scan::PERM_BITS),
                                 racy: super::barrier::racy_stat(&st),
+                                change: Some(super::scan::ChangeStamp::of(&st)),
                                 crc64_b64: Some(entry.crc64_b64.clone()),
                             }),
                             skipped: true,
@@ -543,6 +544,7 @@ impl Syncer {
                             mtime_nanos: Some(mtime_nanos_of(&st)),
                             mode: Some(entry.mode & super::scan::PERM_BITS),
                             racy: super::barrier::racy_stat(&st),
+                            change: Some(super::scan::ChangeStamp::of(&st)),
                             // The fold above equalled it, or we would
                             // not be here.
                             crc64_b64: Some(entry.crc64_b64.clone()),
@@ -680,6 +682,7 @@ impl Syncer {
                         mtime_nanos: Some(mtime_nanos_of(&st)),
                         mode: Some(entry.mode & super::scan::PERM_BITS),
                         racy: super::barrier::racy_stat(&st),
+                        change: Some(super::scan::ChangeStamp::of(&st)),
                         crc64_b64: Some(got),
                     }),
                     skipped: false,
@@ -955,8 +958,15 @@ impl Syncer {
             let (n, newest) = baseline
                 .entries
                 .values()
-                .filter(|e| e.racy && super::scan::racy(e.mtime_unix, e.mtime_nanos.unwrap_or(999_999_999), gate))
-                .map(|e| e.mtime_unix as i128 * 1_000_000_000 + e.mtime_nanos.unwrap_or(999_999_999) as i128)
+                .filter(|e| e.racy && super::scan::racy_entry(e, gate))
+                // From the later stamp, as `racy_entry` measures: a
+                // materialised file's ctime is its chmod and rename, after
+                // its mtime.
+                .map(|e| {
+                    let (sec, nanos) =
+                        super::scan::later(e.mtime_unix, e.mtime_nanos.unwrap_or(999_999_999), e.change.as_ref());
+                    sec as i128 * 1_000_000_000 + nanos as i128
+                })
                 .fold((0usize, i128::MIN), |(n, m), t| (n + 1, m.max(t)));
             if n >= self.cfg.racy_wait_min {
                 // A clock that runs backwards, or an mtime in the future,
@@ -970,7 +980,7 @@ impl Syncer {
             .entries
             .iter()
             .filter(|_| self.cfg.racy_at_gate)
-            .filter(|(_, e)| e.racy && !super::scan::racy(e.mtime_unix, e.mtime_nanos.unwrap_or(999_999_999), gate))
+            .filter(|(_, e)| e.racy && !super::scan::racy_entry(e, gate))
             .map(|(p, _)| p.clone())
             .collect();
         for p in settled {

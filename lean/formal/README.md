@@ -486,6 +486,21 @@ code holds the HITL window across both).
   exactly the step that relies on it
   (`results/2026-10-23-racy-gate/RESULTS.txt`; before the gate,
   `results/2026-10-20-tlaps-racy/RESULTS.txt`).
+  Since 2026-10-26 the agent may also SET mtime (`SetMtime` under
+  `AgentSetsMtime`: `touch -d`, `cp -p`, `rsync -t`), which every world
+  before assumed it never did (AGENTS.md forbade it; FINDINGS L-149,
+  Table 3b). The model gains `ctime`, which only the kernel stamps; the
+  code's `CtimeConfirm` (an entry whose ctime moved alone is confirmed by
+  its bytes, and `Confirm` records the stamp it saw) and `RacyOnChange`
+  (the window runs from the later of mtime and ctime). The shipped rule
+  HOLDS at 427,534 distinct and 91,384,520 (`LeanScanRacyWide`); the
+  code before it misses a change (`LeanScanRacyNoCtime`), and so does a
+  window measured from mtime alone (`LeanScanRacyRacyOnMtime`: a second
+  same-size `cp -p` in the tick of the first); with the agent's clock
+  off and the new rules off (`LeanScanRacyContract`) it is exactly the
+  2026-10-23 model, 3,452 distinct; `ProbeRestoredMtime` is reached.
+  The proof's inductive invariant moves from mtime to ctime (41
+  obligations; `results/2026-10-26-racy-ctime/RESULTS.txt`).
   `LeanP1.tla` is unchanged: its oracle is now a proved abstraction, not
   an assumption.
 - The 6-quiet-poll takeover observation is one `ClaimB` action; the

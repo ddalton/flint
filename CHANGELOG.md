@@ -66,6 +66,22 @@ covered by the stability guarantee.
   may not list, or a name it may not stat, holds everything under it; a
   file holds itself; a name that is not UTF-8 holds no key at all.
 
+- **lean: a same-size rewrite under a restored mtime was never
+  published, and a UI save could be installed over it** (L-149). The
+  syncer judged a file unchanged when its size, mtime and mode were as
+  recorded, so a rewrite that kept the old mtime (`cp -p`, `rsync -t`,
+  `touch -d`) was invisible once the file was past its racy window, and a
+  UI save of that path, finding the tree's copy clean, replaced the
+  agent's unpublished bytes. AGENTS.md forbade preserving timestamps for
+  that reason. The syncer now records each file's ctime and inode, which
+  no process in the pod can set: one that moved while size, mtime and
+  mode did not is confirmed by the bytes, so the rewrite publishes, the
+  consume leaves it alone, and a chmod or rename over the same bytes
+  costs one hash. The racy window is measured from the later of mtime
+  and ctime. The rule is proved in `lean/formal/LeanScanRacy.tla` with
+  the agent free to set mtime (TLAPS, 41 obligations); AGENTS.md no
+  longer asks agents not to preserve timestamps.
+
 - **lean gateway: a file under a `.flint-sync` directory below the
   workspace root could be neither read, saved, removed nor renamed**
   (L-148). The syncer reserves `.flint` and `.flint-sync` at the root

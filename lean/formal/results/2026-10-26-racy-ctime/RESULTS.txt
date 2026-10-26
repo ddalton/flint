@@ -1,0 +1,71 @@
+LeanScanRacy with the agent's clock and ctime (FINDINGS L-149), 2026-10-26
+
+Every world before this one had the agent's `Write` stamp the current tick
+and no action that set mtime: AGENTS.md's "never preserve timestamps" was
+an assumption no world and no proof could see. The model gains:
+  ctime          the tick of the file's last change; only the kernel sets it
+                 (every Write and every SetMtime stamp it now)
+  SetMtime       the agent sets mtime to any tick, past or future
+                 (`touch -d`; after a Write, `cp -p` and `rsync -t`),
+                 under AgentSetsMtime
+  CtimeConfirm   the code: an entry whose ctime moved while size and mtime
+                 did not is UNSURE, and dirty exactly when its bytes differ
+  RacyOnChange   the code: the racy window is measured from the later of
+                 mtime and ctime (`Later`)
+  Confirm        replaces ClearRacy: an unsure entry whose hash vouched
+                 records the ctime it saw and its racy flag measured now
+The proof's inductive invariant moves from mtime to ctime (ReadOK, BaseOK,
+GateOK, `ctime <= clock`): mtime is the agent's to set, ctime is not.
+
+Inputs (md5; record.out prints them, and they equal the committed files):
+  7337464b57dc8d7c954e6717e69d996c  LeanScanRacy.tla
+  cea6b510454e03293298e3917dce4109  LeanScanRacyProof.tla
+Box 10.0.0.249, /mnt/nvme/flint-05-ctime-model; run-racy-ctime.sh.
+
+TLC (tla-mc 0.1.2, -workers 2), every world with AgentSetsMtime = TRUE
+unless named:
+  LeanScanRacy                 HOLDS   427,534 distinct
+  LeanScanRacyWide             HOLDS   91,384,520 distinct
+  LeanScanRacyBefore           HOLDS   427,534 distinct  (MeasureAtGate FALSE)
+  LeanScanRacyContract         HOLDS   3,452 distinct    (AgentSetsMtime,
+                               CtimeConfirm, RacyOnChange FALSE: the old
+                               rule and the old code, exactly the
+                               2026-10-23 model's 3,452)
+  LeanScanRacyNoRule           Inv_NoMissedChange violated      9 distinct
+  LeanScanRacyMeasureLate      Inv_NoMissedChange violated  2,011 distinct
+  LeanScanRacyClearEarly       Inv_NoMissedChange violated     37 distinct
+  LeanScanRacyNoGate           Inv_NoMissedChange violated    121 distinct
+  LeanScanRacyNoCtime          Inv_NoMissedChange violated    187 distinct
+                               (CtimeConfirm FALSE: the code before L-149's
+                               fix, under an agent that sets mtime)
+  LeanScanRacyRacyOnMtime      Inv_NoMissedChange violated  1,737 distinct
+                               (RacyOnChange FALSE: a second same-size
+                               `cp -p` in the tick of the first hides)
+  LeanScanRacyProbe            ProbeNoSameTickRewrite reached    10 distinct
+  LeanScanRacyProbeGate        ProbeGateClears reached           16 distinct
+  LeanScanRacyProbeRestored    ProbeRestoredMtime reached       103 distinct
+
+TLAPS: THEOREM NoMissedChange == Spec => []Inv_NoMissedChange under
+Shipped (RacyClean, MeasureAtRead, ClearOutsideWindow, MeasureAtGate,
+WritesWaitForGate, CtimeConfirm, RacyOnChange TRUE) and Const (any writes,
+ticks, window >= 1, AgentSetsMtime either way).
+tlapm bfa9468, --toolbox 0 0 --cleanfp --stretch 4 --threads 1, nice -n 10.
+
+RECORD 2026-10-26T18:35:42Z: "All 41 obligations proved." 0.88 s wall,
+44 MB peak RSS.
+
+CONTROLS (the one Shipped line set FALSE; lines are LeanScanRacyProof.tla's):
+  RacyClean = FALSE           4/41 failed: 61 IndInit, 76 Record, 78 Confirm, 87 IndSafe
+  MeasureAtRead = FALSE       1/41 failed: 76 Record
+  ClearOutsideWindow = FALSE  1/41 failed: 78 Confirm
+  WritesWaitForGate = FALSE   2/41 failed: 68 Write, 70 SetMtime
+  CtimeConfirm = FALSE        1/41 failed: 87 IndSafe (a write since the
+                              record moves only ctime, and nothing reads it)
+  RacyOnChange = FALSE        3/41 failed: 76 Record, 78 Confirm, 80 Open
+                              (each measures the window)
+  (tlapm --toolbox exits 0 on failed obligations; read the [ERROR] line.
+  A failing control leaves its z3 and Isabelle `poly` running after tlapm
+  moves on: reaper.sh killed 9 such, each under a finished control's dir.)
+
+Logs (record.out, ctl-*.out, tlc-*.out) stay on the box; they are
+generated output.

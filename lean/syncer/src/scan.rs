@@ -29,6 +29,73 @@ pub struct ScanEntry {
     /// when anything after it read the file's bytes. The racy-clean test
     /// measures from here (`racy`).
     pub seen_nanos: i128,
+    /// What only the kernel stamps (`ChangeStamp`).
+    pub change: ChangeStamp,
+}
+
+/// The stamp no agent can set: a file's ctime, which every write, chmod,
+/// rename and `utimensat` moves to now, and its inode. mtime is the
+/// agent's to set (`touch -d`, `cp -p`, `rsync -t`): a same-size rewrite
+/// under the recorded mtime left size and mtime as recorded, and was never
+/// published (AGENTS.md forbade setting timestamps for that reason). An
+/// entry whose change stamp moved while size, mtime and mode did not is
+/// UNSURE: its bytes decide (`confirm_racy`, `barrier::local_dirty`), so a
+/// stamp that moved with no change costs a hash, never an upload. The
+/// model's `StampMoved`, `CtimeConfirm` (`LeanScanRacy.tla`).
+///
+/// Kept as `[ctime, nanos, ino]` (a baseline of a million entries carries
+/// a million of them).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "(i64, u32, u64)", into = "(i64, u32, u64)")]
+pub struct ChangeStamp {
+    pub ctime: i64,
+    pub ctime_nanos: u32,
+    pub ino: u64,
+}
+
+impl From<(i64, u32, u64)> for ChangeStamp {
+    fn from((ctime, ctime_nanos, ino): (i64, u32, u64)) -> Self {
+        ChangeStamp { ctime, ctime_nanos, ino }
+    }
+}
+
+impl From<ChangeStamp> for (i64, u32, u64) {
+    fn from(c: ChangeStamp) -> Self {
+        (c.ctime, c.ctime_nanos, c.ino)
+    }
+}
+
+impl ChangeStamp {
+    pub fn of(m: &std::fs::Metadata) -> ChangeStamp {
+        use std::os::unix::fs::MetadataExt;
+        ChangeStamp { ctime: m.ctime(), ctime_nanos: m.ctime_nsec() as u32, ino: m.ino() }
+    }
+}
+
+/// Whether `b`'s change stamp is not `now`'s. `None`, a baseline entry
+/// written before the stamp, compares as unknown, as `stat_changed`'s
+/// optional fields do.
+pub fn stamp_moved(b: &super::state::BaselineEntry, now: &ChangeStamp) -> bool {
+    b.change.is_some_and(|c| c != *now)
+}
+
+/// The stamp the racy window is measured from: the LATER of mtime and
+/// ctime. Measured from an mtime the agent set into the past, a second
+/// same-size `cp -p` inside the tick of the first hid (the model's
+/// `RacyOnChange`).
+pub fn later(mtime: i64, mtime_nanos: u32, change: Option<&ChangeStamp>) -> (i64, u32) {
+    match change {
+        Some(c) if (c.ctime, c.ctime_nanos) > (mtime, mtime_nanos) => (c.ctime, c.ctime_nanos),
+        _ => (mtime, mtime_nanos),
+    }
+}
+
+/// Whether a baseline entry is racy measured at `at` (`racy`, from its
+/// later stamp). An entry recorded without sub-second mtime takes the end
+/// of its second.
+pub fn racy_entry(b: &super::state::BaselineEntry, at: i128) -> bool {
+    let (sec, nanos) = later(b.mtime_unix, b.mtime_nanos.unwrap_or(999_999_999), b.change.as_ref());
+    racy(sec, nanos, at)
 }
 
 /// RACY CLEAN (git's rule, `racy-git.txt`). A file's mtime comes from a
@@ -528,6 +595,11 @@ fn read_dir_entries(
                         mtime_nanos,
                         mode: st.st_mode as u32,
                         seen_nanos: now_nanos(),
+                        change: ChangeStamp {
+                            ctime: st.st_ctime as i64,
+                            ctime_nanos: st.st_ctime_nsec as u32,
+                            ino: st.st_ino as u64,
+                        },
                     },
                 ));
             }
@@ -567,37 +639,47 @@ pub fn is_control_path(path: &str) -> bool {
     })
 }
 
-/// The racy half of `classify`: an entry whose stat is unchanged but was
-/// recorded `racy` is hashed, and is an upload if its bytes are not the
+/// What a hash that vouched for an unsure entry leaves in its baseline
+/// entry (`confirm_racy`): the change stamp the scan saw, and whether the
+/// entry is still racy, measured now from its later stamp.
+#[derive(Debug, Clone)]
+pub struct Vouched {
+    pub path: String,
+    pub change: ChangeStamp,
+    pub racy: bool,
+}
+
+/// The unsure half of `classify`: an entry whose stat is unchanged but
+/// cannot vouch for its bytes (recorded `racy`, or its change stamp moved:
+/// `stamp_moved`) is hashed, and is an upload if its bytes are not the
 /// ones the baseline integrated (or cannot be read to tell). Returns the
-/// racy entries the hash vouched for AND whose mtime is now outside the
-/// window — those can no longer hide a same-tick write, and the caller
-/// may clear the flag. Run after `classify`, before anything trusts it.
+/// unsure entries the hash vouched for, each with the stamp to record and
+/// whether it is still racy; the caller writes the ones that changed. Run
+/// after `classify`, before anything trusts it. The model's `Confirm`.
 pub fn confirm_racy(
     root: &Path,
     scan: &Scan,
     baseline: &Baseline,
     c: &mut Classified,
-) -> Vec<String> {
+) -> Vec<Vouched> {
     let now = now_nanos();
-    let mut cleared = vec![];
+    let mut vouched = vec![];
     for (path, s) in &scan.entries {
         let Some(b) = baseline.entries.get(path) else { continue };
-        if !b.racy || c.uploads.contains(path) {
+        if !(b.racy || stamp_moved(b, &s.change)) || c.uploads.contains(path) {
             continue;
         }
         match super::barrier::file_crc(root, path) {
             Ok(crc) if b.crc64_b64.as_deref() == Some(crc64_to_b64(crc).as_str()) => {
-                if !racy(s.mtime_unix, s.mtime_nanos, now) {
-                    cleared.push(path.clone());
-                }
+                let (sec, nanos) = later(s.mtime_unix, s.mtime_nanos, Some(&s.change));
+                vouched.push(Vouched { path: path.clone(), change: s.change, racy: racy(sec, nanos, now) });
             }
             _ => {
                 c.uploads.insert(path.clone());
             }
         }
     }
-    cleared
+    vouched
 }
 
 pub fn classify(scan: &Scan, baseline: &Baseline) -> Classified {

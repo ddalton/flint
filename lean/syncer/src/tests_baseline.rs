@@ -19,6 +19,11 @@ fn entry(tag: u64) -> BaselineEntry {
         mode: (tag % 3 != 0).then_some(0o644 | (tag as u32 & 0o111)),
         crc64_b64: Some(format!("c{tag}")),
         racy: tag % 2 == 0,
+        change: (tag % 4 != 1).then_some(super::scan::ChangeStamp {
+            ctime: tag as i64 + 7,
+            ctime_nanos: tag as u32 * 3,
+            ino: tag * 11,
+        }),
     }
 }
 

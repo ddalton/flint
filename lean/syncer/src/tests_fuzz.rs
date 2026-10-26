@@ -66,10 +66,6 @@ struct Known {
 }
 
 const KNOWN: &[Known] = &[
-    Known {
-        name: "agent-set-mtime",
-        what: "AGENTS.md: a same-size rewrite whose mtime the agent set to the published one is invisible (ctime would see it)",
-    },
 ];
 
 fn known_enabled(name: &str) -> bool {
@@ -617,14 +613,12 @@ impl Case {
     /// The agent's turn: one to six operations, none near `frozen`.
     /// Returns the files it wrote or chmodded, the candidates for a
     /// mutation inside the barrier.
-    /// `stamped`: per path, the sizes the document and the baseline hold
-    /// for it, which a rewrite under a set mtime must not reuse.
-    fn agent_turn(&mut self, frozen: &[Vec<u8>], stamped: &BTreeMap<String, Vec<usize>>) -> Vec<Vec<u8>> {
+    fn agent_turn(&mut self, frozen: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let mut touched = vec![];
         let n = 1 + self.rng.below(6);
         for _ in 0..n {
             let s = snapshot(&self.root);
-            let line = self.agent_op(&s, frozen, stamped, &mut touched);
+            let line = self.agent_op(&s, frozen, &mut touched);
             if let Some(line) = line {
                 self.note(line);
             }
@@ -636,7 +630,6 @@ impl Case {
         &mut self,
         s: &Snap,
         frozen: &[Vec<u8>],
-        stamped: &BTreeMap<String, Vec<usize>>,
         touched: &mut Vec<Vec<u8>>,
     ) -> Option<String> {
         let free = |p: &[u8]| !frozen.iter().any(|f| related(p, f));
@@ -807,35 +800,35 @@ impl Case {
                     .map(|_| format!("hardlink {} -> {}", show(&to), show(&from)))
                     .map_err(|e| format!("hardlink {} -> {}: {e}", show(&to), show(&from)))
             }
-            // a weird mtime, always with a size change (the contract says
+            // a rewrite under a set mtime: half the time `cp -p`'s, the same
+            // size under the mtime the file had (the hole ctime closes),
+            // half the time a weird one
             // never to preserve a timestamp across an edit)
             95..=97 => {
                 let p = self.pick_where(&files, |p| perm_of(s, p) & 0o200 != 0)?;
                 let Some(Node::File { body: old, .. }) = s.get(&p) else { unreachable!() };
-                // A size neither the file's now nor one its stamp holds (the
-                // document's, the baseline's, which a write inside the
-                // barrier leaves apart): what the contract leaves visible
-                // with the mtime set. Every name of the file: a hard link's
-                // names share the stamp.
-                let cited: Vec<usize> = links(s, &p)
-                    .iter()
-                    .filter_map(|q| std::str::from_utf8(q).ok().and_then(|k| stamped.get(k)))
-                    .flatten()
-                    .copied()
-                    .collect();
-                let mut body = self.body();
-                while !known_enabled("agent-set-mtime") && (body.len() == old.len() || cited.contains(&body.len())) {
-                    body.push(0);
-                }
-                let (sec, nsec) = *self.rng.pick(&[
-                    (0i64, 0i64),
-                    (-86_400 * 365, 0),
-                    (-1, 500),
-                    (1, 999_999_999),
-                    (4_102_444_800, 0),
-                    (253_402_300_799, 123),
-                ]);
                 let a = abs(&root, &p);
+                let (body, (sec, nsec)) = if self.rng.pct(50) {
+                    let m = std::fs::symlink_metadata(&a).map_err(|e| e.to_string()).ok()?;
+                    use std::os::unix::fs::MetadataExt;
+                    let mut body = old.clone();
+                    if body.is_empty() {
+                        return None;
+                    }
+                    let i = self.rng.below(body.len());
+                    body[i] = body[i].wrapping_add(1);
+                    (body, (m.mtime(), m.mtime_nsec()))
+                } else {
+                    let w = *self.rng.pick(&[
+                        (0i64, 0i64),
+                        (-86_400 * 365, 0),
+                        (-1, 500),
+                        (1, 999_999_999),
+                        (4_102_444_800, 0),
+                        (253_402_300_799, 123),
+                    ]);
+                    (self.body(), w)
+                };
                 touched.push(p.clone());
                 std::fs::OpenOptions::new()
                     .write(true)
@@ -1277,12 +1270,7 @@ async fn run_case(seed: u64, idx: usize, ticks: usize, perms: bool) -> Result<Ta
         };
         t.ui += ui.len();
         let frozen: Vec<Vec<u8>> = ui.iter().flat_map(|u| links(&s0, u.path().as_bytes())).collect();
-        let mut stamped: BTreeMap<String, Vec<usize>> =
-            dprev.iter().map(|(k, e)| (k.clone(), vec![e.size as usize])).collect();
-        for (k, b) in a.state.load_baseline().unwrap().entries.iter() {
-            stamped.entry(k.clone()).or_default().push(b.size as usize);
-        }
-        let touched = c.agent_turn(&frozen, &stamped);
+        let touched = c.agent_turn(&frozen);
         let s = snapshot(&root);
         let inj = c.arm(&s, &touched, &frozen);
         let (_, after, inj) = barrier!(format!("tick {tick} barrier"), ui, inj);

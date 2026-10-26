@@ -327,7 +327,13 @@ marker. Its controls: dropping the rule, measuring racy when the entry is
 built, clearing the flag inside the window, or an agent writing before the
 marker each fails the one step that relies on it
 (`formal/results/2026-10-23-racy-gate/RESULTS.txt`; before the gate,
-`formal/results/2026-10-20-tlaps-racy/RESULTS.txt`).
+`formal/results/2026-10-20-tlaps-racy/RESULTS.txt`). Since 2026-10-26 the
+agent may set mtime to anything (`SetMtime`, `cp -p`, L-149): the code
+records ctime, which no process in the pod sets, confirms by the bytes an
+entry whose ctime moved alone, and measures the racy window from the later
+of mtime and ctime; the proof covers it (41 obligations,
+`formal/results/2026-10-26-racy-ctime/RESULTS.txt`), and the code without
+it is a world that misses a change (`LeanScanRacyNoCtime`).
 
 **Rows 15-17 (2026-10-15 to 2026-10-16):** the model gained the publish
 request and its answer (`Touch`, `Honor`, `HonorReader`, `RetireByAck`),

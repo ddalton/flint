@@ -407,6 +407,7 @@ impl Syncer {
                             // published.
                             mode: Some(e.mode & scan::PERM_BITS),
                             racy: super::barrier::racy_stat(&st),
+                            change: Some(super::scan::ChangeStamp::of(&st)),
                             crc64_b64: Some(e.crc64_b64.clone()),
                         },
                     );
@@ -504,6 +505,7 @@ impl Syncer {
                     mtime_nanos: Some(mtime_nanos_of(&st)),
                     mode: Some(e.mode & scan::PERM_BITS),
                     racy: super::barrier::racy_stat(&st),
+                    change: Some(super::scan::ChangeStamp::of(&st)),
                     crc64_b64: Some(got),
                 },
             );
@@ -814,10 +816,16 @@ impl Syncer {
         }
         clock.lap("walk");
         let mut classified = scan::classify(&scanned, &baseline);
-        let racy_cleared = scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
-        for p in &racy_cleared {
-            if let Some(e) = baseline.entries.get_mut(p) {
-                e.racy = false;
+        // An unsure entry the hash vouched for records the change stamp it
+        // was hashed under and whether it is still racy; written only where
+        // that changed, so an idle tick writes nothing.
+        for v in scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified) {
+            let stale = baseline.entries.get(&v.path).is_some_and(|e| e.racy != v.racy || e.change != Some(v.change));
+            if stale {
+                if let Some(e) = baseline.entries.get_mut(&v.path) {
+                    e.racy = v.racy;
+                    e.change = Some(v.change);
+                }
             }
         }
         // A file the syncer may not read is held, not uploaded
@@ -2160,7 +2168,13 @@ impl UploadOutcome {
                 // Measured from the SCAN's stat, which precedes the read:
                 // an upload can take longer than the window, and the
                 // moment that matters is when the bytes were read.
-                racy: scan::racy(scanned.mtime_unix, scanned.mtime_nanos, scanned.seen_nanos),
+                // From its later stamp (`scan::later`).
+                racy: {
+                    let (sec, nanos) = scan::later(scanned.mtime_unix, scanned.mtime_nanos, Some(&scanned.change));
+                    scan::racy(sec, nanos, scanned.seen_nanos)
+                },
+                // The scan's, with the stat above.
+                change: Some(scanned.change),
             },
         }
     }
@@ -2400,9 +2414,11 @@ pub(super) fn local_dirty(local: &Path, base: Option<&BaselineEntry>) -> bool {
         (Ok(_), None) => true,                     // local exists, never published
         (Ok(m), Some(b)) => {
             scan::stat_changed(b, m.len(), mtime_of(&m), mtime_nanos_of(&m), mode_of(&m))
-                // RACY CLEAN: an unchanged stat recorded inside the window
-                // is believed only if the bytes agree (`scan::racy`).
-                || (b.racy && racy_bytes_differ(local, b))
+                // UNSURE: an unchanged stat recorded inside the window
+                // (`scan::racy`), or one whose change stamp moved
+                // (`scan::stamp_moved`), is believed only if the bytes
+                // agree.
+                || ((b.racy || scan::stamp_moved(b, &scan::ChangeStamp::of(&m))) && racy_bytes_differ(local, b))
         }
     }
 }
@@ -2449,7 +2465,8 @@ pub(super) fn file_crc(root: &Path, rel: &str) -> LeanResult<u64> {
 /// records a baseline entry from a fresh stat of bytes it just read or
 /// wrote stamps the entry with this.
 pub(super) fn racy_stat(m: &std::fs::Metadata) -> bool {
-    scan::racy(mtime_of(m), mtime_nanos_of(m), scan::now_nanos())
+    let (sec, nanos) = scan::later(mtime_of(m), mtime_nanos_of(m), Some(&scan::ChangeStamp::of(m)));
+    scan::racy(sec, nanos, scan::now_nanos())
 }
 
 pub(super) fn mtime_nanos_of(m: &std::fs::Metadata) -> u32 {

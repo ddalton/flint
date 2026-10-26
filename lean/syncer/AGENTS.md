@@ -292,10 +292,13 @@ yours.
   directories are not tracked: a fresh checkout will not have them.
   Sockets, FIFOs and devices are ignored.
 - **A file has changed if its size, its mtime or its mode bits differ**
-  from the last boundary (mtime to the nanosecond). So never preserve or restore
-  timestamps after editing (`cp -p`, `touch -d`, `rsync -t`): a rewrite
-  to the same size that keeps the old mtime is invisible until the file
-  changes again. Plain editors and `cp` are fine.
+  from the last boundary (mtime to the nanosecond), **or if its ctime
+  moved and its bytes differ**. ctime is the stamp no process in the pod can set,
+  so preserving or restoring timestamps (`cp -p`, `touch -d`,
+  `rsync -t`) is fine: a same-size rewrite under the old mtime still
+  moves ctime, and the syncer hashes the file to tell. A chmod, a hard
+  link or a rename that moves ctime over the same bytes costs that hash,
+  never a publish.
 - **What the syncer may not read is held: neither published nor
   deleted.** The syncer runs as the workspace's uid. A file it may not
   read (`chmod 000`, or a file another uid owns with no read bit for
@@ -348,7 +351,6 @@ Do not:
 - wait on `publish.ack` merely existing, or reuse a nonce;
 - touch sentinels in a loop, or expect a boundary faster than
   `sentinel_min_interval_secs`;
-- preserve timestamps when copying edited files into the tree;
 - make a file or directory the workspace's uid may not read, give one a
   name that is not UTF-8, or nest a file so deep its path does not fit in
   a store key: it is held, not published;

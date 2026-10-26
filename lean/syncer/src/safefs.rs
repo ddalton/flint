@@ -394,18 +394,22 @@ fn write_via_tmp_opts(
         f.sync_all()
             .map_err(|e| LeanError::State(format!("fsync tmp for {}: {e}", path.display())))?;
     }
-    // The rename moves the name, not the inode: this is the metadata
-    // the caller would otherwise `stat` the target for.
-    let meta = f
-        .metadata()
-        .map_err(|e| LeanError::State(format!("fstat tmp for {}: {e}", path.display())))?;
-    drop(f);
     if proceed.is_some_and(|p| !p()) {
+        drop(f);
         let _ = std::fs::remove_file(tmp);
         return Ok(None);
     }
     std::fs::rename(tmp, path)
         .map_err(|e| LeanError::State(format!("rename into {}: {e}", path.display())))?;
+    // The rename moves the name, not the inode: this is the metadata the
+    // caller would otherwise `stat` the target for. Taken AFTER the rename,
+    // through the descriptor: a rename moves the inode's ctime on ext4 and
+    // tmpfs, and a baseline recorded before it read every file it wrote as
+    // a moved change stamp, to be hashed again (`scan::ChangeStamp`).
+    let meta = f
+        .metadata()
+        .map_err(|e| LeanError::State(format!("fstat {}: {e}", path.display())))?;
+    drop(f);
     if durable {
         // The rename is a directory write; without this the name can
         // vanish on power loss even though the bytes reached the disk.

@@ -6,14 +6,16 @@
 (* all TRUE) and any Window >= 1 tick. TLC checked it at 3,438 and        *)
 (* 156,048 distinct; this removes the bounds (writes, ticks, window).     *)
 (*                                                                         *)
-(* The invariant alone is not inductive. What makes it so:                 *)
-(*   - a write stamps the current tick, so mtime <= clock;                *)
+(* The invariant alone is not inductive. What makes it so (since         *)
+(* 2026-10-26 on ctime, the stamp every change moves and no agent sets;    *)
+(* mtime is the agent's to set, under AgentSetsMtime):                     *)
+(*   - the kernel stamps the current tick, so ctime <= clock;             *)
 (*   - an upload in flight read its bytes at tick `at`: either the file   *)
-(*     is still those bytes, or a later write stamped mtime >= at         *)
+(*     is still those bytes, or a later write stamped ctime >= at         *)
 (*     (ReadOK);                                                           *)
-(*   - an entry NOT flagged racy was recorded (or cleared) at least a     *)
-(*     window after its mtime, so a write since then has a strictly later *)
-(*     mtime and changes the stat (BaseOK).                               *)
+(*   - an entry NOT flagged racy was recorded (or confirmed) at least a   *)
+(*     window after its later stamp, so a write since then has a strictly *)
+(*     later ctime, the entry is unsure, and its bytes decide (BaseOK).   *)
 (*   - before the checkout opens the gate nothing has written the file   *)
 (*     since the checkout recorded it (GateOK, latency plan §17), so the  *)
 (*     gate may clear a flag a window after its mtime.                    *)
@@ -27,6 +29,7 @@ EXTENDS LeanScanRacy, TLAPS
 ASSUME Const ==
   /\ MaxVer \in Nat /\ MaxTime \in Nat
   /\ Window \in Nat \ {0}
+  /\ AgentSetsMtime \in BOOLEAN
 
 ASSUME Shipped ==
   /\ RacyClean = TRUE
@@ -34,23 +37,25 @@ ASSUME Shipped ==
   /\ ClearOutsideWindow = TRUE
   /\ MeasureAtGate = TRUE
   /\ WritesWaitForGate = TRUE
+  /\ CtimeConfirm = TRUE
+  /\ RacyOnChange = TRUE
 
 ReadOK ==
   read.on => /\ read.size \in Sizes
-             /\ read.mtime <= read.at /\ read.at <= clock
+             /\ read.ctime <= read.at /\ read.at <= clock
              /\ \/ ver = read.ver
-                \/ read.at <= mtime
+                \/ read.at <= ctime
 
 BaseOK ==
-  ~base.racy => /\ base.mtime + Window <= clock
+  ~base.racy => /\ base.ctime + Window <= clock
                 /\ \/ ver = base.ver
-                   \/ base.mtime < mtime
+                   \/ base.ctime < ctime
 
 GateOK ==
-  ~gate => /\ ver = base.ver /\ size = base.size /\ mtime = base.mtime
+  ~gate => /\ ver = base.ver /\ size = base.size /\ mtime = base.mtime /\ ctime = base.ctime
            /\ ~read.on
 
-Ind == TypeOK /\ mtime <= clock /\ ReadOK /\ BaseOK /\ GateOK
+Ind == TypeOK /\ ctime <= clock /\ ReadOK /\ BaseOK /\ GateOK
 
 LEMMA IndInit == Init => Ind
   BY Const, Shipped DEF Init, Ind, TypeOK, ReadOK, BaseOK, GateOK, NoRead
@@ -61,24 +66,26 @@ LEMMA IndNext == Ind /\ [Next]_vars => Ind'
 <1> USE Const, Shipped DEF Ind, TypeOK, ReadOK, BaseOK, GateOK
 <1>1. CASE Write
   BY <1>1 DEF Write
+<1>8. CASE SetMtime
+  BY <1>8 DEF SetMtime
 <1>2. CASE Tick
   BY <1>2 DEF Tick
 <1>3. CASE ReadUpload
-  BY <1>3 DEF ReadUpload, CodeDirty, StatChanged
+  BY <1>3 DEF ReadUpload, CodeDirty, StatChanged, StampMoved, Unsure
 <1>4. CASE Record
-  BY <1>4 DEF Record, IsRacy, NoRead
-<1>5. CASE ClearRacy
-  BY <1>5 DEF ClearRacy, IsRacy, StatChanged
+  BY <1>4 DEF Record, IsRacy, Later, NoRead
+<1>5. CASE Confirm
+  BY <1>5 DEF Confirm, IsRacy, Later, StatChanged, StampMoved, Unsure
 <1>7. CASE Open
-  BY <1>7 DEF Open, IsRacy
+  BY <1>7 DEF Open, IsRacy, Later
 <1>6. CASE UNCHANGED vars
   BY <1>6 DEF vars
 <1> QED
-  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7 DEF Next
+  BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8 DEF Next
 
 LEMMA IndSafe == Ind => Inv_NoMissedChange
   BY Shipped DEF Ind, TypeOK, BaseOK, Inv_NoMissedChange, OracleDirty,
-                 CodeDirty, StatChanged
+                 CodeDirty, StatChanged, StampMoved, Unsure
 
 THEOREM NoMissedChange == Spec => []Inv_NoMissedChange
 <1>1. Spec => []Ind

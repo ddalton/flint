@@ -60,10 +60,18 @@ pub struct BaselineEntry {
     /// a baseline from before it existed.
     pub crc64_b64: Option<String>,
     /// The stat above was taken within `scan::RACY_WINDOW_NANOS` of the
-    /// file's mtime, so it cannot vouch for the bytes on its own: the next
-    /// scan hashes the file before calling it clean (`scan::confirm_racy`).
+    /// file's later stamp (`scan::later`), so it cannot vouch for the bytes
+    /// on its own: the next scan hashes the file before calling it clean
+    /// (`scan::confirm_racy`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub racy: bool,
+    /// The file's ctime and inode as recorded with the stat above
+    /// (`scan::ChangeStamp`): one that moved while size, mtime and mode did
+    /// not makes the entry unsure, and its bytes decide. Taken after the
+    /// last thing the recording write did to the file (its rename), or the
+    /// first scan re-hashes it. `None` compares as unknown.
+    #[serde(rename = "cs", default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<super::scan::ChangeStamp>,
 }
 
 impl BaselineEntry {

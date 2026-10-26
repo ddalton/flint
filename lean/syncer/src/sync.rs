@@ -333,6 +333,7 @@ impl Syncer {
                             // local mode change still publishes.
                             mode: cited_mode.map(|m| m & scan::PERM_BITS),
                             racy: super::barrier::racy_stat(&st),
+                            change: Some(super::scan::ChangeStamp::of(&st)),
                             crc64_b64: local_crc,
                         },
                     );
@@ -455,6 +456,7 @@ impl Syncer {
                     mtime_nanos: Some(mtime_nanos_of(&st)),
                     mode: cited_mode.map(|m| m & scan::PERM_BITS),
                     racy: super::barrier::racy_stat(&st),
+                    change: Some(super::scan::ChangeStamp::of(&st)),
                     crc64_b64: Some(got),
                 },
             );
