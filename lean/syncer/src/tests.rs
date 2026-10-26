@@ -4120,6 +4120,11 @@ async fn a_consume_never_installs_over_bytes_rewritten_under_a_restored_mtime() 
 /// each entry's stamp is the file's. Taken before the rename, which moves
 /// ctime, every file a checkout wrote would read as moved and the first
 /// scan would hash the whole tree again (latency plan §17).
+///
+/// Every rename under B's tree waits for the clock to tick first
+/// (`safefs::TICK_BEFORE_RENAME`): a 1 ms coarse clock otherwise stamps
+/// the rename in the write's tick, and a stamp taken before the rename
+/// passed this test as one taken after (L-149's control C4).
 #[tokio::test]
 async fn a_tree_records_the_change_stamp_its_files_end_with() {
     let store = Arc::new(MemoryStore::new());
@@ -4129,11 +4134,7 @@ async fn a_tree_records_the_change_stamp_its_files_end_with() {
     write(da.path(), "small.txt", "small");
     write(da.path(), "big.bin", &"b".repeat(64 * 1024));
     a.run_barrier().await.unwrap();
-    // On the crate's own filesystem, not /tmp: tmpfs leaves ctime where it
-    // was on a rename, so there a stamp taken before the rename passes too.
-    // ext4 moves it, and a lean tree is ext4 (the s3csi image) or the
-    // node's disk (an emptyDir).
-    let db = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let db = tempfile::tempdir().unwrap();
     {
         let (p, q) = (db.path().join("probe"), db.path().join("probe2"));
         std::fs::write(&p, "x").unwrap();
@@ -4145,6 +4146,14 @@ async fn a_tree_records_the_change_stamp_its_files_end_with() {
         }
         std::fs::remove_file(&q).unwrap();
     }
+    struct Untick;
+    impl Drop for Untick {
+        fn drop(&mut self) {
+            *super::safefs::TICK_BEFORE_RENAME.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+    let _untick = Untick;
+    *super::safefs::TICK_BEFORE_RENAME.lock().unwrap() = Some((db.path().to_path_buf(), Vec::new()));
     let mut b = syncer(&store, db.path()).await;
     b.cfg.range_get_min_bytes = 16 * 1024;
     b.cfg.range_get_chunk_bytes = 16 * 1024;
@@ -4161,6 +4170,10 @@ async fn a_tree_records_the_change_stamp_its_files_end_with() {
     b.run_barrier().await.unwrap();
     let base = b.state.load_baseline().unwrap();
     assert_eq!(base.entries["consumed.txt"].change, Some(stamp_of(db.path(), "consumed.txt")));
+    let held = super::safefs::TICK_BEFORE_RENAME.lock().unwrap().take().map(|(_, h)| h).unwrap_or_default();
+    for p in ["small.txt", "big.bin", "consumed.txt"] {
+        assert!(held.contains(&db.path().join(p)), "fixture: {p}'s rename never waited for a tick");
+    }
 }
 
 /// A declared boundary that holds a path is not complete: the ack is

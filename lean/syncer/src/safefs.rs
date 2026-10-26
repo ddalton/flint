@@ -286,7 +286,7 @@ impl RangedTmp {
             }
         }
         drop(self.file);
-        std::fs::rename(&self.tmp, &self.path).map_err(|e| {
+        rename_into(&self.tmp, &self.path).map_err(|e| {
             let _ = std::fs::remove_file(&self.tmp);
             refuse(&self.path, &format!("rename from temp: {e}"))
         })
@@ -399,7 +399,7 @@ fn write_via_tmp_opts(
         let _ = std::fs::remove_file(tmp);
         return Ok(None);
     }
-    std::fs::rename(tmp, path)
+    rename_into(tmp, path)
         .map_err(|e| LeanError::State(format!("rename into {}: {e}", path.display())))?;
     // The rename moves the name, not the inode: this is the metadata the
     // caller would otherwise `stat` the target for. Taken AFTER the rename,
@@ -421,3 +421,47 @@ fn write_via_tmp_opts(
     }
     Ok(Some(meta))
 }
+
+/// Rename `tmp` onto `path`: the last thing a write does to the file,
+/// and a change of the inode's ctime (ext4 and tmpfs alike), so the
+/// change stamp a baseline records is the one read after this.
+fn rename_into(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    tick_before_rename(path);
+    std::fs::rename(tmp, path)
+}
+
+// Test-only: under this root, `rename_into` first waits for the coarse
+// clock the kernel stamps ctime with (`CLOCK_REALTIME_COARSE`) to tick,
+// so the rename's ctime is later than the write's and the mode's.
+// Without it the three almost always share a tick, and a change stamp
+// taken before the rename passes for one taken after (L-149's control
+// C4). Lists the paths it held back. A static, not a thread-local: a
+// checkout writes from the blocking pool.
+#[cfg(test)]
+pub(crate) static TICK_BEFORE_RENAME: std::sync::Mutex<
+    Option<(std::path::PathBuf, Vec<std::path::PathBuf>)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn tick_before_rename(path: &Path) {
+    match &mut *TICK_BEFORE_RENAME.lock().unwrap() {
+        Some((root, held)) if path.starts_with(&*root) => held.push(path.to_path_buf()),
+        _ => return,
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let coarse = || {
+            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME_COARSE, &mut ts) };
+            (ts.tv_sec, ts.tv_nsec)
+        };
+        let start = coarse();
+        while coarse() == start {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn tick_before_rename(_: &Path) {}
