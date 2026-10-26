@@ -358,6 +358,17 @@ pub struct LeanConfig {
     /// it wrote in its last window. `false` leaves every checked-out entry
     /// racy, the shape before. `FLINT_SYNC_RACY_AT_GATE=off`.
     pub racy_at_gate: bool,
+    /// The tree's reserved blocks are this syncer's (the s3csi quota
+    /// image reserves 1/16 of itself for a group only the syncer's worker
+    /// holds): tree CONTENT it writes — a checkout, a consume, a sync — is
+    /// held to what its tenant could still write (`f_bavail`), so the
+    /// reserve is left for the bookkeeping that must outlive a full tree
+    /// (`safefs::leave_the_reserve`). `FLINT_SYNC_TREE_RESERVE=on`, set by
+    /// the plugin on a quota'd tree; off, nothing is checked.
+    pub tree_reserve: bool,
+    /// Tests only: the bytes `leave_the_reserve` reads as the tenant's room
+    /// instead of asking `statvfs` (a full filesystem needs root to build).
+    pub tree_room_for_tests: Option<u64>,
     /// The fewest files still racy at the gate for which the checkout opens
     /// it the rest of their window later (at most two seconds), so the
     /// first scan hashes none of them: about where hashing them costs more
@@ -600,6 +611,8 @@ impl LeanConfig {
             chunk_view: true,
             g_shadow: false,
             racy_at_gate: true,
+            tree_reserve: false,
+            tree_room_for_tests: None,
             racy_wait_min: 10_000,
             alias_cache: Arc::default(),
             chunk_target: chunk::CHUNK_TARGET,

@@ -462,7 +462,12 @@ impl Syncer {
             // agent's, and it stays (and publishes).
             let still_clean = || !local_dirty(&local, be.as_ref());
             let st = match contained_path(&self.cfg.root, path)
-                .and_then(|target| write_file_atomic_if(&target, &body, mode, &still_clean))
+                .and_then(|target| {
+                    if self.cfg.tree_reserve {
+                        super::safefs::leave_the_reserve(&self.cfg.root, path, body.len() as u64, self.cfg.tree_room_for_tests)?;
+                    }
+                    write_file_atomic_if(&target, &body, mode, &still_clean)
+                })
             {
                 Ok(Some(st)) => st,
                 // The agent wrote first: as a dirty path above.

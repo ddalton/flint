@@ -1574,6 +1574,18 @@ if wait_phase quota-agent Running 300 && wait_phase noquota-agent Running 300; t
     [ "${loop:-0}" -ge 1 ] \
         && ok "the ceiling is a loop-mounted image on the node ($loop tree mount(s) on /dev/loop)" \
         || bad "no lean tree is a loop mount on the node — the tree is a plain directory and sizeLimitGib is enforced by nothing"
+    # THE SYNCER'S RESERVE (2026-10-26). The image keeps 1/16 of itself for
+    # a group only the worker carries, and the syncer is told so: without
+    # both, a full tree stops every barrier at its first journal write and
+    # the drain below can neither publish nor let go of the image.
+    qw=$(worker_of quota-agent)
+    sg=$($K -n $WNS get pod "$qw" -o jsonpath='{.spec.securityContext.supplementalGroups}' 2>/dev/null)
+    [ "$sg" = "[65530]" ] \
+        && ok "the quota'd workspace's worker carries the reserve's group ($sg)" \
+        || bad "the quota'd workspace's worker carries supplementalGroups '${sg:-none}', not [65530]: its syncer cannot write into a full tree"
+    $K -n $WNS logs "$qw" 2>/dev/null | grep -q "reserved blocks are this syncer's" \
+        && ok "the syncer was told the reserve is its own (FLINT_SYNC_TREE_RESERVE): a peer's file is held to the tenant's room" \
+        || bad "no reserve line in $qw's log: the syncer was not given FLINT_SYNC_TREE_RESERVE and would spend the reserve on tree content"
 
     free0=$(onnode "df -P / | tail -1 | awk '{print \$4}'")
     # Fill past the ceiling. busybox dd reports the refusal on stderr and
@@ -1588,8 +1600,8 @@ if wait_phase quota-agent Running 300 && wait_phase noquota-agent Running 300; t
         *) bad "1500 MiB went into a 1 GiB workspace without ENOSPC — the ceiling did not hold: '$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)'" ;;
     esac
     wrote=$(inpod quota-agent "wc -c < /workspace/fill 2>/dev/null || echo 0")
-    [ -n "$wrote" ] && [ "$wrote" -lt 1288490188 ] \
-        && ok "it stopped at $((wrote / 1048576)) MiB — inside the 1 GiB it declared, not somewhere past it" \
+    [ -n "$wrote" ] && [ "$wrote" -le 1073741824 ] \
+        && ok "it stopped at $((wrote / 1048576)) MiB — inside the 1 GiB it declared, not somewhere past it (the reserve is on top)" \
         || bad "the workspace holds ${wrote:-?} bytes, past its 1 GiB ceiling"
     # THE CONTROL THAT MATTERS. If the NODE had run out, this write would
     # fail too — and the whole leg would be measuring a full disk.
@@ -1602,6 +1614,14 @@ if wait_phase quota-agent Running 300 && wait_phase noquota-agent Running 300; t
     # RECLAIM. A ceiling that is not given back is a slow leak of exactly
     # sizeLimitGib per volume ever published on the node.
     $K -n $NS delete pod quota-agent noquota-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
+    # The drain ran against a FULL tree. Its bookkeeping — the intent
+    # journal first — has only the reserve to write into; until
+    # 2026-10-26 it met ENOSPC there, attested nothing, and the image
+    # stayed (the two checks below).
+    psz=$(lmbody tenants/proj-quota 2>/dev/null | jq -r '.entries["fill"].size // empty' 2>/dev/null)
+    [ -n "$psz" ] && [ "$psz" = "$wrote" ] \
+        && ok "the drain published what the full tree held: fill, $psz bytes" \
+        || bad "the drain did not publish the full tree's last write (the manifest cites fill at '${psz:-nothing}', the tree held $wrote bytes)"
     imgs=$(onnode "ls /var/lib/kubelet/plugins/s3.csi.chert.us/volumes/*/tree.img 2>/dev/null | wc -l")
     [ "${imgs:-0}" = "0" ] \
         && ok "the image is gone with its volume — the ceiling is reclaimed at unpublish, not leaked per publish" \

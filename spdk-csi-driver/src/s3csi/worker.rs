@@ -307,6 +307,12 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
                 run_as_user: Some(i.run_as_uid as i64),
                 run_as_group: Some(i.run_as_gid as i64),
                 fs_group: Some(i.run_as_gid as i64),
+                // The quota image's reserved blocks are this group's
+                // (`quota::RESERVE_GID`): the syncer's bookkeeping still
+                // writes when its tenant has filled the tree (S18). No
+                // tenant pod is given it; on a tree with no image it
+                // reserves nothing.
+                supplemental_groups: lean.then(|| vec![super::quota::RESERVE_GID as i64]),
                 seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }),
                 ..Default::default()
             }),
@@ -767,6 +773,7 @@ mod tests {
         assert_eq!(psc.run_as_user, Some(1001));
         assert_eq!(psc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
         assert!(spec.volumes.as_ref().unwrap().iter().all(|v| v.host_path.is_none()), "no hostPath for passthrough");
+        assert_eq!(psc.supplemental_groups, None, "the quota reserve's group is the lean syncer's alone");
         // The door binds 127.0.0.1 in the worker's OWN netns (SECURITY.md
         // P1; kind S35): on the host's network that loopback is the node's,
         // and every hostNetwork pod on the node could read the key.
@@ -847,6 +854,9 @@ mod tests {
         assert_eq!(hp[0].host_path.as_ref().unwrap().type_.as_deref(), Some("Directory"));
         let m = spec.containers[0].volume_mounts.as_ref().unwrap().iter().find(|m| m.name == "workspace").unwrap();
         assert_eq!(m.mount_path, "/workspace");
+        // S18: the quota image's reserve is usable by this group alone.
+        let psc = spec.security_context.as_ref().unwrap();
+        assert_eq!(psc.supplemental_groups, Some(vec![super::super::quota::RESERVE_GID as i64]));
     }
 
     /// Nothing in Kubernetes orders a worker's death against its

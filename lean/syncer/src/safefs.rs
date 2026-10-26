@@ -289,6 +289,56 @@ impl RangedTmp {
     }
 }
 
+/// Refuse `bytes` of TREE content at `rel` when its tenant could not
+/// have written them itself (`LeanConfig::tree_reserve`).
+///
+/// The s3csi quota image reserves 1/16 of itself for a group only the
+/// syncer's worker holds (`resgid`), so a tenant that fills its ceiling
+/// still leaves the syncer room for the bookkeeping a barrier and a drain
+/// cannot do without: the intent journal, the baseline, the conflict
+/// record, the drain's attestation (S18: a full tree's drain met ENOSPC
+/// on `intent.json` and could neither publish nor let go of its tree).
+/// The kernel cannot tell the syncer's two kinds of write apart, though.
+/// A peer's file consumed into a full tree would spend the same reserve,
+/// and the bookkeeping after it would meet ENOSPC again. So tree content
+/// is held here to what an unprivileged writer may use, `f_bavail`, and
+/// only the bookkeeping reaches the reserve. A tenant writing at the same
+/// moment can still race the check by the size of its own write; the
+/// next check sees it.
+///
+/// `room` replaces the `statvfs` answer (tests: a full filesystem needs
+/// root to build). The refusal is an I/O error, which every caller
+/// already handles as the transient full disk it describes.
+pub(crate) fn leave_the_reserve(root: &Path, rel: &str, bytes: u64, room: Option<u64>) -> LeanResult<()> {
+    let (room, block) = match room {
+        Some(r) => (r, 4096),
+        None => {
+            let st = rustix::fs::statvfs(root).map_err(std::io::Error::from)?;
+            let block = st.f_frsize.max(1);
+            (st.f_bavail.saturating_mul(block), block)
+        }
+    };
+    let need = bytes_with_slack(bytes, block);
+    if need > room {
+        return Err(LeanError::Io(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            format!(
+                "{rel}: its {bytes} bytes would land in the syncer's reserve: the tree has {room} bytes left \
+                 for its tenant, and the reserve is kept for the syncer's own bookkeeping (the tree is full)"
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// What a file of `bytes` costs a filesystem of `block`-byte blocks:
+/// whole blocks, plus four for the directory and extent blocks a new
+/// file can take.
+pub(crate) fn bytes_with_slack(bytes: u64, block: u64) -> u64 {
+    let block = block.max(1);
+    bytes.div_ceil(block).saturating_add(4).saturating_mul(block)
+}
+
 /// Flush every dirty page of the filesystem holding `dir` to stable
 /// storage. Linux `syncfs(2)`; elsewhere an fsync of the directory,
 /// which is the best the platform offers. Called before the checkout

@@ -2109,6 +2109,7 @@ impl S3Node {
             crate::lean_operator::sync_env::sync_env(&ws, SYNCER_ROOT).into_iter().collect();
         sync_conf.insert("FLINT_SYNC_NAMESPACE".into(), pr.pod_namespace.clone());
         lean_access_env(st.read_only, &mut sync_conf);
+        tree_reserve_env(st.tree_image.is_some(), &mut sync_conf);
         st.sync_env = Some(sync_conf.clone());
         if let Err(e) = self.launch_lean_worker(dir, &mut st, pr, &req.secrets, &image, cred_mode, &sync_conf).await {
             return Err(self.fail(dir, &st, e).await);
@@ -2952,6 +2953,20 @@ pub fn lean_access_env(read_only: bool, env: &mut BTreeMap<String, String>) {
     }
 }
 
+/// A quota'd tree reserves blocks for the syncer's group
+/// (`quota::RESERVE_GID`, on the worker pod): `FLINT_SYNC_TREE_RESERVE=on`
+/// tells the syncer to keep the tree content it writes out of them, so
+/// they are still there for its bookkeeping when the tenant has filled
+/// the tree (S18). Saved with the launch list, like the access line, so
+/// a relaunched worker keeps it.
+pub fn tree_reserve_env(quota: bool, env: &mut BTreeMap<String, String>) {
+    if quota {
+        env.insert("FLINT_SYNC_TREE_RESERVE".to_string(), "on".to_string());
+    } else {
+        env.remove("FLINT_SYNC_TREE_RESERVE");
+    }
+}
+
 pub fn published_action(st: &VolumeState, target_mounted: bool, src_mounted: bool, tree_exists: bool) -> PublishedAction {
     let lean = st.mode == "lean";
     if st.phase == "published" {
@@ -3431,6 +3446,18 @@ mod tests {
         // "read" is the string flint-lean's `Access::parse` accepts; this
         // crate does not link flint-lean, so the syncer's
         // `access_parses_exactly_what_the_plugin_writes` pins the other end.
+    }
+
+    #[test]
+    fn a_quotad_tree_tells_its_syncer_the_reserve_is_its_own() {
+        let mut env = BTreeMap::from([("FLINT_SYNC_BUCKET".to_string(), "b".to_string())]);
+        tree_reserve_env(true, &mut env);
+        // "on" is the one value flint-sync's env parse accepts; the S18 leg
+        // reads the syncer's own startup line for the other end.
+        assert_eq!(env.get("FLINT_SYNC_TREE_RESERVE").map(String::as_str), Some("on"));
+        assert_eq!(env.get("FLINT_SYNC_BUCKET").map(String::as_str), Some("b"), "the rest of the list is kept");
+        tree_reserve_env(false, &mut env);
+        assert!(!env.contains_key("FLINT_SYNC_TREE_RESERVE"), "{env:?}");
     }
 
     #[test]

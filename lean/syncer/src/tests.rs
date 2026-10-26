@@ -14409,6 +14409,79 @@ async fn a_path_a_sync_could_not_write_stays_owed() {
     assert_eq!(read(dir.path(), "sub/f.txt").as_deref(), Some("user v2"), "the path the sync could not write was never owed again");
 }
 
+/// S18 (2026-10-26). A quota'd tree reserves blocks for the syncer's
+/// group, so its bookkeeping outlives a full tree; tree CONTENT it writes
+/// must not reach them (`safefs::leave_the_reserve`), or a peer's file
+/// consumed into a full tree spends the reserve and the next intent write
+/// meets ENOSPC as before. A checkout refuses before it fetches and
+/// writes nothing; with room it materialises. The control: with the flag
+/// off the room is never consulted.
+#[tokio::test]
+async fn a_checkout_leaves_the_syncers_reserve_alone() {
+    let store = Arc::new(MemoryStore::new());
+    let (dir_a, dir_b, dir_c) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = syncer(&store, dir_a.path()).await;
+    a.checkout().await.unwrap();
+    write(dir_a.path(), "big.bin", &"x".repeat(100_000));
+    a.run_barrier().await.unwrap();
+
+    let mut b = syncer(&store, dir_b.path()).await;
+    b.cfg.tree_reserve = true;
+    b.cfg.tree_room_for_tests = Some(64 * 1024);
+    let err = b.checkout().await.expect_err("a checkout spent the syncer's reserve");
+    assert!(err.to_string().contains("syncer's reserve"), "{err}");
+    assert_eq!(read(dir_b.path(), "big.bin"), None, "the body was written anyway");
+    b.cfg.tree_room_for_tests = Some(1 << 30);
+    b.checkout().await.unwrap();
+    assert_eq!(read(dir_b.path(), "big.bin").map(|s| s.len()), Some(100_000));
+
+    let mut c = syncer(&store, dir_c.path()).await;
+    c.cfg.tree_room_for_tests = Some(0);
+    c.checkout().await.unwrap();
+    assert_eq!(read(dir_c.path(), "big.bin").map(|s| s.len()), Some(100_000), "the flag off still guarded");
+}
+
+/// S18, the sync and the consume: a version that does not fit outside the
+/// reserve is left OWED under the transient record, never written into
+/// the reserve; with room it lands.
+#[tokio::test]
+async fn a_sync_and_a_consume_leave_the_syncers_reserve_alone() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    assert!(claim_until_held(&mut a, 3).await);
+    a.checkout().await.unwrap();
+    write(dir.path(), "f.txt", "v1");
+    a.run_barrier().await.unwrap();
+    a.cfg.tree_reserve = true;
+    a.cfg.tree_room_for_tests = Some(0);
+    hitl_write(&store, &a.cfg, "f.txt", "user v2", "dilip").await.unwrap();
+
+    let r = a.sync().await.unwrap();
+    assert!(r.conflicts.contains(&"f.txt".to_string()), "the sync wrote into the reserve: {r:?}");
+    assert_eq!(read(dir.path(), "f.txt").as_deref(), Some("v1"));
+    a.consume_owed().await.unwrap();
+    assert_eq!(read(dir.path(), "f.txt").as_deref(), Some("v1"), "the consume wrote into the reserve");
+    let kinds: Vec<String> = a.state.load_conflicts().unwrap().into_iter().map(|c| c.kind).collect();
+    assert!(
+        kinds.iter().any(|k| k.starts_with("consume-write-failed (will retry)") && k.contains("syncer's reserve")),
+        "{kinds:?}"
+    );
+
+    a.cfg.tree_room_for_tests = Some(1 << 30);
+    a.consume_owed().await.unwrap();
+    assert_eq!(read(dir.path(), "f.txt").as_deref(), Some("user v2"), "the path the reserve held back was never owed again");
+}
+
+#[test]
+fn a_body_costs_whole_blocks_and_a_little_more() {
+    assert_eq!(super::safefs::bytes_with_slack(0, 4096), 4 * 4096);
+    assert_eq!(super::safefs::bytes_with_slack(1, 4096), 5 * 4096);
+    assert_eq!(super::safefs::bytes_with_slack(4096, 4096), 5 * 4096);
+    assert_eq!(super::safefs::bytes_with_slack(4097, 4096), 6 * 4096);
+    assert_eq!(super::safefs::bytes_with_slack(u64::MAX, 4096), u64::MAX, "saturates, never wraps");
+}
+
 /// S4. A reader re-syncs when the documents move — and, like the consume's
 /// cheap path, when its last sync left something owed. It used to judge by
 /// the two etags alone, so a path its sync could not take waited for the

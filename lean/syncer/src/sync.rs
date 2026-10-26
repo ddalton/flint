@@ -403,8 +403,12 @@ impl Syncer {
             let local = self.cfg.root.join(path);
             let base = baseline.entries.get(path).cloned();
             let still_clean = || !super::barrier::local_dirty(&local, base.as_ref());
-            let written = super::barrier::contained_path(&self.cfg.root, path)
-                .and_then(|target| super::barrier::write_file_atomic_if(&target, &body, mode, &still_clean));
+            let written = super::barrier::contained_path(&self.cfg.root, path).and_then(|target| {
+                if self.cfg.tree_reserve {
+                    super::safefs::leave_the_reserve(&self.cfg.root, path, body.len() as u64, self.cfg.tree_room_for_tests)?;
+                }
+                super::barrier::write_file_atomic_if(&target, &body, mode, &still_clean)
+            });
             let st = match written {
                 Ok(Some(st)) => st,
                 Ok(None) => {

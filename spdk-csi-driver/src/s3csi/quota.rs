@@ -25,6 +25,25 @@
 //! bargain `emptyDir` sizeLimit made. The ceiling bounds one tenant's
 //! blast radius; it is not a reservation.
 //!
+//! THE SYNCER'S RESERVE (2026-10-26, kind S18). The syncer keeps its
+//! bookkeeping in `.flint-sync/` inside this same tree: the intent
+//! journal, the baseline, the conflict record, the drain's attestation.
+//! A tenant that filled its ceiling therefore stopped every barrier at
+//! its first journal write, and at the pod's delete the drain met ENOSPC
+//! on `intent.json` too: nothing it wrote last was published, the worker
+//! stood Terminating for its whole grace, and the image stayed mounted on
+//! the node. The two cannot be told apart by uid — the syncer runs as
+//! the workspace's — so they are told apart by GROUP: the image reserves
+//! 1/16 of its blocks (`-m 6.25`) for `RESERVE_GID` (`resgid=`, every
+//! mount), which only the worker pod carries (`worker::build_pod`). The
+//! image is sized up by the same 1/16, so the tenant still gets the
+//! ceiling it declared (less the filesystem's own overhead, as before).
+//! The syncer holds tree CONTENT it writes to what the tenant could
+//! still write (`FLINT_SYNC_TREE_RESERVE`), so only its bookkeeping
+//! reaches the reserve. 1/16 is 1 KiB for every inode the image has (one
+//! per 16 KiB), several times what a baseline entry costs. Inodes are not
+//! reserved: a tenant that spends every inode still stops the syncer.
+//!
 //! OFF by default (chart `workers.quota`, 2026-09-15): the image costs
 //! speed a plain directory does not — buffered writes 0.57x on local
 //! NVMe, fsync-each writes ~0.6x on any disk, two journals per fsync
@@ -41,10 +60,26 @@ pub fn image_path(dir: &Path) -> PathBuf {
     dir.join("tree.img")
 }
 
+/// The group the image's reserved blocks belong to: the lean worker
+/// pod's only supplementary group, and no tenant's.
+pub const RESERVE_GID: u32 = 65530;
+
+/// The share of the image reserved for `RESERVE_GID`, as `mkfs.ext4 -m`
+/// takes it: 1/16.
+pub const RESERVE_PCT: &str = "6.25";
+
+/// The image's apparent size for a `gib` ceiling: grown by the reserve, so
+/// the tenant's share is the ceiling, rounded up to a whole MiB.
+pub fn image_bytes(gib: u64) -> u64 {
+    (gib << 30).saturating_mul(16).div_ceil(15).next_multiple_of(1 << 20)
+}
+
 /// The loop mount's options. `nodev,nosuid` because checkout restores
 /// the manifest's mode bits, setuid and setgid included, and the tenant
 /// bind is cloned from this mount (`fuse::bind_mount` adds them again).
-pub const LOOP_OPTS: &str = "loop,nodev,nosuid,noatime";
+/// `resgid` on every mount, `ensure`'s and `remount`'s: ext4 keeps the
+/// group in the mount, not in the image (`RESERVE_GID`).
+pub const LOOP_OPTS: &str = "loop,nodev,nosuid,noatime,resgid=65530";
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -79,7 +114,7 @@ mod imp {
         let fresh = !img.exists();
         if fresh {
             let f = std::fs::File::create(&img).map_err(|e| format!("create {}: {e}", img.display()))?;
-            f.set_len(gib << 30).map_err(|e| format!("size {} to {gib} GiB: {e}", img.display()))?;
+            f.set_len(image_bytes(gib)).map_err(|e| format!("size {} for {gib} GiB: {e}", img.display()))?;
             drop(f);
             // lazy init keeps mkfs off the critical path of a publish:
             // the kernel finishes the tables in the background, and a
@@ -87,7 +122,7 @@ mod imp {
             run(
                 "mkfs.ext4",
                 Command::new("mkfs.ext4")
-                    .args(["-F", "-q", "-m", "0", "-E", "lazy_itable_init=1,lazy_journal_init=1"])
+                    .args(["-F", "-q", "-m", RESERVE_PCT, "-E", "lazy_itable_init=1,lazy_journal_init=1"])
                     .arg(&img),
             )
             .inspect_err(|_| {
@@ -225,6 +260,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_reserve_is_the_syncers_group_and_comes_on_top_of_the_ceiling() {
+        let resgid = format!("resgid={RESERVE_GID}");
+        assert!(LOOP_OPTS.split(',').any(|o| o == resgid), "{resgid} missing from {LOOP_OPTS}");
+        let pct: f64 = RESERVE_PCT.parse().unwrap();
+        for gib in [1u64, 2, 10, 100] {
+            let img = image_bytes(gib);
+            assert_eq!(img % (1 << 20), 0, "{gib} GiB: not a whole MiB");
+            let tenant = img as f64 * (1.0 - pct / 100.0);
+            assert!(tenant >= (gib << 30) as f64, "{gib} GiB: the reserve came out of the ceiling ({tenant} bytes left)");
+            assert!(tenant < ((gib << 30) + (2 << 20)) as f64, "{gib} GiB: the tenant gets more than it declared ({tenant})");
+        }
+    }
+
     /// Both mounts, `ensure`'s and `remount`'s, as the kernel reports
     /// them. Needs root, mkfs.ext4 and a loop device; it runs in a
     /// private mount namespace on its own thread (the `mount` child
@@ -263,6 +312,52 @@ mod tests {
         umount2(&tree, MntFlags::empty()).unwrap();
         remount(&dir, &tree).unwrap();
         check(opts());
+        let _ = umount2(&tree, MntFlags::MNT_DETACH);
+    }
+
+    /// S18: the tenant fills its ceiling and is refused there; the
+    /// syncer's group still writes; the tenant still cannot. Both as uid
+    /// 1000, told apart by the supplementary group alone (`setpriv`).
+    /// Needs root, mkfs.ext4, setpriv and a loop device.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_full_tree_leaves_the_reserve_to_the_syncers_group() {
+        use nix::mount::{mount, umount2, MntFlags, MsFlags};
+        use std::os::unix::fs::PermissionsExt;
+        if !nix::unistd::geteuid().is_root() {
+            eprintln!("SKIPPED: needs root for a loop mount");
+            return;
+        }
+        // SAFETY: unshare(2) of this test thread's own mount namespace.
+        assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWNS) }, 0, "unshare: {}", std::io::Error::last_os_error());
+        mount(None::<&str>, "/", None::<&str>, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None::<&str>).unwrap();
+
+        let t = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(t.path()).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tree = dir.join("tree");
+        ensure(&dir, &tree, 1, 1000, 1000).unwrap();
+        let as_1000 = |groups: &str, script: String| {
+            std::process::Command::new("setpriv")
+                .args(["--reuid=1000", "--regid=1000", groups, "--", "sh", "-c", &script])
+                .output()
+                .expect("setpriv")
+        };
+        let t_ = tree.display();
+
+        let fill = as_1000("--clear-groups", format!("dd if=/dev/zero of={t_}/fill bs=1M 2>&1"));
+        let said = String::from_utf8_lossy(&fill.stdout).into_owned();
+        assert!(said.contains("No space left on device"), "the tenant's fill did not stop at a full disk: {said}");
+        let filled = std::fs::metadata(tree.join("fill")).unwrap().len();
+        assert!(filled < 1 << 30, "the tenant wrote past the 1 GiB it declared: {filled}");
+        assert!(filled > (1u64 << 30) * 9 / 10, "the reserve came out of the tenant's ceiling: {filled}");
+
+        let mine = as_1000(&format!("--groups={RESERVE_GID}"), format!("head -c 4194304 /dev/zero > {t_}/intent.json"));
+        assert!(mine.status.success(), "the syncer's group could not write into a full tree: {}", String::from_utf8_lossy(&mine.stderr));
+        assert_eq!(std::fs::metadata(tree.join("intent.json")).unwrap().len(), 4 << 20);
+
+        let more = as_1000("--clear-groups", format!("head -c 65536 /dev/zero > {t_}/more"));
+        assert!(!more.status.success(), "the reserve let the tenant past its ceiling");
         let _ = umount2(&tree, MntFlags::MNT_DETACH);
     }
 }

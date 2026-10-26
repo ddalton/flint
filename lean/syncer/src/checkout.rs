@@ -349,6 +349,7 @@ impl Syncer {
             let range_min = this.cfg.range_get_min_bytes;
             let range_chunk = this.cfg.range_get_chunk_bytes;
             let range_par = this.cfg.range_get_parallelism;
+            let (tree_reserve, tree_room) = (this.cfg.tree_reserve, this.cfg.tree_room_for_tests);
         // SHARDED DRIVERS. Every fetch future used to be polled by ONE
         // `buffer_unordered` task on the block_on thread, so each
         // request's SDK work (build, sign, orchestrate, parse, collect,
@@ -492,6 +493,12 @@ impl Syncer {
                         });
                     }
                     // Fall through and re-materialize.
+                }
+                // Before a byte is fetched: on a quota'd tree a body the
+                // tenant could not have written itself would spend the
+                // syncer's reserve (`safefs::leave_the_reserve`).
+                if tree_reserve {
+                    super::safefs::leave_the_reserve(&root, &path, entry.size, tree_room)?;
                 }
                 // RANGED FIRST, when the object is big enough to
                 // pay for it.

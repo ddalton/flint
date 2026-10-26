@@ -358,9 +358,12 @@ workers:
   # fsync each 0.58-0.60x on both, which is how git and databases write.
   # Reads are unaffected. The image is sparse, so the ceilings on a node
   # may sum to more than its disk; it bounds one tenant's blast radius
-  # and is not a reservation. Needs mkfs.ext4 and loop devices on the
-  # node; with it on, a workspace whose ceiling cannot be built is REFUSED
-  # rather than published unbounded.
+  # and is not a reservation. The image is 1/16 larger than the ceiling,
+  # and that 1/16 is reserved for a group only the workspace's syncer
+  # carries, so a tenant that fills its ceiling still publishes and still
+  # drains (the syncer's own bookkeeping lives in the same tree). Needs
+  # mkfs.ext4 and loop devices on the node; with it on, a workspace whose
+  # ceiling cannot be built is REFUSED rather than published unbounded.
   quota: false
   priorityClass:
     create: true

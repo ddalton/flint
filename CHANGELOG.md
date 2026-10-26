@@ -297,6 +297,26 @@ covered by the stability guarantee.
   share a key any more, so the walk's rule for choosing between two names
   for one path is gone.
 
+- **s3csi: a lean workspace that filled its quota stopped publishing,
+  and could not drain.** With `workers.quota` on, the tree is an ext4
+  image of `sizeLimitGib`, and the syncer keeps its own bookkeeping (the
+  intent journal, the baseline) in `.flint-sync/` inside it. The syncer
+  runs as the workspace's uid, so a tenant that filled the image left it
+  no room: every barrier failed at its first journal write, so nothing
+  the tenant wrote last was published, and at the pod's delete the drain
+  failed the same way. The worker stood Terminating for its whole grace
+  and the image stayed mounted on the node; the tree was kept, not lost.
+  The image is now 1/16 larger than the ceiling, and that 1/16 is
+  reserved (`mkfs -m 6.25`, mounted `resgid=65530`) for a group only the
+  lean worker pod carries. The tenant still stops at the ceiling it
+  declared, and the syncer's bookkeeping still writes. The syncer keeps
+  the files it writes into the tree (checkout, consume, `sync`) out of
+  the reserve (`FLINT_SYNC_TREE_RESERVE=on`, set by the plugin), so a
+  peer's file cannot spend it. Inodes are not reserved: a tenant that
+  uses every inode (one per 16 KiB of ceiling) still stops its syncer.
+  An image made by an earlier release keeps its old layout, with no
+  reserve, until its volume is unpublished.
+
 - **lean: a live tree applies the mode the document cites.** The barrier's
   consume and `sync` set a file's mode from its object's stamp, and a
   UI edit through the gateway stamps none, so a UI edit of an executable

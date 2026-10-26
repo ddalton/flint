@@ -69,6 +69,11 @@
 //!   FLINT_SYNC_RACY_AT_GATE       "off" leaves every file a checkout wrote
 //!                                 racy, so the first scan hashes the tree
 //!                                 (default on: measured at the agent's gate)
+//!   FLINT_SYNC_TREE_RESERVE       "on": the tree's reserved blocks are this
+//!                                 syncer's, so tree content it writes is held
+//!                                 to what the tenant could still write (set
+//!                                 by the s3csi plugin on a quota'd tree;
+//!                                 default off)
 //!   FLINT_SYNC_RACY_WAIT_MIN      when at least this many files a checkout
 //!                                 wrote are still racy at the gate, open it
 //!                                 the rest of their window later, at most
@@ -336,6 +341,9 @@ async fn main() {
         cfg.racy_at_gate = false;
     }
     cfg.racy_wait_min = env_u64("FLINT_SYNC_RACY_WAIT_MIN", cfg.racy_wait_min as u64) as usize;
+    if std::env::var("FLINT_SYNC_TREE_RESERVE").as_deref() == Ok("on") {
+        cfg.tree_reserve = true;
+    }
     // Latency plan lever B: the news arm's poll, its active window, and the
     // fewest seconds between two early barriers.
     cfg.news_poll_secs = env_u64("FLINT_SYNC_NEWS_POLL_SECS", cfg.news_poll_secs);
@@ -598,6 +606,11 @@ async fn ctl_call(
 
 
 async fn run_loop(sc: &mut Syncer) -> Result<(), LeanError> {
+    // Said by `run` alone: the status verbs inherit the same env from the
+    // pod spec, and their output is parsed.
+    if sc.cfg.tree_reserve {
+        eprintln!("flint-sync: the tree's reserved blocks are this syncer's: tree content it writes is held to what the tenant could still write");
+    }
     // No claim before checkout (design 2026-09-13 §4): the cell is a
     // publish fence and a checkout installs nothing. What stays are the
     // project-id precondition (a refusal, not a fence), the shared-prefix
