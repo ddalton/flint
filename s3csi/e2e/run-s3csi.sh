@@ -1139,7 +1139,17 @@ if wait_phase lean-agent Running 300; then
     # the same pod inherits it, and its previous life's process died with
     # it. flint-sync releases such a cell at startup (release_stale_own),
     # before anyone pays the deposal wait for it.
-    E=$((E + 10)); s3=$(lmseq tenants/proj)
+    #
+    # The epoch is the one the incarnation RECORDED: the cell this pod's
+    # previous container held normally and died holding. Until 2026-10-26
+    # the arm planted E+10, an epoch the incarnation never recorded —
+    # which is review 2026-09-18's H2 (a deposal whose container died
+    # before its takeover rotation), where the restart MUST rotate. The
+    # rotation landed 09-26 and the arm has read it as a defect since;
+    # H2 is the next arm now, asserted the right way round.
+    E=$(tsh_out lean-agent "cat /workspace/.flint-sync/incarnation.json 2>/dev/null" | jq -r '.epoch // empty' 2>/dev/null)
+    [ -n "$E" ] || { bad "PRECONDITION: no epoch in lean-agent's incarnation.json"; E=0; }
+    s3=$(lmseq tenants/proj)
     lcell_stage tenants/proj "$inc" $E false
     w=$(worker_of lean-agent)
     r0=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
@@ -1171,6 +1181,34 @@ if wait_phase lean-agent Running 300; then
     [ "$(ack_status "$ack")" = "ok" ] && [ "${el:-999}" -lt 30 ] && [ "$h" = "$inc" ] && [ "${e:-0}" = "$((E + 1))" ] && [ "${s:-0}" = "$((s3 + 1))" ] \
         && ok "the restarted container publishes again under the same incarnation on sight (${el}s; epoch $E → $e, seq $s3 → $s, no rotation)" \
         || bad "after the restart: ack ${el}s status $(ack_status "$ack"), holder '$h', epoch '${e:-?}' (want $((E + 1))), seq '${s:-?}' (want $((s3 + 1)))"
+
+    # ── H2: a fence held under this pod's id at an epoch it never recorded ──
+    # Review 2026-09-18, H2: this pod's previous container DEPOSED a
+    # holder — its acquire landed — and died before its takeover
+    # rotation. The deposed holder may still be mid-commit against the
+    # unmoved pointer, so the restart rotates BEFORE it releases
+    # (`release_stale_own`): the manifest moves by exactly one, under
+    # nobody's publish. A restart that released without it would let
+    # that straggler's CAS land.
+    E5=$(( $(lepoch tenants/proj .epoch) + 10 )); s5=$(lmseq tenants/proj)
+    lcell_stage tenants/proj "$inc" $E5 false
+    w=$(worker_of lean-agent)
+    r0=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+    kill_syncer "$w"
+    i=0; while [ $i -lt 90 ]; do
+        r1=$($K -n $WNS get pod "$w" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null)
+        [ "${r1:-0}" -gt "${r0:-0}" ] && break
+        sleep 3; i=$((i + 3))
+    done
+    [ "${r1:-0}" -gt "${r0:-0}" ] || bad "H2: the worker did not restart after its syncer was killed (restartCount stuck at ${r0:-?}) — the H2 arm never ran"
+    i=0; while [ $i -lt 90 ] && [ "$(lepoch tenants/proj .released)" != "true" ]; do sleep 3; i=$((i + 3)); done
+    h=$(lepoch tenants/proj .holder_id); e=$(lepoch tenants/proj .epoch); rel=$(lepoch tenants/proj .released); s=$(lmseq tenants/proj)
+    [ "$rel" = "true" ] && [ "$h" = "$inc" ] && [ "${e:-0}" = "$E5" ] \
+        && ok "H2: the restarted container released the fence planted at epoch $E5, which its incarnation never recorded" \
+        || bad "H2: after the restart the cell reads holder=$h epoch=${e:-?} released=$rel (want $inc, $E5, true)"
+    [ "${s:-0}" = "$((s5 + 1))" ] \
+        && ok "H2: it ROTATED once first (seq $s5 → $s): an unrecorded epoch is a deposal whose rotation the dead container owed" \
+        || bad "H2: seq $s5 → '${s:-?}' across the restart, want exactly +1 — a restart that releases a deposal without its rotation lets the deposed holder's CAS land"
 else
     bad "lean-agent never reached Running in 300s — S14 made no observation at all"
 fi
@@ -1388,7 +1426,7 @@ else
 fi
 $K -n $NS delete pod slow-agent --ignore-not-found --wait=true --timeout=240s >/dev/null 2>&1
 
-# ── S17f: the window S17 cannot open, made by hand ───────────────────
+# ── S17f the window S17 cannot open, made by hand ───────────────────
 # A wide project of its own (never `proj`, whose entry count S11/S13/S14
 # assert), seeded through a lean seeder and its drain. 4000 files at
 # fanout 1 still check out in ~15 s against local MinIO — less than a
@@ -1405,7 +1443,7 @@ if wait_phase wide-seeder Succeeded 300; then
 else
     bad "the wide seeder did not reach Succeeded"
 fi
-# ── S17f: adoption keeps a FROZEN checkout ─────────────────────────────
+# ── S17f adoption keeps a FROZEN checkout ─────────────────────────────
 # The timing form of S17 cannot open its window on this rig: a plugin
 # roll takes ~30 s and even a 4000-file fanout-1 checkout finishes in
 # ~15 s against local MinIO. So the window is made by hand: the syncer
