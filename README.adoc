@@ -40,7 +40,7 @@ Flint is storage for Kubernetes, in two families:
   (git). The bucket is the durable copy. They need no SPDK, no dedicated
   disks and no hugepages, so they run on ordinary clusters.
 
-image::docs/images/flint-overview.svg[Flint overview: the block driver on node NVMe, and the four S3-backed front ends over one bucket,align="center"]
+image::docs/images/flint-overview.svg["Flint overview: the block driver on node NVMe, and the four S3-backed front ends over one bucket",align="center"]
 
 == Which one?
 
@@ -100,7 +100,7 @@ bucket you already have. Flint never creates or deletes buckets. The four
 differ in what carries the bytes between the pod and the bucket, and so in
 when a write becomes durable.
 
-image::docs/images/flint-s3-data-paths.svg[How bytes reach the bucket for flint-lite, flint-lean, flint-passthrough and flint-forge,align="center"]
+image::docs/images/flint-s3-data-paths.svg["How bytes reach the bucket for flint-lite, flint-lean, flint-passthrough and flint-forge",align="center"]
 
 [cols="1h,3,3,3,3",options="header"]
 |===
@@ -314,7 +314,7 @@ them as lvols. The node's kernel reaches a volume over NVMe-oF/TCP (the
 default) or ublk. A volume with several replicas is an SPDK RAID1 that
 mirrors writes to lvols on other nodes over NVMe-oF/TCP.
 
-image::docs/images/flint-csi-architecture.svg[flint-csi-driver architecture: controller, dashboard and per-node SPDK target, with the volume data path and the three setup steps,align="center"]
+image::docs/images/flint-csi-architecture.svg["flint-csi-driver architecture: controller, dashboard and per-node SPDK target, with the volume data path and the three setup steps",align="center"]
 
 === Prerequisites
 
