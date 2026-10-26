@@ -82,7 +82,7 @@
 # verbs existed, in a worktree so the working tree is untouched:
 #
 #   git worktree add /tmp/predo 69b35978
-#   cd /tmp/predo/lean/syncer && cargo zigbuild --release --features s3 \
+#   cd /tmp/predo/lean/sidecar && cargo zigbuild --release --features s3 \
 #       --target aarch64-unknown-linux-musl
 #   # then docker build that binary as flint-sync:predo with
 #   # Dockerfile.syncer and kind load it.
@@ -671,8 +671,15 @@ b5_scoped_sync_defers_out_of_scope() {
   [ "$(fcat $P outputs/b.txt)" = "B2-remote" ] || { bad "the foreign writer did not install outputs/b.txt"; return 1; }
   ok "foreign install: inputs/a.txt=A2-remote and outputs/b.txt=B2-remote are in the bucket"
 
-  # Scope = inputs/ only.
-  sy_bg verbs-a $P $RA "" /tmp/b05.log run
+  # Scope = inputs/ only. The news arm OFF (latency lever B, 2026-10-23):
+  # with it on, the pointer this tree has not integrated is news, and a
+  # full barrier runs within a second and consumes outputs/ — the
+  # deferral working as D4 says ("the next barrier"), only seconds later,
+  # and the leg read it as the sync ignoring its scope (2026-10-26: the
+  # sync's ack at seq 1, then `news barrier seq=2 consumed=1`). Off, the
+  # scoped sync is the only thing that moves the tree until the two
+  # declared barriers below.
+  sy_bg verbs-a $P $RA "FLINT_SYNC_NEWS_POLL_SECS=0" /tmp/b05.log run
   inpod verbs-a "for i in \$(seq 1 60); do [ -f $RA/.flint-sync/checkout-complete ] && break; sleep 1; done" > /dev/null
   touchp verbs-a $RA sync '{"nonce":"b5-s1","scope":["inputs/"]}'
   local a
@@ -779,6 +786,16 @@ b7_ticker_is_local_only_news() {
     t=$(probe_seq); [ -n "$t" ] && break; sleep 1
   done
   [ -n "$t" ] || { bad "the ticker file never appeared"; return 1; }
+  # The idle window starts after this tree's OWN first publish (t.txt).
+  # Since latency lever B the ticker exists before it (the news poll
+  # writes it from startup), and that publish moves observed_seq with
+  # integrated_seq — our own install, not news (control.rs). Until then
+  # the ticker appeared with the first barrier, already past it.
+  for i in $(seq 1 40); do
+    [ "$(printf '%s' "$t" | jq -r '.integrated_seq')" -ge 1 ] && break
+    sleep 1; t=$(probe_seq)
+  done
+  [ "$(printf '%s' "$t" | jq -r '.integrated_seq')" -ge 1 ] || { bad "the seed publish never reached the ticker: $t"; return 1; }
   before=$(printf '%s' "$t" | jq -r '.observed_seq')
   u1=$(printf '%s' "$t" | jq -r '.updated_unix')
   # The probe container carries no AWS_* env and no S3 client at all —
@@ -794,9 +811,11 @@ b7_ticker_is_local_only_news() {
   sleep 12
   u2=$(probe_seq | jq -r '.updated_unix')
   [ "$u2" -gt "$u1" ] || { bad "updated_unix did not advance across an idle tick ($u1 -> $u2)"; return 1; }
-  local mid
+  local mid midi
   mid=$(probe_seq | jq -r '.observed_seq')
+  midi=$(probe_seq | jq -r '.integrated_seq')
   [ "$mid" = "$before" ] || { bad "observed_seq moved with no foreign write ($before -> $mid)"; return 1; }
+  [ "$mid" = "$midi" ] || { bad "the ticker reports news with no foreign write (observed $mid, integrated $midi)"; return 1; }
   ok "idle heartbeat: updated_unix $u1 -> $u2, observed_seq still $before"
 
   # The foreign write, through the gateway, while the syncer holds the
@@ -877,10 +896,17 @@ b8_unused_verbs_cost_nothing() {
       | grep -c "\"api\":\"s3.$2\".*\"path\":\"/$BUCKET/$P/.flint/lean/$3\"" || true
   }
 
-  local win=22 ticks=4
+  # An IDLE workspace, and the news poll's active window shut within two
+  # seconds of startup. Latency lever B (2026-10-23) reads the pointer —
+  # and, for a writer, the cell — every second for 300 s after any sign
+  # of work: 52 requests in this window (2026-10-26), deliberate, and not
+  # what this leg measures. With the window at 2 s the poll must STOP: a
+  # syncer whose poll re-armed itself would cost 2 requests a second for
+  # ever, and fails the bound and the lease-0 shape below.
+  local win=22 ticks=4 quiet="FLINT_SYNC_NEWS_ACTIVE_SECS=2"
   local off_n auto_n
-  off_n=$(count_window $win "FLINT_SYNC_SENTINELS=off" off)
-  auto_n=$(count_window $win "" auto)
+  off_n=$(count_window $win "FLINT_SYNC_SENTINELS=off $quiet" off)
+  auto_n=$(count_window $win "$quiet" auto)
   [ "$off_n" -gt 0 ] || { bad "the control window counted ZERO requests — a dead oracle passes every budget"; return 1; }
   ok "control (sentinels off): $off_n requests in ${win}s ≈ $((off_n / ticks))/tick"
 
@@ -1114,13 +1140,20 @@ b13_legacy_citation_survives_the_upgrade() {
   # JSON on one line (state.rs save_baseline, since 73e34dfc); a
   # line-oriented insert after a pretty `"entries": {` matched nothing
   # and planted nothing (matches=0). The first `"entries":{` is the
-  # baseline's own map (seq, manifest_etag, entries — field order), and
-  # it is non-empty here (normal.txt), so the inserted entry takes a
-  # trailing comma. Fields not given are Option/default in BaselineEntry.
-  inpod verbs-a "sed 's|\"entries\":{|\"entries\":{\".flint/legacy.txt\":{\"etag\":\"legacy\",\"generation\":1,\"size\":${#want},\"mtime_unix\":1},|' $R/.flint-sync/baseline.json > /tmp/b13.bl && mv /tmp/b13.bl $R/.flint-sync/baseline.json" > /dev/null
+  # snapshot's own map (seq, manifest_etag, entries — field order).
+  # Since latency lever D (2026-10-23) the snapshot may be EMPTY — the
+  # seed barrier's save went to the journal, `baseline.log` — and the
+  # insert's trailing comma then made `{"x":{…},}`, which the syncer
+  # refused ("state: baseline: trailing comma") and exited on, leaving
+  # the marker the earlier checkout wrote (2026-10-26). So: the empty
+  # map takes the entry alone, a non-empty one takes it with a comma.
+  # The journal replays only puts and deletes, so the snapshot's entry
+  # survives it. Fields not given are Option/default in BaselineEntry.
+  local ent='".flint/legacy.txt":{"etag":"legacy","generation":1,"size":'"${#want}"',"mtime_unix":1}'
+  inpod verbs-a "if grep -q '\"entries\":{}' $R/.flint-sync/baseline.json; then sed 's|\"entries\":{}|\"entries\":{$ent}|' $R/.flint-sync/baseline.json; else sed 's|\"entries\":{|\"entries\":{$ent,|' $R/.flint-sync/baseline.json; fi > /tmp/b13.bl && mv /tmp/b13.bl $R/.flint-sync/baseline.json" > /dev/null
   local planted
-  planted=$(inpod verbs-a "grep -c '\.flint/legacy.txt' $R/.flint-sync/baseline.json" | tr -d ' \r')
-  [ "$planted" = "1" ] || { bad "the legacy baseline citation could not be planted (matches=$planted)"; return 1; }
+  planted=$(inpod verbs-a "cat $R/.flint-sync/baseline.json" | jq -r '.entries[".flint/legacy.txt"].etag // empty' 2>/dev/null)
+  [ "$planted" = "legacy" ] || { bad "the legacy baseline citation could not be planted (baseline.json does not parse with it)"; return 1; }
   ok "pre-upgrade state: files/.flint/legacy.txt in the bucket AND cited by the baseline"
 
   sy_bg verbs-a $P $R "FLINT_SYNC_FLOOR_SECS=5" /tmp/b13.log run
