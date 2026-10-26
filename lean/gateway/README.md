@@ -331,7 +331,7 @@ serves — same routes, same bearer, same codes — inside its own server.
 A backend on another web stack turns it off and never compiles warp:
 
 ```toml
-flint-lean-gateway = { version = "0.9", default-features = false, features = ["s3"] }
+flint-lean-gateway = { version = "0.10", default-features = false, features = ["s3"] }
 ```
 
 The `fastalloc` feature (on by default) makes the `flint-lean-gateway`

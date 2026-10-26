@@ -12,6 +12,46 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.61.1] - 2026-10-26
+
+A patch release: six lean defects, all found by a new hostile-tree fuzzer
+(`lean/syncer/src/tests_fuzz.rs`). Nothing outside lean changed: the CSI
+driver, its StorageClass parameters and its volume_context keys are as in
+1.61.0.
+
+Lean: a file made and removed while a barrier ran no longer fails the
+barrier (L-144), so a tree under a build, a package manager or `git`
+keeps publishing; a path too long for an S3 key is held instead of
+stopping every publish, and the gateway refuses to save one (L-145); a
+checked-out setuid or setgid file keeps its bits (L-146); a held path
+withholds only its own deletes (L-147); the gateway serves files under a
+`.flint-sync` directory below the workspace root (L-148); and a
+same-size rewrite that keeps its old mtime (`cp -p`, `rsync -t`) is now
+published, where before a UI save could be installed over it (L-149).
+The syncer now records each file's ctime and inode, so agents may
+preserve timestamps.
+
+Crates: `flint-lean` 0.12.0 and `flint-lean-gateway` 0.10.0 change public
+types (`ScanEntry`, `BaselineEntry`, `Scan`, `confirm_racy`); a baseline
+written by 1.61.0 still reads.
+
+Validated 2026-10-26 on a kind rig with MinIO. The lean boundary-verbs
+suite: 16 of 16 legs on the release and on 1.61.0, run as the control.
+The s3csi lean legs (S11-S14, S17, S17f, S18, S20, S33, S34) match
+1.61.0's run section by section: S12 and S13 fail on both because the
+rig reads an object by its path, and S34's first run missed its join's
+timing window, for a reason not yet known, and said it had proved
+nothing; run alone it passed 61 of 61, as on 1.61.0. The hostile-tree
+fuzzer ran 16,000 cases with none failing. The racy-clean model
+(`lean/formal/LeanScanRacy.tla`) now lets the agent set mtime and holds
+(427,534 states; 91,384,520 in its wide world); the code before L-149
+and a racy window measured from mtime alone each violate it, and TLAPS
+proves the rule in 41 obligations. The lean syncer's lib suite passes
+413 as a non-root uid with none skipped, the gateway's 69, the
+code-trace check 84 of 84; spdk-csi-driver's lib 2,694. The CSI driver's
+restart gate is waived: no spdk-csi-driver source changed since 1.61.0
+but version pins.
+
 ### Fixed
 
 - **lean: a file or directory removed while a barrier ran failed the
@@ -11059,7 +11099,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.61.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.61.1...HEAD
+[1.61.1]: https://github.com/ddalton/flint/compare/v1.61.0...v1.61.1
 [1.61.0]: https://github.com/ddalton/flint/compare/v1.60.3...v1.61.0
 [1.60.3]: https://github.com/ddalton/flint/compare/v1.60.2...v1.60.3
 [1.60.2]: https://github.com/ddalton/flint/compare/v1.60.1...v1.60.2
