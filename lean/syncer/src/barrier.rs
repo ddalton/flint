@@ -649,28 +649,34 @@ impl Syncer {
         }
         let mut confirmed = 0;
         for path in std::mem::take(&mut classified.first_absence) {
-            // ONLY NotFound is absence. Every other errno — EACCES on a
-            // parent, EIO, EMFILE, ELOOP — used to read as "the agent
-            // deleted it", and this is the oracle that PUBLISHES the
-            // delete and then DELETES THE OBJECT. An unreadable path is
-            // the one case where guessing is unrecoverable, so it is never
-            // a delete: EACCES or EPERM holds it, as the walk holds what it
-            // may not read (`scan::Scan::held`), and every other errno
-            // fails the barrier, as it fails the walk. Two call sites, one
-            // syscall: they must not have opposite error policies.
+            // Only a path that cannot be there is absence: nothing at it
+            // (ENOENT), or a component above it that is not a directory
+            // (ENOTDIR, ELOOP), which the walk would not have descended
+            // either (`scan::name_error`, the walk's rule). Every other
+            // errno — EACCES on a parent, EIO, EMFILE — used to read as
+            // "the agent deleted it", and this is the oracle that
+            // PUBLISHES the delete and then DELETES THE OBJECT. An
+            // unreadable path is the one case where guessing is
+            // unrecoverable, so it is never a delete: EACCES or EPERM holds
+            // it, as the walk holds what it may not read
+            // (`scan::Scan::held`), and every other errno fails the
+            // barrier, as it fails the walk. Two call sites, one syscall:
+            // they must not have opposite error policies.
             let gone = match std::fs::symlink_metadata(self.cfg.root.join(&path)) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                    held.insert(path);
-                    continue;
-                }
-                Err(e) => {
-                    classified.first_absence.insert(path.clone());
-                    return Err(LeanError::State(format!(
-                        "cannot confirm the absence of {path:?}: {e} — refusing to publish \
-                         a deletion on an unreadable path"
-                    )));
-                }
+                Err(e) => match scan::name_error(&e) {
+                    scan::NameError::Gone | scan::NameError::Replaced => true,
+                    scan::NameError::Refused => {
+                        held.insert(path);
+                        continue;
+                    }
+                    scan::NameError::Other => {
+                        classified.first_absence.insert(path.clone());
+                        return Err(LeanError::State(format!(
+                            "cannot confirm the absence of {path:?}: {e} — refusing to publish \
+                             a deletion on an unreadable path"
+                        )));
+                    }
+                },
                 Ok(_) => false,
             };
             if gone {
@@ -798,6 +804,14 @@ impl Syncer {
         let mut baseline = self.state.take_baseline()?;
         clock.lap("baseline_load");
         let mut scanned = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
+        // A path too long for a store key has none either (L-145): held,
+        // as a name that is not UTF-8 is, before anything reads the scan.
+        // Its PUT used to fail on S3 at every barrier.
+        let unkeyed: Vec<String> = scanned.entries.keys().filter(|p| !self.cfg.key_fits(p)).cloned().collect();
+        for p in unkeyed {
+            scanned.entries.remove(&p);
+            scanned.held.insert(p);
+        }
         clock.lap("walk");
         let mut classified = scan::classify(&scanned, &baseline);
         let racy_cleared = scan::confirm_racy(&self.cfg.root, &scanned, &baseline, &mut classified);
@@ -1983,25 +1997,28 @@ impl Syncer {
         consume_window("before-upload", path);
         let file = match super::safefs::open_beneath_nofollow(&self.cfg.root, path) {
             Ok(f) => f,
-            Err(e)
-                if e.kind() == std::io::ErrorKind::InvalidInput
-                    || matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) =>
-            {
-                self.state.append_conflict(&ConflictRecord {
-                    path: path.to_string(),
-                    foreign_etag: String::new(),
-                    preserved_key: None,
-                    kind: format!(
-                        "upload-refused-not-regular: no longer a regular file inside the workspace after \
-                         the scan (a symlink or special file replaced it or a directory above it: {e}); \
-                         nothing published"
-                    ),
-                    at_unix: now_unix(),
-                })?;
-                return Ok(UploadOutcome::Deferred);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(UploadOutcome::Unreadable),
-            Err(e) => return Err(LeanError::State(format!("stat {}: {e}", local_path.display()))),
+            Err(e) => match scan::name_error(&e) {
+                // Removed since the walk saw it (L-144): nothing to publish,
+                // and the next scan reads it as a first absence. Not a
+                // refusal, so no record.
+                scan::NameError::Gone => return Ok(UploadOutcome::Deferred),
+                scan::NameError::Replaced => {
+                    self.state.append_conflict(&ConflictRecord {
+                        path: path.to_string(),
+                        foreign_etag: String::new(),
+                        preserved_key: None,
+                        kind: format!(
+                            "upload-refused-not-regular: no longer a regular file inside the workspace after \
+                             the scan (a symlink or special file replaced it or a directory above it: {e}); \
+                             nothing published"
+                        ),
+                        at_unix: now_unix(),
+                    })?;
+                    return Ok(UploadOutcome::Deferred);
+                }
+                scan::NameError::Refused => return Ok(UploadOutcome::Unreadable),
+                scan::NameError::Other => return Err(LeanError::State(format!("stat {}: {e}", local_path.display()))),
+            },
         };
         let lmeta = file
             .metadata()
@@ -2367,8 +2384,9 @@ fn note_held(held: &[String]) {
     let more = held.len().saturating_sub(SHOWN);
     eprintln!(
         "flint-sync: held {} path(s) the syncer may not read (EACCES or EPERM) or name (not UTF-8, \
-         shown with U+FFFD): {:?}{} — nothing at or \
-         under them is published or deleted until they are readable and named in UTF-8; the rest of the tree is",
+         shown with U+FFFD; or too long for a store key): {:?}{} — nothing at or \
+         under them is published or deleted until they are readable and named in UTF-8 within the key \
+         limit; the rest of the tree is",
         held.len(),
         &held[..held.len().min(SHOWN)],
         if more > 0 { format!(" and {more} more") } else { String::new() },

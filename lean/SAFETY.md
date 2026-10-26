@@ -45,7 +45,7 @@ an agent's publish ack, and the gateway's answer to a UI write.
 
 | | enforced by | in code |
 |---|---|---|
-| an ok ack means the boundary is INSTALLED, at the seq it names — and that seq carries the declaration; a declared path it does not carry (withheld, deferred, held because the syncer may not read it or its name is not UTF-8, or deleted by a peer after the install that carried it) makes the ack `partial` and is named | `Inv_AckImpliesCited` | `sentinel.rs`, ack after `note_boundary`; `IntentJournal::carrier` and `Carrier::uncited`, recomputed at every consume (H10, §4.15, §3.2) |
+| an ok ack means the boundary is INSTALLED, at the seq it names — and that seq carries the declaration; a declared path it does not carry (withheld, deferred, held because the syncer may not read it, its name is not UTF-8 or its path is too long for a store key, or deleted by a peer after the install that carried it) makes the ack `partial` and is named | `Inv_AckImpliesCited` | `sentinel.rs`, ack after `note_boundary`; `IntentJournal::carrier` and `Carrier::uncited`, recomputed at every consume (H10, §4.15, §3.2) |
 | the boundary it names cites everything this workspace integrated | `Inv_AckBoundaryCoherent` | the scan publishes every path that differs from the baseline, and the baseline IS the merge base (P1-lite, §3.2); the citation repair that did this before step 5 is gone |
 | a fenced writer never answers ok | `Inv_NoFencedOkAck` | `refuse_if_read`, `verify_not_deposed` |
 | a consumed publish request is always answered | `Inv_NoNonceOrphan` | the pending record, `sentinel.rs` |

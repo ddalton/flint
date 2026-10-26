@@ -67,18 +67,6 @@ struct Known {
 
 const KNOWN: &[Known] = &[
     Known {
-        name: "enoent-at-open",
-        what: "L-144: a name removed while the barrier runs fails the whole barrier",
-    },
-    Known {
-        name: "suid-lost-on-write",
-        what: "L-146: a checkout or consume sets the mode before writing, and the write clears setuid/setgid",
-    },
-    Known {
-        name: "long-keys",
-        what: "L-145: a path over ~968 bytes makes a handle key over S3's 1024-byte limit",
-    },
-    Known {
         name: "lossy-hold-collision",
         what: "L-141, accepted: a keyless name held under its lossy form also holds a real name spelled with U+FFFD",
     },
@@ -91,11 +79,6 @@ const KNOWN: &[Known] = &[
         what: "L-147: an unreadable file where a cited directory was keeps the citations under it, forever a first absence",
     },
 ];
-
-/// The longest relative path the generator makes while `long-keys` is
-/// not generated: a handle key adds the prefix, an `@` and a flush id
-/// (`ui-<secs>-<uuid>` the longest), and must stay within 1024 bytes.
-const SAFE_PATH: usize = 940;
 
 fn known_enabled(name: &str) -> bool {
     let v = std::env::var("FLINT_FUZZ_KNOWN").unwrap_or_default();
@@ -390,6 +373,15 @@ impl View {
     }
 }
 
+/// Whether `k` has a key the store takes (`LeanConfig::key_fits`, L-145),
+/// under the battery's prefix: the barrier holds a file whose path does not.
+fn keyed(k: &str) -> bool {
+    thread_local! {
+        static CFG: LeanConfig = super::tests::cfg_for(Path::new("/nonexistent"));
+    }
+    CFG.with(|c| c.key_fits(k))
+}
+
 fn view(s: &Snap) -> View {
     let mut v = View::default();
     for (p, n) in s {
@@ -401,6 +393,11 @@ fn view(s: &Snap) -> View {
             Vis::Seen => {
                 if let Node::File { body, perm, .. } = n {
                     let k = String::from_utf8(p.clone()).expect("a seen path is UTF-8");
+                    if !keyed(&k) {
+                        v.held.insert(k);
+                        v.held_at.insert(p.clone());
+                        continue;
+                    }
                     if perm & 0o400 == 0 {
                         v.unreadable.insert(k.clone());
                     }
@@ -458,8 +455,6 @@ struct Case {
     rng: Rng,
     root: PathBuf,
     perms: bool,
-    /// `SAFE_PATH`, or no limit while `long-keys` is generated.
-    max_path: usize,
     log: Vec<String>,
 }
 
@@ -482,9 +477,7 @@ impl Case {
     fn file_mode(&mut self) -> u32 {
         loop {
             let m = *self.rng.pick(FILE_MODES);
-            // setuid, and setgid with group execute: what a write clears.
-            let cleared_by_write = m & 0o4000 != 0 || m & 0o2010 == 0o2010;
-            if (self.perms || m & 0o400 != 0) && (!cleared_by_write || known_enabled("suid-lost-on-write")) {
+            if self.perms || m & 0o400 != 0 {
                 return m;
             }
         }
@@ -613,7 +606,8 @@ impl Case {
                 }
                 let name = self.ui_name(path.is_empty());
                 let path = String::from_utf8(join(path.as_bytes(), name.as_bytes())).unwrap();
-                if !fresh(path.as_bytes()) || !path_ok(&path) || path.len() > self.max_path {
+                // The gateway refuses a path with no key (L-145).
+                if !fresh(path.as_bytes()) || !path_ok(&path) || !cfg.key_fits(&path) {
                     return vec![];
                 }
                 let body = self.ui_body();
@@ -680,7 +674,7 @@ impl Case {
             let d = c.rng.pick(&open_dirs).clone();
             let name = c.agent_name(d.is_empty());
             let p = join(&d, &name);
-            (!s.contains_key(&p) && free(&p) && p.len() <= c.max_path).then_some(p)
+            (!s.contains_key(&p) && free(&p)).then_some(p)
         };
         let res: Result<String, String> = match w {
             // create a file
@@ -792,9 +786,6 @@ impl Case {
                 }
                 let name = self.agent_name(d.is_empty());
                 let to = join(&d, &name);
-                if to.len() > self.max_path || s.keys().any(|q| under(q, &from) && to.len() + q.len() - from.len() > self.max_path) {
-                    return None;
-                }
                 let over_file =
                     matches!(s.get(&to), Some(Node::File { .. })) && matches!(s.get(&from), Some(Node::File { .. }));
                 if !free(&to) || to == from || (s.contains_key(&to) && !over_file) {
@@ -876,7 +867,7 @@ impl Case {
             // a path near S3's 1024-byte key limit
             _ => {
                 let d = self.rng.pick(&open_dirs).clone();
-                let target = (880 + self.rng.below(240)).min(self.max_path);
+                let target = 880 + self.rng.below(240);
                 let mut p = d.clone();
                 let mut i = 0;
                 while p.len() + 250 < target {
@@ -889,7 +880,7 @@ impl Case {
                 let blocked = ancestors(&p)
                     .filter(|a| a.len() > d.len())
                     .any(|a| s.get(a).is_some_and(|n| !matches!(n, Node::Dir { .. }) || !open_dir(s, a)));
-                if !free(&p) || s.contains_key(&p) || blocked || p.len() > self.max_path {
+                if !free(&p) || s.contains_key(&p) || blocked {
                     return None;
                 }
                 let a = abs(&root, &p);
@@ -941,10 +932,7 @@ impl Case {
             .cloned()
             .collect();
         let x = self.pick_where(&cands, |_| true)?;
-        let mut kinds = vec![InjKind::SwapDir, InjKind::SwapLink, InjKind::SwapFifo, InjKind::Grow];
-        if known_enabled("enoent-at-open") {
-            kinds.push(InjKind::Delete);
-        }
+        let mut kinds = vec![InjKind::Delete, InjKind::SwapDir, InjKind::SwapLink, InjKind::SwapFifo, InjKind::Grow];
         let covers = d.keys().any(|k| under(k.as_bytes(), &x)) && !known_enabled("file-hold-covers-subtree");
         if self.perms && !covers {
             kinds.push(InjKind::Chmod000);
@@ -1262,8 +1250,7 @@ async fn run_case(seed: u64, idx: usize, ticks: usize, perms: bool) -> Result<Ta
     let threads = *rng.pick(&[1usize, 2, 8]);
     let tree_a = Tree(tempfile::tempdir().unwrap());
     let root = tree_a.0.path().to_path_buf();
-    let max_path = if known_enabled("long-keys") { usize::MAX } else { SAFE_PATH };
-    let mut c = Case { seed, idx, rng, root: root.clone(), perms, max_path, log: vec![format!("walk threads {threads}")] };
+    let mut c = Case { seed, idx, rng, root: root.clone(), perms, log: vec![format!("walk threads {threads}")] };
     let store = Arc::new(MemoryStore::new());
     let mut a = fuzz_syncer(&store, &root, threads).await;
     a.checkout().await.map_err(|e| c.fail("checkout A", format!("{e}")))?;
@@ -1474,16 +1461,14 @@ async fn hostile_trees_publish_what_the_contract_says() {
     assert!(failures.is_empty(), "{} of {cases} hostile-tree cases failed (seed {seed}):\n{}", failures.len(), failures.join("\n"));
 }
 
-/// The tree changes WHILE the barrier walks it: a thread makes and removes
-/// files and directories in a large directory as fast as it can. A name
-/// the walk listed and then could not stat or open is simply gone; that is
-/// the two-scan rule's business, and must never fail the barrier.
+/// The tree changes WHILE the barrier walks it (L-144): a thread makes and
+/// removes files and directories in a large directory as fast as it can. A
+/// name the walk listed and then could not stat or open, or the upload
+/// could not open, is simply gone; that is the two-scan rule's business,
+/// and must never fail the barrier. Before the fix, every one of the 60
+/// barriers failed even at 50 names a second, each living 100 ms.
 #[tokio::test]
 async fn a_tree_churning_under_the_walk_does_not_fail_the_barrier() {
-    if !known_enabled("enoent-at-open") {
-        eprintln!("KNOWN enoent-at-open: the churn test is not run; FLINT_FUZZ_KNOWN=enoent-at-open runs it");
-        return;
-    }
     use std::sync::atomic::AtomicBool;
     let store = Arc::new(MemoryStore::new());
     // FLINT_FUZZ_CHURN_DIR puts the tree on another filesystem than /tmp's.
@@ -1553,5 +1538,9 @@ async fn a_tree_churning_under_the_walk_does_not_fail_the_barrier() {
         did.barriers, did.uploads, did.fired
     );
     assert!(errors.is_empty(), "{} of {barriers} barriers failed while the tree churned: {errors:#?}", errors.values().sum::<usize>());
+    // A churn the barriers never saw proves nothing: names that live a few
+    // microseconds are never listed at all. Seen, they are deferred, read
+    // as absent or deleted (unpaced on tmpfs, every one is gone by its open).
+    assert!(did.fired > 0, "fixture: the churn never reached a barrier: {did:?}");
 }
 

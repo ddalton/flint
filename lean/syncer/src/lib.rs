@@ -567,6 +567,15 @@ pub fn ui_flush(added_unix: u64) -> String {
     format!("ui-{added_unix}-{}", uuid::Uuid::new_v4())
 }
 
+/// The longest flush id a handle carries: the gateway's `ui-<secs>-<uuid>`
+/// with a `u64` of seconds (a barrier's is a bare uuid; an ingress copy's,
+/// `ingress-<etag>`, adopts an object whose bare key already fit).
+pub const MAX_FLUSH_LEN: usize = "ui-".len() + 20 + "-".len() + 36;
+
+/// The longest key the stores lean runs on take: 1,024 bytes of UTF-8 on
+/// S3 (`KeyTooLongError`) and on GCS.
+pub const MAX_KEY_BYTES: usize = 1024;
+
 /// The `added_unix` a UI flush id carries; `None` for any other flush.
 pub fn ui_flush_added(flush: &str) -> Option<u64> {
     let rest = flush.strip_prefix("ui-")?;
@@ -673,6 +682,16 @@ impl LeanConfig {
     /// ([`ui_flush`]), whose ORDER a consume can read off the name.
     pub fn handle_key(&self, path: &str, flush: &str) -> String {
         format!("{}/files/{}@{}", self.prefix, path, flush)
+    }
+    /// Whether every handle `path` can have is a key the store takes
+    /// (L-145): its handle under the longest flush id anyone mints
+    /// ([`MAX_FLUSH_LEN`]) within [`MAX_KEY_BYTES`]. One rule for every
+    /// writer, so a path the agent can publish the UI can save too. A
+    /// file whose path does not fit is HELD by the barrier (as a name that
+    /// is not UTF-8 is), and the gateway refuses to save or move one
+    /// there: the PUT would fail on S3 at every attempt.
+    pub fn key_fits(&self, path: &str) -> bool {
+        self.handle_key(path, "").len() + MAX_FLUSH_LEN <= MAX_KEY_BYTES
     }
     /// The files namespace this workspace's handles and ingress objects
     /// live under, with its trailing slash — what a sweep lists.

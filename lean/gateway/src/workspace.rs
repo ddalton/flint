@@ -645,7 +645,9 @@ impl Workspace {
         opts: &PutFile,
     ) -> Result<String, VerbError> {
         self.writable()?;
-        if !path_ok(path) {
+        // A path with no key the store takes is refused at the door
+        // (`LeanConfig::key_fits`, L-145): its PUT would fail on S3.
+        if !path_ok(path) || !self.cfg.key_fits(path) {
             return Err(VerbError::BadPath(path.to_string()));
         }
         self.check_size(&body)?;
@@ -1012,7 +1014,9 @@ impl Workspace {
             if !path_ok(from) {
                 return Err(VerbError::BadPath(from.to_string()));
             }
-            if !path_ok(to) || from == to || !seen_to.insert(to.to_string()) {
+            // A destination with no key would be a file nobody could save
+            // again (`LeanConfig::key_fits`, L-145).
+            if !path_ok(to) || !self.cfg.key_fits(to) || from == to || !seen_to.insert(to.to_string()) {
                 return Err(VerbError::BadPath(to.to_string()));
             }
         }

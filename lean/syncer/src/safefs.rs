@@ -213,6 +213,9 @@ pub(crate) struct RangedTmp {
     /// whole sink `!Sync` and unshareable.
     written: std::sync::atomic::AtomicU64,
     expect: u64,
+    /// Applied at `commit`, after the last range: a write clears setuid
+    /// and setgid (L-146).
+    mode: Option<u32>,
 }
 
 impl RangedTmp {
@@ -223,20 +226,13 @@ impl RangedTmp {
         mode: Option<u32>,
     ) -> LeanResult<RangedTmp> {
         let f = create_exclusive(tmp, true)?;
-        #[cfg(unix)]
-        if let Some(mode) = mode {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(mode))
-                .map_err(|e| refuse(tmp, &format!("mode: {e}")))?;
-        }
-        #[cfg(not(unix))]
-        let _ = mode;
         Ok(RangedTmp {
             file: f,
             tmp: tmp.to_path_buf(),
             path: path.to_path_buf(),
             written: std::sync::atomic::AtomicU64::new(0),
             expect: size,
+            mode,
         })
     }
 
@@ -280,6 +276,14 @@ impl RangedTmp {
                 written,
                 self.expect
             )));
+        }
+        #[cfg(unix)]
+        if let Some(mode) = self.mode {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = self.file.set_permissions(std::fs::Permissions::from_mode(mode)) {
+                let _ = std::fs::remove_file(&self.tmp);
+                return Err(refuse(&self.tmp, &format!("mode: {e}")));
+            }
         }
         drop(self.file);
         std::fs::rename(&self.tmp, &self.path).map_err(|e| {
@@ -373,6 +377,12 @@ fn write_via_tmp_opts(
     proceed: Option<&dyn Fn() -> bool>,
 ) -> LeanResult<Option<std::fs::Metadata>> {
     let mut f = create_exclusive(tmp, mkdir_parent)?;
+    f.write_all(bytes)
+        .map_err(|e| LeanError::State(format!("write tmp for {}: {e}", path.display())))?;
+    // The mode AFTER the bytes (L-146): a write by a process without
+    // CAP_FSETID clears setuid, and setgid with group-execute, so a mode
+    // set first came out 0755 under a document citing 4755, and the
+    // tree's next barrier published the stripped mode.
     #[cfg(unix)]
     if let Some(mode) = mode {
         use std::os::unix::fs::PermissionsExt;
@@ -380,8 +390,6 @@ fn write_via_tmp_opts(
     }
     #[cfg(not(unix))]
     let _ = mode;
-    f.write_all(bytes)
-        .map_err(|e| LeanError::State(format!("write tmp for {}: {e}", path.display())))?;
     if durable {
         f.sync_all()
             .map_err(|e| LeanError::State(format!("fsync tmp for {}: {e}", path.display())))?;

@@ -12,6 +12,48 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Fixed
+
+- **lean: a file or directory removed while a barrier ran failed the
+  whole barrier, so a tree in which anything makes and removes files
+  stopped publishing for as long as it did** (L-144). A name listed by the
+  walk and gone by the time it stat'ed it, a directory gone or replaced by
+  a file by the time it opened it, a file gone by the time the upload
+  opened it: each failed the barrier, and so did a declared boundary's
+  check of a cited file whose directory had become a file. Builds,
+  package managers, `git`'s `index.lock` and editors' swap files do this
+  all the time; on the build box, 50 short-lived files a second failed 60
+  of 60 barriers. Every look a barrier takes at the tree by name now
+  sorts its error by one rule: a name that is gone, or that something
+  else has replaced, is absent from this scan (the two-scan rule makes
+  that safe, as it always has for a rename mid-walk), and a file gone
+  before its upload is deferred to the next barrier, which reads it as a
+  first absence. A name the syncer may not read is still held, and every
+  other error still fails the barrier. In every release.
+
+- **lean: a file whose path was longer than 956 bytes less its
+  workspace's prefix would stop every publish in that workspace on S3**
+  (L-145). A handle key is
+  `<prefix>/files/<path>@<flush>` and nothing bounded the path; S3 refuses
+  a key over 1,024 bytes, so the upload's PUT, and with it the barrier,
+  would fail at every tick until the file was renamed. Such a file is now
+  held, as a name that is not UTF-8 is, and the gateway refuses to save a
+  file, a draft or a rename's destination at such a path (400,
+  `bad-path`). The limit leaves room for the longest flush id anyone
+  mints (`LeanConfig::key_fits`), so a path the agent can publish the UI
+  can save too.
+
+- **lean: a checkout or a consume dropped setuid and setgid, and that
+  tree's next barrier published the stripped mode** (L-146). The syncer
+  set a materialised file's mode before writing its bytes, and a write by
+  a process without `CAP_FSETID` clears setuid, and setgid with
+  group-execute, so the file came out `0755` under a document citing
+  `4755`. The tree's next scan saw a mode change and re-uploaded the file
+  with `0755`: a replacement pod did this to every such file. The mode is
+  now set after the bytes. A fidelity loss, never an exposure: on an
+  s3csi workspace, mounted `nosuid` since 1.61.0, the bit did nothing
+  anyway.
+
 ## [1.61.0] - 2026-10-26
 
 A minor release: three security fixes, lean's latency work, and four

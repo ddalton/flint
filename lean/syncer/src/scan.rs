@@ -156,6 +156,55 @@ fn under<'a, V>(cited: &'a BTreeMap<String, V>, held: &'a str) -> impl Iterator<
     exact.into_iter().chain(below)
 }
 
+/// What an error on one name says about that name. Every look a barrier
+/// takes at the tree by name (the walk's stat and its open of a directory,
+/// the upload's open, the confirmation of an absence) sorts its error by
+/// this one rule, so an error about one name decides that name, and only
+/// an error about none of them fails the barrier (L-144). Before it, each
+/// call site kept its own list, and any errno not on it, ENOENT among
+/// them, failed the whole barrier: a tree in which anything made and
+/// removed files stopped publishing for as long as it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameError {
+    /// Nothing is at the name any more (ENOENT): it, or a directory above
+    /// it, was removed or renamed since it was listed.
+    Gone,
+    /// Something other than what was listed is there: a component that is
+    /// no longer a directory (ENOTDIR), a symlink where a file or a
+    /// directory was (ELOOP), or not a regular file (`safefs`'s
+    /// InvalidInput).
+    Replaced,
+    /// The tree's owner refused the syncer (EACCES or EPERM): held.
+    Refused,
+    /// Anything else (EIO, ENAMETOOLONG, EMFILE...): no standing condition
+    /// of one name, so it fails the barrier.
+    Other,
+}
+
+pub fn name_error(e: &std::io::Error) -> NameError {
+    match e.raw_os_error() {
+        Some(libc::ENOENT) => NameError::Gone,
+        Some(libc::ENOTDIR) | Some(libc::ELOOP) => NameError::Replaced,
+        _ if e.kind() == std::io::ErrorKind::PermissionDenied => NameError::Refused,
+        _ if e.kind() == std::io::ErrorKind::InvalidInput => NameError::Replaced,
+        _ => NameError::Other,
+    }
+}
+
+/// A test window inside the walk (`barrier::CONSUME_WINDOW_HOOK`), on the
+/// one-thread walk only: the hook is the calling thread's. `rel` is built
+/// only when a hook is armed.
+#[cfg(test)]
+fn walk_window(stage: &'static str, rel: impl FnOnce() -> String) {
+    if super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_some()) {
+        super::barrier::consume_window(stage, &rel());
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn walk_window(_: &'static str, _: impl FnOnce() -> String) {}
+
 /// Whether the syncer may read the file at `rel`: false only when the
 /// kernel answers EACCES or EPERM. Asked of each upload before the
 /// barrier's idle check, so a file it may not read is held there and an
@@ -198,6 +247,11 @@ pub fn may_read(root: &Path, rel: &str) -> bool {
 /// too (L-141); a `\` in a name is a byte like any other (L-142). Either
 /// used to give a key that named another file or none, and the upload's
 /// ENOENT failed every barrier in the workspace.
+///
+/// A name that is GONE by the time the walk stats it, or a directory gone
+/// or replaced by the time the walk opens it, is absent from this scan
+/// (`NameError`, L-144): the agent removed or moved it while the walk ran,
+/// and the two-scan rule is what makes reading that as absence safe.
 ///
 /// Every other error FAILS the walk, and with it the barrier: an EIO is
 /// not a standing condition the tree's owner set, and an unreadable ROOT
@@ -336,14 +390,21 @@ fn read_dir_entries(
 ) -> std::io::Result<()> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use std::os::unix::ffi::OsStrExt;
+    walk_window("walk-before-open", || prefix.to_string());
     let opened = rustix::fs::open(dir, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty());
     let fd = match opened.map_err(std::io::Error::from) {
         Ok(fd) => fd,
-        // Held, not failed, below the root (`scan`).
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !prefix.is_empty() => {
-            out.held.push(prefix.to_string());
-            return Ok(());
-        }
+        // Below the root (`scan`): a directory gone or replaced since it
+        // was listed is absent from this scan; one the syncer may not
+        // list is held, not failed.
+        Err(e) if !prefix.is_empty() => match name_error(&e) {
+            NameError::Gone | NameError::Replaced => return Ok(()),
+            NameError::Refused => {
+                out.held.push(prefix.to_string());
+                return Ok(());
+            }
+            NameError::Other => return Err(e),
+        },
         Err(e) => return Err(e),
     };
     let mut entries = rustix::fs::Dir::new(fd)?;
@@ -370,16 +431,21 @@ fn read_dir_entries(
         if name.ends_with(TMP_SUFFIX) {
             continue;
         }
+        walk_window("walk-before-stat", || format!("{prefix}{name}"));
         let stat = rustix::fs::statat(entries.fd()?, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW);
         let st = match stat.map_err(std::io::Error::from) {
             Ok(st) => st,
-            // A directory the syncer may list but not search: each name
-            // in it is held, file or directory alike.
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                out.held.push(format!("{prefix}{name}"));
-                continue;
-            }
-            Err(e) => return Err(e),
+            Err(e) => match name_error(&e) {
+                // Removed since `getdents` listed it: absent from this scan.
+                NameError::Gone | NameError::Replaced => continue,
+                // A directory the syncer may list but not search: each
+                // name in it is held, file or directory alike.
+                NameError::Refused => {
+                    out.held.push(format!("{prefix}{name}"));
+                    continue;
+                }
+                NameError::Other => return Err(e),
+            },
         };
         match FileType::from_raw_mode(st.st_mode as _) {
             FileType::Directory => {

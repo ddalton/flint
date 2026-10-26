@@ -215,6 +215,10 @@ impl Workspace {
     ) -> Result<String, VerbError> {
         self.writable()?;
         check_user_and_path(user, path)?;
+        // A draft of a path with no key could never be promoted (L-145).
+        if !self.config().key_fits(path) {
+            return Err(VerbError::BadPath(path.to_string()));
+        }
         self.check_size(&body)?;
         let cfg = self.config();
         let size = body.len() as u64;

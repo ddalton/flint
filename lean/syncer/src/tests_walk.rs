@@ -269,3 +269,50 @@ fn an_error_other_than_eacces_still_fails_the_walk() {
         }
     }
 }
+
+/// L-144: a name removed after `getdents` listed it and before the walk
+/// stats it is absent from the scan, not a failed walk; so is a directory
+/// removed, or replaced by a file, after it was listed and before it is
+/// opened. The agent did it while the walk ran, and the two-scan rule reads
+/// it as a first absence. Every errno but EACCES used to fail the walk, and
+/// with it the barrier, so a tree in which anything made and removed files
+/// stopped publishing. One-thread walks: the window is the calling thread's.
+#[test]
+fn a_name_gone_while_the_walk_runs_is_absent_not_a_failure() {
+    let arm = |path: &str, stage: &'static str, f: Box<dyn Fn()>| {
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| *h.borrow_mut() = Some((path.to_string(), stage, f)));
+    };
+    let ran = || super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "a.txt", "a");
+    put(dir.path(), "b.txt", "b");
+    let b = dir.path().join("b.txt");
+    arm("b.txt", "walk-before-stat", Box::new(move || std::fs::remove_file(&b).unwrap()));
+    let s = scan_with(dir.path(), 1).unwrap_or_else(|e| panic!("a file removed under the walk failed it: {e}"));
+    assert!(ran(), "fixture: the window never ran");
+    assert_eq!(s.entries.keys().collect::<Vec<_>>(), ["a.txt"]);
+    assert!(s.held.is_empty(), "{:?}", s.held);
+
+    for replaced in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        put(dir.path(), "a.txt", "a");
+        put(dir.path(), "d/x.txt", "x");
+        let d = dir.path().join("d");
+        arm(
+            "d/",
+            "walk-before-open",
+            Box::new(move || {
+                std::fs::remove_dir_all(&d).unwrap();
+                if replaced {
+                    std::fs::write(&d, "a file now").unwrap();
+                }
+            }),
+        );
+        let s = scan_with(dir.path(), 1)
+            .unwrap_or_else(|e| panic!("replaced={replaced}: a directory gone under the walk failed it: {e}"));
+        assert!(ran(), "fixture: the window never ran");
+        assert_eq!(s.entries.keys().collect::<Vec<_>>(), ["a.txt"], "replaced={replaced}");
+        assert!(s.held.is_empty(), "replaced={replaced}: {:?}", s.held);
+    }
+}

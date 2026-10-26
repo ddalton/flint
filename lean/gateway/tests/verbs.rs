@@ -298,6 +298,44 @@ async fn an_overwrite_must_name_what_it_read() {
     assert_eq!(err.code(), "bad-precondition");
 }
 
+/// L-145: a path whose handle, under the longest flush id, would be over
+/// the store's 1,024-byte key limit is refused at the door, for a save, a
+/// rename's destination and a draft: each would end in a PUT that fails on
+/// S3 at every attempt (the syncer's barrier holds such a file). The
+/// longest path that fits is taken, and no key the store holds is over the
+/// limit.
+#[tokio::test]
+async fn a_path_too_long_for_a_key_is_refused_and_the_longest_that_fits_is_taken() {
+    let s = store();
+    let w = ws(&s);
+    let fit = flint_lean::MAX_KEY_BYTES - flint_lean::MAX_FLUSH_LEN - w.config().handle_key("", "").len();
+    // Names of at most 200 bytes, as a filesystem could hold them.
+    let mut dir = String::new();
+    while fit - dir.len() - 1 > 200 {
+        if !dir.is_empty() {
+            dir.push('/');
+        }
+        dir.push_str(&"d".repeat(150));
+    }
+    let name = fit - dir.len() - 1;
+    let (ok, long) = (format!("{dir}/{}", "f".repeat(name)), format!("{dir}/{}", "g".repeat(name + 1)));
+    assert!(w.config().key_fits(&ok) && !w.config().key_fits(&long), "fixture: {} and {} bytes", ok.len(), long.len());
+
+    w.put_file(&ok, Bytes::from("fits"), &PutFile::default()).await.unwrap();
+    let err = w.put_file(&long, Bytes::from("x"), &PutFile::default()).await.unwrap_err();
+    assert!(matches!(err, VerbError::BadPath(_)), "{err}");
+    assert_eq!(err.status(), 400);
+    let err = w.rename_file(&ok, &long, None).await.unwrap_err();
+    assert!(matches!(err, VerbError::BadPath(_)), "{err}");
+    let err = w.put_draft("alice", &long, Bytes::from("x"), None, None).await.unwrap_err();
+    assert!(matches!(err, VerbError::BadPath(_)), "{err}");
+    // The path that fits reads back.
+    assert_eq!(&w.get_file(&ok).await.unwrap().body[..], b"fits");
+    let keys: Vec<String> = s.list(PREFIX).await.unwrap().into_iter().map(|o| o.key).collect();
+    assert!(keys.iter().all(|k| k.len() <= flint_lean::MAX_KEY_BYTES), "{:?}", keys.iter().map(|k| k.len()).max());
+    assert!(!keys.iter().any(|k| k.contains(&long)), "something landed under the long path");
+}
+
 #[tokio::test]
 async fn path_hygiene_the_size_cap_and_a_missing_file() {
     let s = store();

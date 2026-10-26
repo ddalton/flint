@@ -3453,13 +3453,27 @@ async fn an_unreadable_path_is_not_confirmed_as_deleted() {
     assert!(classified.first_absence.is_empty(), "a held path is unseen, not back on disk: {classified:?}");
     assert_eq!(held.iter().collect::<Vec<_>>(), ["locked/f.txt"]);
 
-    // Any other errno fails, as it did: ENOTDIR, a path through a file.
+    // A path through a file cannot be there (ENOTDIR): the agent replaced
+    // a directory with a file, and the walk does not descend a file
+    // either, so it is absent, and confirmed (`scan::name_error`, L-144).
+    // This was the test's "any other errno" until then, and a declared
+    // boundary failed at every honour while such a citation stood.
     write(dir.path(), "plain.txt", "a file, not a directory");
     let mut classified = super::scan::Classified::default();
     classified.first_absence.insert("plain.txt/f".into());
+    let got = a.confirm_absences(&mut classified, &mut held).expect("a path through a file is absent");
+    assert_eq!(got, 1);
+    assert_eq!(classified.deletes.iter().collect::<Vec<_>>(), ["plain.txt/f"]);
+    assert_eq!(held.len(), 1, "an absence was held: {held:?}");
+
+    // Any other errno fails, as it did: ENAMETOOLONG, a path longer than
+    // PATH_MAX, which says nothing about whether it is there.
+    let long = "n/".repeat(2100) + "f";
+    let mut classified = super::scan::Classified::default();
+    classified.first_absence.insert(long.clone());
     let err = a
         .confirm_absences(&mut classified, &mut held)
-        .expect_err("ENOTDIR must not confirm a deletion, nor be held");
+        .expect_err("ENAMETOOLONG must not confirm a deletion, nor be held");
     assert!(format!("{err}").contains("refusing to publish a deletion"), "the refusal must say what it refused: {err}");
     assert!(classified.deletes.is_empty(), "{:?}", classified.deletes);
     assert_eq!(held.len(), 1, "a non-EACCES errno was held: {held:?}");
@@ -3746,6 +3760,161 @@ async fn a_file_locked_between_the_ask_and_the_open_is_held() {
 
     let r = a.run_barrier().await.unwrap();
     assert_eq!(r.uploaded, ["f.txt"], "readable again, the held edit did not publish: {r:?}");
+}
+
+/// L-144: a file removed between the walk and the upload's open is
+/// deferred, not a failed barrier: nothing of it is published, the rest of
+/// the tree is, and the next scans read the removal as any other (a cited
+/// file's first absence, then its delete; nothing for a new one). The
+/// open's ENOENT used to fail the barrier, so an agent making and removing
+/// files kept the whole tree from publishing while it did.
+#[tokio::test]
+async fn a_file_removed_between_the_walk_and_its_open_is_deferred() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "cited.txt", "v1");
+    a.run_barrier().await.unwrap();
+    let v1 = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest.entries["cited.txt"].etag.clone();
+
+    for (path, cited) in [("new.txt", false), ("cited.txt", true)] {
+        write(dir.path(), path, "written, then removed before its open");
+        write(dir.path(), "other.txt", path);
+        let p = dir.path().join(path);
+        super::barrier::CONSUME_WINDOW_HOOK.with(|h| {
+            *h.borrow_mut() =
+                Some((path.into(), "before-upload", Box::new(move || std::fs::remove_file(&p).unwrap())))
+        });
+        let r = a.run_barrier().await;
+        assert!(super::barrier::CONSUME_WINDOW_HOOK.with(|h| h.borrow().is_none()), "fixture: the window never ran");
+        let r = r.unwrap_or_else(|e| panic!("{path}: a file removed before its open failed the barrier: {e}"));
+        assert_eq!(r.deferred, [path], "{r:?}");
+        assert_eq!(r.uploaded, ["other.txt"], "{r:?}");
+        let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+        assert_eq!(m.entries.get(path).map(|e| e.etag.clone()), cited.then(|| v1.clone()), "{path}");
+        let conflicts = std::fs::read_to_string(a.cfg.state_dir().join("conflicts.jsonl")).unwrap_or_default();
+        assert!(!conflicts.contains(path), "a removal is no refusal, and was recorded as one: {conflicts}");
+    }
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.first_absence, ["cited.txt"], "{r:?}");
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.deleted, ["cited.txt"], "{r:?}");
+}
+
+/// L-144, the confirmation's half: a cited file whose directory the agent
+/// replaced with a file cannot be there (ENOTDIR), as the walk, which does
+/// not descend a file, already says. A declared boundary confirms the
+/// absence and publishes the delete; it used to fail the honour at every
+/// sentinel while that citation stood.
+#[tokio::test]
+async fn a_declared_boundary_confirms_a_file_whose_directory_is_now_a_file_as_deleted() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    write(dir.path(), "d/f.txt", "under a directory");
+    a.run_barrier().await.unwrap();
+    std::fs::remove_dir_all(dir.path().join("d")).unwrap();
+    write(dir.path(), "d", "a file where the directory was");
+    let r = a.declared_barrier().await.expect("a path through a file failed the honour");
+    assert_eq!(r.deleted, ["d/f.txt"], "{r:?}");
+    let r = a.run_barrier().await.unwrap();
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    assert_eq!(m.entries.keys().collect::<Vec<_>>(), ["d"], "{r:?}");
+}
+
+/// L-145: a file whose path has no key the store takes (its handle under
+/// the longest flush id over 1,024 bytes) is held, as a name that is not
+/// UTF-8 is: nothing of it is published, the barrier says so, and the rest
+/// of the tree publishes, the longest path that fits among it. Its PUT used
+/// to fail on S3 at every barrier; MemoryStore takes any key, so the
+/// battery never saw that.
+#[tokio::test]
+async fn a_path_too_long_for_a_key_is_held_and_the_rest_publishes() {
+    let store = Arc::new(MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, dir.path()).await;
+    a.checkout().await.unwrap();
+    let fit = super::MAX_KEY_BYTES - super::MAX_FLUSH_LEN - a.cfg.handle_key("", "").len();
+    // Names of at most 200 bytes, as the filesystem holds them.
+    let mut d = String::new();
+    while fit - d.len() - 1 > 200 {
+        if !d.is_empty() {
+            d.push('/');
+        }
+        d.push_str(&"d".repeat(150));
+    }
+    let name = fit - d.len() - 1;
+    let (ok, long) = (format!("{d}/{}", "f".repeat(name)), format!("{d}/{}", "g".repeat(name + 1)));
+    assert!(a.cfg.key_fits(&ok) && !a.cfg.key_fits(&long), "fixture: {} and {} bytes", ok.len(), long.len());
+    write(dir.path(), &ok, "fits");
+    write(dir.path(), &long, "one byte too long");
+    write(dir.path(), "plain.txt", "plain");
+
+    for _ in 0..2 {
+        let r = a.run_barrier().await.unwrap_or_else(|e| panic!("a path too long for a key failed the barrier: {e}"));
+        assert_eq!(r.held, [long.clone()], "{r:?}");
+    }
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    let mut want = vec![ok.clone(), "plain.txt".to_string()];
+    want.sort();
+    assert_eq!(m.entries.keys().cloned().collect::<Vec<_>>(), want);
+    let keys: Vec<String> = store.list(&a.cfg.prefix).await.unwrap().into_iter().map(|o| o.key).collect();
+    assert!(keys.iter().all(|k| k.len() <= super::MAX_KEY_BYTES), "{:?}", keys.iter().map(|k| k.len()).max());
+}
+
+/// L-146: a materialised file gets its mode AFTER its bytes, so setuid,
+/// and setgid with group-execute, survive the write that would clear them.
+/// A checkout, whole or ranged, and a consume keep 4755 and 2755, and the
+/// trees that took them publish nothing. The mode used to be set first, so
+/// the file came out 0755, and that tree's next barrier published 0755
+/// over the cited 4755 (a replacement pod did it to every such file).
+#[tokio::test]
+async fn a_checkout_and_a_consume_keep_setuid_and_setgid_and_publish_nothing() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("SKIPPED: running as root, which a write never strips setuid from (CAP_FSETID)");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mode_at = |root: &std::path::Path, p: &str| {
+        std::fs::symlink_metadata(root.join(p)).unwrap().permissions().mode() & 0o7777
+    };
+    let store = Arc::new(MemoryStore::new());
+    let da = tempfile::tempdir().unwrap();
+    let mut a = syncer(&store, da.path()).await;
+    a.checkout().await.unwrap();
+    let files = [("suid", 0o4755), ("sgid", 0o2755), ("big-suid", 0o4755)];
+    for (p, m) in files {
+        let body = if p == "big-suid" { "b".repeat(64 * 1024) } else { format!("#!/bin/sh\necho {p}\n") };
+        write(da.path(), p, &body);
+        std::fs::set_permissions(da.path().join(p), std::fs::Permissions::from_mode(m)).unwrap();
+    }
+    a.run_barrier().await.unwrap();
+
+    // A fresh tree, the big file through the ranged fetch.
+    let db = tempfile::tempdir().unwrap();
+    let mut b = syncer(&store, db.path()).await;
+    b.cfg.range_get_min_bytes = 16 * 1024;
+    b.cfg.range_get_chunk_bytes = 16 * 1024;
+    b.checkout().await.unwrap();
+    for (p, m) in files {
+        assert_eq!(mode_at(db.path(), p), m, "{p}: the checkout dropped a bit the document cites");
+    }
+    let r = b.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty(), "a fresh checkout published: {r:?}");
+
+    // A UI edit of the setuid file, consumed into the tree that made it.
+    hitl_write(&store, &a.cfg, "suid", "#!/bin/sh\necho edited\n", "ui").await.unwrap();
+    let r = a.run_barrier().await.unwrap();
+    assert_eq!(r.consumed, 1, "{r:?}");
+    assert_eq!(mode_at(da.path(), "suid"), 0o4755, "the consume dropped setuid");
+    let r = a.run_barrier().await.unwrap();
+    assert!(r.uploaded.is_empty(), "{r:?}");
+    let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+    for (p, mode) in files {
+        assert_eq!(m.entries[p].mode & 0o7777, mode, "{p}");
+    }
 }
 
 /// A declared boundary that holds a path is not complete: the ack is

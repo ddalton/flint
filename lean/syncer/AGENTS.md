@@ -312,6 +312,10 @@ yours.
   Latin-1 `caf\xe9.txt`, say) is held the same way, shown with U+FFFD
   in its place, until it is renamed. A `\` is an ordinary character in
   a name: `a\b` is one file, published as `a\b`.
+- **A path must fit in a store key.** A file whose path is longer than
+  956 bytes less the workspace's prefix is held the same way (S3 takes no
+  key over 1,024 bytes, and the key adds the prefix and a version id);
+  keep paths under 900 bytes. The gateway refuses to save one there.
 - **A delete is published** once the path is absent from two consecutive
   scans, and a declared boundary (`publish`) takes the second look at
   once: `rm` then `publish` deletes it in the bucket.
@@ -344,8 +348,9 @@ Do not:
 - touch sentinels in a loop, or expect a boundary faster than
   `sentinel_min_interval_secs`;
 - preserve timestamps when copying edited files into the tree;
-- make a file or directory the workspace's uid may not read, or give
-  one a name that is not UTF-8: it is held, not published;
+- make a file or directory the workspace's uid may not read, give one a
+  name that is not UTF-8, or nest a file so deep its path does not fit in
+  a store key: it is held, not published;
 - rely on symlinks or empty directories surviving a checkout;
 - expect anything you write to be published when `access` is `"read"`;
 - treat an ack as proof for anyone but yourself: acks are files any
