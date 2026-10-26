@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="876" viewBox="0 0 1280 876" role="img" aria-label="flint-csi-driver: a controller Deployment and a dashboard in flint-system, and on every worker node a flint-csi-node pod running spdk-tgt. An application pod&#x27;s I/O goes through the kernel NVMe-oF/TCP initiator to the local spdk-tgt, which mirrors it with RAID1 to a replica on another node and stores it in lvols on the node&#x27;s NVMe disks. Setup is three steps: install the chart, prepare each node, initialize the disks.">
+  <title>flint-csi-driver: a controller Deployment and a dashboard in flint-system, and on every worker node a flint-csi-node pod running spdk-tgt. An application pod&#x27;s I/O goes through the kernel NVMe-oF/TCP initiator to the local spdk-tgt, which mirrors it with RAID1 to a replica on another node and stores it in lvols on the node&#x27;s NVMe disks. Setup is three steps: install the chart, prepare each node, initialize the disks.</title>
+  <defs>
+    <style>
+svg{--bg:#ffffff;--edge:#d0d7de;--soft:#f6f8fa;--card:#ffffff;--ink:#1f2328;--ink2:#424a53;--mut:#656d76;--ctl:#8c959f;--block:#6e56cf;--block-deep:#5a3fc0;--block-tint:#f4f1fd;--lite:#184f95;--lite-deep:#184f95;--lite-tint:#eef3fa;--lean:#1baf7a;--lean-deep:#0f7a55;--lean-tint:#ecf8f2;--pass:#a06b12;--pass-deep:#7d530c;--pass-tint:#faf3e6;--forge:#b03060;--forge-deep:#8c2449;--forge-tint:#faedf2;--s3:#57606a;--s3-deep:#424a53;--s3-tint:#f6f8fa}
+@media (prefers-color-scheme: dark){svg{--bg:#0d1117;--edge:#30363d;--soft:#151b23;--card:#1c2129;--ink:#e6edf3;--ink2:#c9d1d9;--mut:#9198a1;--ctl:#7d8590;--block:#a18bf5;--block-deep:#bcaaf9;--block-tint:#221d36;--lite:#58a6ff;--lite-deep:#79b8ff;--lite-tint:#142236;--lean:#3dd68c;--lean-deep:#56e0a0;--lean-tint:#13281f;--pass:#d29922;--pass-deep:#e3b341;--pass-tint:#2b2213;--forge:#f778ba;--forge-deep:#ff9bce;--forge-tint:#2f1a25;--s3:#9198a1;--s3-deep:#c9d1d9;--s3-tint:#151b23}}
+.bg{fill:var(--bg);stroke:var(--edge)}
+.lane{fill:var(--soft);stroke:var(--edge)}
+.card{fill:var(--card);stroke:var(--edge)}
+.chip{fill:var(--card);stroke:var(--edge)}
+.frame{fill:none;stroke:var(--ctl);stroke-width:1.2;stroke-dasharray:6 5}
+.rule{stroke:var(--edge);stroke-width:1}
+.ln-ctl{stroke:var(--ctl);stroke-width:1.6;fill:none;stroke-dasharray:5 4}
+.hue-ctl{fill:var(--ctl)} .hue-ink2{fill:var(--ink2)}
+text{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;fill:var(--ink)}
+.h1{font-size:24px;font-weight:700}
+.h2{font-size:17px;font-weight:700}
+.h3{font-size:14.5px;font-weight:600}
+.tag{font-size:14px;font-weight:600;fill:var(--ink2)}
+.b{font-size:13.5px;fill:var(--ink2)}
+.m{font-size:13px;fill:var(--mut)}
+.sub{font-size:14.5px;fill:var(--mut)}
+.lbl{font-size:12.5px;fill:var(--ink2)}
+.cap{font-size:11px;font-weight:700;letter-spacing:.08em}
+.pill{font-size:11px;font-weight:700;letter-spacing:.06em}
+.mono{font-family:ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;font-size:12.5px;fill:var(--ink2)}
+.num{font-size:13px;font-weight:700;fill:var(--bg)}
+.hue-block{fill:var(--block)} .txt-block{fill:var(--block-deep)} .tint-block{fill:var(--block-tint);stroke:var(--block);stroke-width:1.2} .ln-block{stroke:var(--block);stroke-width:2;fill:none}
+.hue-lite{fill:var(--lite)} .txt-lite{fill:var(--lite-deep)} .tint-lite{fill:var(--lite-tint);stroke:var(--lite);stroke-width:1.2} .ln-lite{stroke:var(--lite);stroke-width:2;fill:none}
+.hue-lean{fill:var(--lean)} .txt-lean{fill:var(--lean-deep)} .tint-lean{fill:var(--lean-tint);stroke:var(--lean);stroke-width:1.2} .ln-lean{stroke:var(--lean);stroke-width:2;fill:none}
+.hue-pass{fill:var(--pass)} .txt-pass{fill:var(--pass-deep)} .tint-pass{fill:var(--pass-tint);stroke:var(--pass);stroke-width:1.2} .ln-pass{stroke:var(--pass);stroke-width:2;fill:none}
+.hue-forge{fill:var(--forge)} .txt-forge{fill:var(--forge-deep)} .tint-forge{fill:var(--forge-tint);stroke:var(--forge);stroke-width:1.2} .ln-forge{stroke:var(--forge);stroke-width:2;fill:none}
+.hue-s3{fill:var(--s3)} .txt-s3{fill:var(--s3-deep)} .tint-s3{fill:var(--s3-tint);stroke:var(--s3);stroke-width:1.2} .ln-s3{stroke:var(--s3);stroke-width:2;fill:none}
+    </style>
+    <marker id="ah-block" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 z" class="hue-block"/></marker>
+    <marker id="ah-ctl" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 z" class="hue-ctl"/></marker>
+    <clipPath id="c1"><rect x="332" y="140" width="548" height="120" rx="10"/></clipPath>
+    <clipPath id="c2"><rect x="920" y="140" width="308" height="120" rx="10"/></clipPath>
+    <clipPath id="c3"><rect x="424" y="478" width="368" height="74" rx="10"/></clipPath>
+    <clipPath id="c4"><rect x="876" y="478" width="320" height="74" rx="10"/></clipPath>
+  </defs>
+  <rect x="0.5" y="0.5" width="1279" height="875" rx="14" class="bg"/>
+  <text x="32" y="48" class="h1">flint-csi-driver — block volumes on node NVMe</text>
+  <text x="32" y="73" class="sub">Controller, dashboard and a per-node SPDK target; the default backend is NVMe-oF/TCP into the node's kernel.</text>
+  <path d="M968,58 H1004" class="ln-block" marker-end="url(#ah-block)"/>
+  <text x="1012" y="62" class="lbl">volume I/O</text>
+  <path d="M1100,58 H1136" class="ln-ctl" marker-end="url(#ah-ctl)"/>
+  <text x="1144" y="62" class="lbl">control</text>
+  <rect x="32" y="96" width="1216" height="580" rx="14" class="frame"/>
+  <text x="52" y="122" class="cap txt-s3">KUBERNETES CLUSTER</text>
+  <rect x="52" y="140" width="236" height="120" rx="10" class="card"/>
+  <text x="70" y="168" class="h3">PersistentVolumeClaim</text>
+  <text x="70" y="190" class="mono">storageClassName: flint</text>
+  <text x="70" y="212" class="m">RWO block or filesystem; RWX</text>
+  <text x="70" y="228" class="m">through NFS; pNFS opt-in</text>
+  <rect x="332" y="140" width="548" height="120" rx="10" class="card"/>
+  <rect x="332" y="140" width="548" height="5" class="hue-block" clip-path="url(#c1)"/>
+  <text x="350" y="172" class="h2">flint-csi-controller</text>
+  <rect x="781" y="157" width="85" height="20" rx="10" class="tint-block"/>
+  <text x="823.5" y="171" class="pill txt-block" text-anchor="middle">DEPLOYMENT</text>
+  <text x="350" y="193" class="m">flint-driver, CSI_MODE=controller: provisions, attaches, expands and</text>
+  <text x="350" y="209" class="m">snapshots volumes, and places each replica on a node</text>
+  <text x="350" y="241" class="m">CSI sidecars</text>
+  <rect x="442.68" y="224" width="89" height="24" rx="12.0" class="chip"/>
+  <text x="487.18" y="240.0" class="lbl" text-anchor="middle">provisioner</text>
+  <rect x="536.6800000000001" y="224" width="69" height="24" rx="12.0" class="chip"/>
+  <text x="571.1800000000001" y="240.0" class="lbl" text-anchor="middle">attacher</text>
+  <rect x="610.6800000000001" y="224" width="62" height="24" rx="12.0" class="chip"/>
+  <text x="641.6800000000001" y="240.0" class="lbl" text-anchor="middle">resizer</text>
+  <rect x="677.6800000000001" y="224" width="89" height="24" rx="12.0" class="chip"/>
+  <text x="722.1800000000001" y="240.0" class="lbl" text-anchor="middle">snapshotter</text>
+  <rect x="771.6800000000001" y="224" width="102" height="24" rx="12.0" class="chip"/>
+  <text x="822.6800000000001" y="240.0" class="lbl" text-anchor="middle">livenessprobe</text>
+  <rect x="920" y="140" width="308" height="120" rx="10" class="card"/>
+  <rect x="920" y="140" width="308" height="5" class="hue-block" clip-path="url(#c2)"/>
+  <text x="938" y="172" class="h2">flint-dashboard</text>
+  <rect x="1129" y="157" width="85" height="20" rx="10" class="tint-block"/>
+  <text x="1171.5" y="171" class="pill txt-block" text-anchor="middle">DEPLOYMENT</text>
+  <text x="938" y="198" class="h3">frontend</text>
+  <text x="1014" y="198" class="m">nginx :3000, the web UI</text>
+  <text x="938" y="222" class="h3">backend</text>
+  <text x="1014" y="222" class="m">:8080 /api, disk discovery</text>
+  <text x="1014" y="238" class="m">and initialization</text>
+  <path d="M290,200.0 H330" class="ln-ctl" marker-end="url(#ah-ctl)"/>
+  <text x="310" y="192.0" class="lbl" text-anchor="middle">watch</text>
+  <rect x="52" y="300" width="772" height="360" rx="12" class="lane"/>
+  <text x="70" y="326" class="cap txt-s3">WORKER NODE A  ·  RUNS THE APPLICATION</text>
+  <rect x="844" y="300" width="384" height="360" rx="12" class="lane"/>
+  <text x="862" y="326" class="cap txt-s3">WORKER NODE B  ·  HOLDS A REPLICA</text>
+  <rect x="72" y="348" width="264" height="76" rx="10" class="card"/>
+  <text x="90" y="374" class="h3">Application pod</text>
+  <text x="90" y="394" class="mono">/data → PVC</text>
+  <text x="90" y="412" class="m">sees an ordinary filesystem</text>
+  <rect x="72" y="472" width="264" height="76" rx="10" class="card"/>
+  <text x="90" y="498" class="h3">Linux kernel</text>
+  <text x="90" y="518" class="m">nvme_tcp initiator (or ublk)</text>
+  <text x="90" y="536" class="mono">/dev/nvmeXnY → ext4 / xfs</text>
+  <path d="M132,426 V470" class="ln-block" marker-end="url(#ah-block)"/>
+  <text x="146" y="452.0" class="lbl">read / write</text>
+  <rect x="412" y="344" width="392" height="220" rx="10" class="frame"/>
+  <text x="428" y="366" class="cap txt-s3">flint-csi-node  ·  DaemonSet pod</text>
+  <rect x="424" y="378" width="368" height="56" rx="10" class="card"/>
+  <text x="440" y="400" class="h3">flint-csi-driver</text>
+  <text x="440" y="420" class="m">NodeStage, NodePublish · node agent :9081</text>
+  <rect x="424" y="442" width="368" height="28" rx="10" class="card"/>
+  <text x="440" y="461" class="lbl">node-driver-registrar</text>
+  <rect x="424" y="478" width="368" height="74" rx="10" class="card"/>
+  <rect x="424" y="478" width="5" height="74" class="hue-block" clip-path="url(#c3)"/>
+  <text x="442" y="501" class="h3">spdk-tgt</text>
+  <text x="515.22" y="501" class="m">privileged · hugepages</text>
+  <text x="442" y="520" class="m">SPDK v26.05: lvstore and lvols, RAID1 bdev,</text>
+  <text x="442" y="536" class="m">NVMe-oF/TCP target</text>
+  <rect x="864" y="344" width="344" height="220" rx="10" class="frame"/>
+  <text x="880" y="366" class="cap txt-s3">flint-csi-node  ·  DaemonSet pod</text>
+  <rect x="876" y="378" width="320" height="56" rx="10" class="card"/>
+  <text x="892" y="400" class="h3">flint-csi-driver</text>
+  <text x="892" y="420" class="m">CSI_MODE=node · node agent :9081</text>
+  <rect x="876" y="442" width="320" height="28" rx="10" class="card"/>
+  <text x="892" y="461" class="lbl">node-driver-registrar</text>
+  <rect x="876" y="478" width="320" height="74" rx="10" class="card"/>
+  <rect x="876" y="478" width="5" height="74" class="hue-block" clip-path="url(#c4)"/>
+  <text x="894" y="501" class="h3">spdk-tgt</text>
+  <text x="967.22" y="501" class="m">privileged · hugepages</text>
+  <text x="894" y="520" class="m">exports the replica lvol over NVMe-oF/TCP</text>
+  <rect x="412" y="580" width="392" height="64" rx="10" class="card"/>
+  <path d="M428,597 v30 a13.0,5 0 0 0 26,0 v-30" class="tint-block"/>
+  <ellipse cx="441.0" cy="597" rx="13.0" ry="5" class="tint-block"/>
+  <path d="M462,597 v30 a13.0,5 0 0 0 26,0 v-30" class="tint-block"/>
+  <ellipse cx="475.0" cy="597" rx="13.0" ry="5" class="tint-block"/>
+  <text x="508" y="606" class="h3">NVMe disks</text>
+  <text x="508" y="625" class="m">one blobstore (lvstore) per disk</text>
+  <rect x="864" y="580" width="344" height="64" rx="10" class="card"/>
+  <path d="M880,597 v30 a13.0,5 0 0 0 26,0 v-30" class="tint-block"/>
+  <ellipse cx="893.0" cy="597" rx="13.0" ry="5" class="tint-block"/>
+  <path d="M914,597 v30 a13.0,5 0 0 0 26,0 v-30" class="tint-block"/>
+  <ellipse cx="927.0" cy="597" rx="13.0" ry="5" class="tint-block"/>
+  <text x="960" y="606" class="h3">NVMe disks</text>
+  <text x="960" y="625" class="m">one blobstore (lvstore) per disk</text>
+  <path d="M338,515 H422" class="ln-block" marker-end="url(#ah-block)"/>
+  <text x="380" y="506" class="lbl" text-anchor="middle">NVMe/TCP</text>
+  <path d="M794,515 H874" class="ln-block" marker-end="url(#ah-block)"/>
+  <text x="834" y="493" class="lbl" text-anchor="middle">RAID1</text>
+  <text x="834" y="507" class="lbl" text-anchor="middle">mirror</text>
+  <path d="M608,552 V578" class="ln-block" marker-end="url(#ah-block)"/>
+  <path d="M1036,552 V578" class="ln-block" marker-end="url(#ah-block)"/>
+  <path d="M700,262 V376" class="ln-ctl" marker-end="url(#ah-ctl)"/>
+  <text x="710" y="276" class="lbl">create lvols on</text>
+  <text x="710" y="292" class="lbl">each replica's node</text>
+  <path d="M1150,262 V376" class="ln-ctl" marker-end="url(#ah-ctl)"/>
+  <text x="1140" y="276" class="lbl" text-anchor="end">discover and initialize</text>
+  <text x="1140" y="292" class="lbl" text-anchor="end">disks on every node</text>
+  <text x="32" y="706" class="cap txt-block">SET UP ONCE</text>
+  <rect x="32.0" y="720" width="394.6666666666667" height="132" rx="10" class="card"/>
+  <circle cx="62.0" cy="750" r="13" class="hue-block"/>
+  <text x="62.0" y="754.5" class="num" text-anchor="middle">1</text>
+  <text x="86.0" y="755" class="h3">Install the chart</text>
+  <text x="52.0" y="788" class="mono">helm install flint-csi ./flint-csi-driver-chart \</text>
+  <text x="52.0" y="806" class="mono">  -n flint-system --create-namespace</text>
+  <text x="52.0" y="832" class="m">Also install the VolumeSnapshot CRDs if you want snapshots.</text>
+  <rect x="442.6666666666667" y="720" width="394.6666666666667" height="132" rx="10" class="card"/>
+  <circle cx="472.6666666666667" cy="750" r="13" class="hue-block"/>
+  <text x="472.6666666666667" y="754.5" class="num" text-anchor="middle">2</text>
+  <text x="496.6666666666667" y="755" class="h3">Prepare every worker node</text>
+  <text x="462.6666666666667" y="788" class="b">Reserve 2Mi hugepages (the chart requests 8Gi), load</text>
+  <text x="462.6666666666667" y="806" class="b">nvme_tcp and nvme_fabrics, then restart kubelet.</text>
+  <text x="462.6666666666667" y="832" class="m">The root disk cannot be used: each node needs a spare disk.</text>
+  <rect x="853.3333333333334" y="720" width="394.6666666666667" height="132" rx="10" class="card"/>
+  <circle cx="883.3333333333334" cy="750" r="13" class="hue-block"/>
+  <text x="883.3333333333334" y="754.5" class="num" text-anchor="middle">3</text>
+  <text x="907.3333333333334" y="755" class="h3">Initialize the disks</text>
+  <text x="873.3333333333334" y="788" class="b">Dashboard → Disk Setup → select the spare disks →</text>
+  <text x="873.3333333333334" y="806" class="b">Initialize. Each gets an SPDK blobstore.</text>
+  <text x="873.3333333333334" y="832" class="m">Initializing erases the disk. Then create PVCs.</text>
+</svg>

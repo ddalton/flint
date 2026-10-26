@@ -1,4 +1,4 @@
-= Flint CSI Driver
+= Flint
 :toc:
 :toclevels: 2
 
@@ -29,25 +29,296 @@ image:https://github.com/ddalton/flint/actions/workflows/formal-hub.yml/badge.sv
 // automated can, and reading it that way is how an abstraction becomes
 // the bug.
 
-Kubernetes CSI driver providing high-performance local storage using SPDK (Storage Performance Development Kit) with multi-replica support, snapshots, and volume cloning.
+Flint is storage for Kubernetes, in two families:
 
-TIP: Looking for a shared POSIX filesystem without any of this machinery?
-**Flint-lite** is a separate, minimal chart (`flint-lite-chart/`): one pod
-on any CSI driver's RWO PVC serving real NFSv4.2 (locks, close-to-open
-coherence), an optional S3 cold tier, and nothing to install on consumer
-clusters — no SPDK, no dedicated hardware, no CRDs. See
-`flint-lite-chart/README.md` and `docs/flint-lite.md`. For a FLEET of
-them (bucket-per-tenant workspaces), `flint-lite-operator-chart/` adds
-one `FlintShare` custom resource per volume — see
-`docs/flint-lite-operator.md`. To reach those hubs' HTTP file APIs from
-outside the cluster, the same chart can run `flint-hub-gateway`: one
-door that resolves a project id to its share, wakes it if it is parked,
-and proxies the file routes — see `docs/flint-hub-gateway.md`.
-Everything below this line concerns the full CSI driver.
+* **Block storage on node NVMe.** `flint-csi-driver` is a CSI driver that
+  serves replicated block volumes from an SPDK target on every node, with
+  snapshots, clones, online expansion, RWX over NFS and opt-in pNFS.
+* **S3-backed storage.** Four front ends put an S3 bucket behind a
+  workload, each in a different way: **flint-lite** (NFS),
+  **flint-lean** (sync), **flint-passthrough** (FUSE) and **flint-forge**
+  (git). The bucket is the durable copy. They need no SPDK, no dedicated
+  disks and no hugepages, so they run on ordinary clusters.
 
-== Prerequisites
+image::docs/images/flint-overview.svg[Flint overview: the block driver on node NVMe, and the four S3-backed front ends over one bucket,align="center"]
 
-=== Hardware Requirements
+== Which one?
+
+[cols="2,4,4,3",options="header"]
+|===
+| Component | What a pod gets | Pick it when | Charts
+
+| <<block-storage-flint-csi-driver,*flint-csi-driver*>> +
+  block
+| An RWO block device or filesystem on node NVMe, with 1 to N replicas.
+  RWX through a per-volume NFS server; pNFS opt-in.
+| Databases and other stateful workloads that want local-disk latency
+  and replicas.
+| `flint-csi-driver-chart`
+
+| <<flint-lite-a-shared-nfs-hub,*flint-lite*>> +
+  NFS
+| One live POSIX tree over NFSv4.2 (enforced locks, close-to-open,
+  atomic rename), shared by many pods in many clusters.
+| Several pods, or several clusters, must share one tree as it changes.
+| `flint-lite-chart`; `flint-lite-operator-chart` for fleets
+
+| <<flint-lean-local-files-synced-to-s3,*flint-lean*>> +
+  sync
+| Plain local files at disk speed, checked out from S3 before the pod
+  starts and published back atomically.
+| One agent or job per workspace, and the tree fits on a node's disk.
+| `flint-lean-chart` + `flint-s3-csi-chart`
+
+| <<flint-passthrough-an-s3-prefix-as-a-mount,*flint-passthrough*>> +
+  FUSE
+| An S3 prefix mounted as-is with Mountpoint for S3: fast lazy reads,
+  whole-object writes.
+| Reading data that already lives in a bucket, or writing outputs that
+  are written once.
+| `flint-passthrough-chart` + `flint-s3-csi-chart`
+
+| <<flint-forge-git-backed-by-s3,*flint-forge*>> +
+  git
+| A git remote per repository; S3 is its only durable state.
+| Source code: history, protected branches, server-side merges, and a
+  push that is durable once acknowledged.
+| `flint-forge-chart`
+|===
+
+A file-shaped volume can usually move between lite, lean and passthrough
+without re-plumbing: all three store whole files as objects, and differ
+only in the `.flint/` control objects beside them. The
+link:docs/architecture/README.md[front-ends architecture deck] compares
+all four in depth, including identity, blast radius, security posture,
+and how they compose on one bucket.
+
+== S3-backed storage
+
+Each front end reads and writes ordinary objects under its own prefix in a
+bucket you already have. Flint never creates or deletes buckets. The four
+differ in what carries the bytes between the pod and the bucket, and so in
+when a write becomes durable.
+
+image::docs/images/flint-s3-data-paths.svg[How bytes reach the bucket for flint-lite, flint-lean, flint-passthrough and flint-forge,align="center"]
+
+[cols="1h,3,3,3,3",options="header"]
+|===
+| | flint-lite | flint-lean | flint-passthrough | flint-forge
+
+| Writers
+| Many pods at once, with real locks
+| Each pod has its own copy; copies merge at each boundary (a same-file
+  edit is last-boundary-wins)
+| No coordination between pods
+| Many, through pushes and server-side merges
+
+| Durable when
+| The hub flushes, on its cadence (that cadence is the RPO)
+| At each publish boundary: `.flint/publish.ack` says `ok`
+| The file is closed
+| git reports the push `ok`
+
+| File semantics
+| NFSv4.2: locks, close-to-open, atomic rename
+| Local POSIX: it is a local directory
+| No rename, no append, no in-place writes
+| A git working tree on local disk
+
+| In the bucket
+| `<path>` objects, plus `.flint/`
+| `files/<path>` objects, plus `.flint/lean/`
+| The objects and nothing else
+| A bare git repository (`git/`), LFS objects (`lfs/`)
+|===
+
+None of the four gives the application container an S3 credential. The
+lite hub, the forge server and the lean and passthrough workers hold the
+keys. For lean and passthrough, the worker's short-lived key comes from
+`flint-s3-broker` after a TokenReview of the pod's own token.
+
+TIP: Charts are published to `oci://registry-1.docker.io/dilipdalton/<chart>`.
+Always pass `--version`: each chart shares its Docker Hub repository with an
+image of the same name, so an unpinned `helm install` can pick up an image
+tag and fail with `manifest does not contain minimum number of descriptors`.
+The versions below are the ones released with v1.61.1. A local checkout
+works too: use `./<chart-dir>` instead of the OCI URL.
+
+[[flint-lite-a-shared-nfs-hub]]
+=== flint-lite: a shared NFS hub
+
+One hub pod is a full NFSv4.2 server. It keeps the working set on a PVC from
+any CSI driver and, with the S3 tier on, keeps the durable copy in a bucket,
+so a lost PVC is a rebuild, not a loss. Consumers install nothing: every
+node already has the kernel NFS client. The chart renders four objects (a
+ConfigMap, an RWO PVC, a Service and a one-replica Deployment) and no CRDs.
+
+[source,bash]
+----
+helm install flint-lite \
+  oci://registry-1.docker.io/dilipdalton/flint-lite --version 0.7.7 \
+  -n flint-lite --create-namespace \
+  --set tier.enabled=true --set tier.bucket=my-team-flint \
+  --set tier.keyPrefix=vol1/ --set tier.credentialsSecret=flint-tier-s3
+----
+
+Consumers mount it with an ordinary `nfs:` PersistentVolume that points at
+the hub's Service; see the recipes in link:docs/flint-lite.md[docs/flint-lite.md].
+The tier's bucket must already exist, with versioning on. Run one hub per
+prefix: a second hub on the same prefix is fenced off rather than allowed to
+split the tree.
+
+For a fleet of hubs (for example, a bucket per tenant), the
+`flint-lite-operator` chart (`--version 0.6.7`) manages each one as a
+`FlintShare` resource, and can run `flint-hub-gateway`: one HTTP endpoint
+that resolves a project to its share, wakes it if parked, and proxies the
+file API. See link:docs/flint-lite-operator.md[docs/flint-lite-operator.md]
+and link:docs/flint-hub-gateway.md[docs/flint-hub-gateway.md].
+
+[[flint-lean-local-files-synced-to-s3]]
+=== flint-lean: local files, synced to S3
+
+A pod gets its workspace as one `csi:` volume. Before any of the pod's
+containers start, the `s3.csi.chert.us` node driver checks the tree out
+from S3 onto node-local disk. The application then works on plain local
+files, so git, sqlite and builds behave as on any disk. An unprivileged
+`flint-sync` worker publishes changes on a cadence, or when the agent marks
+a boundary with `echo > .flint/publish`. Each publish lands atomically as
+one manifest compare-and-swap.
+
+[source,bash]
+----
+kubectl create namespace flint-system
+kubectl -n flint-system create secret generic s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=... \
+  --from-literal=AWS_SECRET_ACCESS_KEY=... \
+  --from-literal=AWS_REGION=us-west-1
+
+helm install flint-lean \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.10 \
+  -n flint-system --set operatorCredentialsSecret=s3
+helm install flint-s3-csi \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.8 \
+  -n flint-system --set broker.static.secretRef=s3 --set node.region=us-west-1
+----
+
+[source,yaml]
+----
+apiVersion: chert.us/v1alpha1
+kind: FlintLeanWorkspace
+metadata: { name: proj1, namespace: agents }
+spec:
+  projectId: team-a/proj1
+  bucket: my-bucket
+  keyPrefix: tenants/proj1
+  region: us-west-1
+  floorSecs: 60                  # publish cadence, and the RPO
+  uid: 1000                      # the uid your app runs as
+  gid: 1000
+  consumers:
+    serviceAccounts: [agent]     # absent = nobody
+---
+# in the pod spec: one volume is the whole integration
+volumes:
+  - name: ws
+    csi:
+      driver: s3.csi.chert.us
+      volumeAttributes: { chert.us/workspace: proj1 }
+----
+
+Full walkthrough, credentials and the boundary verbs:
+link:docs/flint-lean-for-agent-fleets.md[docs/flint-lean-for-agent-fleets.md].
+What lean does and does not guarantee: link:lean/SAFETY.md[lean/SAFETY.md]
+and link:lean/PROTOCOL.md[lean/PROTOCOL.md].
+
+[[flint-passthrough-an-s3-prefix-as-a-mount]]
+=== flint-passthrough: an S3 prefix as a mount
+
+The same node driver mounts an S3 prefix as it is, with Mountpoint for S3
+running in an unprivileged worker. The node plugin makes the one privileged
+call, `mount(2)`, and hands the FUSE file descriptor to the worker. The
+tenant pod gets no sidecar, no label, no webhook and no credential, and
+stays admissible under PodSecurity `restricted`. There is no controller and
+nothing written beside your objects, so a passthrough mount can point at a
+prefix that other tools already own.
+
+[source,bash]
+----
+# flint-s3-csi as above, then the CRD:
+helm install flint-passthrough \
+  oci://registry-1.docker.io/dilipdalton/flint-passthrough --version 0.5.10 \
+  -n flint-system
+----
+
+[source,yaml]
+----
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: datasets, namespace: ml }
+spec:
+  bucket: my-bucket
+  keyPrefix: datasets/imagenet
+  readOnly: true
+  uid: 1001                      # every file shows this owner
+  consumers:
+    serviceAccounts: [trainer]   # absent = nobody
+---
+# in the pod spec
+volumes:
+  - name: data
+    csi:
+      driver: s3.csi.chert.us
+      volumeAttributes: { chert.us/mount: datasets }
+----
+
+Writes create whole new objects: there is no rename, no append and no
+in-place modification, and two pods on one prefix are not coordinated. A
+workload that needs any of that wants flint-lean. Credential
+guarantees: link:s3csi/SECURITY.md[s3csi/SECURITY.md]. Design of record:
+link:docs/plans/csi-node-mount-design.md[docs/plans/csi-node-mount-design.md].
+
+[[flint-forge-git-backed-by-s3]]
+=== flint-forge: git backed by S3
+
+One server pod per repository runs real git (`git-http-backend` and the
+standard hooks) over a local disk that is only a cache. One syncer owns
+every write to the bucket and reports `ok` for a push only after the packs
+are uploaded and the repository's snapshot pointer has been swapped in S3.
+Agents are stock git clients and authenticate with their own projected
+ServiceAccount token, through the door, `flint-hub-gateway`. Protected
+branches, server-side merges (`refs/for/<target>`), LFS and clone bundles
+are built in. An idle repository scales to zero and is woken by its next
+request.
+
+[source,bash]
+----
+# a forge-only cluster renders its own door; with flint-lite present,
+# share that chart's gateway instead
+helm install flint-forge \
+  oci://registry-1.docker.io/dilipdalton/flint-forge --version 0.8.5 \
+  -n flint-system --set door.deploy=true --set door.namespace=flint-system
+----
+
+Each repository is a `FlintRepo`: a bucket and prefix, who may reach it,
+and who may push or merge to which branches. Install, agent image setup and
+tuning: link:docs/flint-forge-for-agents.md[docs/flint-forge-for-agents.md].
+Architecture: link:docs/architecture/forge/flint-forge-architecture.pdf[flint-forge-architecture.pdf].
+
+[[block-storage-flint-csi-driver]]
+== Block storage: flint-csi-driver
+
+`flint-csi-driver` (driver name `disk.csi.chert.us`) serves block volumes
+from node-local NVMe or SSD disks. On every worker node, an SPDK target
+(`spdk-tgt`) owns the disks set aside for it and carves volumes out of
+them as lvols. The node's kernel reaches a volume over NVMe-oF/TCP (the
+default) or ublk. A volume with several replicas is an SPDK RAID1 that
+mirrors writes to lvols on other nodes over NVMe-oF/TCP.
+
+image::docs/images/flint-csi-architecture.svg[flint-csi-driver architecture: controller, dashboard and per-node SPDK target, with the volume data path and the three setup steps,align="center"]
+
+=== Prerequisites
+
+==== Hardware Requirements
 
 Each worker node must have:
 
@@ -55,11 +326,24 @@ Each worker node must have:
 ** These disks will be dedicated to SPDK for volume storage
 ** NVMe devices recommended for best performance
 ** Example: `/dev/nvme1n1`, `/dev/sdb`, etc.
-* **2GB+ RAM** for hugepages (1024 pages of 2MB each)
+* **Hugepages** for `spdk-tgt`: the chart requests
+  `spdkTarget.hugepages.amount` per node, by default **8Gi of 2Mi pages**.
+  Reserve at least that much on every node, then restart kubelet so the
+  node advertises them:
++
+[source,bash]
+----
+echo 4096 | sudo tee /proc/sys/vm/nr_hugepages           # 4096 x 2Mi = 8Gi
+echo 'vm.nr_hugepages = 4096' | sudo tee /etc/sysctl.d/90-flint-hugepages.conf
+sudo systemctl restart kubelet
+----
++
+Or turn them off with `spdkTarget.hugepages.enabled: false`. Read the
+comment on that key in `values.yaml` before you do.
 
 ⚠️ **IMPORTANT**: The root filesystem disk cannot be used by SPDK. You must have at least one additional disk per node.
 
-=== Software Requirements
+==== Software Requirements
 
 * **Kubernetes cluster** (1.21+) with kubectl access
 * **Helm 3** installed locally
@@ -87,7 +371,7 @@ Note that `ublk_drv` is absent on some kernels (e.g. certain AWS 6.8
 builds) — verify with `modprobe ublk_drv` before choosing that backend.
 --
 
-=== Snapshot Prerequisites (only if you plan to use snapshots)
+==== Snapshot Prerequisites (only if you plan to use snapshots)
 
 The Kubernetes `VolumeSnapshot` / `VolumeSnapshotContent` /
 `VolumeSnapshotClass` CRDs are **cluster-singleton, cluster-scoped**
@@ -127,54 +411,52 @@ NOTE: pNFS volumes (StorageClass `parameters.layout: pnfs`) do
 requests for pNFS sources return `FAILED_PRECONDITION`. Use a
 non-pNFS StorageClass for volumes that need snapshots.
 
-== Installation
+=== Installation
 
-The diagram below shows the Flint components and the three one-time setup
-steps: **①** install the chart, **②** prepare each host node (hugepages +
-kernel modules + kubelet restart), and **③** initialize the NVMe disks
-from the dashboard. The blue path is the automatic volume flow once setup
-is done.
+Setup is the three steps at the foot of the diagram above: install the
+chart, prepare each node (hugepages and kernel modules, above), and
+initialize the disks from the dashboard (next section).
 
-image::docs/flint-architecture.png[Flint architecture and setup happy path,align="center"]
-
-_(Editable source: link:docs/flint-architecture.svg[flint-architecture.svg].)_
-
-=== 1. Set Your Kubeconfig
+==== 1. Set Your Kubeconfig
 
 [source,bash]
 ----
 export KUBECONFIG=/path/to/your/kubeconfig
 ----
 
-=== 2. Update Helm Chart Values
+==== 2. Review the Chart Values
 
-Edit `flint-csi-driver-chart/values.yaml` and configure:
+The defaults work for most clusters. The ones you are most likely to change
+in `flint-csi-driver-chart/values.yaml`:
 
 [source,yaml]
 ----
 images:
-  repository: dilipdalton  # Your container registry (default: Docker Hub)
-  flintCsiDriver:
-    tag: "1.18.0"   # pinned per release — see values.yaml for the current tag
-  spdkTarget:
-    tag: "1.6.0"
+  repository: dilipdalton   # your registry namespace (default: Docker Hub)
+  # each image's tag is pinned per release; keep them unless you build your own
+
+blockDevice:
+  backend: nvmeof           # or ublk
 
 dashboard:
-  enabled: true  # Enable web UI for disk management
-  frontend:
-    tag: "1.9.0"
+  enabled: true             # web UI for disk management
 ----
 
-=== 3. Install via Helm
+==== 3. Install via Helm
 
 [source,bash]
 ----
 helm install flint-csi ./flint-csi-driver-chart \
   --namespace flint-system \
   --create-namespace
+
+# or, without a checkout, the released chart:
+helm install flint-csi \
+  oci://registry-1.docker.io/dilipdalton/flint-csi-driver-chart --version 1.61.1 \
+  --namespace flint-system --create-namespace
 ----
 
-=== 4. Verify Installation
+==== 4. Verify Installation
 
 [source,bash]
 ----
@@ -196,11 +478,11 @@ flint-csi-node-xxx             3/3     Running   0          2m
 flint-dashboard-xxx            2/2     Running   0          2m
 ----
 
-== Disk Setup
+=== Disk Setup
 
 After installation, initialize your SPDK disks using the web dashboard:
 
-=== 1. Access the Dashboard
+==== 1. Access the Dashboard
 
 [source,bash]
 ----
@@ -211,7 +493,7 @@ kubectl port-forward -n flint-system svc/flint-dashboard 3000:3000
 open http://localhost:3000
 ----
 
-=== 2. Initialize Disks
+==== 2. Initialize Disks
 
 1. Navigate to the **"Disk Setup"** tab in the dashboard
 2. View all discovered disks on your nodes
@@ -223,9 +505,9 @@ open http://localhost:3000
 
 ⚠️ **WARNING**: Initializing a disk will erase all existing data on it.
 
-== Usage
+=== Usage
 
-=== Create a Persistent Volume Claim
+==== Create a Persistent Volume Claim
 
 [source,yaml]
 ----
@@ -248,7 +530,7 @@ kubectl apply -f my-pvc.yaml
 kubectl get pvc my-pvc
 ----
 
-=== Use in a Pod
+==== Use in a Pod
 
 [source,yaml]
 ----
@@ -269,10 +551,12 @@ spec:
       claimName: my-pvc
 ----
 
-== Features
+=== Features
 
-* **High Performance**: SPDK userspace I/O eliminates kernel overhead
-* **Multi-Replica Volumes**: Configure 2+ replicas for high availability
+* **SPDK data path**: an SPDK target on every node serves each volume as an
+  lvol, to the node's kernel over NVMe-oF/TCP (default) or ublk
+* **Multi-replica Volumes**: Configure 2+ replicas for high availability;
+  replicas on other nodes are mirrored with SPDK RAID1 over NVMe-oF/TCP
 * **Volume Snapshots**: Create snapshots and restore from them
 * **Volume Cloning**: Clone existing volumes for fast copies
 * **Volume Expansion**: Expand volumes online without downtime
@@ -283,6 +567,59 @@ spec:
   Flint MDS + Data Server fleet (`pnfs.enabled`; StorageClass
   `parameters.layout: pnfs`) — see `docs/pnfs-operator-runbook.md`
 * **Web Dashboard**: Visual management and monitoring
+
+=== Troubleshooting
+
+==== Pods Stuck in Pending
+
+Check if CSI driver pods are running:
+[source,bash]
+----
+kubectl get pods -n flint-system
+kubectl logs -n flint-system -l app=flint-csi-node --tail=50
+----
+
+==== Volumes Not Mounting
+
+Verify disks are initialized:
+[source,bash]
+----
+# Check dashboard or query nodes directly
+kubectl exec -n flint-system flint-csi-node-xxx -c flint-csi-driver -- \
+  curl localhost:9081/api/disks/list
+----
+
+==== Kernel Initiator Module Not Loaded
+
+If you see "No such device" errors, or `nvme connect failed: Failed to
+open /dev/nvme-fabrics`, the backend's kernel module is missing. Load the
+module that matches `blockDevice.backend`:
+
+[source,bash]
+----
+# Default nvmeof backend — load on all worker nodes
+ssh <node> 'sudo modprobe nvme_tcp nvme_fabrics && lsmod | grep nvme'
+
+# ublk backend instead
+ssh <node> 'sudo modprobe ublk_drv && lsmod | grep ublk'
+
+# Restart CSI node pods after loading the module
+kubectl delete pods -n flint-system -l app=flint-csi-node
+----
+
+=== Uninstallation
+
+[source,bash]
+----
+# Delete all PVCs using Flint first
+kubectl delete pvc --all -A
+
+# Uninstall Helm release
+helm uninstall flint-csi -n flint-system
+
+# Optional: Delete namespace
+kubectl delete namespace flint-system
+----
 
 == Testing
 
@@ -305,62 +642,27 @@ chainsaw test --config chainsaw-standard.yaml --test-dir tests-standard/snapshot
 ./kind-nfs-only.sh
 ----
 
-See link:tests/system/README.md[tests/system/README.md] for details.
+See link:tests/system/README.md[tests/system/README.md] for details. The
+S3-backed front ends carry their own end-to-end rigs under `lean/e2e/`,
+`forge/e2e/` and `s3csi/e2e/`.
 
-== Troubleshooting
+== Documentation
 
-=== Pods Stuck in Pending
+S3-backed storage:
 
-Check if CSI driver pods are running:
-[source,bash]
-----
-kubectl get pods -n flint-system
-kubectl logs -n flint-system -l app=flint-csi-node --tail=50
-----
+* link:docs/architecture/README.md[docs/architecture/] — the front-ends
+  architecture deck (`flint-front-ends-architecture.pdf`) and a one-page
+  data-flow poster per front end
+* `docs/flint-lite.md`, `docs/flint-lite-operator.md`,
+  `docs/flint-hub-gateway.md` — the hub, its fleet operator and its gateway
+* `docs/flint-lean-for-agent-fleets.md`, `docs/flint-lean-git-workflow.md`,
+  `lean/PROTOCOL.md`, `lean/SAFETY.md` — lean from install to guarantees
+* `docs/plans/csi-node-mount-design.md` — the `s3.csi.chert.us` node
+  driver and broker that deliver lean and passthrough; `s3csi/SECURITY.md`
+* `docs/flint-forge-for-agents.md`, `docs/plans/flint-forge-design.md` —
+  forge for operators and agent authors, and its design of record
 
-=== Volumes Not Mounting
-
-Verify disks are initialized:
-[source,bash]
-----
-# Check dashboard or query nodes directly
-kubectl exec -n flint-system flint-csi-node-xxx -c flint-csi-driver -- \
-  curl localhost:9081/api/disks/list
-----
-
-=== Kernel Initiator Module Not Loaded
-
-If you see "No such device" errors, or `nvme connect failed: Failed to
-open /dev/nvme-fabrics`, the backend's kernel module is missing. Load the
-module that matches `blockDevice.backend`:
-
-[source,bash]
-----
-# Default nvmeof backend — load on all worker nodes
-ssh <node> 'sudo modprobe nvme_tcp nvme_fabrics && lsmod | grep nvme'
-
-# ublk backend instead
-ssh <node> 'sudo modprobe ublk_drv && lsmod | grep ublk'
-
-# Restart CSI node pods after loading the module
-kubectl delete pods -n flint-system -l app=flint-csi-node
-----
-
-== Uninstallation
-
-[source,bash]
-----
-# Delete all PVCs using Flint first
-kubectl delete pvc --all -A
-
-# Uninstall Helm release
-helm uninstall flint-csi -n flint-system
-
-# Optional: Delete namespace
-kubectl delete namespace flint-system
-----
-
-== Architecture
+Block storage:
 
 * `docs/decisions/` — architectural decision records (one CSI driver,
   pNFS perf baseline, write-path deep dive)
@@ -369,6 +671,14 @@ kubectl delete namespace flint-system
   (state persistence) shipped; optional Phase C (FFL replication)
   deferred
 * `docs/pnfs-operator-runbook.md` — pNFS deployment and trust model
+* `docs/identity-contract.md` — the volume-identity contract
 * `tests/lima/STATUS.md` — living project status with phase notes,
   test gates, and conformance scores
+
+Both:
+
+* `formal/README.md` — the TLA+ models and what each one checks
 * `CHANGELOG.md` — release notes
+
+The diagrams in this README are generated by
+`docs/images/readme_diagrams.py`; edit that, not the SVGs.

@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="681" viewBox="0 0 1280 681" role="img" aria-label="How bytes reach the bucket for each S3-backed front end. flint-lite: pods mount a hub over NFSv4.2 and the hub flushes to S3 on a cadence. flint-lean: the pod writes a local directory and the flint-sync worker publishes it atomically at each boundary. flint-passthrough: every file operation goes through FUSE to a mount-s3 worker and becomes an S3 request. flint-forge: git pushes go through the gateway to a per-repository server whose syncer acknowledges only once the push is in S3.">
+  <title>How bytes reach the bucket for each S3-backed front end. flint-lite: pods mount a hub over NFSv4.2 and the hub flushes to S3 on a cadence. flint-lean: the pod writes a local directory and the flint-sync worker publishes it atomically at each boundary. flint-passthrough: every file operation goes through FUSE to a mount-s3 worker and becomes an S3 request. flint-forge: git pushes go through the gateway to a per-repository server whose syncer acknowledges only once the push is in S3.</title>
+  <defs>
+    <style>
+svg{--bg:#ffffff;--edge:#d0d7de;--soft:#f6f8fa;--card:#ffffff;--ink:#1f2328;--ink2:#424a53;--mut:#656d76;--ctl:#8c959f;--block:#6e56cf;--block-deep:#5a3fc0;--block-tint:#f4f1fd;--lite:#184f95;--lite-deep:#184f95;--lite-tint:#eef3fa;--lean:#1baf7a;--lean-deep:#0f7a55;--lean-tint:#ecf8f2;--pass:#a06b12;--pass-deep:#7d530c;--pass-tint:#faf3e6;--forge:#b03060;--forge-deep:#8c2449;--forge-tint:#faedf2;--s3:#57606a;--s3-deep:#424a53;--s3-tint:#f6f8fa}
+@media (prefers-color-scheme: dark){svg{--bg:#0d1117;--edge:#30363d;--soft:#151b23;--card:#1c2129;--ink:#e6edf3;--ink2:#c9d1d9;--mut:#9198a1;--ctl:#7d8590;--block:#a18bf5;--block-deep:#bcaaf9;--block-tint:#221d36;--lite:#58a6ff;--lite-deep:#79b8ff;--lite-tint:#142236;--lean:#3dd68c;--lean-deep:#56e0a0;--lean-tint:#13281f;--pass:#d29922;--pass-deep:#e3b341;--pass-tint:#2b2213;--forge:#f778ba;--forge-deep:#ff9bce;--forge-tint:#2f1a25;--s3:#9198a1;--s3-deep:#c9d1d9;--s3-tint:#151b23}}
+.bg{fill:var(--bg);stroke:var(--edge)}
+.lane{fill:var(--soft);stroke:var(--edge)}
+.card{fill:var(--card);stroke:var(--edge)}
+.chip{fill:var(--card);stroke:var(--edge)}
+.frame{fill:none;stroke:var(--ctl);stroke-width:1.2;stroke-dasharray:6 5}
+.rule{stroke:var(--edge);stroke-width:1}
+.ln-ctl{stroke:var(--ctl);stroke-width:1.6;fill:none;stroke-dasharray:5 4}
+.hue-ctl{fill:var(--ctl)} .hue-ink2{fill:var(--ink2)}
+text{font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;fill:var(--ink)}
+.h1{font-size:24px;font-weight:700}
+.h2{font-size:17px;font-weight:700}
+.h3{font-size:14.5px;font-weight:600}
+.tag{font-size:14px;font-weight:600;fill:var(--ink2)}
+.b{font-size:13.5px;fill:var(--ink2)}
+.m{font-size:13px;fill:var(--mut)}
+.sub{font-size:14.5px;fill:var(--mut)}
+.lbl{font-size:12.5px;fill:var(--ink2)}
+.cap{font-size:11px;font-weight:700;letter-spacing:.08em}
+.pill{font-size:11px;font-weight:700;letter-spacing:.06em}
+.mono{font-family:ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;font-size:12.5px;fill:var(--ink2)}
+.num{font-size:13px;font-weight:700;fill:var(--bg)}
+.hue-block{fill:var(--block)} .txt-block{fill:var(--block-deep)} .tint-block{fill:var(--block-tint);stroke:var(--block);stroke-width:1.2} .ln-block{stroke:var(--block);stroke-width:2;fill:none}
+.hue-lite{fill:var(--lite)} .txt-lite{fill:var(--lite-deep)} .tint-lite{fill:var(--lite-tint);stroke:var(--lite);stroke-width:1.2} .ln-lite{stroke:var(--lite);stroke-width:2;fill:none}
+.hue-lean{fill:var(--lean)} .txt-lean{fill:var(--lean-deep)} .tint-lean{fill:var(--lean-tint);stroke:var(--lean);stroke-width:1.2} .ln-lean{stroke:var(--lean);stroke-width:2;fill:none}
+.hue-pass{fill:var(--pass)} .txt-pass{fill:var(--pass-deep)} .tint-pass{fill:var(--pass-tint);stroke:var(--pass);stroke-width:1.2} .ln-pass{stroke:var(--pass);stroke-width:2;fill:none}
+.hue-forge{fill:var(--forge)} .txt-forge{fill:var(--forge-deep)} .tint-forge{fill:var(--forge-tint);stroke:var(--forge);stroke-width:1.2} .ln-forge{stroke:var(--forge);stroke-width:2;fill:none}
+.hue-s3{fill:var(--s3)} .txt-s3{fill:var(--s3-deep)} .tint-s3{fill:var(--s3-tint);stroke:var(--s3);stroke-width:1.2} .ln-s3{stroke:var(--s3);stroke-width:2;fill:none}
+    </style>
+    <clipPath id="c1"><rect x="32" y="148" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c2"><rect x="32" y="268" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c3"><rect x="32" y="388" width="292" height="72" rx="10"/></clipPath>
+    <marker id="ah-lite" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 z" class="hue-lite"/></marker>
+    <clipPath id="c4"><rect x="340" y="148" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c5"><rect x="340" y="268" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c6"><rect x="340" y="388" width="292" height="72" rx="10"/></clipPath>
+    <marker id="ah-lean" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 z" class="hue-lean"/></marker>
+    <clipPath id="c7"><rect x="648" y="148" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c8"><rect x="648" y="268" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c9"><rect x="648" y="388" width="292" height="72" rx="10"/></clipPath>
+    <marker id="ah-pass" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 z" class="hue-pass"/></marker>
+    <clipPath id="c10"><rect x="956" y="148" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c11"><rect x="956" y="268" width="292" height="72" rx="10"/></clipPath>
+    <clipPath id="c12"><rect x="956" y="388" width="292" height="72" rx="10"/></clipPath>
+    <marker id="ah-forge" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 z" class="hue-forge"/></marker>
+  </defs>
+  <rect x="0.5" y="0.5" width="1279" height="680" rx="14" class="bg"/>
+  <text x="32" y="48" class="h1">How bytes reach the bucket</text>
+  <text x="32" y="73" class="sub">Each column follows one write: what the pod touches, what carries the bytes, and when they reach S3.</text>
+  <rect x="32" y="516" width="1216" height="78" rx="10" class="lane"/>
+  <text x="48" y="541" class="h3">S3 bucket</text>
+  <text x="122" y="541" class="m">one prefix per volume, workspace, mount or repository; what each front end writes there:</text>
+  <rect x="32" y="100" width="292" height="32" rx="8" class="tint-lite"/>
+  <text x="46" y="121" class="h3 txt-lite">flint-lite</text>
+  <text x="310" y="121" class="pill txt-lite" text-anchor="end">NFS</text>
+  <rect x="32" y="148" width="292" height="72" rx="10" class="card"/>
+  <rect x="32" y="148" width="5" height="72" class="hue-lite" clip-path="url(#c1)"/>
+  <text x="50" y="173" class="h3">App pods, any node, any cluster</text>
+  <text x="50" y="193" class="m">an nfs: volume at /data</text>
+  <rect x="32" y="268" width="292" height="72" rx="10" class="card"/>
+  <rect x="32" y="268" width="5" height="72" class="hue-lite" clip-path="url(#c2)"/>
+  <text x="50" y="293" class="h3">Kernel NFS client</text>
+  <text x="50" y="313" class="m">one mount per node, shared by its</text>
+  <text x="50" y="329" class="m">pods</text>
+  <rect x="32" y="388" width="292" height="72" rx="10" class="card"/>
+  <rect x="32" y="388" width="5" height="72" class="hue-lite" clip-path="url(#c3)"/>
+  <text x="50" y="413" class="h3">flint-lite hub pod</text>
+  <text x="50" y="433" class="m">holds every lock, lease and open; its</text>
+  <text x="50" y="449" class="m">PVC is the working set</text>
+  <path d="M72,222 V266" class="ln-lite" marker-end="url(#ah-lite)"/>
+  <text x="86" y="248.0" class="lbl">every read and write, live</text>
+  <path d="M72,342 V386" class="ln-lite" marker-end="url(#ah-lite)"/>
+  <text x="86" y="368.0" class="lbl">NFSv4.2 over TCP 2049</text>
+  <path d="M72,462 V514" class="ln-lite" marker-end="url(#ah-lite)"/>
+  <text x="86" y="484.0" class="lbl">flushed on a cadence; cold reads</text>
+  <text x="86" y="500.0" class="lbl">hydrate on demand</text>
+  <rect x="44" y="560" width="268" height="24" rx="12" class="tint-lite"/>
+  <text x="178.0" y="576" class="mono" text-anchor="middle">&lt;path&gt;  ·  .flint/</text>
+  <rect x="340" y="100" width="292" height="32" rx="8" class="tint-lean"/>
+  <text x="354" y="121" class="h3 txt-lean">flint-lean</text>
+  <text x="618" y="121" class="pill txt-lean" text-anchor="end">SYNC</text>
+  <rect x="340" y="148" width="292" height="72" rx="10" class="card"/>
+  <rect x="340" y="148" width="5" height="72" class="hue-lean" clip-path="url(#c4)"/>
+  <text x="358" y="173" class="h3">Agent pod</text>
+  <text x="358" y="193" class="m">plain files at /workspace; no S3</text>
+  <text x="358" y="209" class="m">credential</text>
+  <rect x="340" y="268" width="292" height="72" rx="10" class="card"/>
+  <rect x="340" y="268" width="5" height="72" class="hue-lean" clip-path="url(#c5)"/>
+  <text x="358" y="293" class="h3">Node-local directory</text>
+  <text x="358" y="313" class="m">checked out before the pod's first</text>
+  <text x="358" y="329" class="m">container starts</text>
+  <rect x="340" y="388" width="292" height="72" rx="10" class="card"/>
+  <rect x="340" y="388" width="5" height="72" class="hue-lean" clip-path="url(#c6)"/>
+  <text x="358" y="413" class="h3">flint-sync worker</text>
+  <text x="358" y="433" class="m">unprivileged, in flint-workers; holds</text>
+  <text x="358" y="449" class="m">a short-lived key</text>
+  <path d="M380,222 V266" class="ln-lean" marker-end="url(#ah-lean)"/>
+  <text x="394" y="248.0" class="lbl">no interception: local disk</text>
+  <path d="M380,342 V386" class="ln-lean" marker-end="url(#ah-lean)"/>
+  <text x="394" y="368.0" class="lbl">read after the fact</text>
+  <path d="M380,462 V514" class="ln-lean" marker-end="url(#ah-lean)"/>
+  <text x="394" y="484.0" class="lbl">atomic publish at each boundary</text>
+  <text x="394" y="500.0" class="lbl">(one manifest CAS)</text>
+  <rect x="352" y="560" width="268" height="24" rx="12" class="tint-lean"/>
+  <text x="486.0" y="576" class="mono" text-anchor="middle">files/&lt;path&gt;  ·  .flint/lean/</text>
+  <rect x="648" y="100" width="292" height="32" rx="8" class="tint-pass"/>
+  <text x="662" y="121" class="h3 txt-pass">flint-passthrough</text>
+  <text x="926" y="121" class="pill txt-pass" text-anchor="end">FUSE</text>
+  <rect x="648" y="148" width="292" height="72" rx="10" class="card"/>
+  <rect x="648" y="148" width="5" height="72" class="hue-pass" clip-path="url(#c7)"/>
+  <text x="666" y="173" class="h3">App pod</text>
+  <text x="666" y="193" class="m">objects as files at /mnt/s3</text>
+  <rect x="648" y="268" width="292" height="72" rx="10" class="card"/>
+  <rect x="648" y="268" width="5" height="72" class="hue-pass" clip-path="url(#c8)"/>
+  <text x="666" y="293" class="h3">Kernel FUSE</text>
+  <text x="666" y="313" class="m">mounted by the node plugin; its fd is</text>
+  <text x="666" y="329" class="m">handed to the worker</text>
+  <rect x="648" y="388" width="292" height="72" rx="10" class="card"/>
+  <rect x="648" y="388" width="5" height="72" class="hue-pass" clip-path="url(#c9)"/>
+  <text x="666" y="413" class="h3">mount-s3 worker</text>
+  <text x="666" y="433" class="m">Mountpoint for S3, unprivileged;</text>
+  <text x="666" y="449" class="m">holds a short-lived key</text>
+  <path d="M688,222 V266" class="ln-pass" marker-end="url(#ah-pass)"/>
+  <text x="702" y="248.0" class="lbl">every file operation</text>
+  <path d="M688,342 V386" class="ln-pass" marker-end="url(#ah-pass)"/>
+  <text x="702" y="368.0" class="lbl">FUSE requests</text>
+  <path d="M688,462 V514" class="ln-pass" marker-end="url(#ah-pass)"/>
+  <text x="702" y="484.0" class="lbl">each operation is an S3 request; a</text>
+  <text x="702" y="500.0" class="lbl">file becomes an object at close()</text>
+  <rect x="660" y="560" width="268" height="24" rx="12" class="tint-pass"/>
+  <text x="794.0" y="576" class="mono" text-anchor="middle">&lt;key&gt;   (objects only)</text>
+  <rect x="956" y="100" width="292" height="32" rx="8" class="tint-forge"/>
+  <text x="970" y="121" class="h3 txt-forge">flint-forge</text>
+  <text x="1234" y="121" class="pill txt-forge" text-anchor="end">GIT</text>
+  <rect x="956" y="148" width="292" height="72" rx="10" class="card"/>
+  <rect x="956" y="148" width="5" height="72" class="hue-forge" clip-path="url(#c10)"/>
+  <text x="974" y="173" class="h3">Agent pod</text>
+  <text x="974" y="193" class="m">stock git; its ServiceAccount token</text>
+  <text x="974" y="209" class="m">is the credential</text>
+  <rect x="956" y="268" width="292" height="72" rx="10" class="card"/>
+  <rect x="956" y="268" width="5" height="72" class="hue-forge" clip-path="url(#c11)"/>
+  <text x="974" y="293" class="h3">flint-hub-gateway</text>
+  <text x="974" y="313" class="m">the door: TokenReview, routing, wakes</text>
+  <text x="974" y="329" class="m">a parked repository</text>
+  <rect x="956" y="388" width="292" height="72" rx="10" class="card"/>
+  <rect x="956" y="388" width="5" height="72" class="hue-forge" clip-path="url(#c12)"/>
+  <text x="974" y="413" class="h3">Repository server pod</text>
+  <text x="974" y="433" class="m">git-http-backend and hooks; one</text>
+  <text x="974" y="449" class="m">syncer; its disk is a cache</text>
+  <path d="M996,222 V266" class="ln-forge" marker-end="url(#ah-forge)"/>
+  <text x="1010" y="248.0" class="lbl">git fetch / push over smart HTTP</text>
+  <path d="M996,342 V386" class="ln-forge" marker-end="url(#ah-forge)"/>
+  <text x="1010" y="368.0" class="lbl">routed to the repository</text>
+  <path d="M996,462 V514" class="ln-forge" marker-end="url(#ah-forge)"/>
+  <text x="1010" y="484.0" class="lbl">packs uploaded, snapshot CAS, and</text>
+  <text x="1010" y="500.0" class="lbl">only then ok</text>
+  <rect x="968" y="560" width="268" height="24" rx="12" class="tint-forge"/>
+  <text x="1102.0" y="576" class="mono" text-anchor="middle">git/ packs · snapshot · lfs/</text>
+  <path d="M32,618 H1248" class="rule"/>
+  <text x="32" y="642" class="m">Control never carries file bytes. Lean and passthrough volumes are mounted by the s3.csi.chert.us node plugin, and each worker's short-lived S3 key comes from flint-s3-broker</text>
+  <text x="32" y="659" class="m">after a TokenReview; the application container holds no credential.</text>
+</svg>
