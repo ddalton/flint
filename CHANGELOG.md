@@ -86,6 +86,24 @@ covered by the stability guarantee.
   backend now sends `estimated` and emits no "HIGH PRIORITY" line on an
   estimate).
 
+### Fixed
+
+- **`release.sh` no longer reads "the registry did not answer" as "the
+  image is not published"** (2026-10-27; `scripts/release.sh`). Its
+  registry check threw away `imagetools inspect`'s error, so every
+  failure counted as absent. The 1.61.2 chart step refused an image
+  pushed seven minutes earlier, and nothing recorded what the registry
+  had said. Where absent means build or push, a transient error would
+  re-push a published chart under a new digest, send `images` to rebuild
+  a published tag, or skip the spdk-tgt staleness check; with Docker Hub
+  unreachable, `check` listed all four published images as missing and
+  said to run `images`. Now only the registry's "not found" counts as
+  absent. Any other error
+  is printed and asked again, five times over about 100 seconds, and then
+  the release stops. A missing alias in the forge and lean digest checks
+  now prints its refusal; `set -e` used to end the script there without
+  a word.
+
 ## [1.61.2] - 2026-10-27
 
 A security patch release. Every image that talks to S3 or STS shipped

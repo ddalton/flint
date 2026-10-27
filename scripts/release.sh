@@ -132,6 +132,35 @@ if pnfs.get("image", {}).get("tag"):
 PYEOF
 )
 
+# The registry's ANSWER for one tag: prints its manifest digest and returns
+# 0 if it exists, returns 1 if the registry says it does not ("...: not
+# found", for a missing tag and a missing repo alike). Anything else is NO
+# answer -- a refused connection, a timeout, a 5xx -- and is asked again,
+# printing each error; if the registry still has not answered, the release
+# STOPS. The previous tag_exists read every failure as "absent", and its
+# callers act on "absent" in both directions: some refuse (safe), but
+# push_chart then re-pushes a published chart under a new digest, `images`
+# rebuilds a published tag, and the spdk-tgt staleness check skips the pin.
+# On 2026-10-27 the 1.61.2 chart step refused flint-lean 0.14.11 because
+# flint-lean-operator:1.61.2 "is not on Docker Hub", seven minutes after
+# it was pushed and a minute before an inspect by hand got its digest;
+# the error was discarded, so what the registry said is unknown.
+registry_digest() {  # <name> <tag>
+    local ref="$hub_ns/$1:$2" err d i
+    err=$(mktemp)
+    for i in 1 2 3 4 5; do
+        if d=$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>"$err"); then
+            rm -f "$err"; echo "$d"; return 0
+        fi
+        case "$(tail -1 "$err")" in *': not found') rm -f "$err"; return 1 ;; esac
+        echo "  … $ref: the registry did not answer (try $i of 5): $(tail -1 "$err")" >&2
+        [ "$i" = 5 ] || sleep $((10 * i))
+    done
+    echo "REFUSING: the registry never said whether $ref exists; last error: $(tail -1 "$err")" >&2
+    rm -f "$err"
+    exit 1
+}
+
 tag_exists() {  # <name> <tag> -> 0 if the tag can actually be PULLED
     # ASK THE REGISTRY, NOT THE INDEX. This used to curl
     # hub.docker.com/v2/repositories/.../tags/..., which is Docker Hub's
@@ -148,7 +177,7 @@ tag_exists() {  # <name> <tag> -> 0 if the tag can actually be PULLED
     # `docker manifest inspect` is NOT a substitute: it answers from a
     # local cache and told us the tag existed before it had been pushed
     # at all.
-    docker buildx imagetools inspect "$hub_ns/$1:$2" >/dev/null 2>&1
+    registry_digest "$1" "$2" >/dev/null
 }
 
 # The Docker Hub name a chart's `image` block pulls, for tag_exists.
@@ -250,7 +279,11 @@ tag_digest() {  # <name> <tag> -> the manifest-list digest, or empty
     # flint-lean chart — the alias digest comparison 404'd on an index
     # that had not moved since the previous day, for an image
     # `docker pull` fetched successfully.
-    docker buildx imagetools inspect "$hub_ns/$1:$2" --format '{{.Manifest.Digest}}' 2>/dev/null
+    # Empty for a tag the registry says is absent, so the caller's refusal
+    # prints; it used to fail the `x=$(tag_digest ...)` assignment, and
+    # `set -e` ended the release without saying why. With no answer at all,
+    # registry_digest has said so and exits this subshell: callers `|| exit 1`.
+    registry_digest "$1" "$2" || true
 }
 
 # A chart's checked-in CRD is install-time bootstrap for its operator's
@@ -607,8 +640,8 @@ EOF
         # this is inert — it is here so that the day it becomes an
         # alias, the release does not have to remember.)
         if [ "$forge_img" != flint-forge-operator ]; then
-            alias_d=$(tag_digest "$forge_img" "$forge_app")
-            src_d=$(tag_digest flint-forge-operator "$forge_app")
+            alias_d=$(tag_digest "$forge_img" "$forge_app") || exit 1
+            src_d=$(tag_digest flint-forge-operator "$forge_app") || exit 1
             if [ -z "$alias_d" ] || [ -z "$src_d" ] || [ "$alias_d" != "$src_d" ]; then
                 echo "REFUSING to push flint-forge $forge_version:" \
                      "$hub_ns/$forge_img:$forge_app is not the same image as" \
@@ -660,8 +693,8 @@ EOF
         # the lean one. Digest equality is the only thing that closes
         # it, and it is one API call.
         if [ "$lean_op_img" != flint-lite-operator ]; then
-            alias_d=$(tag_digest "$lean_op_img" "$lean_app")
-            src_d=$(tag_digest flint-lite-operator "$lean_app")
+            alias_d=$(tag_digest "$lean_op_img" "$lean_app") || exit 1
+            src_d=$(tag_digest flint-lite-operator "$lean_app") || exit 1
             if [ -z "$alias_d" ] || [ -z "$src_d" ]; then
                 echo "REFUSING to push flint-lean $lean_version: cannot read the" \
                      "manifest digest of $hub_ns/$lean_op_img:$lean_app or of" \
