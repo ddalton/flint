@@ -12,6 +12,32 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.61.2] - 2026-10-27
+
+A security patch release. Every image that talks to S3 or STS shipped
+`rustls-webpki` 0.103.15, which accepted certificate paths through the
+compromised eMudhra intermediates (CVE-2026-111943), and the door's JWT
+verifier shipped `jsonwebtoken` 9.3.1 (CVE-2026-25537). No flint source
+changed except one test: the door builds against `jsonwebtoken` 11.1 with
+its code as before, and the CSI driver, its StorageClass parameters and
+its volume_context keys are as in 1.61.1. The crates are unchanged
+(`flint-lean` 0.12.0, `flint-lean-gateway` 0.10.0, `flint-store` 0.2.1),
+since only their lockfiles moved. Releases now refuse a known advisory
+(`scripts/cve-gate.sh`), and this one passed that check.
+
+Validated 2026-10-27 on the Linux box, everything `--locked`. With default
+features, flint-store's 37 tests pass, lean/syncer's 413, lean/gateway's
+69, forge/syncer's 217 and spdk-csi-driver's lib 2,695. With the release
+features (`s3`; `s3,gitcgi` for forge) they pass 55, 413, 69 and 222, and
+`rustls-webpki` 0.103.16 is in every shipped dependency graph. The lean
+syncer passes as a non-root uid with none skipped, and the s3csi module's
+124 tests pass as root with none skipped. The new JWT test fails on
+`jsonwebtoken` 9.3.1 and passes on 11.1. On the release tree, the lite
+operator and s3csi suites pass 289 tests, the 29 render and guide-pin
+tests among them, and the render fixture is current. The CSI driver's
+restart gate is waived: no flint code on the restart path changed, and
+`tokio` 1.53.1 to 1.53.3 is a bug-fix patch release.
+
 ### Security
 
 - **TLS no longer accepts the compromised eMudhra intermediates**
@@ -11158,7 +11184,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.61.1...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.61.2...HEAD
+[1.61.2]: https://github.com/ddalton/flint/compare/v1.61.1...v1.61.2
 [1.61.1]: https://github.com/ddalton/flint/compare/v1.61.0...v1.61.1
 [1.61.0]: https://github.com/ddalton/flint/compare/v1.60.3...v1.61.0
 [1.60.3]: https://github.com/ddalton/flint/compare/v1.60.2...v1.60.3

@@ -144,7 +144,7 @@ TIP: Charts are published to `oci://registry-1.docker.io/dilipdalton/<chart>`.
 Always pass `--version`: each chart shares its Docker Hub repository with an
 image of the same name, so an unpinned `helm install` can pick up an image
 tag and fail with `manifest does not contain minimum number of descriptors`.
-The versions below are the ones released with v1.61.1. A local checkout
+The versions below are the ones released with v1.61.2. A local checkout
 works too: use `./<chart-dir>` instead of the OCI URL.
 
 [[flint-lite-a-shared-nfs-hub]]
@@ -159,7 +159,7 @@ ConfigMap, an RWO PVC, a Service and a one-replica Deployment) and no CRDs.
 [source,bash]
 ----
 helm install flint-lite \
-  oci://registry-1.docker.io/dilipdalton/flint-lite --version 0.7.7 \
+  oci://registry-1.docker.io/dilipdalton/flint-lite --version 0.7.8 \
   -n flint-lite --create-namespace \
   --set tier.enabled=true --set tier.bucket=my-team-flint \
   --set tier.keyPrefix=vol1/ --set tier.credentialsSecret=flint-tier-s3
@@ -172,7 +172,7 @@ prefix: a second hub on the same prefix is fenced off rather than allowed to
 split the tree.
 
 For a fleet of hubs (for example, a bucket per tenant), the
-`flint-lite-operator` chart (`--version 0.6.7`) manages each one as a
+`flint-lite-operator` chart (`--version 0.6.8`) manages each one as a
 `FlintShare` resource, and can run `flint-hub-gateway`: one HTTP endpoint
 that resolves a project to its share, wakes it if parked, and proxies the
 file API. See link:docs/flint-lite-operator.md[docs/flint-lite-operator.md]
@@ -198,10 +198,10 @@ kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_REGION=us-west-1
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.10 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.11 \
   -n flint-system --set operatorCredentialsSecret=s3
 helm install flint-s3-csi \
-  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.8 \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.9 \
   -n flint-system --set broker.static.secretRef=s3 --set node.region=us-west-1
 ----
 
@@ -249,7 +249,7 @@ prefix that other tools already own.
 ----
 # flint-s3-csi as above, then the CRD:
 helm install flint-passthrough \
-  oci://registry-1.docker.io/dilipdalton/flint-passthrough --version 0.5.10 \
+  oci://registry-1.docker.io/dilipdalton/flint-passthrough --version 0.5.11 \
   -n flint-system
 ----
 
@@ -298,7 +298,7 @@ request.
 # a forge-only cluster renders its own door; with flint-lite present,
 # share that chart's gateway instead
 helm install flint-forge \
-  oci://registry-1.docker.io/dilipdalton/flint-forge --version 0.8.5 \
+  oci://registry-1.docker.io/dilipdalton/flint-forge --version 0.8.6 \
   -n flint-system --set door.deploy=true --set door.namespace=flint-system
 ----
 
@@ -455,7 +455,7 @@ helm install flint-csi ./flint-csi-driver-chart \
 
 # or, without a checkout, the released chart:
 helm install flint-csi \
-  oci://registry-1.docker.io/dilipdalton/flint-csi-driver-chart --version 1.61.1 \
+  oci://registry-1.docker.io/dilipdalton/flint-csi-driver-chart --version 1.61.2 \
   --namespace flint-system --create-namespace
 ----
 
