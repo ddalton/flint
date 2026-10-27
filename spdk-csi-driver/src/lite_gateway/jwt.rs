@@ -550,6 +550,62 @@ FPR3Nl+Roh3riCJV1QReFzE=
         assert!(r.review("").await.is_err());
     }
 
+    /// CVE-2026-25537 (jsonwebtoken before 10.3): a standard claim of the
+    /// WRONG JSON TYPE parsed as absent, so a check the validator had been
+    /// told to make was skipped unless the claim was also required. The
+    /// door checks `nbf` without requiring it, so a token its issuer
+    /// signed with `"nbf": "<string>"` was accepted before its not-before
+    /// time; 9.3.1 fails the string leg below.
+    ///
+    /// Every token lives 600 s, inside the door's lifetime ceiling. The
+    /// first draft of this test gave the early tokens a two-hour life, so
+    /// the ceiling refused them before `nbf` was ever read and the test
+    /// passed on 9.3.1 — a refusal for the wrong reason. Each refused
+    /// token here differs from the accepted control in `nbf` alone.
+    #[tokio::test]
+    async fn a_claim_of_the_wrong_json_type_is_refused_not_skipped() {
+        let (enc, pubk) = keypair();
+        let iss = "https://knox.example/token";
+        let r = reviewer(&pubk, Some("forge.chert.us"));
+        let t = now();
+        let mint_json = |claims: serde_json::Value| {
+            let mut h = Header::new(Algorithm::RS256);
+            h.kid = Some("k1".to_string());
+            encode(&h, &claims, &enc).expect("mint")
+        };
+        let with = |nbf: serde_json::Value, exp: serde_json::Value| {
+            serde_json::json!({
+                "iss": iss, "sub": "alice", "aud": "forge.chert.us",
+                "iat": t, "exp": exp, "nbf": nbf,
+            })
+        };
+        // Five minutes ahead: past the 60 s leeway, inside the lifetime.
+        let ahead = t + 300;
+
+        // The control: a numeric `nbf` in the past is accepted.
+        let ok = mint_json(with(serde_json::json!(t - 60), serde_json::json!(t + 600)));
+        assert!(r.review(&ok).await.is_ok(), "the control was refused — every leg below is vacuous");
+
+        // `nbf` is checked at all, and THIS is why it is refused: numeric,
+        // five minutes ahead, refused as immature.
+        let early = mint_json(with(serde_json::json!(ahead), serde_json::json!(t + 600)));
+        let err = r.review(&early).await.expect_err("a token not yet valid was accepted");
+        assert!(err.message().contains("Immature"), "refused for another reason: {}", err.message());
+
+        // The CVE: the same `nbf`, as a STRING.
+        let nbf_str = mint_json(with(serde_json::json!(ahead.to_string()), serde_json::json!(t + 600)));
+        assert!(
+            r.review(&nbf_str).await.is_err(),
+            "an `nbf` of the wrong JSON type was skipped instead of refused (CVE-2026-25537)"
+        );
+
+        // `exp` as a string. Refused on 9.3.1 too, because the door's own
+        // `Claims` reads `exp` as an i64 — this leg keeps that true if
+        // `Claims` is ever loosened.
+        let exp_str = mint_json(with(serde_json::json!(t - 60), serde_json::json!((t + 600).to_string())));
+        assert!(r.review(&exp_str).await.is_err(), "an `exp` of the wrong JSON type was accepted");
+    }
+
     /// A lifetime the door will not accept however good the signature.
     /// Issuers default to months; with revocation out of scope this is
     /// the only bound on a stolen token.

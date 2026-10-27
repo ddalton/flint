@@ -12,6 +12,31 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Security
+
+- **TLS no longer accepts the compromised eMudhra intermediates**
+  (2026-10-27; every `Cargo.lock`). `rustls-webpki` 0.103.15 accepted
+  certificate paths through the eight emSign intermediates whose private
+  keys turned out to be recoverable (RUSTSEC-2026-0382,
+  CVE-2026-111943), and 1.61.1 shipped it in every image that talks to
+  S3 or STS. It is now 0.103.16, which refuses those keys whatever roots
+  are trusted; this matters because the AWS SDK path trusts the image's
+  CA bundle, not a bundled list. `webpki-roots` (the CSI driver's
+  `reqwest`) is 1.0.11, without the emSign G3, C1 and ECC C3 roots. In
+  the same pass: `tokio` 1.53.3 (RUSTSEC-2026-0386, `AsyncFd` I/O
+  safety) and `ctutils` 0.4.4 (RUSTSEC-2026-0385, a timing leak).
+  Lockfile changes only; no flint code changed.
+- **The door refuses a JWT whose `nbf` is not a number** (2026-10-27;
+  `spdk-csi-driver/Cargo.toml`, `lite_gateway/jwt.rs`). `jsonwebtoken`
+  9.3.1 (CVE-2026-25537) read a standard claim of the wrong JSON type as
+  absent and skipped its check, so a token its issuer signed with
+  `"nbf": "<string>"` was accepted before its not-before time. `exp` was
+  never exposed, because the door reads it as a required integer. Now
+  `jsonwebtoken` 11.1 on the `aws_lc_rs` backend, the provider rustls
+  already uses here, so no crypto library is added. A regression test
+  mints the string `nbf` with the door's own test key, against a numeric
+  control, and fails on 9.3.1.
+
 ### Fixed
 
 - **The README covers the S3-backed front ends, and its block install
