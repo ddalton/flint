@@ -795,17 +795,11 @@ impl MinimalControllerService {
     }
 
     /// Create volume from snapshot by cloning the snapshot
-    /// `replica_count` is the StorageClass's `numReplicas`: leg 0 is the
-    /// clone, every further leg an empty placeholder seeded STALE that the
-    /// catch-up full-builds from the clone (`snapshot::restore`). Until
-    /// 2026-10-27 a restore was single-replica whatever the class said.
     async fn create_volume_from_snapshot(
         &self,
         volume_id: &str,
         snapshot_id: &str,
         size_bytes: u64,
-        replica_count: u32,
-        auto_rebuild: Option<&str>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("🔄 [SNAPSHOT_RESTORE] ⚠️  ENTRY POINT - Creating volume from snapshot");
@@ -920,18 +914,8 @@ impl MinimalControllerService {
             }
         };
 
-        // Step 2: Clone the snapshot to create a new writable volume. With
-        // more than one replica the clone is leg 0 and carries a leg's name
-        // (`vol_<vol>_replica_0`): the orphan sweep, the per-replica NQNs
-        // and the hot-rejoin head names all key on that shape.
-        let clone_name = if replica_count > 1 {
-            spdk_csi_driver::identity::replica_lvol_name(
-                &spdk_csi_driver::identity::StorageId::of_handle(volume_id),
-                0,
-            )
-        } else {
-            spdk_csi_driver::identity::lvol_name(volume_id)
-        };
+        // Step 2: Clone the snapshot to create a new writable volume
+        let clone_name = spdk_csi_driver::identity::lvol_name(volume_id);
 
         let payload = serde_json::json!({
             "snapshot_uuid": snapshot_ref,
@@ -960,170 +944,57 @@ impl MinimalControllerService {
         println!("✅ [CONTROLLER] Volume {} created from snapshot (clone UUID: {}, lvs: {})", 
                  volume_id, clone_uuid, lvs_name);
         
-        // Step 3: the leg list. Leg 0 is the clone; a class with numReplicas
-        // N > 1 gets N-1 empty placeholder legs on other nodes, seeded STALE,
-        // which the catch-up full-builds from the clone after cutting the
-        // volume's first epoch on it (incremental-rebuild §11: "a
-        // single-replica clone plus phase-5 full builds for the remaining
-        // replicas").
-        use spdk_csi_driver::snapshot::restore;
-        let actual_size_u64 = actual_size.max(0) as u64;
-        let node_uid = self.driver.get_node_uid(&node_name).await.unwrap_or_default();
-        let source_pci = self
-            .driver
-            .get_initialized_disks_from_node(&node_name)
-            .await
-            .ok()
-            .and_then(|disks| {
-                disks
-                    .into_iter()
-                    .find(|d| d.lvs_name.as_deref() == Some(lvs_name.as_str()))
-                    .map(|d| d.pci_address)
-            })
-            .unwrap_or_default();
-        let mut replicas = vec![spdk_csi_driver::minimal_models::ReplicaInfo {
-            node_name: node_name.clone(),
-            node_uid,
-            disk_pci_address: source_pci,
-            lvol_uuid: clone_uuid.clone(),
-            lvol_name: clone_name.clone(),
-            lvs_name: lvs_name.clone(),
-            nqn: None,
-            target_ip: None,
-            target_port: None,
-            health: "online".to_string(),
-        }];
-
-        if replica_count > 1 {
-            let mut candidates: Vec<restore::LegCandidate> = Vec::new();
-            let nodes = self.driver.get_all_nodes().await.map_err(|e| {
-                tonic::Status::internal(format!("Failed to list nodes for the extra legs: {}", e))
-            })?;
-            for node in nodes {
-                if node == node_name {
-                    continue;
-                }
-                match self.driver.get_initialized_disks_from_node(&node).await {
-                    Ok(disks) => {
-                        if let Some(disk) = disks
-                            .iter()
-                            .filter(|d| d.free_space >= actual_size_u64 && d.lvs_name.is_some())
-                            .max_by_key(|d| d.free_space)
-                        {
-                            candidates.push(restore::LegCandidate {
-                                node: node.clone(),
-                                free_space: disk.free_space,
-                                lvs_name: disk.lvs_name.clone().unwrap_or_default(),
-                                pci_address: disk.pci_address.clone(),
-                            });
-                        }
-                    }
-                    Err(e) => println!(
-                        "⚠️  [SNAPSHOT_RESTORE] Skipping node {} for the extra legs: {}",
-                        node, e
-                    ),
-                }
-            }
-            let picked = match restore::pick_extra_leg_nodes(
-                &node_name,
-                &candidates,
-                (replica_count - 1) as usize,
-            ) {
-                Ok(picked) => picked,
-                Err(reason) => {
-                    // The class promised N copies; deliver none rather than
-                    // one. Unwind the clone so the provisioner's retry
-                    // starts clean.
-                    let _ = self.driver.delete_lvol(&node_name, &clone_uuid).await;
-                    return Err(tonic::Status::resource_exhausted(format!(
-                        "Cannot restore {} with {} replicas: {}",
-                        volume_id, replica_count, reason
-                    )));
-                }
-            };
-            let storage_id = spdk_csi_driver::identity::StorageId::of_handle(volume_id);
-            for (offset, leg) in picked.iter().enumerate() {
-                let index = offset + 1;
-                let replica_volume_id =
-                    spdk_csi_driver::identity::replica_volume_id(&storage_id, index);
-                // Thin: the full build recreates the head empty and thin
-                // anyway (`revert_head_to_empty`); this only reserves the
-                // identity and the lvstore's bookkeeping.
-                match self
-                    .driver
-                    .create_lvol(&leg.node, &leg.lvs_name, &replica_volume_id, actual_size_u64, true)
-                    .await
-                {
-                    Ok(uuid) => {
-                        self.driver.capacity_cache.invalidate(&leg.node).await;
-                        let uid = self.driver.get_node_uid(&leg.node).await.unwrap_or_default();
-                        replicas.push(spdk_csi_driver::minimal_models::ReplicaInfo {
-                            node_name: leg.node.clone(),
-                            node_uid: uid,
-                            disk_pci_address: leg.pci_address.clone(),
-                            lvol_uuid: uuid,
-                            lvol_name: spdk_csi_driver::identity::lvol_name(&replica_volume_id),
-                            lvs_name: leg.lvs_name.clone(),
-                            nqn: None,
-                            target_ip: None,
-                            target_port: None,
-                            health: "online".to_string(),
-                        });
-                    }
-                    Err(e) => {
-                        for made in &replicas {
-                            let _ = self.driver.delete_lvol(&made.node_name, &made.lvol_uuid).await;
-                        }
-                        return Err(tonic::Status::internal(format!(
-                            "Placeholder leg {} of {} on {} failed: {}",
-                            index, volume_id, leg.node, e
-                        )));
-                    }
-                }
-            }
-            // Seed the record: the clone in_sync, the placeholders stale.
-            // Best effort — the PV may not exist yet — which is why the
-            // seeded-stale list ALSO rides in volumeAttributes below.
-            let record = restore::seed_record_for_restore(
-                &replicas,
-                &spdk_csi_driver::replica_sync::now_rfc3339(),
-            );
-            if let Err(e) = self.driver.seed_replica_record(volume_id, &replicas, &record).await {
-                println!(
-                    "⚠️  [SNAPSHOT_RESTORE] Sync record not seeded on the PV yet ({}); the \
-                     seeded-stale attribute keeps the placeholders stale",
-                    e
-                );
-            }
-            println!(
-                "✅ [SNAPSHOT_RESTORE] {} extra leg(s) placed for {}: {}; full builds from the clone \
-                 follow",
-                replicas.len() - 1,
-                volume_id,
-                replicas
-                    .iter()
-                    .skip(1)
-                    .map(|r| r.node_name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-
-        let volume_context =
-            restore::restore_volume_context(snapshot_id, actual_size_u64, &replicas, auto_rebuild)
-                .map_err(|e| {
-                    tonic::Status::internal(format!("Failed to serialize the replica list: {}", e))
-                })?;
-        println!(
-            "📝 [SNAPSHOT_RESTORE] Volume context: replica-count {}, nodes {}, size {}",
-            replicas.len(),
-            volume_context
-                .get("nfs.chert.us/replica-nodes")
-                .map(String::as_str)
-                .unwrap_or("-"),
-            volume_context.get("size").map(String::as_str).unwrap_or("-")
+        // Step 3: Build volume_context with metadata (critical for attach operations)
+        let mut volume_context = std::collections::HashMap::new();
+        
+        // Single replica (snapshot clones are always single replica)
+        volume_context.insert(
+            "disk.chert.us/replica-count".to_string(),
+            "1".to_string(),
+        );
+        volume_context.insert(
+            "disk.chert.us/node-name".to_string(),
+            node_name.clone(),
+        );
+        volume_context.insert(
+            "disk.chert.us/lvol-uuid".to_string(),
+            clone_uuid.clone(),
+        );
+        volume_context.insert(
+            "disk.chert.us/lvs-name".to_string(),
+            lvs_name.clone(),
+        );
+        
+        // CRITICAL: Mark filesystem as initialized (clone has filesystem from snapshot)
+        // Without this, node can't distinguish SPDK block reuse from real filesystem
+        volume_context.insert(
+            "disk.chert.us/filesystem-initialized".to_string(),
+            "true".to_string(),
+        );
+        volume_context.insert(
+            "disk.chert.us/source-snapshot".to_string(),
+            snapshot_id.to_string(),
         );
 
+        // Add NFS replica-nodes attribute (needed for ROX volumes from snapshots)
+        // Since snapshot clones are always single replica, this is just the node where the snapshot was cloned
+        volume_context.insert(
+            "nfs.chert.us/replica-nodes".to_string(),
+            node_name.clone(),
+        );
+        
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("📝 [SNAPSHOT_RESTORE] Volume context populated:");
+        eprintln!("   replica-count: {}", volume_context.get("disk.chert.us/replica-count").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   node-name: {}", volume_context.get("disk.chert.us/node-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvol-uuid: {}", volume_context.get("disk.chert.us/lvol-uuid").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   lvs-name: {}", volume_context.get("disk.chert.us/lvs-name").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   filesystem-initialized: {}", volume_context.get("disk.chert.us/filesystem-initialized").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   source-snapshot: {}", volume_context.get("disk.chert.us/source-snapshot").unwrap_or(&"MISSING".to_string()));
+        eprintln!("   ⚠️  nfs.chert.us/replica-nodes: {}", volume_context.get("nfs.chert.us/replica-nodes").unwrap_or(&"🔴 MISSING - THIS IS THE BUG!".to_string()));
+        eprintln!("   Total attributes: {}", volume_context.len());
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        
         // Step 4: Return volume with content_source and metadata populated
         let content_source = spdk_csi_driver::csi::VolumeContentSource {
             r#type: Some(spdk_csi_driver::csi::volume_content_source::Type::Snapshot(
@@ -1897,17 +1768,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
                         .unwrap_or(1024 * 1024 * 1024) as u64;
 
-                    // The class's replica count applies to a restore too
-                    // (2026-10-27); autoRebuild rides along as on a plain create.
-                    let replica_count = req.parameters.get("numReplicas")
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(1);
-                    let auto_rebuild = req.parameters.get("autoRebuild").cloned();
-
                     match source_type {
                         Type::Snapshot(snapshot) => {
-                            println!("🔄 [CONTROLLER] Creating volume from snapshot: {} ({} replica(s))", snapshot.snapshot_id, replica_count);
-                            let mut resp = self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes, replica_count, auto_rebuild.as_deref()).await?;
+                            println!("🔄 [CONTROLLER] Creating volume from snapshot: {}", snapshot.snapshot_id);
+                            let mut resp = self.create_volume_from_snapshot(&volume_id, &snapshot.snapshot_id, size_bytes).await?;
                             if let Some(vol) = resp.get_mut().volume.as_mut() {
                                 vol.volume_context.insert(
                                     spdk_csi_driver::identity::ROLE_CONTEXT_KEY.to_string(),

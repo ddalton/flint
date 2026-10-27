@@ -650,21 +650,6 @@ impl SpdkCsiDriver {
         volume_id: &str,
         replicas: &[ReplicaInfo],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let record = crate::replica_sync::VolumeSyncRecord::initial(replicas);
-        self.seed_replica_record(volume_id, replicas, &record).await
-    }
-
-    /// The labels of [`Self::add_replica_node_labels`] plus a caller-built
-    /// sync record — the multi-replica restore seeds its placeholder legs
-    /// STALE (2026-10-27). Best effort: the PV may not exist yet (the
-    /// provisioner writes it after CreateVolume returns), which is why a
-    /// restore ALSO carries the seeded-stale list in volumeAttributes.
-    pub async fn seed_replica_record(
-        &self,
-        volume_id: &str,
-        replicas: &[ReplicaInfo],
-        sync_record: &crate::replica_sync::VolumeSyncRecord,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::api::{Patch, PatchParams};
 
@@ -689,6 +674,7 @@ impl SpdkCsiDriver {
             return Ok(());
         }
 
+        let sync_record = crate::replica_sync::VolumeSyncRecord::initial(replicas);
         let patch = serde_json::json!({
             "metadata": {
                 "labels": labels,

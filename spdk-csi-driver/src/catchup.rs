@@ -2747,125 +2747,6 @@ async fn reconcile_snapshot_tombstones(
 /// tombstones, chase every standby, then run at most one stale replica's
 /// bulk catch-up. Per-replica failures are contained (warned + evented) so
 /// one replica cannot starve the others.
-/// The first common epoch, cut on demand, for a volume whose record holds
-/// none while a stale leg waits for a full build.
-///
-/// The epoch scheduler owns the cadence and skips detached volumes (no
-/// writes, nothing to capture). That is right for healthy volumes and
-/// wrong for exactly one case: a leg that must be rebuilt from scratch on
-/// a volume nobody consumes — a leg re-placed off a deleted node (U11), or
-/// the empty legs a multi-replica restore starts with. Both end in
-/// `catchup_stale`, whose full build copies the source's chain up to the
-/// latest recorded epoch, and with no epoch there is no target: the
-/// re-placement pre-pass used to wait for the scheduler silently, and a
-/// detached dash1 volume waited forever (scenario 8b, 2026-10-27).
-///
-/// Cuts on every in_sync replica (their live heads, as the scheduler
-/// does), all-or-abort via `execute_cut`, records it through the store,
-/// and returns the re-read record. `None` when no stale leg needs it (the
-/// scheduler's business), when the full build is disabled (nothing would
-/// consume the epoch), when no in_sync source exists (nothing to build
-/// from, and never a cut on a stale head), or when the cut aborted (a
-/// Warning event names the node; the next tick retries). Standby legs
-/// never need this: standby is minted at an epoch, so one exists.
-pub(crate) async fn ensure_epoch_for_rebuild(
-    rpc: &dyn CatchupRpc,
-    store: &dyn CatchupStore,
-    volume_id: &str,
-    record: &VolumeSyncRecord,
-    replicas: &[ReplicaInfo],
-    cfg: &CatchupConfig,
-) -> Result<Option<VolumeSyncRecord>, RpcError> {
-    if !cfg.full_build {
-        // The epoch would serve a full build that is switched off: leave
-        // the record as it was (the pre-2026-10-27 "never classify, never
-        // touch" posture holds whenever the build cannot follow).
-        return Ok(None);
-    }
-    let maint_now = replica_sync::now_rfc3339();
-    let needs_build = record.replicas.iter().any(|r| {
-        r.sync_state == SyncState::Stale && r.hot_rejoin.is_none() && !r.maint_drain_live(&maint_now)
-    });
-    if !needs_build {
-        return Ok(None);
-    }
-    let targets: Vec<EpochTarget> = record
-        .replicas
-        .iter()
-        .filter(|rec| rec.sync_state == SyncState::InSync)
-        .filter_map(|rec| {
-            replicas
-                .iter()
-                .find(|ri| ri.lvol_uuid == rec.lvol_uuid)
-                .map(|ri| EpochTarget {
-                    node_name: ri.node_name.clone(),
-                    lvol_uuid: ri.lvol_uuid.clone(),
-                    snapshot_source: rec.live_lvol_uuid().to_string(),
-                    lvs_name: ri.lvs_name.clone(),
-                })
-        })
-        .collect();
-    if targets.is_empty() {
-        debug!(
-            volume_id,
-            "[CATCHUP] A stale leg needs a first epoch but no replica is in_sync — nothing to build from"
-        );
-        return Ok(None);
-    }
-    let plan = CutPlan {
-        epoch: epoch_name(volume_id, record.latest_epoch_seq(volume_id) + 1),
-        targets,
-    };
-    match execute_cut(&NodeRpcAdapter(rpc), &plan).await {
-        CutOutcome::Recorded { cut_uuids } => {
-            store.record_epoch_cut(volume_id, &plan.epoch, &cut_uuids).await?;
-            info!(
-                volume_id, epoch = %plan.epoch, replicas = cut_uuids.len(),
-                "[CATCHUP] First epoch cut on demand: a stale leg's full build needs a target"
-            );
-            store
-                .emit(
-                    volume_id,
-                    "Normal",
-                    "EpochCutForRebuild",
-                    &format!(
-                        "First epoch {} cut on {} in_sync replica(s) as the target for a stale \
-                         leg's full build; the scheduler cuts no epochs on a volume nobody consumes",
-                        plan.epoch,
-                        cut_uuids.len()
-                    ),
-                )
-                .await;
-            // Re-read before dispatch: the store's record carries the cut.
-            Ok(store.load(volume_id).await?)
-        }
-        CutOutcome::Aborted { failures } => {
-            let detail = failures
-                .iter()
-                .map(|(node, err)| format!("{}: {}", node, err))
-                .collect::<Vec<_>>()
-                .join("; ");
-            warn!(
-                volume_id, epoch = %plan.epoch, detail,
-                "[CATCHUP] On-demand first epoch aborted — the stale leg waits for the next tick"
-            );
-            store
-                .emit(
-                    volume_id,
-                    "Warning",
-                    "EpochCutFailed",
-                    &format!(
-                        "First epoch {} for a stale leg's full build could not be cut on every \
-                         in_sync replica: {}",
-                        plan.epoch, detail
-                    ),
-                )
-                .await;
-            Ok(None)
-        }
-    }
-}
-
 pub async fn run_catchup_for_volume(
     rpc: &dyn CatchupRpc,
     store: &dyn CatchupStore,
@@ -2880,23 +2761,12 @@ pub async fn run_catchup_for_volume(
     if !record.deleted_snapshots.is_empty() {
         reconcile_snapshot_tombstones(rpc, store, volume_id, &record, replicas).await;
     }
-    let record = if record.epochs.is_empty() {
-        // No common epochs yet (scheduler disabled, volume too new, or
-        // DETACHED — the scheduler cuts nothing a consumer is not writing
-        // to). Nothing to catch up from, and nothing to classify as
-        // full-build: an empty record must never condemn a healable
-        // replica. One exception, since 2026-10-27: a leg already STALE
-        // with an in_sync source needs a first epoch as its build target,
-        // and on a detached volume no one else will ever cut it (dash1
-        // r3-idle's re-placed leg; a restore's empty legs). Cut it here,
-        // on demand, or stop.
-        match ensure_epoch_for_rebuild(rpc, store, volume_id, &record, replicas, cfg).await? {
-            Some(with_epoch) => with_epoch,
-            None => return Ok(()),
-        }
-    } else {
-        record
-    };
+    if record.epochs.is_empty() {
+        // No common epochs yet (scheduler disabled or volume too new):
+        // nothing to catch up from, and nothing to classify as full-build —
+        // an empty record must never condemn a healable replica.
+        return Ok(());
+    }
     let raid_name = crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
 
     // Tier-2 7b: replicas claimed by a hot rejoin (marker set) belong to its
@@ -4572,133 +4442,6 @@ mod tests {
         );
     }
 
-    // ---- first epoch on demand (detached volume, 2026-10-27) ----------
-
-    /// Record of a volume nobody has consumed: every leg in_sync at
-    /// creation, no epoch ever cut; then b's node is gone and b is the
-    /// re-placed (or restore-seeded) empty leg, STALE.
-    fn detached_record_with_stale_b() -> VolumeSyncRecord {
-        let mut record = VolumeSyncRecord::initial(&replicas3());
-        record.mark_stale("uuid-b", "re-placed from lost node (U11)", "2026-10-27T18:00:00Z");
-        record
-    }
-
-    #[tokio::test]
-    async fn first_epoch_is_cut_on_demand_for_a_stale_leg_with_no_history() {
-        let rpc = FakeRpc::new("uuid-b-v2");
-        let store = FakeStore::new(detached_record_with_stale_b());
-
-        let got = ensure_epoch_for_rebuild(&rpc, &store, "vol1", &detached_record_with_stale_b(), &replicas3(), &cfg())
-            .await
-            .unwrap()
-            .expect("a first epoch");
-
-        // Cut on the in_sync legs' heads only — never on the stale leg.
-        let cuts = rpc.calls_of("bdev_lvol_snapshot");
-        let mut nodes: Vec<&str> = cuts.iter().map(|(n, _)| n.as_str()).collect();
-        nodes.sort();
-        assert_eq!(nodes, vec!["node-a", "node-c"]);
-        assert!(cuts.iter().all(|(_, p)| p["params"]["snapshot_name"] == epoch("vol1", 1)));
-        // Recorded through the store and visible in the returned record.
-        assert_eq!(store.ops.lock().unwrap().clone(), vec![format!("epoch_cut:{}", epoch("vol1", 1))]);
-        assert_eq!(got.latest_epoch("vol1"), Some(epoch("vol1", 1).as_str()));
-        let reasons: Vec<String> =
-            store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
-        assert_eq!(reasons, vec!["EpochCutForRebuild".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn no_stale_leg_means_no_on_demand_cut() {
-        // All in_sync, no epochs: the scheduler's cadence decides, not us —
-        // a detached healthy volume must not start accruing epochs here.
-        let rpc = FakeRpc::new("x");
-        let record = VolumeSyncRecord::initial(&replicas3());
-        let store = FakeStore::new(record.clone());
-
-        let got = ensure_epoch_for_rebuild(&rpc, &store, "vol1", &record, &replicas3(), &cfg()).await.unwrap();
-
-        assert!(got.is_none());
-        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty());
-        assert!(store.ops.lock().unwrap().is_empty());
-        assert!(store.events.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn on_demand_cut_without_an_in_sync_source_does_nothing() {
-        // Every leg stale: nothing to build from, and a cut on a stale
-        // head would record a lie as the common epoch.
-        let rpc = FakeRpc::new("x");
-        let mut record = detached_record_with_stale_b();
-        record.mark_stale("uuid-a", "leg failed", "t");
-        record.mark_stale("uuid-c", "leg failed", "t");
-        let store = FakeStore::new(record.clone());
-
-        let got = ensure_epoch_for_rebuild(&rpc, &store, "vol1", &record, &replicas3(), &cfg()).await.unwrap();
-
-        assert!(got.is_none());
-        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty());
-        assert!(store.events.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn on_demand_cut_abort_is_loud_and_records_nothing() {
-        let mut rpc = FakeRpc::new("x");
-        rpc.fail.insert(
-            ("node-c".to_string(), "bdev_lvol_snapshot".to_string()),
-            "Connection refused".to_string(),
-        );
-        let store = FakeStore::new(detached_record_with_stale_b());
-
-        let got = ensure_epoch_for_rebuild(&rpc, &store, "vol1", &detached_record_with_stale_b(), &replicas3(), &cfg())
-            .await
-            .unwrap();
-
-        assert!(got.is_none());
-        assert!(store.ops.lock().unwrap().is_empty(), "a partial cut is never recorded");
-        // (reason, type): the fake keeps no message.
-        assert_eq!(
-            store.events.lock().unwrap().clone(),
-            vec![("EpochCutFailed".to_string(), "Warning".to_string())]
-        );
-        // The survivor's cut was rolled back (execute_cut's all-or-abort).
-        let rollback = rpc.calls_of("bdev_lvol_delete");
-        assert!(
-            rollback.iter().any(|(n, p)| n == "node-a" && p["params"]["name"].as_str().map(|s| s.ends_with(&epoch("vol1", 1))).unwrap_or(false)),
-            "{:?}",
-            rollback
-        );
-    }
-
-    #[tokio::test]
-    async fn catchup_cycle_cuts_the_first_epoch_before_building_a_stale_leg() {
-        // The whole per-volume cycle on the detached shape: the cycle used
-        // to return at "no epochs" and the stale leg stayed stale forever.
-        // Now the first action is the on-demand cut; whatever the build
-        // does after (it needs a real chain on the source) is its own
-        // test — this pins that the cycle no longer stops short.
-        let rpc = {
-            let mut rpc = FakeRpc::new("uuid-b-v2");
-            rpc.lvols.insert(
-                "node-b".to_string(),
-                vec![("lvol-uuid-b".to_string(), "uuid-b".to_string())],
-            );
-            rpc
-        };
-        install_chain(&rpc, "node-a", "lvs0", "lvol-uuid-a", &[]);
-        let store = FakeStore::new(detached_record_with_stale_b());
-
-        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
-            .await
-            .unwrap();
-
-        let ops = store.ops.lock().unwrap().clone();
-        assert_eq!(ops.first().map(String::as_str), Some(format!("epoch_cut:{}", epoch("vol1", 1)).as_str()));
-        let reasons: Vec<String> =
-            store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
-        assert_eq!(reasons.first().map(String::as_str), Some("EpochCutForRebuild"));
-        assert!(store.record.lock().unwrap().latest_epoch("vol1").is_some());
-    }
-
     #[tokio::test]
     async fn full_build_resumes_without_recreating_the_head() {
         // A previous full build crashed mid-copy: the marker stands and the
@@ -5067,27 +4810,13 @@ mod tests {
 
     #[tokio::test]
     async fn no_epochs_means_no_action() {
-        // Empty epoch list, every leg in_sync (a record rebuilt after
-        // annotation loss): never classify, never touch a replica. A stale
-        // leg here used to be left alone too; since 2026-10-27 it gets a
-        // first epoch cut on demand (`first_epoch_is_cut_on_demand_…`),
-        // but ONLY when the full build that consumes it is enabled — with
-        // it off, the old posture holds exactly.
-        let store = FakeStore::new(VolumeSyncRecord::initial(&replicas3()));
-        let rpc = FakeRpc::new("u");
-        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
-            .await
-            .unwrap();
-        assert!(rpc.calls.lock().unwrap().is_empty());
-        assert!(store.ops.lock().unwrap().is_empty());
-        assert!(store.events.lock().unwrap().is_empty());
-
+        // Empty epoch list (scheduler off / record rebuilt after annotation
+        // loss): never classify, never touch the replica.
         let mut record = VolumeSyncRecord::initial(&replicas3());
         record.mark_stale("uuid-b", "leg failed", "t");
         let store = FakeStore::new(record);
         let rpc = FakeRpc::new("u");
-        let no_build = CatchupConfig { full_build: false, ..cfg() };
-        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &no_build)
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
             .await
             .unwrap();
         assert!(rpc.calls.lock().unwrap().is_empty());
