@@ -57,6 +57,45 @@ describe('EnhancedSnapshotsTab header chips', () => {
     expect(ready.previousElementSibling).toHaveTextContent(/^3$/);
   });
 
+  it('labels estimated overhead and raises no alert on it', async () => {
+    const volume = 'pvc-93edc114-bec7-43a0-8273-5812c2c52d13';
+    server.use(
+      http.get('/api/snapshots/tree', () =>
+        HttpResponse.json({
+          [volume]: {
+            volume_id: volume,
+            volume_name: 'r3-data',
+            volume_size: 8589934592,
+            snapshots: [],
+            snapshot_chain: { active_lvol: `vol_${volume}`, chain_depth: 0, snapshots: [] },
+            storage_analytics: {
+              estimated: true,
+              total_volume_size: 8589934592,
+              actual_data_size: 8589934592,
+              total_snapshot_overhead: 15913451520,
+              snapshot_efficiency_ratio: 1.85,
+              storage_breakdown: {
+                active_volume_consumption: 8589934592,
+                snapshot_consumption: 15913451520,
+                metadata_overhead: 0,
+                free_space_in_volume: 0,
+              },
+              recommendations: ['Overhead figures are estimates until every lvol\'s consumption is readable'],
+            },
+          },
+        })
+      )
+    );
+    await login('admin', 'right-password');
+    renderTab();
+    await screen.findByText('User Snapshots');
+    expect(screen.getByText('Snapshot Overhead (est.)')).toBeInTheDocument();
+    expect(screen.getByText('Overhead Ratio (est.)')).toBeInTheDocument();
+    expect(screen.queryByText('Storage Efficiency Warning')).not.toBeInTheDocument();
+    // Both the header note and the storage view's say so.
+    expect(screen.getAllByText(/Overhead figures are estimates/).length).toBeGreaterThanOrEqual(1);
+  });
+
   it('labels each row by kind and filters by it', async () => {
     await login('admin', 'right-password');
     const user = userEvent.setup();

@@ -108,15 +108,36 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Persistent nav nudge while any node still has uninitialized disks
   const uninitializedDisks = uninitializedDiskCount(data.disks);
 
+  // How long the first aggregate has been outstanding. One node agent that
+  // does not answer holds the whole aggregate for up to 30 s (dash1,
+  // 2026-10-27: 15–26 s with a terminated worker still polled), and a bare
+  // skeleton for that long looks broken; after a few seconds, say why.
+  const loadingSince = useRef(Date.now());
+  const [loadingFor, setLoadingFor] = useState(0);
+  const firstLoad = loading && data.volumes.length === 0;
+  useEffect(() => {
+    if (!firstLoad) return;
+    const tick = setInterval(() => {
+      setLoadingFor(Math.round((Date.now() - loadingSince.current) / 1000));
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [firstLoad]);
+
   // Unknown path segment: back to the landing entry point.
   if (activeTab === null) {
     return <Navigate to="/" replace />;
   }
 
-  if (loading && data.volumes.length === 0) {
+  if (firstLoad) {
     return (
       <div className="min-h-screen bg-gray-50 p-8" role="status" aria-label="Loading dashboard">
         <div className="max-w-screen-2xl mx-auto space-y-6">
+          {loadingFor >= 5 && (
+            <p className="text-sm text-gray-600" aria-live="polite">
+              Still loading after {loadingFor} s. The backend polls every node agent for each page,
+              and one that does not answer holds the page for up to 30 s.
+            </p>
+          )}
           <Skeleton className="h-12 w-72" />
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Skeleton className="h-24" />

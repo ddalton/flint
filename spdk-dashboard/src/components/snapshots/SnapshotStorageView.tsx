@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart as RechartsPieChart, Cell, Pie } from 'recharts';
 import type { SnapshotStorageViewProps } from './types';
+import { analyticsEstimated } from './types';
 import { Button } from '../ui/Button';
 
 interface StorageAnalysisCard {
@@ -16,6 +17,9 @@ interface StorageAnalysisCard {
   efficiency: number;
   snapshotCount: number;
   recommendations: string[];
+  // Overhead built on a logical-size fallback: shown as an estimate, never
+  // as an alert.
+  estimated: boolean;
 }
 
 export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
@@ -47,7 +51,8 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
         snapshotOverhead: analytics.total_snapshot_overhead || 0,
         efficiency: analytics.snapshot_efficiency_ratio || 0,
         snapshotCount: volumeSnapshots.length,
-        recommendations: analytics.recommendations || []
+        recommendations: analytics.recommendations || [],
+        estimated: analyticsEstimated(analytics),
       };
 
       volumeMap.set(volumeId, card);
@@ -111,7 +116,9 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
       avgEfficiency: storageAnalysis.length > 0 
         ? storageAnalysis.reduce((sum, card) => sum + (card.efficiency || 0), 0) / storageAnalysis.length 
         : 0,
-      inefficientVolumes: storageAnalysis.filter(card => (card.efficiency || 0) > 0.3).length,
+      // Only measured overhead can be inefficient; estimates are labelled instead.
+      inefficientVolumes: storageAnalysis.filter(card => !card.estimated && (card.efficiency || 0) > 0.3).length,
+      estimated: storageAnalysis.some(card => card.estimated),
       storageWasted: Math.max(0, totalOverhead - (totalLogical - totalActual)) // Overhead beyond data compression, never negative
     };
   }, [storageAnalysis]);
@@ -198,6 +205,16 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
           </div>
         </div>
       </div>
+
+      {aggregateStats.estimated && (
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-sm text-gray-700">
+          <div className="flex items-center gap-2 mb-1">
+            <Info className="w-4 h-4 text-gray-500" />
+            <span className="font-medium text-gray-800">Overhead figures are estimates</span>
+          </div>
+          The backend could not read the actual consumption of every lvol and fell back to logical sizes, so no efficiency alert is raised on them.
+        </div>
+      )}
 
       {/* Efficiency Alerts */}
       {aggregateStats.inefficientVolumes > 0 && (
@@ -337,8 +354,11 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
               </div>
               {/* not Chip: text-sm/px-3 sizing and borderless look differ from
                   the Chip primitive — semantic tokens only */}
-              <div className={`px-3 py-1 rounded-full text-sm font-medium ${getEfficiencyBadge(card.efficiency)}`}>
-                {(card.efficiency * 100).toFixed(1)}% overhead
+              <div
+                className={`px-3 py-1 rounded-full text-sm font-medium ${card.estimated ? 'bg-gray-100 text-gray-700' : getEfficiencyBadge(card.efficiency)}`}
+                title={card.estimated ? 'An estimate: the backend fell back to logical sizes' : undefined}
+              >
+                {(card.efficiency * 100).toFixed(1)}% overhead{card.estimated ? ' (est.)' : ''}
               </div>
             </div>
 
@@ -368,8 +388,9 @@ export const SnapshotStorageView: React.FC<SnapshotStorageViewProps> = ({
             <div className="mb-4">
               <div className="flex items-center justify-between text-sm mb-1">
                 <span className="text-gray-600">Storage Efficiency</span>
-                <span className={`font-medium ${getEfficiencyColor(card.efficiency)}`}>
-                  {card.efficiency < 0.1 ? 'Excellent' : 
+                <span className={`font-medium ${card.estimated ? 'text-gray-500' : getEfficiencyColor(card.efficiency)}`}>
+                  {card.estimated ? 'Estimate' :
+                   card.efficiency < 0.1 ? 'Excellent' : 
                    card.efficiency < 0.3 ? 'Good' : 'Needs Attention'}
                 </span>
               </div>

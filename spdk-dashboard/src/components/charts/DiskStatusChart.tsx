@@ -1,5 +1,4 @@
 import React from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
 import { HardDrive } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { VOLUME_STATE_STYLES } from '../ui/status';
@@ -26,9 +25,9 @@ const getDiskStatus = (disk: Disk): DiskStatus => {
   return 'Uninitialized';
 };
 
-// Status hues come from status.ts — the chart can never drift from the chips
-// (the old version hardcoded the same hexes and would have). System is a
-// deliberate neutral gray: informational, never actionable.
+// Status hues come from status.ts — the strip can never drift from the
+// chips. System is a deliberate neutral gray: informational, never
+// actionable.
 const DISK_STATUS_HEX: Record<DiskStatus, string> = {
   Healthy: VOLUME_STATE_STYLES.Healthy.hex,
   Uninitialized: VOLUME_STATE_STYLES.Degraded.hex,
@@ -36,21 +35,22 @@ const DISK_STATUS_HEX: Record<DiskStatus, string> = {
   System: '#9ca3af',
 };
 
-const AXIS_TICK = { fontSize: 12, fill: '#6b7280' };
-const AXIS_LINE = { stroke: '#e5e7eb' };
+const STATUS_ORDER: DiskStatus[] = ['Healthy', 'Uninitialized', 'Unhealthy', 'System'];
 
+// One row per node, one cell per disk, colored by its logical-volume-store
+// state. This replaced a stacked bar chart whose bars were all one unit
+// tall (one disk per node on every cluster so far): 300 px of axes to say
+// what a row of cells says in 20 px (dash1, 2026-10-27).
 export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
-  const nodeData = disks.reduce((acc, disk) => {
-    const bucket = acc[disk.node] ?? { Healthy: 0, Uninitialized: 0, Unhealthy: 0, System: 0 };
-    acc[disk.node] = bucket;
-    bucket[getDiskStatus(disk)]++;
+  const byNode = disks.reduce((acc, disk) => {
+    (acc[disk.node] ??= []).push(disk);
     return acc;
-  }, {} as Record<string, Record<DiskStatus, number>>);
-
-  const chartData = Object.entries(nodeData).map(([node, data]) => ({
-    node,
-    ...data,
-  }));
+  }, {} as Record<string, Disk[]>);
+  const nodes = Object.keys(byNode).sort();
+  const counts = disks.reduce((acc, disk) => {
+    acc[getDiskStatus(disk)]++;
+    return acc;
+  }, { Healthy: 0, Uninitialized: 0, Unhealthy: 0, System: 0 } as Record<DiskStatus, number>);
 
   return (
     <Card
@@ -59,29 +59,53 @@ export const DiskStatusChart: React.FC<DiskStatusChartProps> = ({ disks }) => {
       subtitle={`logical volume store state across ${disks.length} disk${disks.length !== 1 ? 's' : ''}`}
       bodyClassName="p-6"
     >
-      {chartData.length === 0 ? (
+      {nodes.length === 0 ? (
         <p className="text-sm text-gray-500">
           No disks discovered yet — node agents report NVMe disks here.
         </p>
       ) : (
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={chartData}>
-            <CartesianGrid vertical={false} stroke="#f3f4f6" />
-            <XAxis dataKey="node" tick={AXIS_TICK} tickLine={false} axisLine={AXIS_LINE} />
-            <YAxis allowDecimals={false} tick={AXIS_TICK} tickLine={false} axisLine={AXIS_LINE} width={32} />
-            <RechartsTooltip cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }} />
-            <Legend
-              iconType="circle"
-              iconSize={10}
-              formatter={(value: string) => <span className="text-sm text-gray-700">{value}</span>}
-            />
-            {/* White segment strokes = the 2px surface gap between stacked fills */}
-            <Bar dataKey="Healthy" stackId="a" fill={DISK_STATUS_HEX.Healthy} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="Healthy" />
-            <Bar dataKey="Uninitialized" stackId="a" fill={DISK_STATUS_HEX.Uninitialized} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="Uninitialized" />
-            <Bar dataKey="Unhealthy" stackId="a" fill={DISK_STATUS_HEX.Unhealthy} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="Unhealthy" />
-            <Bar dataKey="System" stackId="a" fill={DISK_STATUS_HEX.System} stroke="#ffffff" strokeWidth={1} maxBarSize={40} name="System" />
-          </BarChart>
-        </ResponsiveContainer>
+        <div className="space-y-4">
+          <ul className="space-y-2" aria-label="Disks by node">
+            {nodes.map(node => (
+              <li key={node} className="flex items-center gap-3">
+                <span className="w-32 flex-shrink-0 truncate text-sm font-medium text-gray-800" title={node}>
+                  {node}
+                </span>
+                <span className="flex flex-wrap gap-1">
+                  {byNode[node]!.map(disk => {
+                    const status = getDiskStatus(disk);
+                    return (
+                      <span
+                        key={disk.id}
+                        role="img"
+                        aria-label={`${disk.id}: ${status}`}
+                        title={`${disk.id} · ${status}${disk.blobstore_initialized ? ` · ${disk.lvol_count} logical volumes` : ''}`}
+                        className="h-5 w-5 rounded-sm"
+                        style={{ backgroundColor: DISK_STATUS_HEX[status] }}
+                      />
+                    );
+                  })}
+                </span>
+                <span className="text-xs text-gray-500">
+                  {byNode[node]!.length} disk{byNode[node]!.length !== 1 ? 's' : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-700" aria-label="Legend">
+            {STATUS_ORDER.map(status => (
+              <li key={status} className="flex items-center gap-1.5">
+                <span
+                  aria-hidden="true"
+                  className="inline-block h-3 w-3 rounded-sm"
+                  style={{ backgroundColor: DISK_STATUS_HEX[status] }}
+                />
+                {status}
+                <span className="text-gray-400 tabular-nums">· {counts[status]}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </Card>
   );

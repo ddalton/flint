@@ -20,6 +20,7 @@ import type {
   SnapshotTypeFilter,
   SnapshotViewMode
 } from './types';
+import { analyticsEstimated } from './types';
 
 export const EnhancedSnapshotsTab: React.FC = () => {
   const [snapshots, setSnapshots] = useState<SnapshotDetails[]>([]);
@@ -192,7 +193,13 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       sum + (tree.storage_analytics?.actual_data_size || 0), 0
     );
     
+    // Overhead built on a logical-size fallback is an estimate: labelled,
+    // never alerted on (dash1, 2026-10-27).
+    const estimated = Object.values(snapshotTree).some(tree =>
+      analyticsEstimated(tree.storage_analytics)
+    );
     const inefficientVolumes = Object.values(snapshotTree).filter(tree => 
+      !analyticsEstimated(tree.storage_analytics) &&
       (tree.storage_analytics?.snapshot_efficiency_ratio || 0) > 0.3
     ).length;
 
@@ -201,6 +208,7 @@ export const EnhancedSnapshotsTab: React.FC = () => {
       totalSnapshotOverhead,
       totalActualData,
       inefficientVolumes,
+      estimated,
       overallEfficiency: totalLogicalSize > 0 ? totalSnapshotOverhead / totalLogicalSize : 0
     };
   }, [snapshotTree]);
@@ -353,22 +361,29 @@ export const EnhancedSnapshotsTab: React.FC = () => {
             <p className="text-stat text-orange-600">
               {formatSize(storageInsights.totalSnapshotOverhead)}
             </p>
-            <p className="text-sm text-gray-600">Snapshot Overhead</p>
+            <p className="text-sm text-gray-600">Snapshot Overhead{storageInsights.estimated ? ' (est.)' : ''}</p>
           </div>
           <div className="bg-degraded-50 rounded-lg p-4 text-center">
             <TrendingUp className="w-6 h-6 text-degraded-600 mx-auto mb-2" />
             <p className={`text-stat ${
+              storageInsights.estimated ? 'text-gray-600' :
               storageInsights.overallEfficiency < 0.1 ? 'text-healthy-600' :
               storageInsights.overallEfficiency < 0.3 ? 'text-degraded-600' : 'text-failed-600'
             }`}>
               {(storageInsights.overallEfficiency * 100).toFixed(1)}%
             </p>
-            <p className="text-sm text-gray-600">Overhead Ratio</p>
+            <p className="text-sm text-gray-600">Overhead Ratio{storageInsights.estimated ? ' (est.)' : ''}</p>
           </div>
         </div>
 
-        {/* Storage Efficiency Alert */}
-        {storageInsights.inefficientVolumes > 0 && (
+        {storageInsights.estimated && (
+          <p className="mt-4 text-sm text-gray-600" title="The backend fell back to logical sizes for at least one lvol">
+            Overhead figures are estimates: the backend could not read the actual consumption of every lvol.
+          </p>
+        )}
+
+        {/* Storage Efficiency Alert — measured overhead only */}
+        {!storageInsights.estimated && storageInsights.inefficientVolumes > 0 && (
           <div className="mt-4 p-4 bg-failed-50 border border-failed-200 rounded-lg">
             <div className="flex items-center gap-2">
               <AlertTriangle className="w-5 h-5 text-failed-600" />

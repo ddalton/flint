@@ -73,6 +73,19 @@ export interface VolumeStorageAnalytics {
     free_space_in_volume: number;
   };
   recommendations: string[];
+  // True when the backend fell back to logical sizes for the active volume
+  // or any snapshot; the overhead figures are then estimates, not readings.
+  estimated?: boolean;
+}
+
+// Whether a volume's analytics are estimates. Older backends send no flag
+// but say so in their recommendations.
+export function analyticsEstimated(a: VolumeStorageAnalytics | undefined): boolean {
+  if (!a) return false;
+  if (a.estimated !== undefined) return a.estimated;
+  return (a.recommendations ?? []).some(
+    r => r.includes('estimated volume size') || r.startsWith('Warning: Only')
+  );
 }
 
 export interface ReplicaSnapshotInfo {

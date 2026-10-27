@@ -1079,6 +1079,15 @@ parsed hot-rejoin windows), `/api/nodes` rollups.
 - `api/openapi.json` and `src/api/schema.d.ts` regenerated; the frontend's
   `Omit` narrowings are gone.
 
+**Presentation changes made after the drill** (the owner asked whether
+the graphics needed work; four things did): the Snapshots list is a table
+with expandable copies and no boilerplate; the Overview's disk bar chart
+is a per-node strip of cells with a counted legend; a first load past
+five seconds explains itself; estimated overhead is labelled "(est.)" and
+never alerted on (`storage_analytics.estimated`, with a name-based
+fallback for older backends). The Nodes heatmap and the volume topology
+were left as they are.
+
 **Still missing (controller work, not UI):**
 
 1. **Byte-level copy progress during a catch-up or full build.** The

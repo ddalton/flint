@@ -2581,7 +2581,14 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
             ));
         }
         
-        if snapshot_efficiency_ratio > 0.5 {
+        // Overhead figures built on a logical-size fallback are estimates:
+        // say so and raise no priority on them (dash1, 2026-10-27: "HIGH
+        // PRIORITY: >50% snapshot overhead" on 15 GB of "overhead" for an
+        // 8 GiB volume whose lvstore held ~6 GB in total).
+        let estimated = !has_actual_volume_data || snapshot_count_with_data < volume_snapshots.len();
+        if estimated {
+            recommendations.push("Overhead figures are estimates until every lvol's consumption is readable".to_string());
+        } else if snapshot_efficiency_ratio > 0.5 {
             recommendations.push("HIGH PRIORITY: >50% snapshot overhead detected".to_string());
             recommendations.push("Consider deleting old snapshots".to_string());
         } else if snapshot_efficiency_ratio > 0.3 {
@@ -2592,6 +2599,7 @@ async fn get_snapshots_tree(state: AppState) -> Result<impl Reply, warp::Rejecti
         }
         
         let storage_analytics = json!({
+            "estimated": estimated,
             "total_volume_size": volume_size,
             "actual_data_size": actual_data_size,
             "total_snapshot_overhead": total_snapshot_consumed,

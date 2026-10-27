@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { analyticsEstimated } from './types';
 import { 
   GitBranch, ChevronDown, ChevronRight, Database, Layers, 
   HardDrive, BarChart3, TrendingUp, AlertCircle, Info, Zap
@@ -195,13 +196,13 @@ const VolumeStorageAnalytics: React.FC<{
           <div className="text-stat text-orange-600">
             {formatSize(analytics.total_snapshot_overhead)}
           </div>
-          <div className="text-xs text-gray-600">Snapshot Overhead</div>
+          <div className="text-xs text-gray-600">Snapshot Overhead{analyticsEstimated(analytics) ? ' (estimate)' : ''}</div>
         </div>
         <div className="text-center">
           <div className={`text-stat ${getEfficiencyColor()}`}>
             {(efficiency * 100).toFixed(1)}%
           </div>
-          <div className="text-xs text-gray-600">Overhead Ratio</div>
+          <div className="text-xs text-gray-600">Overhead Ratio{analyticsEstimated(analytics) ? ' (estimate)' : ''}</div>
         </div>
       </div>
       

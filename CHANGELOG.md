@@ -143,7 +143,17 @@ restart gate is waived: no flint code on the restart path changed, and
   through in the Volumes tab's node column with a note. The Snapshots
   list and detail views no longer date every snapshot with the node
   agent's list stamp (SPDK stores no creation time for an lvol; the
-  Timeline view has the real ones).
+  Timeline view has the real ones). Four presentation changes from the
+  same drill: the Snapshots list is a compact table with the per-node
+  copies unfolding on demand (eight snapshots made a 6,000 px page of
+  cards and boilerplate); the Overview's "Disk Status by Node" bar chart,
+  whose bars were all one unit tall, is a per-node strip of disk cells
+  with a counted legend; a first load that outlasts five seconds says why
+  (the backend polls every node agent, and one that does not answer holds
+  the page); and overhead figures the backend built on a logical-size
+  fallback are labelled "(est.)" and raise no efficiency alert (the
+  backend now sends `estimated` and emits no "HIGH PRIORITY" line on an
+  estimate).
 
 ### Fixed
 

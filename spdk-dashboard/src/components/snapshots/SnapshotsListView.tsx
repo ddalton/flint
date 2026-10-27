@@ -1,7 +1,5 @@
-import React from 'react';
-import {
-  Camera, Eye, Server, Shield, Info, CheckCircle
-} from 'lucide-react';
+import React, { useState } from 'react';
+import { Camera, ChevronDown, ChevronRight, Eye } from 'lucide-react';
 import type { SnapshotDetails } from './types';
 import { IconButton } from '../ui/Button';
 import { Chip } from '../ui/Chip';
@@ -15,12 +13,26 @@ interface SnapshotsListViewProps {
   getSnapshotTypeIcon: (type: string) => React.ReactNode;
 }
 
+// One compact row per logical snapshot; the per-node copies unfold on
+// demand. The earlier card layout spent ~700 px per snapshot on the same
+// three bdev names plus boilerplate ("High Availability Snapshot",
+// "Consistency Guarantee") that said nothing the wire did not — eight
+// snapshots made a 6,000 px page on dash1 (2026-10-27).
 export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
   snapshots,
   onSnapshotSelect,
   formatSize,
   getSnapshotTypeIcon
 }) => {
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  const toggle = (id: string) =>
+    setOpen(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   if (snapshots.length === 0) {
     return (
       <div className="text-center py-12">
@@ -34,152 +46,127 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
   }
 
   return (
-    <div className="space-y-4">
-      {snapshots.map((snapshot) => (
-        <div key={snapshot.snapshot_id} className="bg-white border border-gray-200 rounded-lg shadow-sm">
-          {/* Snapshot Header */}
-          <div className="p-6 border-b border-gray-200">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                {getSnapshotTypeIcon(snapshot.snapshot_type)}
-                <div>
-                  <h3 className="text-section text-gray-900 flex items-center gap-2">
-                    {snapshot.snapshot_id}
+    <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto">
+      <table className="min-w-full divide-y divide-gray-200">
+        <thead className="bg-gray-50">
+          <tr>
+            {['', 'Snapshot', 'Kind', 'Source volume', 'Size', 'Copies', 'Status', ''].map((h, i) => (
+              <th
+                key={i}
+                scope="col"
+                className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {snapshots.map((snapshot) => {
+            const expanded = open.has(snapshot.snapshot_id);
+            const copies = snapshot.replica_bdev_details;
+            const name = copies[0]?.name ?? snapshot.snapshot_id;
+            return (
+              <React.Fragment key={snapshot.snapshot_id}>
+                <tr className="hover:bg-gray-50">
+                  <td className="px-3 py-2 w-8">
+                    <button
+                      type="button"
+                      onClick={() => toggle(snapshot.snapshot_id)}
+                      aria-expanded={expanded}
+                      aria-label={`${expanded ? 'Hide' : 'Show'} the copies of ${name}`}
+                      className="text-gray-500 hover:text-gray-800"
+                    >
+                      {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                    </button>
+                  </td>
+                  <td className="px-3 py-2 min-w-0">
+                    <div className="flex items-center gap-2">
+                      {getSnapshotTypeIcon(snapshot.snapshot_type)}
+                      <span className="font-mono text-xs text-gray-900 truncate max-w-[26rem]" title={name}>
+                        {name}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">
                     <Chip
                       label={snapshotKindLabel(snapshot.snapshot_type)}
                       chip={snapshot.snapshot_type === 'user'
                         ? 'bg-brand-100 text-brand-800 border-brand-200'
                         : 'bg-gray-100 text-gray-700 border-gray-200'}
                     />
-                  </h3>
-                  <p className="text-sm text-gray-600">
-                    Source: {snapshot.source_volume_id}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <div className="text-sm font-medium text-gray-900">
-                    {formatSize(snapshot.size_bytes)}
-                  </div>
-                  {/* The flat listing's creation_time is the node agent's
-                      list stamp (SPDK lvols store no creation time): every
-                      row read the capture time on dash1. Real times are on
-                      the Timeline, from the CR and the PV sync record. */}
-                  <div className="text-xs text-gray-500" title="SPDK stores no creation time for an lvol; see the Timeline view for the real one">
-                    created: see Timeline
-                  </div>
-                </div>
-                <Chip
-                  label={snapshot.ready_to_use ? 'Ready' : 'Creating'}
-                  chip={snapshot.ready_to_use
-                    ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
-                    : 'bg-degraded-100 text-degraded-800 border-degraded-200'}
-                />
-                <IconButton
-                  icon={Eye}
-                  aria-label="View snapshot details"
-                  onClick={() => onSnapshotSelect(snapshot)}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Multi-Replica Architecture Display */}
-          <div className="p-6">
-            <div className="mb-4">
-              <h4 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                <Shield className="w-4 h-4 text-indigo-600" />
-                Multi-Replica Snapshot Architecture
-                <span className="text-xs text-gray-500">
-                  ({snapshot.replica_bdev_details.length} replica snapshots)
-                </span>
-              </h4>
-              <div className="bg-brand-50 border border-brand-200 rounded-lg p-3 mb-4">
-                <div className="flex items-start gap-2">
-                  <Info className="w-4 h-4 text-brand-600 mt-0.5 flex-shrink-0" />
-                  <div className="text-sm text-brand-800">
-                    <p className="font-medium mb-1">High Availability Snapshot</p>
-                    <p>
-                      This snapshot was created by taking individual snapshots of each volume replica 
-                      across {snapshot.replica_bdev_details.length} nodes, ensuring no single point of failure.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {snapshot.replica_bdev_details.map((replica, index) => (
-                <div key={`${replica.node}-${replica.name}`} 
-                     className="border border-gray-200 rounded-lg p-4 bg-gray-50">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <Server className="w-4 h-4 text-gray-600" />
-                      <span className="font-medium text-gray-900">{replica.node}</span>
-                    </div>
-                    {/* raw on purpose: indigo replica-identity tag (no semantic
-                        alias exists); borderless, so Chip would change the look */}
-                    <span className="text-xs bg-indigo-100 text-indigo-800 px-2 py-1 rounded-full">
-                      Replica {index + 1}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className="font-mono text-xs text-gray-600 truncate block max-w-[14rem]" title={snapshot.source_volume_id}>
+                      {snapshot.source_volume_id}
                     </span>
-                  </div>
-                  
-                  <div className="space-y-2 text-sm">
-                    <div>
-                      <span className="text-gray-600">Snapshot Bdev:</span>
-                      <div className="font-mono text-xs bg-white p-2 rounded border mt-1">
-                        {replica.name}
-                      </div>
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-sm text-gray-900">
+                    {formatSize(snapshot.size_bytes)}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-wrap gap-1">
+                      {copies.map(c => (
+                        <span key={c.node} className="inline-flex px-2 py-0.5 text-xs bg-gray-100 text-gray-800 rounded">
+                          {c.node}
+                        </span>
+                      ))}
                     </div>
-                    
-                    <div>
-                      <span className="text-gray-600">Source Bdev:</span>
-                      <div className="font-mono text-xs text-gray-700 mt-1">
-                        {replica.snapshot_source_bdev || 'N/A'}
-                      </div>
-                    </div>
-                    
-                    <div>
-                      <span className="text-gray-600">Driver:</span>
-                      <span className="ml-2 text-xs bg-gray-200 text-gray-800 px-2 py-1 rounded">
-                        {replica.driver}
-                      </span>
-                    </div>
-                    
-                    {replica.aliases.length > 0 && (
-                      <div>
-                        <span className="text-gray-600">Aliases:</span>
-                        <div className="mt-1 space-y-1">
-                          {replica.aliases.map((alias, aliasIndex) => (
-                            <div key={aliasIndex} className="font-mono text-xs text-gray-700">
-                              {alias}
-                            </div>
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <Chip
+                      label={snapshot.ready_to_use ? 'Ready' : 'Creating'}
+                      chip={snapshot.ready_to_use
+                        ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
+                        : 'bg-degraded-100 text-degraded-800 border-degraded-200'}
+                    />
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-right">
+                    <IconButton
+                      icon={Eye}
+                      aria-label="View snapshot details"
+                      onClick={() => onSnapshotSelect(snapshot)}
+                    />
+                  </td>
+                </tr>
+                {expanded && (
+                  <tr className="bg-gray-50">
+                    <td />
+                    <td colSpan={7} className="px-3 py-3">
+                      {/* The per-node copies: one lvol per leg from one
+                          coordinated cut. SPDK stores no creation time for
+                          an lvol; the Timeline view has the real one. */}
+                      <table className="min-w-full text-xs">
+                        <thead>
+                          <tr className="text-gray-500">
+                            <th scope="col" className="text-left font-medium pr-4 pb-1">Node</th>
+                            <th scope="col" className="text-left font-medium pr-4 pb-1">Snapshot bdev</th>
+                            <th scope="col" className="text-left font-medium pr-4 pb-1">Source bdev</th>
+                            <th scope="col" className="text-left font-medium pb-1">Driver</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {copies.map(c => (
+                            <tr key={`${c.node}-${c.name}`}>
+                              <td className="pr-4 py-0.5 font-medium text-gray-800">{c.node}</td>
+                              <td className="pr-4 py-0.5 font-mono text-gray-700 break-all">{c.name}</td>
+                              <td className="pr-4 py-0.5 font-mono text-gray-600 break-all">{c.snapshot_source_bdev || '—'}</td>
+                              <td className="py-0.5 text-gray-600">{c.driver}</td>
+                            </tr>
                           ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Consistency Information */}
-            <div className="mt-4 p-3 bg-healthy-50 border border-healthy-200 rounded-lg">
-              <div className="flex items-center gap-2 mb-2">
-                <CheckCircle className="w-4 h-4 text-healthy-600" />
-                <span className="text-sm font-medium text-healthy-800">
-                  Consistency Guarantee
-                </span>
-              </div>
-              <p className="text-sm text-healthy-700">
-                All {snapshot.replica_bdev_details.length} replica copies come from one coordinated cut,
-                so they hold the same data.
-              </p>
-            </div>
-          </div>
-        </div>
-      ))}
+                        </tbody>
+                      </table>
+                      <p className="mt-2 text-xs text-gray-500">
+                        {copies.length} cop{copies.length === 1 ? 'y' : 'ies'} from one coordinated cut; created time: see the Timeline view.
+                      </p>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 };
