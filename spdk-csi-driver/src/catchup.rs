@@ -121,7 +121,8 @@ use tracing::{debug, info, warn};
 
 use crate::driver::{NvmeofConnectionInfo, SpdkCsiDriver};
 use crate::epoch_scheduler::{
-    execute_cut, is_already_exists, is_missing, CutOutcome, CutPlan, EpochTarget, NodeRpc,
+    execute_cut, execute_cut_strict, is_already_exists, is_missing, CutOutcome, CutPlan,
+    EpochTarget, NodeRpc,
 };
 use crate::identity::StorageId;
 use crate::minimal_models::ReplicaInfo;
@@ -2588,8 +2589,18 @@ async fn admit_one_standby(
     if targets.is_empty() {
         return Err("no attached in-sync replica to cut the final epoch on".into());
     }
+    // STRICT (2026-10-27): a snapshot already standing under the final
+    // epoch's name is a leftover of an aborted scheduler cut — the same name
+    // (`plan_cut` uses latest+1 too), rolled back best-effort or not at all
+    // after a crash — and it is OLDER than the head. The lenient cut took
+    // "already exists" as success, the chase copied through the leftover,
+    // and the standby was admitted in_sync without the writes acked after
+    // it (formal/FlintCatchup.tla). Refusing defers this admission: the
+    // stage proceeds with the attached legs, the standby keeps chasing, the
+    // scheduler adopts the leftover at its next tick, and the next stage
+    // admits at the following epoch.
     let plan = CutPlan { epoch: final_epoch.clone(), targets };
-    let cut_uuids = match execute_cut(&NodeRpcAdapter(rpc), &plan).await {
+    let cut_uuids = match execute_cut_strict(&NodeRpcAdapter(rpc), &plan).await {
         CutOutcome::Recorded { cut_uuids } => cut_uuids,
         CutOutcome::Aborted { failures } => {
             return Err(format!(
@@ -5222,6 +5233,57 @@ mod tests {
         .await;
         assert!(again.is_empty());
         assert_eq!(store.events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admission_refuses_a_leftover_final_epoch_and_defers() {
+        // formal/FlintCatchup.tla counterexample, 2026-10-27: an aborted
+        // scheduler cut left a snapshot named epoch 6 (latest+1) standing on
+        // the consumer-side survivor c — OLDER than c's head. The final cut
+        // must refuse it: no admission, nothing recorded, no raid member
+        // added; a's fresh epoch-6 snapshot (cut first, by THIS attempt) is
+        // rolled back; the leftover on c is left for the scheduler.
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.lvols.insert(
+            "node-c".to_string(),
+            vec![(epoch("vol1", 6), "uuid-leftover".to_string())],
+        );
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        let store = FakeStore::new(standby_b_record());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty(), "no raid membership for the standby");
+        assert!(store.ops.lock().unwrap().is_empty(), "nothing recorded: no epoch cut, no in_sync");
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Standby
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert_eq!(events, vec![("StandbyAdmissionDeferred".to_string(), "Warning".to_string())]);
+
+        // a was cut, c refused, a rolled back; c's leftover untouched; the
+        // standby's head never copied to.
+        let cut_nodes: Vec<String> =
+            rpc.calls_of("bdev_lvol_snapshot").into_iter().map(|(n, _)| n).collect();
+        assert_eq!(cut_nodes, vec!["node-a".to_string(), "node-c".to_string()]);
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].0, "node-a");
+        assert_eq!(deletes[0].1["params"]["name"], format!("lvs0/{}", epoch("vol1", 6)));
+        assert!(!rpc
+            .deleted
+            .lock()
+            .unwrap()
+            .contains(&("node-c".to_string(), epoch("vol1", 6))));
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
     }
 
     #[tokio::test]

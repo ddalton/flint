@@ -260,22 +260,74 @@ pub async fn execute_cut(rpc: &dyn NodeRpc, plan: &CutPlan) -> CutOutcome {
     }
 
     // A partially-cut epoch must never be recorded common.
-    for target in &succeeded {
+    rollback_cut(rpc, &succeeded, &plan.epoch).await;
+    CutOutcome::Aborted { failures }
+}
+
+/// Best-effort delete of `epoch` on `targets` (a partial cut's rollback).
+async fn rollback_cut(rpc: &dyn NodeRpc, targets: &[&EpochTarget], epoch: &str) {
+    for target in targets {
         let payload = json!({
             "method": "bdev_lvol_delete",
-            "params": { "name": format!("{}/{}", target.lvs_name, plan.epoch) }
+            "params": { "name": format!("{}/{}", target.lvs_name, epoch) }
         });
         if let Err(e) = rpc.spdk_rpc(&target.node_name, &payload).await {
             let msg = e.to_string();
             if !is_missing(&msg) {
                 debug!(
-                    node = %target.node_name, epoch = %plan.epoch, error = %msg,
+                    node = %target.node_name, epoch = %epoch, error = %msg,
                     "[EPOCH] Rollback delete failed (non-fatal; retry converges via EEXIST)"
                 );
             }
         }
     }
-    CutOutcome::Aborted { failures }
+}
+
+/// The all-or-abort cut WITHOUT "already exists counts as success", for a
+/// cut whose name must denote THIS instant on every target: the reassembly
+/// admission's final epoch (`catchup::admit_one_standby`), cut while no
+/// writer exists so that it equals every head. A snapshot already standing
+/// under that name is a leftover of an aborted earlier cut — the
+/// scheduler's rollback is best-effort, and a controller crash between the
+/// snapshot and the record skips it — so it is OLDER than the head: the
+/// writes acked since sit in the head blob, not in the leftover. Adopting
+/// it made the admission copy through the leftover and admit the standby
+/// in_sync without those writes, and raid1 then served stale blocks from
+/// it (flint-e4's catch-up model, formal/FlintCatchup.tla, 2026-10-27).
+///
+/// On any failure — a standing name included — this deletes only the
+/// snapshots THIS call created on earlier targets, never the leftover (the
+/// scheduler adopts it at its next tick, which is safe there: it only
+/// widens the next delta), and returns `Aborted`. Hot rejoin's E_f cut has
+/// refused the same way since Tier-2 (`hot_rejoin::cut_ef_strict`).
+pub async fn execute_cut_strict(rpc: &dyn NodeRpc, plan: &CutPlan) -> CutOutcome {
+    let mut created: Vec<&EpochTarget> = Vec::new();
+    for target in &plan.targets {
+        let payload = json!({
+            "method": "bdev_lvol_snapshot",
+            "params": { "lvol_name": target.snapshot_source, "snapshot_name": plan.epoch }
+        });
+        match rpc.spdk_rpc(&target.node_name, &payload).await {
+            Ok(_) => created.push(target),
+            Err(e) => {
+                rollback_cut(rpc, &created, &plan.epoch).await;
+                let msg = e.to_string();
+                let why = if is_already_exists(&msg) {
+                    format!(
+                        "{} already exists — a leftover of an aborted cut, older than the head; \
+                         refused ({})",
+                        plan.epoch, msg
+                    )
+                } else {
+                    msg
+                };
+                return CutOutcome::Aborted { failures: vec![(target.node_name.clone(), why)] };
+            }
+        }
+    }
+    CutOutcome::Recorded {
+        cut_uuids: created.iter().map(|t| t.lvol_uuid.clone()).collect(),
+    }
 }
 
 /// Of this volume's epoch-named snapshots found on a node, the ones safe to
@@ -625,6 +677,67 @@ mod tests {
             }
             Ok(json!({ "result": "ok" }))
         }
+    }
+
+    fn strict_target(node: &str) -> EpochTarget {
+        EpochTarget {
+            node_name: node.to_string(),
+            lvol_uuid: format!("uuid-{}", node),
+            snapshot_source: format!("uuid-{}", node),
+            lvs_name: "lvs0".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_cut_refuses_a_standing_name_and_rolls_back_only_its_own() {
+        // Three targets; the 2nd already holds the name (a leftover of an
+        // aborted scheduler cut). The 1st was cut fresh by THIS call and is
+        // rolled back; the leftover on the 2nd is never deleted; the 3rd is
+        // never cut.
+        let mut rpc = FakeNodeRpc::new();
+        rpc.fail.insert(("n2".to_string(), "bdev_lvol_snapshot".to_string()), "File exists".to_string());
+        let plan = CutPlan {
+            epoch: "epoch-vol1-7".to_string(),
+            targets: vec![strict_target("n1"), strict_target("n2"), strict_target("n3")],
+        };
+
+        match execute_cut_strict(&rpc, &plan).await {
+            CutOutcome::Aborted { failures } => {
+                assert_eq!(failures.len(), 1);
+                assert_eq!(failures[0].0, "n2");
+                assert!(failures[0].1.contains("already exists"), "{}", failures[0].1);
+            }
+            other => panic!("expected Aborted, got {:?}", other),
+        }
+        let snaps: Vec<String> = rpc.calls_of("bdev_lvol_snapshot").into_iter().map(|(n, _)| n).collect();
+        assert_eq!(snaps, vec!["n1".to_string(), "n2".to_string()]);
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].0, "n1");
+        assert_eq!(deletes[0].1["params"]["name"], "lvs0/epoch-vol1-7");
+
+        // The lenient cut on the same world adopts the leftover — the
+        // scheduler's semantics, kept for the scheduler.
+        match execute_cut(&rpc, &plan).await {
+            CutOutcome::Recorded { cut_uuids } => assert_eq!(cut_uuids.len(), 3),
+            other => panic!("expected Recorded, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_cut_records_every_target_when_no_name_stands() {
+        let rpc = FakeNodeRpc::new();
+        let plan = CutPlan {
+            epoch: "epoch-vol1-7".to_string(),
+            targets: vec![strict_target("n1"), strict_target("n2")],
+        };
+        match execute_cut_strict(&rpc, &plan).await {
+            CutOutcome::Recorded { cut_uuids } => {
+                assert_eq!(cut_uuids, vec!["uuid-n1".to_string(), "uuid-n2".to_string()])
+            }
+            other => panic!("expected Recorded, got {:?}", other),
+        }
+        assert!(rpc.calls_of("bdev_lvol_delete").is_empty());
     }
 
     #[test]

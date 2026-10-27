@@ -195,6 +195,23 @@ covered by the stability guarantee.
   node is now excluded from the targets. When it was the only node with
   room, `ReplicaReplacementBlocked` says so, and the leg is re-placed once
   the consumer moves or a node with room joins.
+- **A standby is never admitted in sync through a leftover snapshot older
+  than its source** (2026-10-27; `spdk-csi-driver/src/catchup.rs`,
+  `src/epoch_scheduler.rs`). At reassembly the admission cuts a final
+  epoch named one past the newest and copies the standby up to it. The
+  scheduler's cuts use the same name, and when one of them aborted, its
+  rollback was best-effort (and a controller crash skipped it), so a
+  snapshot under that name could survive on a source. The admission took
+  "already exists" as success, so its final epoch was that leftover,
+  older than the source's head: the standby was admitted in sync without
+  the writes acknowledged after it, and the raid then served stale blocks
+  from it. flint-e4's TLA+ model of the catch-up (`formal/FlintCatchup.tla`)
+  found the trace. The admission's cut now refuses a name that already
+  exists, deletes only the snapshots it created itself, and defers the
+  standby; the volume stages on its in-sync legs, the scheduler adopts
+  the leftover as an ordinary epoch at its next cut, and the next stage
+  admits at the following one. Hot rejoin's cut already refused the same
+  way.
 
 ## [1.61.2] - 2026-10-27
 
