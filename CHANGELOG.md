@@ -52,7 +52,9 @@ covered by the stability guarantee.
   "100% used" in the Disks tab, the Nodes tab and the node summary,
   because the agent reports `free_space` 0 for it — all three now show
   "not initialized" with nothing allocated (and the Disks tab's average
-  utilization, which divided GB by bytes, is a real average). Rolling the
+  utilization, which divided GB by bytes, is a real average; the node
+  summary sums its stores from +0.0, since f64's empty sum is -0.0 and the
+  first live build of this backend wrote `-0.0` for that node). Rolling the
   csi-node DaemonSet on that cluster found three more: the Events tab and
   the recovery panel had been empty on every live cluster because the
   engine stamps its PV events `disk.chert.us/node-agent` and the backend

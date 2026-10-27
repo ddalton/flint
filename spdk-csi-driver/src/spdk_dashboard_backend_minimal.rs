@@ -1959,9 +1959,17 @@ fn node_summaries(data: &DashboardData) -> Vec<NodeSummary> {
                 volumes_not_healthy,
                 // The logical volume stores' figures: a disk without one has
                 // nothing allocated, and its agent-reported free_space of 0
-                // counted as a full disk here (dash1-cp-1, 2026-10-27).
-                capacity_gb: disks.iter().filter(|d| d.blobstore_initialized).map(|d| d.capacity_gb).sum(),
-                allocated_gb: disks.iter().filter(|d| d.blobstore_initialized).map(|d| d.allocated_space).sum(),
+                // counted as a full disk here (dash1-cp-1, 2026-10-27). A
+                // fold from +0.0, not `sum()`: f64's empty sum is -0.0, which
+                // went out on the wire as `-0.0` for a node with no store.
+                capacity_gb: disks
+                    .iter()
+                    .filter(|d| d.blobstore_initialized)
+                    .fold(0.0, |acc, d| acc + d.capacity_gb),
+                allocated_gb: disks
+                    .iter()
+                    .filter(|d| d.blobstore_initialized)
+                    .fold(0.0, |acc, d| acc + d.allocated_space),
                 health: health.to_string(),
             }
         })
@@ -5129,12 +5137,13 @@ mod tests {
                 create_test_disk("disk-a2", "node-a", false),
                 create_test_disk("disk-b", "node-b", true),
                 bad_disk,
+                create_test_disk("disk-d", "node-d", false),
             ],
-            vec!["node-a", "node-b", "node-c"],
+            vec!["node-a", "node-b", "node-c", "node-d"],
         );
 
         let summaries = node_summaries(&data);
-        assert_eq!(summaries.len(), 3);
+        assert_eq!(summaries.len(), 4);
 
         let by_name: HashMap<&str, &NodeSummary> =
             summaries.iter().map(|s| (s.name.as_str(), s)).collect();
@@ -5158,6 +5167,14 @@ mod tests {
         assert_eq!(c.health, "critical");
         assert_eq!((c.disks_total, c.disks_healthy), (1, 0));
         assert_eq!(c.volumes_total, 0);
+
+        // node-d has only a disk without a volume store (dash1-cp-1's shape):
+        // its capacity and allocation are +0.0, not f64's empty-sum -0.0,
+        // which the released backend put on the wire as `-0.0`.
+        let d = by_name["node-d"];
+        assert_eq!((d.disks_total, d.disks_uninitialized), (1, 1));
+        assert_eq!(d.capacity_gb.to_bits(), 0.0f64.to_bits());
+        assert_eq!(d.allocated_gb.to_bits(), 0.0f64.to_bits());
     }
 
     #[test]
