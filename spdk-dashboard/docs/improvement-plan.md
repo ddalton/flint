@@ -1259,8 +1259,12 @@ class) came up as a single-replica volume on dash1-aws-2 (`replica-count:
 showed it as "1/1 · active" — faithful, and worth knowing: a restore does
 not inherit the class's replica count. Its Size column read "0": the
 restore path stamps no `size` volume attribute, which was the backend's
-only source. The backend now falls back to the PV's `spec.capacity`
-(driver follow-up: stamp `size` on restores and clones too).
+only source. The backend now falls back to the PV's `spec.capacity`.
+Driver side, done later the same day (`spdk-csi-driver/src/snapshot/
+restore.rs`): a restore now creates the class's replica count — the
+clone is leg 0, the other legs are empty placeholders seeded stale and
+full-built from the clone after an on-demand first epoch — and stamps
+`size`; a plain PVC clone still does neither (follow-up).
 
 **No consumer, then a consumer again (scenario 4)**: deleting the writer pod
 took the consumer raid off the wire within a poll; the page read "Consumer ·
@@ -1296,10 +1300,19 @@ dash1-aws-3 as `in_sync` ten minutes later: no `ReplicaReplaced`, no
 `ReplicaReplacementBlocked`, nothing in the controller log. The replace
 guard "epochs exist" fails silently for a volume that never had a
 consumer, so its record keeps a leg on a node that no longer exists and
-the page shows "Healthy 3/3". Engine work (`replica_replace.rs`: emit
-`ReplicaReplacementBlocked` with the reason, or replace from the in_sync
-legs directly since nothing was ever written); on the page, a replica
-whose node is not in the cluster's node list is now marked "node gone".
+the page shows "Healthy 3/3". On the page, a replica whose node is not
+in the cluster's node list is now marked "node gone". Engine side, fixed
+later the same day: candidacy no longer requires a stale or standby leg
+(the record never demotes a leg of a volume with no raid) — except an
+in_sync member of the recorded writer set, which the formal model showed
+may hold an acknowledged write no other leg has (it waits for the F36c
+gate at the next assembly, with a `ReplicaReplacementBlocked` event) —
+the silent
+epoch guard is gone, and the catch-up cuts the volume's first epoch on
+demand (`EpochCutForRebuild`) so the swapped-in leg's full build has a
+target; a volume whose only in_sync leg is the lost one gets a
+`ReplicaReplacementBlocked` event instead of silence
+(`replica_replace.rs`, `catchup::ensure_epoch_for_rebuild`).
 
 The roll then stopped by design: the roller refuses the consumer node
 ("roll refuses dash1-aws-1: it consumes its own volume — its tgt hosts the

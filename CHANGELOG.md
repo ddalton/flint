@@ -106,6 +106,53 @@ covered by the stability guarantee.
   now prints its refusal; `set -e` used to end the script there without
   a word.
 
+- **A replica leg on a deleted node is re-placed even when nothing
+  consumes the volume** (2026-10-27; `spdk-csi-driver/src/replica_replace.rs`,
+  `src/catchup.rs`). On dash1 the Node object of a terminated worker was
+  deleted while a three-replica volume nobody had staged kept one leg
+  there: the record read "3/3 in_sync" forever, no replacement happened and
+  no event said why. Two gates, both silent. The replacement pre-pass only
+  considered stale or standby legs, and a detached volume has no raid, so
+  nothing ever demoted the leg; and it refused to swap while the record
+  held no epoch, "waiting a tick for the scheduler", which never cuts
+  epochs on a volume with no writer. Now any unmarked leg whose node is
+  gone (Node deleted, or NotReady past `FLINT_REPLICA_REPLACE_AFTER_SECS`)
+  is a candidate, provided another leg is in_sync (never the candidate
+  itself, which may be the only copy — that case is a
+  `ReplicaReplacementBlocked` event, not silence) and provided it is not
+  an in_sync member of the recorded writer set: the formal model
+  (`formal/FlintReplication.tla`, flint-e4's gone-node tranche) showed
+  that swapping such a leg prunes it from the set and lets the next
+  assembly pass the F36c gate with an acknowledged write silently lost,
+  so that leg stays, named in a `ReplicaReplacementBlocked` event, until
+  the gate rules at the next assembly (a volume never assembled has no
+  writer set and heals; one assembled and now detached waits for its
+  next stage); and the catch-up cuts
+  the volume's first epoch on demand (`EpochCutForRebuild`) when a stale
+  leg has a source and no epoch exists, so the thin-aware full build has
+  its target. The epoch scheduler's cadence and its skipping of detached
+  volumes are unchanged; the on-demand cut happens only for a leg that
+  must be rebuilt, and only while the full build is enabled.
+- **A restore from a `VolumeSnapshot` honors the StorageClass's
+  `numReplicas` and records its `size`** (2026-10-27;
+  `spdk-csi-driver/src/snapshot/restore.rs`, `src/main.rs`,
+  `src/replica_sync.rs`). A `dataSource: VolumeSnapshot` claim on a
+  three-replica class came up as a single-replica volume, with no `size`
+  attribute: the restore cloned one verified copy and stopped. It still
+  clones one copy — the copies of a multi-replica snapshot are equivalent
+  crash-consistent images, not identical ones, so cloning each would make
+  a raid whose legs differ — but the clone is now leg 0 (named
+  `vol_<vol>_replica_0`) and the other legs are empty placeholders on the
+  freest other nodes, seeded stale; the catch-up cuts the first epoch on
+  the clone and full-builds them from it, the same machinery a re-placed
+  leg uses. The seeded-stale list also rides in volumeAttributes
+  (`disk.chert.us/replicas-seeded-stale`), because the sync-record
+  annotation is patched best-effort after CreateVolume and a record
+  synthesized without it would read an empty leg as in_sync. Too few
+  nodes with room is a refusal (`RESOURCE_EXHAUSTED`), as on a plain
+  create, never a volume with fewer copies than promised. A single-replica
+  class restores exactly as before, plus `size`.
+
 ## [1.61.2] - 2026-10-27
 
 A security patch release. Every image that talks to S3 or STS shipped

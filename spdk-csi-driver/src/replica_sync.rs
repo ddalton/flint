@@ -50,6 +50,18 @@ pub const REPLICAS_OVERRIDE_ANNOTATION: &str = "disk.chert.us/replicas-override"
 /// autoRebuild StorageClass parameter, echoed into volumeAttributes by
 /// CreateVolume. "false" opts the volume out of replica re-placement.
 pub const AUTO_REBUILD_ATTRIBUTE: &str = "disk.chert.us/auto-rebuild";
+/// Comma-separated lvol uuids that CreateVolume seeds STALE: the empty
+/// placeholder legs of a multi-replica restore from a VolumeSnapshot
+/// (2026-10-27). The provisioner writes volumeAttributes atomically with
+/// the PV, so a sync-record annotation that never landed (the PV did not
+/// exist when the controller tried) or was lost can never read those legs
+/// as in_sync — which is what the record's `initial` default would say,
+/// and what would let an EMPTY lvol into a raid. `initial_seeded` honours
+/// it wherever a record is synthesized from volumeAttributes.
+pub const SEEDED_STALE_ATTRIBUTE: &str = "disk.chert.us/replicas-seeded-stale";
+/// The reason stamped on a seeded-stale leg.
+pub const SEEDED_STALE_REASON: &str =
+    "restored from a snapshot: empty leg awaiting the full build from the clone";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -268,6 +280,18 @@ impl VolumeSyncRecord {
                 })
                 .collect(),
         }
+    }
+
+    /// `initial`, with the legs in `stale_uuids` entered STALE (reason
+    /// [`SEEDED_STALE_REASON`], `since` = `now`) instead of in_sync — the
+    /// multi-replica restore's empty placeholders. Unknown uuids are
+    /// ignored. With an empty list this is exactly `initial`.
+    pub fn initial_seeded(replicas: &[ReplicaInfo], stale_uuids: &[String], now_rfc3339: &str) -> Self {
+        let mut record = Self::initial(replicas);
+        for uuid in stale_uuids {
+            record.mark_stale(uuid, SEEDED_STALE_REASON, now_rfc3339);
+        }
+        record
     }
 
     pub fn from_annotation(s: &str) -> serde_json::Result<Self> {
@@ -1101,6 +1125,24 @@ pub fn is_rwx_pv(pv: &PersistentVolume) -> bool {
 /// The authoritative replica-identity JSON for this PV: the re-placement
 /// override annotation when present (identity swapped after permanent node
 /// loss, U11), else the immutable CreateVolume attribute.
+/// The lvol uuids a CreateVolume seeded STALE ([`SEEDED_STALE_ATTRIBUTE`]),
+/// empty when the attribute is absent.
+pub fn seeded_stale_from_pv(pv: &PersistentVolume) -> Vec<String> {
+    pv.spec
+        .as_ref()
+        .and_then(|s| s.csi.as_ref())
+        .and_then(|c| c.volume_attributes.as_ref())
+        .and_then(|a| a.get(SEEDED_STALE_ATTRIBUTE))
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn raw_replicas_json(pv: &PersistentVolume) -> Option<&String> {
     if let Some(j) = pv
         .metadata
@@ -1187,9 +1229,9 @@ where
             );
         }
         let baseline = parsed.and_then(|p| p.ok());
-        let mut record = baseline
-            .clone()
-            .unwrap_or_else(|| VolumeSyncRecord::initial(&replicas));
+        let mut record = baseline.clone().unwrap_or_else(|| {
+            VolumeSyncRecord::initial_seeded(&replicas, &seeded_stale_from_pv(&pv), &now_rfc3339())
+        });
         record.reconcile_membership(&replicas);
         mutate(&mut record);
 
@@ -1557,6 +1599,42 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn initial_seeded_enters_the_listed_legs_stale_and_the_rest_in_sync() {
+        let replicas = vec![
+            replica("n1", "u1"),
+            replica("n2", "u2"),
+            replica("n3", "u3"),
+        ];
+        let record = VolumeSyncRecord::initial_seeded(
+            &replicas,
+            &["u2".to_string(), "u3".to_string(), "unknown".to_string()],
+            "2026-10-27T21:00:00Z",
+        );
+        let states: Vec<(&str, SyncState)> =
+            record.replicas.iter().map(|r| (r.lvol_uuid.as_str(), r.sync_state.clone())).collect();
+        assert_eq!(
+            states,
+            vec![("u1", SyncState::InSync), ("u2", SyncState::Stale), ("u3", SyncState::Stale)]
+        );
+        let u2 = record.get("u2").unwrap();
+        assert_eq!(u2.reason.as_deref(), Some(SEEDED_STALE_REASON));
+        assert_eq!(u2.since.as_deref(), Some("2026-10-27T21:00:00Z"));
+        assert!(record.epochs.is_empty());
+        // No list: exactly the plain initial record.
+        assert_eq!(VolumeSyncRecord::initial_seeded(&replicas, &[], "t"), VolumeSyncRecord::initial(&replicas));
+    }
+
+    #[test]
+    fn seeded_stale_attribute_is_read_from_the_pv() {
+        let mut pv = pv_with("pvc-abc", &["ReadWriteOnce"]);
+        assert!(seeded_stale_from_pv(&pv).is_empty());
+        let attrs: std::collections::BTreeMap<String, String> =
+            [(SEEDED_STALE_ATTRIBUTE.to_string(), " u2, u3,,".to_string())].into_iter().collect();
+        pv.spec.as_mut().unwrap().csi.as_mut().unwrap().volume_attributes = Some(attrs);
+        assert_eq!(seeded_stale_from_pv(&pv), vec!["u2".to_string(), "u3".to_string()]);
     }
 
     #[test]
