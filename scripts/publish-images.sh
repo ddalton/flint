@@ -79,6 +79,12 @@ tags_for() {
 
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
+
+# CVE GATE (2026-10-27): the images carry the binaries, so this is the
+# publish the gate exists for. A dry run reports instead of refusing, so it
+# still shows everything a real run would do. See scripts/cve-gate.sh.
+if [ "$dry" = "--dry-run" ]; then "$here/cve-gate.sh" --report; else "$here/cve-gate.sh"; fi
+
 cd "$crate"
 
 [ -d docker/prebuilt/amd64 ] && [ -d docker/prebuilt/arm64 ] || {

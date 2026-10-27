@@ -80,6 +80,11 @@ for a in "$@"; do
     esac
 done
 
+# CVE GATE (2026-10-27). `check` reports; anything that pushes refuses. A
+# chart is the thing that points clusters at the images, so it is gated
+# like them. See scripts/cve-gate.sh.
+if [ "$cmd" = check ]; then "$here/cve-gate.sh" --report; else "$here/cve-gate.sh"; fi
+
 # --- read the chart ---------------------------------------------------------
 # images_table lines:  <name> <tag> <context-dir> <dockerfile-rel-to-context>
 # The build recipes live here too so values.yaml stays the single source of

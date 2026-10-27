@@ -36,6 +36,24 @@ covered by the stability guarantee.
   already uses here, so no crypto library is added. A regression test
   mints the string `nbf` with the door's own test key, against a numeric
   control, and fails on 9.3.1.
+- **A release now refuses a known advisory** (2026-10-27;
+  `scripts/cve-gate.sh`, `osv-scanner.toml`,
+  `.github/workflows/cve-scan.yml`). Nothing in the build or the release
+  checked dependencies, which is how 1.61.1 shipped six days after the
+  advisory above. `stage-prebuilt.sh`, `publish-images.sh` and
+  `release.sh` (except `check`, which reports) now scan every committed
+  `Cargo.lock` with osv-scanner, which reads both RustSec and GitHub's
+  advisory database, and refuse on any finding not accepted in
+  `osv-scanner.toml` with a reason and an end date. CI runs the same scan
+  on lockfile changes and daily, and a failing daily run opens a tracking
+  issue. `cargo-deny` alone would have missed two of today's findings:
+  `jsonwebtoken`'s CVE-2026-25537 and `block-buffer`'s
+  GHSA-qwgh-2vcv-g2f7 are GitHub-only, and on default features it never
+  saw `rustls-webpki` in `flint-store`, `lean/syncer` or `forge/syncer`.
+  Two findings are accepted until 2027-01-27, each with its reason in
+  `osv-scanner.toml`: `block-buffer` 0.10.4 (the fix needs the next
+  generation of the RustCrypto crates) and the unmaintained
+  `unsafe-libyaml` (no fix exists; it comes in through `serde_yaml`).
 
 ### Fixed
 

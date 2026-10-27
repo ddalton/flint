@@ -1,0 +1,29 @@
+# Dependabot SECURITY updates only: a PR that bumps a crate to its fixed
+# version when GitHub raises an advisory against one of these lockfiles.
+#
+# `open-pull-requests-limit: 0` turns off routine version-update PRs; it
+# does not limit security-update PRs. Those also need "Dependabot alerts"
+# and "Dependabot security updates" switched on in the repository's
+# Settings -> Code security. The lockfiles are independent crates (no
+# workspace), so each directory is listed; a new lockfile must be added
+# here too (scripts/cve-gate.sh finds new ones by itself).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /spdk-csi-driver
+      - /lean/syncer
+      - /lean/gateway
+      - /forge/syncer
+      - /crates/flint-store
+      - /crates/flint-s3-worker
+      - /lean/e2e/perf/fakes3
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0

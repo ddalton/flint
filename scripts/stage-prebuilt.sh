@@ -99,6 +99,12 @@ case "$SCOPE" in
     *)    echo "usage: stage-prebuilt.sh [all|lean|s3csi|forge|lite]" >&2; exit 2 ;;
 esac
 
+# CVE GATE (2026-10-27). Here, and not only at publish: a staged binary is
+# one publish-images.sh away from every cluster that pulls the tag, and
+# v1.61.1 was staged and shipped six days after an advisory against a
+# crate linked into it. See scripts/cve-gate.sh.
+"$(cd "$(dirname "$0")" && pwd)/cve-gate.sh"
+
 # Binaries from the LEAN crates — separate crates with separate target
 # dirs, which is why they could not simply join $BINS. `flint-sync`
 # (lean/syncer) is the image every workspace pod actually RUNS, and it

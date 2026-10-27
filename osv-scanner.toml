@@ -1,0 +1,28 @@
+# Advisories the CVE gate (scripts/cve-gate.sh) accepts, each with WHY and
+# an end date. An entry past its `ignoreUntil` stops being ignored, so the
+# gate goes red again and the decision is made again — an acceptance does
+# not get to become permanent by being forgotten.
+#
+# Add an entry only with a reason a reviewer can check: what reaches the
+# vulnerable code in flint (or why nothing does), and what the fix waits on.
+
+# block-buffer 0.10.4 — a CAUGHT panic inside `digest_blocks` can leave the
+# buffer cursor corrupt, and a later use of the same hasher reads or writes
+# out of bounds. The panic has to come from the compression callback, i.e.
+# the hash itself; flint hashes with RustCrypto's sha2/md-5/hmac, whose
+# compression functions do not panic, and flint never catches a panic
+# outside its tests (no `panic = "abort"` either, so this is the reason,
+# not the profile). The fix is block-buffer 0.12.1, which needs the
+# digest 0.11 generation of every RustCrypto crate in the graph.
+[[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+ignoreUntil = 2027-01-27
+reason = "panic must come from the hash's own compress fn, which RustCrypto's do not raise; fix needs digest 0.11 across the graph"
+
+# unsafe-libyaml 0.2.11 — unmaintained (archived 2024-03), no fixed
+# version exists. Reached through serde_yaml 0.9 in spdk-csi-driver
+# (itself deprecated). Replacing serde_yaml is its own change.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0449"
+ignoreUntil = 2027-01-27
+reason = "unmaintained, no fix; via serde_yaml 0.9 in spdk-csi-driver; replacing serde_yaml is its own change"
