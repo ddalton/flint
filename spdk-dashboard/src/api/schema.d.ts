@@ -339,7 +339,6 @@ export interface components {
                 [key: string]: components["schemas"]["NodeInfo"];
             };
             nodes: string[];
-            raw_volumes: Record<string, never>[];
             volumes: components["schemas"]["DashboardVolume"][];
         };
         DashboardDisk: {
@@ -391,40 +390,19 @@ export interface components {
             healthy_disks: number;
             healthy_volumes: number;
             initialized_disks: number;
-            local_nvme_volumes: number;
             total_disks: number;
             total_nodes: number;
             total_volumes: number;
         };
-        DashboardRaidStatus: {
-            auto_rebuild_enabled: boolean;
-            /** Format: int32 */
-            discovered_members: number;
-            members: components["schemas"]["RaidMember"][];
-            /** Format: int32 */
-            num_members: number;
-            /** Format: int32 */
-            operational_members: number;
-            /** Format: int32 */
-            raid_level: number;
-            rebuild_info?: null | components["schemas"]["RebuildInfo"];
-            state: string;
-            /** Format: int32 */
-            superblock_version?: number | null;
-        };
+        /**
+         * @description One replica leg. `status` is "healthy" / "stale" / "standby" projected
+         *     from the sync record; a single-replica volume (no record) reads
+         *     "active" / "failed" from verifying its one lvol. Whether a leg is served
+         *     locally is a property of the CONSUMER (consumer_raids[].node equals the
+         *     replica's node), not of the replica, so it is not repeated here.
+         */
         DashboardReplicaStatus: {
-            access_method: string;
-            is_local: boolean;
-            is_new_replica?: boolean | null;
-            last_io_timestamp?: string | null;
             node: string;
-            nvmf_target?: null | components["schemas"]["NvmfTarget"];
-            /** Format: int32 */
-            raid_member_slot?: number | null;
-            raid_member_state: string;
-            /** Format: double */
-            rebuild_progress?: number | null;
-            rebuild_target?: string | null;
             status: string;
             sync?: null | components["schemas"]["ReplicaSyncInfo"];
         };
@@ -440,6 +418,13 @@ export interface components {
              */
             creation_time: string;
             lvs_name?: string | null;
+            /**
+             * @description What made it: "user" for a CSI VolumeSnapshot (`snap_<vol>_<suffix>`),
+             *     "epoch" for an engine common-epoch snapshot (`epoch-<vol>-<seq>`,
+             *     retained for replica catch-up), "other" for any other lvol snapshot.
+             *     The tab counted both under one "Total Snapshots" until 2026-10-27.
+             */
+            kind: string;
             /** @description Node of the first copy; the copy list is authoritative. */
             node: string;
             ready_to_use: boolean;
@@ -456,31 +441,29 @@ export interface components {
             source_volume_id: string;
         };
         DashboardVolume: {
-            access_method: string;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Replicas in_sync (single-replica: the count when the lvol verified).
+             */
             active_replicas: number;
             consumer_raids: components["schemas"]["ConsumerRaid"][];
             current_epoch?: string | null;
             id: string;
-            local_nvme: boolean;
             name: string;
+            /** @description The replica nodes, one per leg — not the consumer (see consumer_raids). */
             nodes: string[];
-            nvmeof_enabled: boolean;
-            nvmeof_targets: components["schemas"]["NvmeofTargetInfo"][];
             pvc_info?: null | components["schemas"]["PvcInfo"];
-            raid_status?: null | components["schemas"]["DashboardRaidStatus"];
-            /** Format: double */
-            rebuild_progress?: number | null;
             replica_statuses: components["schemas"]["DashboardReplicaStatus"][];
             /** Format: int32 */
             replicas: number;
             size: string;
             spdk_validation_status: components["schemas"]["SpdkValidationStatus"];
+            /**
+             * @description Healthy / Degraded / Failed from the sync record (all / some / no
+             *     replicas in_sync). A single-replica volume (no record) reads Healthy
+             *     / Failed / Unknown from verifying its one lvol on its node.
+             */
             state: string;
-            /** Format: int32 */
-            target_port: number;
-            transport_type: string;
-            ublk_device?: Record<string, never> | null;
         };
         DeleteDiskRequest: {
             pci_address: string;
@@ -677,8 +660,6 @@ export interface components {
              *     warning = degraded volume or out-of-sync replica here.
              */
             health: string;
-            /** Format: int32 */
-            local_nvme_volumes: number;
             name: string;
             /**
              * Format: int32
@@ -698,24 +679,6 @@ export interface components {
         };
         NodesResponse: {
             nodes: components["schemas"]["NodeSummary"][];
-        };
-        NvmeofTargetInfo: {
-            active: boolean;
-            bdev_name: string;
-            /** Format: int64 */
-            connection_count: number;
-            node: string;
-            nqn: string;
-            target_ip: string;
-            /** Format: int32 */
-            target_port: number;
-            transport: string;
-        };
-        NvmfTarget: {
-            nqn: string;
-            target_ip: string;
-            target_port: string;
-            transport_type: string;
         };
         OrphanedVolumeInfo: {
             orphaned_since: string;
@@ -741,28 +704,6 @@ export interface components {
             namespace: string;
             storage_class: string;
         };
-        RaidMember: {
-            name: string;
-            /** Format: int32 */
-            slot: number;
-            state: string;
-            uuid?: string | null;
-        };
-        RebuildInfo: {
-            /** Format: int64 */
-            blocks_remaining: number;
-            /** Format: int64 */
-            blocks_total: number;
-            estimated_time_remaining?: string | null;
-            /** Format: double */
-            progress_percentage: number;
-            /** Format: int32 */
-            source_slot: number;
-            start_time?: string | null;
-            state: string;
-            /** Format: int32 */
-            target_slot: number;
-        };
         RefreshResponse: {
             error?: string | null;
             message?: string | null;
@@ -770,16 +711,35 @@ export interface components {
         };
         /**
          * @description Per-replica sync state projected from the PV `replica-sync-state`
-         *     annotation — the Tier-2 engine's live signal. `rebuild_progress` above
-         *     tracks the pre-Tier-2 blind-rebuild model and stays for raid-level
-         *     rebuild_info only; replica health is judged from here.
+         *     annotation — the Tier-2 engine's live signal; replica health is judged
+         *     from here.
          */
         ReplicaSyncInfo: {
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Epochs behind current_epoch; 0 when in_sync; null when unknowable
+             *     (no last_epoch — e.g. a full build from empty — or trimmed history).
+             */
             epoch_lag?: number | null;
+            /** @description E_f epoch name while a hot rejoin is in flight (renders "rejoining"). */
             hot_rejoin?: string | null;
             last_epoch?: string | null;
+            /**
+             * @description Maintenance-drain lease deadline (RFC3339) while the leg is fenced
+             *     out for a planned csi-node roll and the catch-up skips it; only a
+             *     LIVE mark is projected (an expired deadline reads as absent, as the
+             *     engine's own readers treat it). Renders "draining".
+             */
+            maint_drain?: string | null;
             reason?: string | null;
+            /**
+             * @description What the head was rebuilt from while a catch-up is in progress: an
+             *     epoch name for a delta catch-up, "empty" for the thin-aware full
+             *     build (no shared epoch history). Cleared when the replica returns
+             *     to in_sync. With epoch_lag null this is the only phase signal the
+             *     engine records — it publishes no byte-level copy progress.
+             */
+            rebuild_base?: string | null;
             since?: string | null;
             sync_state: string;
         };
@@ -865,7 +825,6 @@ export interface components {
             uninitialized_disks: components["schemas"]["NodeDiskListing"][];
         };
         VolumesResponse: {
-            raw_volumes: Record<string, never>[];
             volumes: components["schemas"]["DashboardVolume"][];
         };
         WindowStep: {

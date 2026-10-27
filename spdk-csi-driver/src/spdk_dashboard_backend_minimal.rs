@@ -20,7 +20,7 @@ use crate::minimal_models::DiskInfo;
 #[into_params(parameter_in = Query)]
 struct DashboardQuery {
     // Volume filters
-    volume_filter: Option<String>, // "all", "healthy", "degraded", "failed", "rebuilding", "local-nvme", "orphaned"
+    volume_filter: Option<String>, // "all", "healthy", "degraded", "failed", "faulted", "rebuilding"; "orphaned" matches no volume (orphans are per disk)
     volume_node: Option<String>,   // Filter volumes by node
     
     // Disk filters
@@ -34,27 +34,29 @@ struct DashboardQuery {
     node: Option<String>,          // Apply to both volumes and disks
 }
 
-// Dashboard data structures - kept compatible with frontend
+// Dashboard data structures — the API contract (src/bin/dashboard_openapi.rs
+// emits the spec the SPA's types are generated from). Every field is a
+// datum this backend actually computes. The pre-Tier-2 placeholders
+// (raid_status/rebuild_info, rebuild_progress, local_nvme, access_method,
+// transport_type/target_port, the ublk and NVMe-oF descriptors) were
+// dropped 2026-10-27: they had been emitted as constants or null since the
+// Tier-2 engine replaced the blind-rebuild model, and the SPA had cards,
+// filters and a graph layer keyed on them.
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardVolume {
     id: String,
     name: String,
     size: String,
+    /// Healthy / Degraded / Failed from the sync record (all / some / no
+    /// replicas in_sync). A single-replica volume (no record) reads Healthy
+    /// / Failed / Unknown from verifying its one lvol on its node.
     state: String,
     replicas: i32,
+    /// Replicas in_sync (single-replica: the count when the lvol verified).
     active_replicas: i32,
-    local_nvme: bool,
-    access_method: String,
-    rebuild_progress: Option<f64>,
+    /// The replica nodes, one per leg — not the consumer (see consumer_raids).
     nodes: Vec<String>,
     replica_statuses: Vec<DashboardReplicaStatus>,
-    nvmeof_targets: Vec<NvmeofTargetInfo>,
-    nvmeof_enabled: bool,
-    transport_type: String,
-    target_port: u16,
-    raid_status: Option<DashboardRaidStatus>,
-    #[schema(value_type = Option<Object>)]
-    ublk_device: Option<serde_json::Value>,
     spdk_validation_status: SpdkValidationStatus,
     pvc_info: Option<PvcInfo>,
     current_epoch: Option<String>,
@@ -84,8 +86,11 @@ struct ConsumerRaidMember {
     name: Option<String>,
     uuid: Option<String>,
     is_configured: bool,
-    /// Replica (by node) this base backs, resolved against the sync record;
-    /// None when unmatchable (failed slot, no record).
+    /// Replica (by node) this base backs, resolved against the sync record.
+    /// For a nulled slot: the leg that held it, by position (legs are
+    /// assembled in replica-index order and a hot rejoin refills the one
+    /// empty slot), set only when that replica is not already a configured
+    /// base. None when unmatchable (no record, ambiguous).
     replica_node: Option<String>,
 }
 
@@ -117,87 +122,43 @@ struct DashboardDisk {
     device_type: String, // "NVMe", "SCSI/SATA", "VirtIO", "IDE", "Unknown"
 }
 
+/// One replica leg. `status` is "healthy" / "stale" / "standby" projected
+/// from the sync record; a single-replica volume (no record) reads
+/// "active" / "failed" from verifying its one lvol. Whether a leg is served
+/// locally is a property of the CONSUMER (consumer_raids[].node equals the
+/// replica's node), not of the replica, so it is not repeated here.
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardReplicaStatus {
     node: String,
     status: String,
-    is_local: bool,
-    last_io_timestamp: Option<String>,
-    rebuild_progress: Option<f64>,
-    rebuild_target: Option<String>,
-    is_new_replica: Option<bool>,
-    nvmf_target: Option<NvmfTarget>,
-    access_method: String,
-    raid_member_slot: Option<u32>,
-    raid_member_state: String,
     sync: Option<ReplicaSyncInfo>,
 }
 
 /// Per-replica sync state projected from the PV `replica-sync-state`
-/// annotation — the Tier-2 engine's live signal. `rebuild_progress` above
-/// tracks the pre-Tier-2 blind-rebuild model and stays for raid-level
-/// rebuild_info only; replica health is judged from here.
+/// annotation — the Tier-2 engine's live signal; replica health is judged
+/// from here.
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct ReplicaSyncInfo {
     sync_state: String,
     last_epoch: Option<String>,
+    /// Epochs behind current_epoch; 0 when in_sync; null when unknowable
+    /// (no last_epoch — e.g. a full build from empty — or trimmed history).
     epoch_lag: Option<u64>,
     since: Option<String>,
     reason: Option<String>,
+    /// E_f epoch name while a hot rejoin is in flight (renders "rejoining").
     hot_rejoin: Option<String>,
-}
-
-#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
-struct NvmfTarget {
-    nqn: String,
-    target_ip: String,
-    target_port: String,
-    transport_type: String,
-}
-
-#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
-struct NvmeofTargetInfo {
-    nqn: String,
-    target_ip: String,
-    target_port: u16,
-    transport: String,
-    node: String,
-    bdev_name: String,
-    active: bool,
-    connection_count: u64,
-}
-
-#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
-struct DashboardRaidStatus {
-    raid_level: u32,
-    state: String,
-    num_members: u32,
-    operational_members: u32,
-    discovered_members: u32,
-    members: Vec<RaidMember>,
-    rebuild_info: Option<RebuildInfo>,
-    superblock_version: Option<u32>,
-    auto_rebuild_enabled: bool,
-}
-
-#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
-struct RaidMember {
-    slot: u32,
-    name: String,
-    state: String,
-    uuid: Option<String>,
-}
-
-#[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
-struct RebuildInfo {
-    state: String,
-    target_slot: u32,
-    source_slot: u32,
-    blocks_remaining: u64,
-    blocks_total: u64,
-    progress_percentage: f64,
-    estimated_time_remaining: Option<String>,
-    start_time: Option<String>,
+    /// Maintenance-drain lease deadline (RFC3339) while the leg is fenced
+    /// out for a planned csi-node roll and the catch-up skips it; only a
+    /// LIVE mark is projected (an expired deadline reads as absent, as the
+    /// engine's own readers treat it). Renders "draining".
+    maint_drain: Option<String>,
+    /// What the head was rebuilt from while a catch-up is in progress: an
+    /// epoch name for a delta catch-up, "empty" for the thin-aware full
+    /// build (no shared epoch history). Cleared when the replica returns
+    /// to in_sync. With epoch_lag null this is the only phase signal the
+    /// engine records — it publishes no byte-level copy progress.
+    rebuild_base: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
@@ -237,8 +198,6 @@ struct OrphanedVolumeInfo {
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct DashboardData {
     volumes: Vec<DashboardVolume>,
-    #[schema(value_type = Vec<Object>)]
-    raw_volumes: Vec<serde_json::Value>,  // Unmanaged SPDK volumes
     disks: Vec<DashboardDisk>,
     nodes: Vec<String>,
     node_info: HashMap<String, NodeInfo>,  // node_name -> node info with memory details
@@ -261,8 +220,6 @@ struct NodeInfo {
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
 struct VolumesResponse {
     volumes: Vec<DashboardVolume>,
-    #[schema(value_type = Vec<Object>)]
-    raw_volumes: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize, Debug, Clone, utoipa::ToSchema)]
@@ -291,7 +248,6 @@ struct NodeSummary {
     disks_uninitialized: u32,
     /// Volumes with a replica on this node.
     volumes_total: u32,
-    local_nvme_volumes: u32,
     /// This node's replicas not in_sync (stale/standby/rejoining).
     replicas_out_of_sync: u32,
     /// Volumes with a replica here whose state is not Healthy.
@@ -316,7 +272,6 @@ struct DashboardOverview {
     degraded_volumes: usize,
     failed_volumes: usize,
     faulted_volumes: usize,
-    local_nvme_volumes: usize,
     total_disks: usize,
     healthy_disks: usize,
     initialized_disks: usize,
@@ -713,20 +668,27 @@ async fn convert_disk_info_to_dashboard(disk_info: &DiskInfo, node_url: &str, st
     // Get IOPS and latency stats for the base bdev
     let stats = fetch_bdev_stats(node_url, &disk_info.bdev_name, state).await;
 
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let cap_gb = (disk_info.size_bytes as f64 / GIB * 100.0).round() / 100.0;
+    // Without a logical volume store the agent reports free_space 0, which
+    // means "no store", not "full": nothing is allocated on such a disk.
+    let (free_gb, allocated_gb) = if disk_info.blobstore_initialized {
+        let free = (disk_info.free_space as f64 / GIB * 100.0).round() / 100.0;
+        (free, ((cap_gb - free) * 100.0).round() / 100.0)  // the difference shows metadata overhead like 0.02GB
+    } else {
+        (0.0, 0.0)
+    };
+
     DashboardDisk {
         id: format!("{}_{}", disk_info.node_name, disk_info.pci_address.replace(":", "-")),
         node: disk_info.node_name.clone(),
         pci_addr: disk_info.pci_address.clone(),
         capacity: disk_info.size_bytes as i64,
         // Use f64 for decimal precision (shows actual capacity like 3.98GB instead of 3GB)
-        capacity_gb: (disk_info.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0,
-        free_space: (disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0,
-        allocated_space: {
-            let cap_gb = (disk_info.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
-            let free_gb = (disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0) * 100.0).round() / 100.0;
-            ((cap_gb - free_gb) * 100.0).round() / 100.0  // Shows metadata overhead like 0.02GB
-        },
-        free_space_display: format!("{:.2}GB", disk_info.free_space as f64 / (1024.0 * 1024.0 * 1024.0)),
+        capacity_gb: cap_gb,
+        free_space: free_gb,
+        allocated_space: allocated_gb,
+        free_space_display: format!("{:.2}GB", free_gb),
         healthy: disk_info.healthy,
         blobstore_initialized: disk_info.blobstore_initialized,
         is_system_disk: disk_info.is_system_disk,
@@ -968,9 +930,25 @@ struct HotRejoinWindow {
     estimator_bytes: Option<u64>,
 }
 
+/// The engine stamps its PV events `reportingComponent:
+/// disk.chert.us/node-agent` (replica_sync::emit_pv_event); the s3csi node
+/// uses the CSI driver name. The old filter accepted only the latter, so the
+/// Events tab and the recovery panel were empty on every live cluster
+/// (dash1, 2026-10-27: 15 engine events on the PV, `/api/events` → []).
+fn is_flint_engine_event(e: &k8s_openapi::api::core::v1::Event) -> bool {
+    e.reporting_component
+        .as_deref()
+        .map(|c| c.starts_with("disk.chert.us") || c.starts_with("disk.csi.chert.us"))
+        .unwrap_or(false)
+}
+
 fn categorize_event_reason(reason: &str) -> &'static str {
     if reason.starts_with("HotRejoin") {
         "hot_rejoin"
+    } else if reason.starts_with("Maintenance") {
+        // MaintenanceDrain / MaintenanceMarkCleared: a leg fenced out of
+        // and readmitted after a planned csi-node roll (maint_roll.rs).
+        "maintenance"
     } else if reason.starts_with("VolumeDataPath") {
         "data_path"
     } else if reason.starts_with("Cutover") {
@@ -1062,9 +1040,11 @@ fn epoch_lag(record: &crate::replica_sync::VolumeSyncRecord, last_epoch: Option<
 /// (replica_statuses, nodes, active_replicas = in_sync count, current_epoch).
 fn project_sync_record(
     rec: &crate::replica_sync::VolumeSyncRecord,
-    primary_node: &str,
 ) -> (Vec<DashboardReplicaStatus>, Vec<String>, i32, Option<String>) {
     use crate::replica_sync::SyncState;
+    // The drain mark's TTL is enforced by readers (an expired deadline reads
+    // as absent) — project it the way the engine's own readers see it.
+    let now = crate::replica_sync::now_rfc3339();
     let statuses: Vec<DashboardReplicaStatus> = rec.replicas.iter().map(|r| {
         DashboardReplicaStatus {
             node: r.node_name.clone(),
@@ -1073,15 +1053,6 @@ fn project_sync_record(
                 SyncState::Stale => "stale",
                 SyncState::Standby => "standby",
             }.to_string(),
-            is_local: r.node_name == primary_node,
-            last_io_timestamp: None,
-            rebuild_progress: None,
-            rebuild_target: None,
-            is_new_replica: Some(false),
-            nvmf_target: None,
-            access_method: "Direct".to_string(),
-            raid_member_slot: None,
-            raid_member_state: "none".to_string(),
             sync: Some(ReplicaSyncInfo {
                 sync_state: r.sync_state.as_str().to_string(),
                 last_epoch: r.last_epoch.clone(),
@@ -1093,6 +1064,8 @@ fn project_sync_record(
                 since: r.since.clone(),
                 reason: r.reason.clone(),
                 hot_rejoin: r.hot_rejoin.clone(),
+                maint_drain: if r.maint_drain_live(&now) { r.maint_drain.clone() } else { None },
+                rebuild_base: r.reverted_to.clone(),
             }),
         }
     }).collect();
@@ -1152,7 +1125,10 @@ fn project_node_raids(node: &str, result: &serde_json::Value) -> Vec<ConsumerRai
 /// Label each configured base with the replica it backs, using the same
 /// matching rules as `replica_sync::replicas_missing_from_raid`: identity or
 /// live uuid, name equal to the lvol uuid (local base), or the deterministic
-/// remote bdev name.
+/// remote bdev name. Then label each nulled slot with the leg that held it,
+/// by position, unless that leg is already a configured base elsewhere —
+/// so a drained or failed leg reads as "the leg on X, out of the raid"
+/// rather than an anonymous failed slot (dash1 roll, 2026-10-27).
 fn label_consumer_raid_members(
     raids: &mut [ConsumerRaid],
     volume_id: &str,
@@ -1182,6 +1158,21 @@ fn label_consumer_raid_members(
                         || name == remote
                 })
                 .map(|(_, rec)| rec.node_name.clone());
+        }
+        let labelled: std::collections::HashSet<String> = raid
+            .base_bdevs
+            .iter()
+            .filter_map(|m| m.replica_node.clone())
+            .collect();
+        for (slot, member) in raid.base_bdevs.iter_mut().enumerate() {
+            if member.is_configured || member.replica_node.is_some() {
+                continue;
+            }
+            if let Some(rec) = record.replicas.get(slot) {
+                if !labelled.contains(&rec.node_name) {
+                    member.replica_node = Some(rec.node_name.clone());
+                }
+            }
         }
     }
 }
@@ -1258,24 +1249,42 @@ async fn fetch_volumes_from_pvs(
                     let pv_name = pv.metadata.name.as_deref().unwrap_or("unknown");
                     
                     if let Some(attrs) = &csi.volume_attributes {
+                        // An NFS share owns no SPDK object of its own: the
+                        // emptyDir class serves a kubelet directory, the PVC
+                        // backend serves another claim that has its own row
+                        // here. Say so, instead of verifying a non-existent
+                        // lvol on an empty node name (dash1, 2026-10-27: a
+                        // healthy share read "Unknown, 0/1, 1 replica not in
+                        // sync" with a red "No node information").
+                        if attrs.get("nfs.chert.us/enabled").map(|v| v == "true").unwrap_or(false) {
+                            volumes.push(nfs_share_volume(pv_name, pvc_info_of(&pv, spec), attrs));
+                            println!("   Found NFS share: {}", pv_name);
+                            continue;
+                        }
+
                         let lvol_uuid = attrs.get("disk.chert.us/lvol-uuid")
                             .map(|s| s.as_str()).unwrap_or("");
                         let node_name = attrs.get("disk.chert.us/node-name")
                             .map(|s| s.as_str()).unwrap_or("");
                         let replica_count = attrs.get("disk.chert.us/replica-count")
                             .and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
-                        let size_str = attrs.get("size")
-                            .map(|s| s.as_str()).unwrap_or("0");
+                        // The `size` attribute is what CreateVolume stamped; a
+                        // restore from a snapshot stamps none (dash1,
+                        // 2026-10-27: the restored volume read "0"), so fall
+                        // back to the PV's own capacity, which is what
+                        // Kubernetes reports for it anyway.
+                        let capacity = spec
+                            .capacity
+                            .as_ref()
+                            .and_then(|c| c.get("storage"))
+                            .map(|q| q.0.clone());
+                        let size_str = attrs
+                            .get("size")
+                            .cloned()
+                            .or(capacity)
+                            .unwrap_or_else(|| "0".to_string());
                         
-                        // Get PVC info from claimRef
-                        let pvc_info = spec.claim_ref.as_ref()
-                            .map(|claim| PvcInfo {
-                                name: claim.name.clone().unwrap_or_default(),
-                                namespace: claim.namespace.clone().unwrap_or_default(),
-                                storage_class: spec.storage_class_name.clone().unwrap_or_default(),
-                                creation_timestamp: pv.metadata.creation_timestamp.as_ref()
-                                    .map(|t| t.0.to_string()).unwrap_or_default(),
-                            });
+                        let pvc_info = pvc_info_of(&pv, spec);
                         
                         // Check if the lvol still exists on the node
                         let (state_str, validation_status) = if node_name.is_empty() {
@@ -1324,25 +1333,26 @@ async fn fetch_volumes_from_pvs(
                                 }
                             });
 
+                        // "failed" only when the verify answered no; an agent
+                        // that did not answer (a csi-node restart) is
+                        // "unknown", not a failed replica.
                         let primary_status = DashboardReplicaStatus {
                             node: node_name.to_string(),
-                            status: if validation_status.has_spdk_backing { "active" } else { "failed" }.to_string(),
-                            is_local: true,
-                            last_io_timestamp: None,
-                            rebuild_progress: None,
-                            rebuild_target: None,
-                            is_new_replica: Some(false),
-                            nvmf_target: None,
-                            access_method: "Direct".to_string(),
-                            raid_member_slot: None,
-                            raid_member_state: "none".to_string(),
+                            status: if validation_status.has_spdk_backing {
+                                "active"
+                            } else if validation_status.validation_severity == "warning" {
+                                "unknown"
+                            } else {
+                                "failed"
+                            }
+                            .to_string(),
                             sync: None,
                         };
 
                         let (replica_statuses, nodes, active_replicas, current_epoch) =
                             match &sync_record {
                                 Some(rec) if !rec.replicas.is_empty() => {
-                                    project_sync_record(rec, node_name)
+                                    project_sync_record(rec)
                                 }
                                 _ => (
                                     vec![primary_status],
@@ -1400,21 +1410,12 @@ async fn fetch_volumes_from_pvs(
                         volumes.push(DashboardVolume {
                             id: pv_name.to_string(),
                             name: pvc_info.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| pv_name.to_string()),
-                            size: size_str.to_string(),
+                            size: size_str.clone(),
                             state: state_str.clone(),
                             replicas: replica_count,
                             active_replicas,
-                            local_nvme: true, // Flint volumes are always local
-                            access_method: "Direct".to_string(),
-                            rebuild_progress: None,
                             nodes,
                             replica_statuses,
-                            nvmeof_targets: Vec::new(),
-                            nvmeof_enabled: false,
-                            transport_type: "Local".to_string(),
-                            target_port: 0,
-                            raid_status: None,
-                            ublk_device: None,
                             spdk_validation_status: validation_status,
                             pvc_info,
                             current_epoch,
@@ -1430,6 +1431,57 @@ async fn fetch_volumes_from_pvs(
     
     println!("✅ [DASHBOARD] Found {} managed volumes", volumes.len());
     Ok(volumes)
+}
+
+/// The claim a PV is bound to, as the dashboard shows it.
+fn pvc_info_of(
+    pv: &k8s_openapi::api::core::v1::PersistentVolume,
+    spec: &k8s_openapi::api::core::v1::PersistentVolumeSpec,
+) -> Option<PvcInfo> {
+    spec.claim_ref.as_ref().map(|claim| PvcInfo {
+        name: claim.name.clone().unwrap_or_default(),
+        namespace: claim.namespace.clone().unwrap_or_default(),
+        storage_class: spec.storage_class_name.clone().unwrap_or_default(),
+        creation_timestamp: pv.metadata.creation_timestamp.as_ref()
+            .map(|t| t.0.to_string()).unwrap_or_default(),
+    })
+}
+
+/// The row for an NFS share (`nfs.chert.us/enabled`): no SPDK legs, no
+/// sync record, no consumer raid, so no replica count and no epoch. Its
+/// health is the NFS server pod's, which this backend does not watch, so
+/// the state stays "Unknown" with an informational note naming the backend
+/// rather than an error about a missing lvol.
+fn nfs_share_volume(
+    pv_name: &str,
+    pvc_info: Option<PvcInfo>,
+    attrs: &std::collections::BTreeMap<String, String>,
+) -> DashboardVolume {
+    let note = if crate::rwx_nfs::is_emptydir_backend(attrs) {
+        "NFS share served from an emptyDir: no SPDK volume by design"
+    } else if attrs.get("nfs.chert.us/backend").map(|v| v == "pvc").unwrap_or(false) {
+        "NFS share served from a backing claim (listed on its own row): no SPDK volume of its own"
+    } else {
+        "NFS share: no SPDK volume of its own"
+    };
+    DashboardVolume {
+        id: pv_name.to_string(),
+        name: pvc_info.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| pv_name.to_string()),
+        size: attrs.get("size").cloned().unwrap_or_else(|| "0".to_string()),
+        state: "Unknown".to_string(),
+        replicas: 0,
+        active_replicas: 0,
+        nodes: vec![],
+        replica_statuses: vec![],
+        spdk_validation_status: SpdkValidationStatus {
+            has_spdk_backing: false,
+            validation_message: Some(note.to_string()),
+            validation_severity: "info".to_string(),
+        },
+        pvc_info,
+        current_epoch: None,
+        consumer_raids: vec![],
+    }
 }
 
 /// Verify if an lvol exists on a node by its UUID
@@ -1485,17 +1537,14 @@ fn filter_volumes(volumes: Vec<DashboardVolume>, query: &DashboardQuery) -> Vec<
             "degraded" => filtered.into_iter().filter(|v| v.state == "Degraded").collect(),
             "failed" => filtered.into_iter().filter(|v| v.state == "Failed").collect(),
             "faulted" => filtered.into_iter().filter(|v| v.state == "Degraded" || v.state == "Failed").collect(),
+            // Tier-2 recovery in progress: a replica not in_sync — the sync
+            // record is the only recovery signal the engine emits.
             "rebuilding" => filtered.into_iter().filter(|v| {
-                v.replica_statuses.iter().any(|r|
-                    r.status == "rebuilding" ||
-                    r.rebuild_progress.is_some() ||
-                    r.is_new_replica == Some(true) ||
-                    // Tier-2 recovery in progress: replica not in_sync
-                    r.sync.as_ref().map(|s| s.sync_state != "in_sync").unwrap_or(false)
-                ) || v.raid_status.as_ref().map(|rs| rs.rebuild_info.is_some()).unwrap_or(false)
+                v.replica_statuses.iter().any(replica_out_of_sync)
             }).collect(),
-            "local-nvme" => filtered.into_iter().filter(|v| v.local_nvme).collect(),
-            "orphaned" => Vec::new(), // Orphaned volumes are in raw_volumes, not main volumes
+            // Orphans are per-disk lvols (DashboardDisk.orphaned_spdk_volumes),
+            // never volumes.
+            "orphaned" => Vec::new(),
             "all" | _ => filtered,
         };
         println!("🔍 [FILTER] Volume state filter '{}': {} -> {} volumes", filter, original_count, filtered.len());
@@ -1581,7 +1630,6 @@ async fn build_dashboard_aggregate(state: &AppState) -> Result<DashboardData, Bo
 
     let dashboard_data = DashboardData {
         volumes: dashboard_volumes,
-        raw_volumes: Vec::new(), // raw_volumes surface as orphans on disks, not separately
         disks: dashboard_disks,
         nodes,
         node_info,
@@ -1656,7 +1704,6 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
 
     Ok(DashboardData {
         volumes: filtered_volumes,
-        raw_volumes: Vec::new(),
         disks: filtered_disks,
         nodes,
         node_info,
@@ -1665,7 +1712,7 @@ async fn fetch_dashboard_data_minimal(state: &AppState, query: Option<DashboardQ
 
 /// Handle GET /api/dashboard - Main dashboard endpoint (always fetches fresh data)
 /// Supports query parameters for backend filtering:
-/// - volume_filter: "all", "healthy", "degraded", "failed", "rebuilding", "local-nvme"
+/// - volume_filter: "all", "healthy", "degraded", "failed", "faulted", "rebuilding" ("orphaned" matches no volume)
 /// - volume_node: filter volumes by node name (partial match)
 /// - disk_node: filter disks by node name (partial match)
 /// - disk_initialized: filter disks by blobstore initialization (true/false)
@@ -1722,12 +1769,7 @@ async fn get_events_minimal(
                 .items
                 .iter()
                 .filter_map(|e| {
-                    let flint_emitter = e
-                        .reporting_component
-                        .as_deref()
-                        .map(|c| c.starts_with("disk.csi.chert.us"))
-                        .unwrap_or(false);
-                    if !flint_emitter {
+                    if !is_flint_engine_event(e) {
                         return None;
                     }
                     let volume = e.involved_object.name.clone().unwrap_or_default();
@@ -1818,7 +1860,7 @@ async fn get_volumes_minimal(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     match fetch_dashboard_data_minimal(&state, query).await {
         Ok(data) => Ok(warp::reply::with_status(
-            warp::reply::json(&VolumesResponse { volumes: data.volumes, raw_volumes: data.raw_volumes }),
+            warp::reply::json(&VolumesResponse { volumes: data.volumes }),
             warp::http::StatusCode::OK,
         )),
         Err(e) => Ok(warp::reply::with_status(
@@ -1861,12 +1903,14 @@ async fn get_nodes_minimal(
     }
 }
 
-/// True when this replica is behind its volume (Tier-2 sync signal when
-/// present, legacy status string otherwise).
+/// True when this replica is behind its volume: the Tier-2 sync record says
+/// not in_sync. Without a record (a single-replica volume) nothing is
+/// recovering — a missing lvol is "failed", which node health counts
+/// separately.
 fn replica_out_of_sync(replica: &DashboardReplicaStatus) -> bool {
     match &replica.sync {
         Some(sync) => sync.sync_state != "in_sync",
-        None => matches!(replica.status.as_str(), "stale" | "standby" | "rebuilding"),
+        None => false,
     }
 }
 
@@ -1911,11 +1955,13 @@ fn node_summaries(data: &DashboardData) -> Vec<NodeSummary> {
                     .filter(|d| !d.is_system_disk && !d.blobstore_initialized)
                     .count() as u32,
                 volumes_total: volumes.len() as u32,
-                local_nvme_volumes: volumes.iter().filter(|v| v.local_nvme).count() as u32,
                 replicas_out_of_sync: replicas_out,
                 volumes_not_healthy,
-                capacity_gb: disks.iter().map(|d| d.capacity_gb).sum(),
-                allocated_gb: disks.iter().map(|d| d.allocated_space).sum(),
+                // The logical volume stores' figures: a disk without one has
+                // nothing allocated, and its agent-reported free_space of 0
+                // counted as a full disk here (dash1-cp-1, 2026-10-27).
+                capacity_gb: disks.iter().filter(|d| d.blobstore_initialized).map(|d| d.capacity_gb).sum(),
+                allocated_gb: disks.iter().filter(|d| d.blobstore_initialized).map(|d| d.allocated_space).sum(),
                 health: health.to_string(),
             }
         })
@@ -1949,7 +1995,6 @@ fn dashboard_overview(data: &DashboardData) -> DashboardOverview {
         degraded_volumes: degraded,
         failed_volumes: failed,
         faulted_volumes: degraded + failed,
-        local_nvme_volumes: data.volumes.iter().filter(|v| v.local_nvme).count(),
         total_disks: data.disks.len(),
         healthy_disks: data.disks.iter().filter(|d| d.healthy).count(),
         initialized_disks: data.disks.iter().filter(|d| d.blobstore_initialized).count(),
@@ -2176,6 +2221,11 @@ struct DashboardSnapshot {
     node: String,
     /// One entry per node currently holding a copy.
     replica_bdev_details: Vec<SnapshotCopy>,
+    /// What made it: "user" for a CSI VolumeSnapshot (`snap_<vol>_<suffix>`),
+    /// "epoch" for an engine common-epoch snapshot (`epoch-<vol>-<seq>`,
+    /// retained for replica catch-up), "other" for any other lvol snapshot.
+    /// The tab counted both under one "Total Snapshots" until 2026-10-27.
+    kind: String,
 }
 
 /// The subset of the node agent's SnapshotInfo the dashboard consumes.
@@ -2216,9 +2266,16 @@ fn merge_snapshot_copies(
         .map(|(name, mut copies)| {
             copies.sort_by(|a, b| a.0.cmp(&b.0));
             let (first_node, first) = copies[0].clone();
+            let kind = match crate::identity::lvol_owner(&name) {
+                Some((_, crate::identity::LvolKind::UserSnapshot)) => "user",
+                Some((_, crate::identity::LvolKind::EpochSnapshot)) => "epoch",
+                _ => "other",
+            }
+            .to_string();
             DashboardSnapshot {
                 snapshot_uuid: first.snapshot_uuid,
                 snapshot_name: name,
+                kind,
                 source_volume_id: first.source_volume_id,
                 lvs_name: first.lvs_name,
                 size_bytes: first.size_bytes,
@@ -3788,8 +3845,7 @@ mod api_doc {
         components(schemas(
             LoginRequest, LoginResponse, crate::dashboard_auth::Role,
             DashboardData, DashboardVolume, DashboardDisk, DashboardReplicaStatus,
-            ReplicaSyncInfo, NvmfTarget, NvmeofTargetInfo, DashboardRaidStatus,
-            RaidMember, RebuildInfo, SpdkValidationStatus, PvcInfo, ProvisionedVolume,
+            ReplicaSyncInfo, SpdkValidationStatus, PvcInfo, ProvisionedVolume,
             OrphanedVolumeInfo, ConsumerRaid, ConsumerRaidMember, NodeInfo,
             DashboardOverview, VolumesResponse, DisksResponse, NodesResponse,
             NodeSummary, EventsResponse,
@@ -3862,9 +3918,7 @@ mod tests {
         let volumes = vec![create_test_volume(
             TL_VOL,
             "Healthy",
-            vec!["runk-aws-1".to_string(), "runk-aws-2".to_string()],
-            false,
-            false,
+            vec!["runk-aws-1".to_string(), "runk-aws-2".to_string()], false
         )];
         let by_id: HashMap<&str, &DashboardVolume> =
             volumes.iter().map(|v| (v.id.as_str(), v)).collect();
@@ -3895,9 +3949,7 @@ mod tests {
         let volumes = vec![create_test_volume(
             "pvc-live",
             "Healthy",
-            vec!["n1".to_string()],
-            false,
-            false,
+            vec!["n1".to_string()], false
         )];
         let by_id: HashMap<&str, &DashboardVolume> =
             volumes.iter().map(|v| (v.id.as_str(), v)).collect();
@@ -3927,8 +3979,7 @@ mod tests {
             "pvc-live",
             "Healthy",
             vec!["n1".to_string()],
-            false,
-            true, // rebuilding → per-node status "rebuilding"
+            true, // recovering → per-node status "stale"
         )];
         let by_id: HashMap<&str, &DashboardVolume> =
             volumes.iter().map(|v| (v.id.as_str(), v)).collect();
@@ -3945,7 +3996,7 @@ mod tests {
         assert_eq!(classified.len(), 1);
         let provisioned = provisioned_of(&classified);
         assert_eq!(provisioned[0].replica_type, "replica");
-        assert_eq!(provisioned[0].status, "rebuilding");
+        assert_eq!(provisioned[0].status, "stale");
     }
 
     /// Live pin: the attribution key minted from a disk's node+PCI equals
@@ -4299,6 +4350,21 @@ mod tests {
         assert!(parse_hot_rejoin_window("v", None, "").is_none());
     }
 
+    /// The engine's own stamp passes; the s3csi node's driver-name stamp
+    /// passes; kubelet/scheduler events on the same PV do not.
+    #[test]
+    fn engine_events_are_recognised_by_their_reporting_component() {
+        use k8s_openapi::api::core::v1::Event;
+        let ev = |c: Option<&str>| Event {
+            reporting_component: c.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        assert!(is_flint_engine_event(&ev(Some("disk.chert.us/node-agent"))));
+        assert!(is_flint_engine_event(&ev(Some("disk.csi.chert.us"))));
+        assert!(!is_flint_engine_event(&ev(Some("kubelet"))));
+        assert!(!is_flint_engine_event(&ev(None)));
+    }
+
     #[test]
     fn categorize_event_reasons() {
         assert_eq!(categorize_event_reason("HotRejoinSucceeded"), "hot_rejoin");
@@ -4310,6 +4376,8 @@ mod tests {
         assert_eq!(categorize_event_reason("CutoverSucceeded"), "cutover");
         assert_eq!(categorize_event_reason("EpochCutFailed"), "epoch");
         assert_eq!(categorize_event_reason("VolumeDegraded"), "health");
+        assert_eq!(categorize_event_reason("MaintenanceDrain"), "maintenance");
+        assert_eq!(categorize_event_reason("MaintenanceMarkCleared"), "maintenance");
         assert_eq!(categorize_event_reason("SomethingElse"), "other");
     }
 
@@ -4351,28 +4419,43 @@ mod tests {
                    "sync_state":"in_sync","last_epoch":"epoch-v-2"},
                   {"node_name":"n2","node_uid":"u2","lvol_uuid":"x2",
                    "sync_state":"stale","last_epoch":"epoch-v-1",
-                   "reason":"leg failure","hot_rejoin":"epoch-v-2"}
+                   "reason":"leg failure","hot_rejoin":"epoch-v-2",
+                   "reverted_to":"epoch-v-1","maint_drain":"2099-01-01T00:00:00Z"},
+                  {"node_name":"n3","node_uid":"u3","lvol_uuid":"x3",
+                   "sync_state":"stale",
+                   "reverted_to":"empty","maint_drain":"2000-01-01T00:00:00Z"}
                 ]}"#,
         ).unwrap();
 
-        let (statuses, nodes, active, current_epoch) = project_sync_record(&rec, "n1");
-        assert_eq!(nodes, vec!["n1", "n2"]);
+        let (statuses, nodes, active, current_epoch) = project_sync_record(&rec);
+        assert_eq!(nodes, vec!["n1", "n2", "n3"]);
         assert_eq!(active, 1);
         assert_eq!(current_epoch.as_deref(), Some("epoch-v-2"));
 
         assert_eq!(statuses[0].status, "healthy");
-        assert!(statuses[0].is_local);
         let s0 = statuses[0].sync.as_ref().unwrap();
         assert_eq!(s0.sync_state, "in_sync");
         assert_eq!(s0.epoch_lag, Some(0));
+        assert_eq!(s0.maint_drain, None);
+        assert_eq!(s0.rebuild_base, None);
 
+        // Delta catch-up from epoch-v-1 under a LIVE drain lease.
         assert_eq!(statuses[1].status, "stale");
-        assert!(!statuses[1].is_local);
         let s1 = statuses[1].sync.as_ref().unwrap();
         assert_eq!(s1.sync_state, "stale");
         assert_eq!(s1.epoch_lag, Some(1));
         assert_eq!(s1.reason.as_deref(), Some("leg failure"));
         assert_eq!(s1.hot_rejoin.as_deref(), Some("epoch-v-2"));
+        assert_eq!(s1.rebuild_base.as_deref(), Some("epoch-v-1"));
+        assert_eq!(s1.maint_drain.as_deref(), Some("2099-01-01T00:00:00Z"));
+
+        // Full build from empty (no last_epoch → lag unknowable); the drain
+        // lease has EXPIRED, so it is not projected — as the engine's own
+        // readers treat it.
+        let s2 = statuses[2].sync.as_ref().unwrap();
+        assert_eq!(s2.epoch_lag, None);
+        assert_eq!(s2.rebuild_base.as_deref(), Some("empty"));
+        assert_eq!(s2.maint_drain, None);
     }
 
     #[test]
@@ -4471,24 +4554,62 @@ mod tests {
         label_consumer_raid_members(&mut raids, vol, &rec);
         assert_eq!(raids[0].base_bdevs[0].replica_node.as_deref(), Some("n1"));
         assert_eq!(raids[0].base_bdevs[1].replica_node.as_deref(), Some("n2"));
+        // The record has no third leg: the nulled slot stays anonymous.
         assert_eq!(raids[0].base_bdevs[2].replica_node, None);
+
+        // With a third leg on record, the nulled slot is that leg, by
+        // position (the raid is assembled in replica-index order).
+        let rec3 = VolumeSyncRecord::from_annotation(
+            r#"{"replicas":[
+                  {"node_name":"n1","node_uid":"u1","lvol_uuid":"aaa",
+                   "sync_state":"in_sync","active_lvol_uuid":"aaa-live"},
+                  {"node_name":"n2","node_uid":"u2","lvol_uuid":"bbb",
+                   "sync_state":"in_sync"},
+                  {"node_name":"n3","node_uid":"u3","lvol_uuid":"ccc",
+                   "sync_state":"stale"}
+                ]}"#,
+        )
+        .unwrap();
+        for m in raids[0].base_bdevs.iter_mut() {
+            m.replica_node = None;
+        }
+        label_consumer_raid_members(&mut raids, vol, &rec3);
+        assert_eq!(raids[0].base_bdevs[2].replica_node.as_deref(), Some("n3"));
+
+        // Never a leg that is already a configured base: slot 1 nulled while
+        // n2's base sits (after a rejoin into the first empty slot) in slot 2.
+        raids[0].base_bdevs[1] = ConsumerRaidMember { name: None, uuid: None, is_configured: false, replica_node: None };
+        raids[0].base_bdevs[2] = ConsumerRaidMember {
+            name: Some(expected_remote_base_bdev(&crate::identity::StorageId::of_handle(vol), 1)),
+            uuid: Some("x".to_string()),
+            is_configured: true,
+            replica_node: None,
+        };
+        label_consumer_raid_members(&mut raids, vol, &rec3);
+        assert_eq!(raids[0].base_bdevs[2].replica_node.as_deref(), Some("n2"));
+        assert_eq!(raids[0].base_bdevs[1].replica_node, None);
     }
 
-    // Helper function to create test volumes
-    fn create_test_volume(id: &str, state: &str, nodes: Vec<String>, local_nvme: bool, rebuilding: bool) -> DashboardVolume {
-        let replica_statuses = nodes.iter().map(|node| DashboardReplicaStatus {
-            node: node.clone(),
-            status: if rebuilding { "rebuilding".to_string() } else { "healthy".to_string() },
-            is_local: node == &nodes[0],
-            last_io_timestamp: Some("2025-01-06T00:00:00Z".to_string()),
-            rebuild_progress: if rebuilding { Some(50.0) } else { None },
-            rebuild_target: None,
-            is_new_replica: Some(rebuilding),
-            nvmf_target: None,
-            access_method: "nvmeof".to_string(),
-            raid_member_slot: None,
-            raid_member_state: "online".to_string(),
-            sync: None,
+    // Helper function to create test volumes. `recovering` marks the LAST
+    // replica stale in its sync record (the Tier-2 recovery signal).
+    fn create_test_volume(id: &str, state: &str, nodes: Vec<String>, recovering: bool) -> DashboardVolume {
+        let last = nodes.len().saturating_sub(1);
+        let replica_statuses = nodes.iter().enumerate().map(|(i, node)| {
+            let stale = recovering && i == last;
+            DashboardReplicaStatus {
+                node: node.clone(),
+                status: if stale { "stale".to_string() } else { "healthy".to_string() },
+                sync: Some(ReplicaSyncInfo {
+                    sync_state: if stale { "stale" } else { "in_sync" }.to_string(),
+                    last_epoch: None,
+                    epoch_lag: if stale { None } else { Some(0) },
+                    since: None,
+                    reason: None,
+                    hot_rejoin: None,
+                    maint_drain: None,
+                    rebuild_base: if stale { Some("empty".to_string()) } else { None },
+                }),
+            }
         }).collect();
 
         DashboardVolume {
@@ -4497,18 +4618,9 @@ mod tests {
             size: "100GB".to_string(),
             state: state.to_string(),
             replicas: nodes.len() as i32,
-            active_replicas: nodes.len() as i32,
-            local_nvme,
-            access_method: "nvmeof".to_string(),
-            rebuild_progress: if rebuilding { Some(50.0) } else { None },
+            active_replicas: nodes.len() as i32 - if recovering { 1 } else { 0 },
             nodes,
             replica_statuses,
-            nvmeof_targets: vec![],
-            nvmeof_enabled: false,
-            transport_type: "TCP".to_string(),
-            target_port: 4420,
-            raid_status: None,
-            ublk_device: None,
             spdk_validation_status: SpdkValidationStatus {
                 has_spdk_backing: true,
                 validation_message: None,
@@ -4551,12 +4663,11 @@ mod tests {
     fn dashboard_overview_counts_match_the_aggregate() {
         let data = DashboardData {
             volumes: vec![
-                create_test_volume("v1", "Healthy", vec!["n1".to_string()], true, false),
-                create_test_volume("v2", "Degraded", vec!["n1".to_string()], false, false),
-                create_test_volume("v3", "Failed", vec!["n2".to_string()], false, false),
-                create_test_volume("v4", "Healthy", vec!["n2".to_string()], true, false),
+                create_test_volume("v1", "Healthy", vec!["n1".to_string()], false),
+                create_test_volume("v2", "Degraded", vec!["n1".to_string()], false),
+                create_test_volume("v3", "Failed", vec!["n2".to_string()], false),
+                create_test_volume("v4", "Healthy", vec!["n2".to_string()], false),
             ],
-            raw_volumes: vec![],
             disks: vec![
                 create_test_disk("d1", "n1", true),
                 create_test_disk("d2", "n2", false),
@@ -4571,7 +4682,6 @@ mod tests {
         assert_eq!(ov.degraded_volumes, 1);
         assert_eq!(ov.failed_volumes, 1);
         assert_eq!(ov.faulted_volumes, 2);
-        assert_eq!(ov.local_nvme_volumes, 2);
         assert_eq!(ov.total_disks, 2);
         assert_eq!(ov.initialized_disks, 1);
         assert_eq!(ov.total_nodes, 2);
@@ -4582,7 +4692,7 @@ mod tests {
         let json = serde_json::to_value(&ov).unwrap();
         for key in [
             "total_volumes", "healthy_volumes", "degraded_volumes",
-            "failed_volumes", "faulted_volumes", "local_nvme_volumes",
+            "failed_volumes", "faulted_volumes",
             "total_disks", "healthy_disks", "initialized_disks", "total_nodes",
         ] {
             assert!(json.get(key).is_some(), "overview lost key {key}");
@@ -4598,13 +4708,42 @@ mod tests {
 
     // Volume filtering tests
 
+    /// An NFS share's row: no legs, no epoch, an informational note — not
+    /// the "failed replica on node ''" the lvol verify produced.
+    #[test]
+    fn nfs_share_row_has_no_legs_and_an_informational_note() {
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("nfs.chert.us/enabled".to_string(), "true".to_string());
+        attrs.insert("nfs.chert.us/backend".to_string(), "emptydir".to_string());
+        attrs.insert("size".to_string(), "4Gi".to_string());
+        let pvc = Some(PvcInfo {
+            name: "rwx-shared".to_string(),
+            namespace: "dashtest".to_string(),
+            storage_class: "flint-nfs".to_string(),
+            creation_timestamp: String::new(),
+        });
+        let v = nfs_share_volume("pvc-1", pvc, &attrs);
+        assert_eq!((v.name.as_str(), v.size.as_str(), v.state.as_str()), ("rwx-shared", "4Gi", "Unknown"));
+        assert_eq!((v.replicas, v.active_replicas), (0, 0));
+        assert!(v.nodes.is_empty() && v.replica_statuses.is_empty() && v.consumer_raids.is_empty());
+        assert_eq!(v.current_epoch, None);
+        assert!(!v.spdk_validation_status.has_spdk_backing);
+        assert_eq!(v.spdk_validation_status.validation_severity, "info");
+        assert!(v.spdk_validation_status.validation_message.as_deref().unwrap().contains("emptyDir"));
+
+        attrs.insert("nfs.chert.us/backend".to_string(), "pvc".to_string());
+        let v = nfs_share_volume("pvc-2", None, &attrs);
+        assert_eq!(v.name, "pvc-2");
+        assert!(v.spdk_validation_status.validation_message.as_deref().unwrap().contains("backing claim"));
+    }
+
     #[test]
     fn test_filter_volumes_by_healthy_state() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, false),
-            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], true, false),
-            create_test_volume("vol4", "Failed", vec!["node1".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], false),
+            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], false),
+            create_test_volume("vol4", "Failed", vec!["node1".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4625,9 +4764,9 @@ mod tests {
     #[test]
     fn test_filter_volumes_by_degraded_state() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, false),
-            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], false),
+            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4647,9 +4786,9 @@ mod tests {
     #[test]
     fn test_filter_volumes_by_failed_state() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Failed", vec!["node1".to_string()], true, false),
-            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
+            create_test_volume("vol2", "Failed", vec!["node1".to_string()], false),
+            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4669,9 +4808,9 @@ mod tests {
     #[test]
     fn test_filter_volumes_by_faulted_state() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Failed", vec!["node1".to_string()], true, false),
-            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
+            create_test_volume("vol2", "Failed", vec!["node1".to_string()], false),
+            create_test_volume("vol3", "Degraded", vec!["node2".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4692,9 +4831,9 @@ mod tests {
     #[test]
     fn test_filter_volumes_by_rebuilding_state() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, true),
-            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true),
+            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4708,37 +4847,15 @@ mod tests {
 
         let filtered = filter_volumes(volumes, &query);
         assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].rebuild_progress.is_some());
-    }
-
-    #[test]
-    fn test_filter_volumes_by_local_nvme() {
-        let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Healthy", vec!["node1".to_string()], false, false),
-            create_test_volume("vol3", "Healthy", vec!["node2".to_string()], true, false),
-        ];
-
-        let query = DashboardQuery {
-            volume_filter: Some("local-nvme".to_string()),
-            volume_node: None,
-            disk_node: None,
-            disk_initialized: None,
-            nodes_with_disks_only: None,
-            node: None,
-        };
-
-        let filtered = filter_volumes(volumes, &query);
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|v| v.local_nvme));
+        assert_eq!(filtered[0].id, "vol2");
     }
 
     #[test]
     fn test_filter_volumes_by_node() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["worker-node-1".to_string()], true, false),
-            create_test_volume("vol2", "Healthy", vec!["worker-node-2".to_string()], true, false),
-            create_test_volume("vol3", "Healthy", vec!["worker-node-1".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["worker-node-1".to_string()], false),
+            create_test_volume("vol2", "Healthy", vec!["worker-node-2".to_string()], false),
+            create_test_volume("vol3", "Healthy", vec!["worker-node-1".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4758,10 +4875,10 @@ mod tests {
     #[test]
     fn test_filter_volumes_combined() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["worker-node-1".to_string()], true, false),
-            create_test_volume("vol2", "Degraded", vec!["worker-node-1".to_string()], true, false),
-            create_test_volume("vol3", "Healthy", vec!["worker-node-2".to_string()], true, false),
-            create_test_volume("vol4", "Degraded", vec!["worker-node-2".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["worker-node-1".to_string()], false),
+            create_test_volume("vol2", "Degraded", vec!["worker-node-1".to_string()], false),
+            create_test_volume("vol3", "Healthy", vec!["worker-node-2".to_string()], false),
+            create_test_volume("vol4", "Degraded", vec!["worker-node-2".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4782,7 +4899,7 @@ mod tests {
     #[test]
     fn test_filter_volumes_empty_result() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4801,8 +4918,8 @@ mod tests {
     #[test]
     fn test_filter_volumes_all_filter() {
         let volumes = vec![
-            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], true, false),
-            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], true, false),
+            create_test_volume("vol1", "Healthy", vec!["node1".to_string()], false),
+            create_test_volume("vol2", "Degraded", vec!["node1".to_string()], false),
         ];
 
         let query = DashboardQuery {
@@ -4975,7 +5092,6 @@ mod tests {
     fn fleet_data(volumes: Vec<DashboardVolume>, disks: Vec<DashboardDisk>, nodes: Vec<&str>) -> DashboardData {
         DashboardData {
             volumes,
-            raw_volumes: vec![],
             disks,
             nodes: nodes.into_iter().map(String::from).collect(),
             node_info: HashMap::new(),
@@ -4991,17 +5107,13 @@ mod tests {
                 create_test_volume(
                     "vol-ok",
                     "Healthy",
-                    vec!["node-a".to_string(), "node-b".to_string()],
-                    true,
-                    false,
+                    vec!["node-a".to_string(), "node-b".to_string()], false
                 ),
                 // Degraded volume with a rebuilding (out-of-sync) replica on node-b.
                 create_test_volume(
                     "vol-deg",
                     "Degraded",
-                    vec!["node-b".to_string()],
-                    false,
-                    true,
+                    vec!["node-b".to_string()], true
                 ),
             ],
             vec![
@@ -5022,8 +5134,11 @@ mod tests {
         let a = by_name["node-a"];
         assert_eq!(a.health, "ok");
         assert_eq!((a.disks_total, a.disks_healthy, a.disks_uninitialized), (2, 2, 1));
-        assert_eq!((a.volumes_total, a.local_nvme_volumes), (1, 1));
-        assert_eq!(a.capacity_gb, 2000.0);
+        assert_eq!(a.volumes_total, 1);
+        // disk-a2 has no volume store: it adds to disks_total, not to the
+        // store capacity or allocation.
+        assert_eq!(a.capacity_gb, 1000.0);
+        assert_eq!(a.allocated_gb, 500.0);
 
         let b = by_name["node-b"];
         assert_eq!(b.health, "warning");
@@ -5041,7 +5156,7 @@ mod tests {
     fn node_health_prefers_tier2_sync_signal_over_legacy_status() {
         // A replica reported "healthy" by the legacy status but stale by the
         // Tier-2 sync record is out of sync — the sync signal wins.
-        let mut vol = create_test_volume("vol", "Healthy", vec!["node-a".to_string()], false, false);
+        let mut vol = create_test_volume("vol", "Healthy", vec!["node-a".to_string()], false);
         vol.replica_statuses[0].sync = Some(ReplicaSyncInfo {
             sync_state: "stale".to_string(),
             last_epoch: Some("epoch-vol-4".to_string()),
@@ -5049,6 +5164,8 @@ mod tests {
             since: None,
             reason: None,
             hot_rejoin: None,
+            maint_drain: None,
+            rebuild_base: None,
         });
         let data = fleet_data(vec![vol], vec![create_test_disk("d", "node-a", true)], vec!["node-a"]);
 
@@ -5106,6 +5223,22 @@ mod tests {
 
         assert_eq!(merged.len(), 2);
         assert!(merged.iter().all(|s| s.replica_bdev_details.len() == 1));
+        // Rows are name-ordered: the engine epoch first, then the user one.
+        assert_eq!(
+            merged.iter().map(|s| (s.snapshot_name.as_str(), s.kind.as_str())).collect::<Vec<_>>(),
+            vec![("epoch-pvc-abc-7", "epoch"), ("snap_pvc-abc_1", "user")]
+        );
+    }
+
+    /// A snapshot lvol no flint constructor named is "other", never mistaken
+    /// for a user snapshot.
+    #[test]
+    fn merge_marks_unrecognised_snapshot_names_other() {
+        let merged = merge_snapshot_copies(vec![(
+            "node-a".to_string(),
+            vec![agent_row("manual-snapshot", "u9")],
+        )]);
+        assert_eq!(merged[0].kind, "other");
     }
 
     #[test]

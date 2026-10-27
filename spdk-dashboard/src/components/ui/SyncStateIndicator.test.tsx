@@ -62,6 +62,43 @@ describe('SyncStateIndicator', () => {
   });
 });
 
+describe('SyncStateIndicator — the record markers', () => {
+  it('names the full build when the lag is unknowable and the head was rebuilt from empty', () => {
+    render(
+      <SyncStateIndicator
+        sync={sync({ sync_state: 'stale', epoch_lag: null, last_epoch: null, rebuild_base: 'empty' })}
+      />
+    );
+    const bar = screen.getByRole('progressbar', { name: 'epoch catch-up' });
+    expect(bar).not.toHaveAttribute('aria-valuenow');
+    expect(bar).toHaveTextContent('full rebuild from empty');
+  });
+
+  it('carries the delta base in the progress value text', () => {
+    render(
+      <SyncStateIndicator
+        sync={sync({ sync_state: 'standby', epoch_lag: 2, rebuild_base: 'epoch-hr-e2e-1258' })}
+      />
+    );
+    expect(screen.getByRole('progressbar', { name: 'epoch catch-up' })).toHaveAttribute(
+      'aria-valuetext',
+      '2 epochs behind (delta from #1258)'
+    );
+  });
+
+  it('a live maintenance-drain lease renders the chip as "draining"', () => {
+    render(
+      <SyncStateIndicator
+        sync={sync({ sync_state: 'stale', epoch_lag: 1, maint_drain: '2099-01-01T00:00:00Z' })}
+      />
+    );
+    expect(screen.getByText('draining')).toBeInTheDocument();
+    expect(screen.queryByText('stale')).not.toBeInTheDocument();
+    // The catch-up readout still shows: the drained leg is caught up like any other.
+    expect(screen.getByRole('progressbar', { name: 'epoch catch-up' })).toHaveTextContent('1 epoch behind');
+  });
+});
+
 describe('VolumeSyncSummary', () => {
   const toVolume = (v: ReturnType<typeof makeVolume>) => {
     const volume = transformBackendData(makeDashboardData({ volumes: [v] })).volumes[0];

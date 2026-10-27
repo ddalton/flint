@@ -5,6 +5,7 @@ import {
 import type { SnapshotDetails } from './types';
 import { IconButton } from '../ui/Button';
 import { Chip } from '../ui/Chip';
+import { snapshotKindLabel } from './types';
 
 interface SnapshotsListViewProps {
   snapshots: SnapshotDetails[];
@@ -18,7 +19,6 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
   snapshots,
   onSnapshotSelect,
   formatSize,
-  formatTime,
   getSnapshotTypeIcon
 }) => {
   if (snapshots.length === 0) {
@@ -43,8 +43,14 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
               <div className="flex items-center gap-3">
                 {getSnapshotTypeIcon(snapshot.snapshot_type)}
                 <div>
-                  <h3 className="text-section text-gray-900">
+                  <h3 className="text-section text-gray-900 flex items-center gap-2">
                     {snapshot.snapshot_id}
+                    <Chip
+                      label={snapshotKindLabel(snapshot.snapshot_type)}
+                      chip={snapshot.snapshot_type === 'user'
+                        ? 'bg-brand-100 text-brand-800 border-brand-200'
+                        : 'bg-gray-100 text-gray-700 border-gray-200'}
+                    />
                   </h3>
                   <p className="text-sm text-gray-600">
                     Source: {snapshot.source_volume_id}
@@ -56,8 +62,12 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
                   <div className="text-sm font-medium text-gray-900">
                     {formatSize(snapshot.size_bytes)}
                   </div>
-                  <div className="text-xs text-gray-500">
-                    {formatTime(snapshot.creation_time)}
+                  {/* The flat listing's creation_time is the node agent's
+                      list stamp (SPDK lvols store no creation time): every
+                      row read the capture time on dash1. Real times are on
+                      the Timeline, from the CR and the PV sync record. */}
+                  <div className="text-xs text-gray-500" title="SPDK stores no creation time for an lvol; see the Timeline view for the real one">
+                    created: see Timeline
                   </div>
                 </div>
                 <Chip
@@ -163,8 +173,8 @@ export const SnapshotsListView: React.FC<SnapshotsListViewProps> = ({
                 </span>
               </div>
               <p className="text-sm text-healthy-700">
-                All replica snapshots were created atomically at {formatTime(snapshot.creation_time)} 
-                ensuring data consistency across all {snapshot.replica_bdev_details.length} replicas.
+                All {snapshot.replica_bdev_details.length} replica copies come from one coordinated cut,
+                so they hold the same data.
               </p>
             </div>
           </div>

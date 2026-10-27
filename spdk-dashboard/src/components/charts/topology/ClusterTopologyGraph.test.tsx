@@ -8,11 +8,7 @@ import type { Disk, ReplicaStatus, Volume } from '../../../hooks/useDashboardDat
 
 function mkReplica(node: string, overrides: Partial<ReplicaStatus> = {}): ReplicaStatus {
   return {
-    access_method: 'nvmeof',
-    is_local: false,
     node,
-    raid_member_state: 'online',
-    rebuild_progress: null,
     status: 'healthy',
     ...overrides,
   } as ReplicaStatus;
@@ -20,23 +16,15 @@ function mkReplica(node: string, overrides: Partial<ReplicaStatus> = {}): Replic
 
 function mkVolume(id: string, nodes: string[]): Volume {
   return {
-    access_method: 'nvmeof',
     active_replicas: nodes.length,
     consumer_raids: [],
     id,
-    local_nvme: false,
     name: id,
     nodes: [],
-    nvmeof_enabled: true,
-    nvmeof_targets: [],
     replicas: nodes.length,
     size: '2 GiB',
     spdk_validation_status: { has_spdk_backing: true, validation_severity: 'info' },
     state: 'Healthy',
-    target_port: 4420,
-    transport_type: 'tcp',
-    ublk_device: null,
-    raid_status: null,
     replica_statuses: nodes.map(n => mkReplica(n)),
   } as Volume;
 }
@@ -72,7 +60,7 @@ describe('cluster topology view', () => {
     // Drill into pvc-beta → volume altitude with it selected
     fireEvent.click(screen.getByRole('button', { name: /pvc-beta/ }));
     expect(screen.getByText('Volume Topology')).toBeInTheDocument();
-    expect(screen.getByText('2/2 Active Replicas')).toBeInTheDocument();
+    expect(screen.getByText('2/2 replicas in sync')).toBeInTheDocument();
     // The volume graph shows pvc-beta's replicas (w2, w3 — not w1)
     expect(screen.queryByText('w1')).not.toBeInTheDocument();
   });

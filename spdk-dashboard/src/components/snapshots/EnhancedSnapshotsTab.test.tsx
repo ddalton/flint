@@ -3,6 +3,7 @@
 // "Total Snapshots" double-counted replicated snapshots and "Replica
 // Snapshots" summed a field the endpoint never sent (always 0).
 import { describe, expect, it, beforeEach } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { render, screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { MemoryRouter } from 'react-router';
@@ -41,14 +42,33 @@ describe('EnhancedSnapshotsTab header chips', () => {
     await login('admin', 'right-password');
     renderTab();
 
-    // Fixture: one 2-copy snapshot + one 1-copy snapshot.
-    const total = await screen.findByText('Total Snapshots');
-    expect(total.previousElementSibling).toHaveTextContent(/^2$/);
+    // Fixture: two user snapshots (2 copies + 1 copy) and one engine epoch
+    // (2 copies): the kinds are counted apart, copies across all of them.
+    const users = await screen.findByText('User Snapshots');
+    expect(users.previousElementSibling).toHaveTextContent(/^2$/);
+
+    const epochs = screen.getByText('Engine Epochs');
+    expect(epochs.previousElementSibling).toHaveTextContent(/^1$/);
 
     const copies = screen.getByText('Replica Snapshots');
-    expect(copies.previousElementSibling).toHaveTextContent(/^3$/);
+    expect(copies.previousElementSibling).toHaveTextContent(/^5$/);
 
     const ready = screen.getByText('Ready to Use');
-    expect(ready.previousElementSibling).toHaveTextContent(/^2$/);
+    expect(ready.previousElementSibling).toHaveTextContent(/^3$/);
+  });
+
+  it('labels each row by kind and filters by it', async () => {
+    await login('admin', 'right-password');
+    const user = userEvent.setup();
+    renderTab();
+    await screen.findByText('User Snapshots');
+    await user.click(screen.getByRole('button', { name: /List View/ }));
+    expect(await screen.findAllByText('user snapshot')).toHaveLength(2);
+    expect(screen.getAllByText('engine epoch')).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: /Filters/ }));
+    await user.selectOptions(screen.getByLabelText('Snapshot Type'), 'epoch');
+    expect(screen.queryAllByText('user snapshot')).toHaveLength(0);
+    expect(screen.getAllByText('engine epoch')).toHaveLength(1);
   });
 });

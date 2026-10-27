@@ -49,7 +49,9 @@ describe('searchForTab', () => {
 describe('parseVolumeFilter', () => {
   it('accepts known filters and degrades unknown values to all', () => {
     expect(parseVolumeFilter('degraded')).toBe('degraded');
-    expect(parseVolumeFilter('local-nvme')).toBe('local-nvme');
+    expect(parseVolumeFilter('rebuilding')).toBe('rebuilding');
+    // Retired filters degrade like unknown values.
+    expect(parseVolumeFilter('local-nvme')).toBe('all');
     expect(parseVolumeFilter(null)).toBe('all');
     expect(parseVolumeFilter('junk')).toBe('all');
   });

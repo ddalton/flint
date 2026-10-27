@@ -1,4 +1,5 @@
 import React from 'react';
+import { snapshotKindLabel } from './types';
 import {
   Shield, Info, CheckCircle, Server, X
 } from 'lucide-react';
@@ -18,7 +19,6 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
   snapshot,
   onClose,
   formatSize,
-  formatTime,
   getSnapshotTypeIcon
 }) => {
   return (
@@ -52,8 +52,8 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
                   <p className="font-mono text-sm">{snapshot.source_volume_id}</p>
                 </div>
                 <div>
-                  <span className="text-sm font-medium text-gray-600">Type:</span>
-                  <p className="text-sm">{snapshot.snapshot_type}</p>
+                  <span className="text-sm font-medium text-gray-600">Kind:</span>
+                  <p className="text-sm">{snapshotKindLabel(snapshot.snapshot_type)}</p>
                 </div>
                 <div>
                   <span className="text-sm font-medium text-gray-600">Size:</span>
@@ -61,7 +61,8 @@ export const SnapshotDetailModal: React.FC<SnapshotDetailModalProps> = ({
                 </div>
                 <div>
                   <span className="text-sm font-medium text-gray-600">Created:</span>
-                  <p className="text-sm">{formatTime(snapshot.creation_time)}</p>
+                  {/* The listing carries the agent's list stamp, not a creation time. */}
+                  <p className="text-sm text-gray-500" title="SPDK stores no creation time for an lvol">see the Timeline view</p>
                 </div>
                 <div>
                   <span className="text-sm font-medium text-gray-600">Status:</span>

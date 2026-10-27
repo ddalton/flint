@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import type { Disk, OrphanedVolumeInfo, Volume, VolumeFilter, VolumeReplicaFilter } from '../../hooks/useDashboardData';
 import { filterVolumesByType } from '../../hooks/useDashboardData';
+import { volumeFilterDisplay } from '../ui/status';
 import { Chip } from '../ui/Chip';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { Pagination } from '../ui/Pagination';
@@ -30,6 +31,17 @@ interface DisksTableProps {
 type DiskHealthFilter = 'all' | 'healthy' | 'unhealthy';
 type DiskLVSFilter = 'all' | 'initialized' | 'uninitialized';
 type DiskUtilizationFilter = 'all' | 'low' | 'medium' | 'high' | 'full';
+// Mean utilization over the disks that have a logical volume store: a disk
+// without one has nothing allocated (the transform zeroes it), and the
+// previous form divided GB by bytes, which always rounded to 0%.
+function averageUtilization(disks: Disk[]): number {
+  const withLvs = disks.filter(d => d.blobstore_initialized && d.capacity_gb > 0);
+  if (withLvs.length === 0) return 0;
+  return Math.round(
+    withLvs.reduce((sum, d) => sum + (d.allocated_space / d.capacity_gb) * 100, 0) / withLvs.length
+  );
+}
+
 type DiskSortField = 'id' | 'node' | 'capacity' | 'utilization' | 'free_space' | 'read_iops' | 'write_iops' | 'volumes';
 type DiskSortOrder = 'asc' | 'desc';
 
@@ -85,6 +97,11 @@ export const DisksTable: React.FC<DisksTableProps> = ({
           diskVolume.volume_id === volumeReplicaFilter
         );
       });
+    }
+    // 'orphaned' is disk-side: disks carrying SPDK lvols with no owning PV
+    // (the Orphaned stat card lands here; the delete action is per row).
+    else if (volumeFilter === 'orphaned') {
+      result = result.filter(disk => disk.orphaned_spdk_volumes.length > 0);
     }
     // Apply general volume filter
     else if (volumeFilter && volumeFilter !== 'all') {
@@ -265,13 +282,11 @@ export const DisksTable: React.FC<DisksTableProps> = ({
   const targetVolume = volumeReplicaFilter ? volumes.find(v => v.id === volumeReplicaFilter) : null;
   const activeFilterCount = getActiveFilterCount();
 
+  // Shared filter vocabulary (status.ts): "recovering volumes", "orphaned
+  // volumes", … — the same words as the stat card that applied the filter.
   const getFilterDisplayName = (filter: VolumeFilter) => {
-    switch (filter) {
-      case 'faulted': return 'faulted volumes';
-      case 'rebuilding': return 'rebuilding volumes';
-      case 'local-nvme': return 'local NVMe volumes';
-      default: return 'volumes';
-    }
+    const short = volumeFilterDisplay(filter).short;
+    return short ? `${short} volumes` : 'volumes';
   };
 
   const SortIcon = ({ field }: { field: DiskSortField }) => {
@@ -586,10 +601,7 @@ export const DisksTable: React.FC<DisksTableProps> = ({
             <div>
               <h3 className="text-sm font-medium text-gray-700">Avg Utilization</h3>
               <p className="text-stat text-purple-600">
-                {filteredDisks.length > 0 ? 
-                  Math.round(filteredDisks.reduce((sum, disk) => 
-                    sum + (disk.allocated_space / disk.capacity) * 100, 0
-                  ) / filteredDisks.length) : 0}%
+                {averageUtilization(filteredDisks)}%
               </p>
             </div>
           </div>
@@ -695,29 +707,19 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                   );
                 }
                 // Apply general volume filter if no specific volume replica filter
-                else if (volumeFilter && volumeFilter !== 'all') {
+                else if (volumeFilter && volumeFilter !== 'all' && volumeFilter !== 'orphaned') {
+                  // Same predicate as the stat cards and the volumes table.
                   displayVolumes = disk.provisioned_volumes.filter(diskVolume => {
                     const actualVolume = volumes.find(v => v.id === diskVolume.volume_id);
-                    if (!actualVolume) return false;
-                    
-                    switch (volumeFilter) {
-                      case 'faulted':
-                        return actualVolume.state === 'Degraded' || actualVolume.state === 'Failed';
-                      case 'rebuilding':
-                        return actualVolume.replica_statuses.some(replica => 
-                          replica.status === 'rebuilding' || 
-                          replica.rebuild_progress !== null ||
-                          replica.is_new_replica
-                        );
-                      case 'local-nvme':
-                        return actualVolume.local_nvme;
-                      default:
-                        return true;
-                    }
+                    return !!actualVolume && filterVolumesByType([actualVolume], volumeFilter).length > 0;
                   });
                 }
 
                 const utilization = Math.round((disk.allocated_space / disk.capacity_gb) * 100);
+                // No logical volume store: nothing is allocated or free on
+                // this disk yet, so the capacity columns show that rather
+                // than a utilization derived from the agent's zero free_space.
+                const hasLvs = disk.blobstore_initialized;
 
                 return (
                   <tr key={disk.id} className="hover:bg-gray-50">
@@ -758,18 +760,28 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.capacity_gb.toFixed(2)}GB</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{disk.free_space.toFixed(2)}GB</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {hasLvs ? `${disk.free_space.toFixed(2)}GB` : (
+                        <span className="text-gray-400" title="No logical volume store on this disk">—</span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center gap-2">
-                        <ProgressBar
-                          value={utilization}
-                          label={`${disk.id} utilization`}
-                          valueText={`${utilization}% used`}
-                          tone={utilization < 75 ? 'ok' : utilization < 95 ? 'warn' : 'danger'}
-                          className="w-20"
-                        />
-                        <span className="text-xs text-gray-600 min-w-[3rem]">{utilization}%</span>
-                      </div>
+                      {hasLvs ? (
+                        <div className="flex items-center gap-2">
+                          <ProgressBar
+                            value={utilization}
+                            label={`${disk.id} utilization`}
+                            valueText={`${utilization}% used`}
+                            tone={utilization < 75 ? 'ok' : utilization < 95 ? 'warn' : 'danger'}
+                            className="w-20"
+                          />
+                          <span className="text-xs text-gray-600 min-w-[3rem]">{utilization}%</span>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400" title="No logical volume store on this disk">
+                          not initialized
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <Chip
@@ -865,11 +877,19 @@ export const DisksTable: React.FC<DisksTableProps> = ({
                         <div className="mt-1 space-y-1">
                           {displayVolumes.slice(0, 2).map((vol, idx) => (
                             <div key={idx} className="text-xs text-gray-500 flex items-center gap-1">
-                              <div className={`w-2 h-2 rounded-full ${
-                                vol.status === 'healthy' ? 'bg-healthy-500' :
-                                vol.status === 'rebuilding' ? 'bg-rebuilding-500' :
-                                'bg-failed-500'
-                              }`}></div>
+                              {/* status is the replica's status on this node (healthy /
+                                  stale / standby from the sync record; active / failed on a
+                                  single-replica volume); snapshots read present / read-only. */}
+                              <div
+                                className={`w-2 h-2 rounded-full ${
+                                  vol.status === 'healthy' || vol.status === 'active' ? 'bg-healthy-500' :
+                                  vol.status === 'stale' ? 'bg-stale-500' :
+                                  vol.status === 'standby' ? 'bg-standby-500' :
+                                  vol.status === 'failed' ? 'bg-failed-500' :
+                                  'bg-gray-400'
+                                }`}
+                                title={vol.status}
+                              ></div>
                               <span className="truncate max-w-[8rem]">{vol.volume_name}</span>
                               <span className="text-gray-400">({vol.size}GB)</span>
                             </div>

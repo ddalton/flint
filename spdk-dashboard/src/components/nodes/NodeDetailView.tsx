@@ -3,6 +3,7 @@ import { Server, HardDrive, Database, Zap, Activity, ChevronDown, ChevronRight, 
 import type { Disk, Volume, VolumeFilter, NodeInfo } from '../../hooks/useDashboardData';
 import type { FleetNode } from '../../hooks/useNodesFleet';
 import { volumeFilterDisplay, nodeHealthStyle } from '../ui/status';
+import { isLegServedLocally } from '../../hooks/useDashboardData';
 import { Chip, MemberStateChip, VolumeStateChip } from '../ui/Chip';
 import { ProgressBar } from '../ui/ProgressBar';
 import { useDiskSetup } from '../../hooks/useDashboardData';
@@ -100,19 +101,22 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
     }
   };
 
-  // Use filtered volumes if provided, otherwise use all node volumes
-  const displayVolumes = filteredVolumes || nodeVolumes;
   const filteredVolumeCount = filteredVolumes ? filteredVolumes.length : nodeVolumes.length;
 
-  // Calculate filtered stats
-  const filteredLocalNVMeCount = displayVolumes.filter(v => v.local_nvme).length;
 
   const getFilterDisplayName = (filter?: VolumeFilter) => volumeFilterDisplay(filter).short;
 
-  const capacityGb = Math.round(summary.capacity_gb);
-  const allocatedGb = Math.round(summary.allocated_gb);
-  const utilizationPct = summary.capacity_gb > 0
-    ? Math.round((summary.allocated_gb / summary.capacity_gb) * 100)
+  // Capacity is the logical volume stores': a disk with no store has
+  // nothing allocated, and the released backend's node summary counted it
+  // as fully used (dash1-cp-1 read "100% · 436/436GB", 2026-10-27). Derive
+  // the figures from this node's initialized disks instead of the summary.
+  const lvsDisks = nodeDisks.filter(d => d.blobstore_initialized);
+  const lvsCapacityGb = lvsDisks.reduce((s, d) => s + d.capacity_gb, 0);
+  const lvsAllocatedGb = lvsDisks.reduce((s, d) => s + d.allocated_space, 0);
+  const capacityGb = Math.round(lvsCapacityGb);
+  const allocatedGb = Math.round(lvsAllocatedGb);
+  const utilizationPct = lvsCapacityGb > 0
+    ? Math.round((lvsAllocatedGb / lvsCapacityGb) * 100)
     : 0;
   const healthStyle = nodeHealthStyle(summary.health);
 
@@ -166,10 +170,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
               ? <>{filteredVolumeCount}<span className="text-gray-400">/{summary.volumes_total}</span></>
               : summary.volumes_total}
           </span>
-          <span className="flex items-center gap-1" title="Local NVMe volumes">
-            <Zap className="w-4 h-4 text-gray-400" />
-            {volumeFilter && volumeFilter !== 'all' ? filteredLocalNVMeCount : summary.local_nvme_volumes}
-          </span>
+
           <span className="hidden md:flex items-center gap-1" title="Capacity used">
             <Activity className="w-4 h-4 text-gray-400" />
             {utilizationPct}%
@@ -216,14 +217,17 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                   <div className="flex items-center justify-between mb-2">
                     <VolumeStateChip state={volume.state} />
 
-                    {nodeReplica && (
+                    {/* Locality is the consumer's property: a raid assembled on
+                        THIS node serves this leg directly, otherwise the leg is
+                        reached over NVMe-oF; no chip when nothing stages the volume. */}
+                    {nodeReplica && isLegServedLocally(volume, node) !== null && (
                       <span className={`px-2 py-1 text-xs rounded ${
-                        nodeReplica.is_local
+                        isLegServedLocally(volume, node)
                           ? 'bg-brand-100 text-brand-700'
                           : // Raw purple on purpose: replica transport type, not sync rejoining.
                             'bg-purple-100 text-purple-700'
                       }`}>
-                        {nodeReplica.is_local ? 'Local NVMe' : 'NVMe-oF'}
+                        {isLegServedLocally(volume, node) ? 'consumer here' : 'NVMe-oF leg'}
                       </span>
                     )}
                   </div>
@@ -233,8 +237,7 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                     {nodeReplica && (
                       <div>Node Status:
                         <span className={`ml-1 font-medium ${
-                          nodeReplica.status === 'healthy' ? 'text-healthy-600' :
-                          nodeReplica.status === 'rebuilding' ? 'text-rebuilding-600' :
+                          nodeReplica.status === 'healthy' || nodeReplica.status === 'active' ? 'text-healthy-600' :
                           nodeReplica.status === 'stale' ? 'text-stale-600' :
                           nodeReplica.status === 'standby' ? 'text-standby-600' :
                           'text-failed-600'
@@ -315,12 +318,16 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                       <td className="px-4 py-4">
                         <div className="text-sm">
                           <div className="font-medium">{disk.capacity_gb}GB</div>
-                          <div className="text-xs text-gray-500">{disk.free_space}GB free</div>
+                          <div className="text-xs text-gray-500">
+                            {disk.blobstore_initialized ? `${disk.free_space}GB free` : 'no volume store'}
+                          </div>
                         </div>
                       </td>
                       <td className="px-4 py-4">
                         {/* allocated_space and capacity_gb are both GB
-                            (capacity is bytes) — see useDashboardData. */}
+                            (capacity is bytes) — see useDashboardData. A disk
+                            without a volume store has no allocation to show. */}
+                        {disk.blobstore_initialized ? (
                         <div className="text-sm">
                           <div className="flex items-center gap-2 mb-1">
                             <ProgressBar
@@ -337,6 +344,11 @@ export const NodeDetailView: React.FC<NodeDetailViewProps> = ({
                             {Math.round(disk.allocated_space)}GB / {disk.capacity_gb}GB used
                           </div>
                         </div>
+                        ) : (
+                          <span className="text-xs text-gray-400" title="No logical volume store on this disk">
+                            not initialized
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-4">
                         <div className="space-y-1">

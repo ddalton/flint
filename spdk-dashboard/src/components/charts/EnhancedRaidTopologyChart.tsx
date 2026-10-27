@@ -1,12 +1,13 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
-  Database, Activity, Zap, Network, AlertTriangle, Shield, Settings, Search, ChevronDown
+  Database, Activity, AlertTriangle, Shield, Search, ChevronDown
 } from 'lucide-react';
 import type { Volume, Disk, NodeInfo } from '../../hooks/useDashboardData';
+import { isVolumeRecovering, primaryConsumerRaid } from '../../hooks/useDashboardData';
 import { Chip, VolumeStateChip } from '../ui/Chip';
 import { VolumeTopologyGraph } from './topology/VolumeTopologyGraph';
 import { ClusterTopologyGraph } from './topology/ClusterTopologyGraph';
-import { raidLevelDisplayName } from './topology/buildTopology';
+import { raidHealth } from './topology/buildTopology';
 
 // The topology page at two altitudes: the cluster view (node cards +
 // replica-placement links) and the volume drill-down (searchable picker +
@@ -84,11 +85,9 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
   // (fresh cluster) — the cluster view still renders.
   const selectedVolumeInfo = volumes.find(v => v.id === selectedVolume) ?? volumes[0];
 
-  const raidStatus = selectedVolumeInfo?.raid_status;
-  const hasNvmeof = !!selectedVolumeInfo &&
-                    (selectedVolumeInfo.nvmeof_enabled ||
-                     (selectedVolumeInfo.nvmeof_targets && selectedVolumeInfo.nvmeof_targets.length > 0) ||
-                     selectedVolumeInfo.access_method === 'nvmeof');
+  // The raid the consumer node actually assembled (none when nothing stages
+  // the volume) — the only raid-level datum the backend emits.
+  const consumerRaid = selectedVolumeInfo ? primaryConsumerRaid(selectedVolumeInfo) : null;
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6">
@@ -198,7 +197,7 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
                               </span>
                             </div>
                           </div>
-                          {volume.replica_statuses.some(r => r.sync && r.sync.sync_state !== 'in_sync') && (
+                          {isVolumeRecovering(volume) && (
                             <div className="ml-3 flex-shrink-0" title="Replica recovery in progress">
                               <AlertTriangle className="w-4 h-4 text-stale-500" />
                             </div>
@@ -264,32 +263,14 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
         <p className="text-sm text-gray-500">No volumes to display yet.</p>
       ) : (
         <>
-      {/* Missing live metrics: honest empty-state note, graph still renders
-          from replica statuses. */}
-      {/* Raw yellow on purpose: generic caution note about missing metrics —
-          not the degraded volume state the yellow alias carries. */}
-      {!raidStatus && (
-        <div className="mb-4 p-4 bg-yellow-50 border-l-4 border-yellow-400">
-          <div className="flex">
-            <div className="flex-shrink-0">
-              <AlertTriangle className="h-5 w-5 text-yellow-400" />
-            </div>
-            <div className="ml-3">
-              <p className="text-sm text-yellow-700">
-                RAID status is not available for this volume; the graph shows
-                replica placement only.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       <VolumeTopologyGraph volume={selectedVolumeInfo} disks={disks} />
 
-      {/* Status Summary */}
+      {/* Status summary — each chip is a datum the backend sends: the in-sync
+          count from the sync record, and the raid the consumer node actually
+          assembled (none when nothing stages the volume). */}
       <div className="mt-4 flex justify-center gap-4 flex-wrap">
         <Chip
-          label={`${selectedVolumeInfo.active_replicas}/${selectedVolumeInfo.replicas} Active Replicas`}
+          label={`${selectedVolumeInfo.active_replicas}/${selectedVolumeInfo.replicas} replicas in sync`}
           chip={
             selectedVolumeInfo.active_replicas === selectedVolumeInfo.replicas
               ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
@@ -299,43 +280,33 @@ export const EnhancedRaidTopologyChart: React.FC<EnhancedRaidTopologyChartProps>
           }
         />
 
-        {raidStatus && (
+        {consumerRaid ? (
           <Chip
             icon={Shield}
-            label={`${raidLevelDisplayName(raidStatus.raid_level)} ${raidStatus.state.toUpperCase()}`}
+            label={`Assembled on ${consumerRaid.node} · ${consumerRaid.state} ${consumerRaid.num_base_bdevs_operational}/${consumerRaid.num_base_bdevs}`}
+            title={consumerRaid.raid_name}
             chip={
-              raidStatus.state === 'online'
+              raidHealth(consumerRaid) === 'healthy'
                 ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
-                : raidStatus.state === 'degraded'
+                : raidHealth(consumerRaid) === 'degraded'
                 ? 'bg-degraded-100 text-degraded-800 border-degraded-200'
                 : 'bg-failed-100 text-failed-800 border-failed-200'
             }
           />
-        )}
-
-        {selectedVolumeInfo.local_nvme && (
+        ) : (
           <Chip
-            icon={Zap}
-            label="High Performance Path"
-            chip="bg-brand-100 text-brand-800 border-brand-200"
+            icon={Shield}
+            label="Not assembled — no consumer"
+            title="No node currently stages this volume"
+            chip="bg-gray-100 text-gray-800 border-gray-200"
           />
         )}
 
-        {/* Raw indigo on purpose: NVMe-oF transport accent, not a status —
-            no semantic alias fits. */}
-        {hasNvmeof && (
+        {selectedVolumeInfo.consumer_raids.length > 1 && (
           <Chip
-            icon={Network}
-            label="NVMe-oF Enabled"
-            chip="bg-indigo-100 text-indigo-800 border-indigo-200"
-          />
-        )}
-
-        {raidStatus?.rebuild_info && (
-          <Chip
-            icon={Settings}
-            label={`RAID Rebuild in Progress (${raidStatus.rebuild_info.progress_percentage.toFixed(1)}%)`}
-            chip="bg-rebuilding-100 text-rebuilding-800 border-rebuilding-200"
+            label={`${selectedVolumeInfo.consumer_raids.length} consumers`}
+            title={selectedVolumeInfo.consumer_raids.map(r => r.node).join(', ')}
+            chip="bg-warning-100 text-warning-800 border-warning-200"
           />
         )}
       </div>

@@ -17,6 +17,7 @@ const CATEGORY_LABELS: Record<EventCategory, string> = {
   epoch: 'Epochs',
   health: 'Health',
   cutover: 'Cutover',
+  maintenance: 'Maintenance',
   other: 'Other',
 };
 

@@ -60,7 +60,6 @@ const VOLUME_FILTERS = [
   'failed',
   'faulted',
   'rebuilding',
-  'local-nvme',
 ] as const;
 
 export type UrlVolumeFilter = (typeof VOLUME_FILTERS)[number];

@@ -81,6 +81,70 @@ restart gate is waived: no flint code on the restart path changed, and
   generation of the RustCrypto crates) and the unmaintained
   `unsafe-libyaml` (no fix exists; it comes in through `serde_yaml`).
 
+### Changed
+
+- **The dashboard reads only what its backend emits** (2026-10-27;
+  `spdk-dashboard/`). The UI still keyed cards, filters, a progress bar
+  and a whole graph layer on fields the live dashboard backend never
+  populates (`raid_status`/`rebuild_info`, `rebuild_progress`,
+  `is_new_replica`, `raw_volumes`, `local_nvme`, the NVMe-oF and ublk
+  descriptors), so the "Orphaned" card always read 0, "Local NVMe" always
+  equalled Total, a "RAID status is not available" banner showed on every
+  volume, and the Volumes-tab orphan delete called a route that does not
+  exist. Now: replica recovery is the sync record alone (the "Recovering"
+  card, filter and chart banner); "Orphaned" counts the per-disk orphan
+  lvols and opens the Disks tab, whose new `orphaned` filter lists the
+  disks carrying them (the per-row delete was already there); the volume
+  topology is built from `consumer_raids` (consumer node → the raid it
+  assembled, with its configured-base count → legs, local or NVMe-oF,
+  animated while not in sync → disks); single-replica cards shrink to the
+  one datum the backend has; and a "Recovery activity" panel (the
+  volume's catch-up, hot-rejoin and health events) appears under the
+  replica table while any replica is not in sync. The `local-nvme` filter
+  is retired (`?filter=local-nvme` degrades to all). The dashboard
+  backend drops the dead fields from the wire (`raid_status`,
+  `rebuild_progress`, `raw_volumes`, `local_nvme`, the access and
+  transport descriptors, `is_local`; `api/openapi.json` regenerated) and
+  projects two markers the sync record already carried: `maint_drain`
+  (a leg fenced out for a planned csi-node roll renders "draining") and
+  `rebuild_base` (an epoch name for a delta catch-up, `"empty"` for the
+  thin-aware full build, which the indicator now names instead of a
+  bare "catching up"). Still not published anywhere: byte-level copy
+  progress during a catch-up (`spdk-dashboard/docs/improvement-plan.md`,
+  2026-10-27 section). A live drill on a four-worker i4i.large cluster
+  then found two more wire-to-screen lies, both fixed: an NFS share (the
+  `nfsEmptyDir` class) read "Unknown, 0/1, 1 replica not in sync" with a
+  red "No node information", because the backend verified a non-existent
+  lvol on an empty node name — it now emits an NFS-share row (no legs, no
+  epoch, an informational note naming the backend) and the table shows a
+  dash and a gray note; and a disk with no logical volume store read
+  "100% used" in the Disks tab, the Nodes tab and the node summary,
+  because the agent reports `free_space` 0 for it — all three now show
+  "not initialized" with nothing allocated (and the Disks tab's average
+  utilization, which divided GB by bytes, is a real average). Rolling the
+  csi-node DaemonSet on that cluster found three more: the Events tab and
+  the recovery panel had been empty on every live cluster because the
+  engine stamps its PV events `disk.chert.us/node-agent` and the backend
+  kept only `disk.csi.chert.us*` (fixed; `Maintenance*` reasons get their
+  own category); a single-replica volume whose node agent was restarting
+  read "failed · 1 replica not in sync" when the backend had only failed
+  to verify it (now "unknown" / "1 replica unverified" with the message);
+  and a drained leg's nulled raid slot was an anonymous "failed slot"
+  beside a separate card for the leg (the backend now names the leg that
+  held the slot, by position, and the topology draws one card with the
+  leg's own state). Two more from the snapshot and node-loss drills: the
+  Snapshots tab counted the engine's epoch snapshots and the user's
+  VolumeSnapshots as one "Total Snapshots" figure with every row typed
+  "Bdev" — the backend now sends `kind` (`user` / `epoch` / `other`,
+  from the lvol name the engine itself chose), the tab counts "User
+  Snapshots" and "Engine Epochs" apart, labels each row, and filters by
+  kind; and a replica whose node has left the cluster (the record still
+  listed it `in_sync` after the Node object was deleted) is now struck
+  through in the Volumes tab's node column with a note. The Snapshots
+  list and detail views no longer date every snapshot with the node
+  agent's list stamp (SPDK stores no creation time for an lvol; the
+  Timeline view has the real ones).
+
 ### Fixed
 
 - **The README covers the S3-backed front ends, and its block install

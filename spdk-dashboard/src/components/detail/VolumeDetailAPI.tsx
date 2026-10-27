@@ -5,7 +5,8 @@ import {
   RefreshCw, AlertTriangle, X, HardDrive
 } from 'lucide-react';
 import type { ConsumerRaid, ReplicaStatus, Volume, SpdkVolumeDetails } from '../../hooks/useDashboardData';
-import { Chip, VolumeStateChip } from '../ui/Chip';
+import { isVolumeRecovering } from '../../hooks/useDashboardData';
+import { Chip, MemberStateChip, VolumeStateChip } from '../ui/Chip';
 import { SyncStateIndicator } from '../ui/SyncStateIndicator';
 import { Skeleton } from '../ui/Skeleton';
 import { ProgressBar } from '../ui/ProgressBar';
@@ -88,7 +89,9 @@ function ConsumerRaidCard({ raid }: { raid: ConsumerRaid }) {
               </>
             ) : (
               <span className="text-sm font-medium text-failed-700">
-                failed slot — leg removed from the raid
+                {member.replica_node
+                  ? `Leg on ${member.replica_node} removed from the raid`
+                  : 'failed slot — leg removed from the raid'}
               </span>
             )}
           </div>
@@ -158,58 +161,54 @@ function ReplicaSyncTable({ volume }: { volume: Volume }) {
   );
 }
 
-// Legacy per-replica cards for volumes without a sync record
-// (single-replica volumes have none by design).
-function LegacyReplicaCards({ replicas }: { replicas: ReplicaStatus[] }) {
+// Single-replica volumes have no sync record: the backend verifies that the
+// one lvol exists on its node and reports "active" or "failed". That is the
+// whole datum, so that is the whole card.
+function SingleReplicaCards({ replicas }: { replicas: ReplicaStatus[] }) {
   return (
     <div className="space-y-4">
       {replicas.map((replica, index) => (
         <div key={index} className="bg-gray-50 rounded-lg p-6">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between">
             <h4 className="text-section">Replica on {replica.node}</h4>
-            <Chip
-              label={replica.status}
-              chip={
-                replica.status === 'healthy' || replica.status === 'active'
-                  ? 'bg-healthy-100 text-healthy-800 border-healthy-200'
-                  : replica.status === 'rebuilding'
-                  ? 'bg-rebuilding-100 text-rebuilding-800 border-rebuilding-200'
-                  : 'bg-failed-100 text-failed-800 border-failed-200'
-              }
-            />
+            <MemberStateChip state={replica.status} />
           </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div>
-              <p className="text-sm text-gray-600">Access Method</p>
-              <p className="font-medium">{replica.access_method}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600">Local NVMe</p>
-              <p className="font-medium">{replica.is_local ? 'Yes' : 'No'}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600">RAID Slot</p>
-              <p className="font-medium">{replica.raid_member_slot ?? 'N/A'}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600">Last I/O</p>
-              <p className="font-medium text-xs">{formatTime(replica.last_io_timestamp)}</p>
-            </div>
-          </div>
-
-          {replica.nvmf_target && (
-            <div className="mt-4 p-3 bg-white rounded border">
-              <h5 className="font-medium mb-2">NVMe-oF Target</h5>
-              <div className="text-sm space-y-1">
-                <div>IP: {replica.nvmf_target.target_ip}:{replica.nvmf_target.target_port}</div>
-                <div>NQN: {replica.nvmf_target.nqn}</div>
-                <div>Transport: {replica.nvmf_target.transport_type}</div>
-              </div>
-            </div>
-          )}
+          <p className="mt-2 text-sm text-gray-600">
+            Single-replica volume — no replication record; the status is whether
+            the SPDK logical volume is present on its node.
+          </p>
         </div>
       ))}
+    </div>
+  );
+}
+
+// Live recovery narrative for a volume mid-recovery: the engine's own events
+// for this volume (ReplicaStale → ReplicaCatchupStarted or
+// ReplicaFullBuildStarted → ReplicaStandby → HotRejoinSucceeded; or
+// ReplicaReplaced after permanent node loss) under the replica table, so the
+// operator can see WHICH phase a catch-up is in. The backend publishes no
+// byte-level copy progress; this is the finest-grained signal it emits.
+function RecoveryActivityPanel({ volumeId }: { volumeId: string }) {
+  const { data } = useEvents(volumeId);
+  const events = (data?.events ?? []).filter(
+    e =>
+      e.category === 'catchup' ||
+      e.category === 'hot_rejoin' ||
+      e.category === 'health' ||
+      // A leg fenced out for a planned csi-node roll, and its readmission.
+      e.category === 'maintenance'
+  );
+  return (
+    <div>
+      <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+        <RefreshCw className="w-4 h-4 text-rebuilding-600" aria-hidden="true" />
+        Recovery activity
+        <span className="text-xs font-normal text-gray-500">
+          engine events for this volume while a replica is not in sync
+        </span>
+      </h4>
+      <EventTimelinePanel events={events} showVolume={false} />
     </div>
   );
 }
@@ -399,9 +398,12 @@ export const VolumeDetailAPI: React.FC<VolumeDetailAPIProps> = ({
 
   const renderReplicasTab = () =>
     hasSyncData ? (
-      <ReplicaSyncTable volume={volume} />
+      <div className="space-y-6">
+        <ReplicaSyncTable volume={volume} />
+        {isVolumeRecovering(volume) && <RecoveryActivityPanel volumeId={volumeId} />}
+      </div>
     ) : volume.replica_statuses.length > 0 ? (
-      <LegacyReplicaCards replicas={volume.replica_statuses} />
+      <SingleReplicaCards replicas={volume.replica_statuses} />
     ) : (
       <div className="text-center py-8">
         <Network className="w-12 h-12 text-gray-400 mx-auto mb-4" />

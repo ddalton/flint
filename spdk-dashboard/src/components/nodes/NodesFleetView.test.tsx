@@ -8,7 +8,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { NodesFleetView } from './NodesFleetView';
 import { OperationsProvider } from '../../contexts/OperationsContext';
 import { transformBackendData } from '../../hooks/useDashboardData';
-import { makeDashboardData } from '../../test/fixtures';
+import { makeDashboardData, makeDisk } from '../../test/fixtures';
 import { login, logout } from '../../api/client';
 
 const renderView = () => {
@@ -82,5 +82,47 @@ describe('NodesFleetView', () => {
     // The aggregate-fed disk table shows the fixture disk on that node.
     const table = screen.getByRole('table');
     expect(within(table).getAllByText(/0000:00:1f\.0/).length).toBeGreaterThan(0);
+  });
+
+  it('shows a disk without a volume store as not initialized, never as full', async () => {
+    // The agent reports free_space 0 for such a disk and the released
+    // backend's node summary summed it as allocated: dash1-cp-1 read
+    // "100% · 436/436GB" on 2026-10-27. The row derives its figures from
+    // the node's initialized disks instead.
+    await login('admin', 'right-password');
+    const user = userEvent.setup();
+    const wire = makeDashboardData();
+    wire.disks = [
+      ...wire.disks,
+      makeDisk({
+        id: 'runj-aws-3:0000:00:1f.0',
+        node: 'runj-aws-3',
+        blobstore_initialized: false,
+        free_space: 0,
+        allocated_space: 435.86,
+        capacity_gb: 435.86,
+        lvol_count: 0,
+      }),
+    ];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <OperationsProvider>
+            <NodesFleetView data={transformBackendData(wire)} />
+          </OperationsProvider>
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+
+    const row = (await screen.findAllByRole('button', { expanded: false })).find(b =>
+      (b.textContent ?? '').includes('runj-aws-3')
+    );
+    expect(row).toBeDefined();
+    expect(row!.textContent).toContain('0%');
+    expect(row!.textContent).toContain('0/0GB');
+    await user.click(row!);
+    expect(screen.getByText('not initialized')).toBeInTheDocument();
+    expect(screen.getByText('no volume store')).toBeInTheDocument();
   });
 });

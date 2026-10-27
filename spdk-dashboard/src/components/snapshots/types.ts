@@ -6,6 +6,7 @@ export interface SnapshotDetails {
   creation_time: string;
   ready_to_use: boolean;
   size_bytes: number;
+  // The backend's `kind`: 'user' | 'epoch' | 'other' (see SnapshotKind).
   snapshot_type: string;
   clone_source_snapshot_id?: string;
   replica_bdev_details: ReplicaBdevDetails[];
@@ -93,7 +94,15 @@ export interface SnapshotRelationshipMap {
   };
 }
 
-export type SnapshotTypeFilter = 'all' | 'Bdev' | 'LvolClone' | 'External';
+// What made the snapshot: a CSI VolumeSnapshot ('user') or an engine
+// common-epoch snapshot retained for replica catch-up ('epoch').
+export type SnapshotKind = 'user' | 'epoch' | 'other';
+export type SnapshotTypeFilter = 'all' | SnapshotKind;
+
+// The kind, in words: a CSI VolumeSnapshot or an engine epoch snapshot.
+export function snapshotKindLabel(kind: string): string {
+  return kind === 'user' ? 'user snapshot' : kind === 'epoch' ? 'engine epoch' : 'snapshot';
+}
 export type SnapshotViewMode = 'list' | 'tree' | 'storage' | 'timeline';
 
 // New view mode for storage analysis

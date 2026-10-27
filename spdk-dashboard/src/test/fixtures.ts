@@ -16,25 +16,21 @@ export function makeSyncInfo(
     since: '2026-07-02T22:36:53Z',
     reason: null,
     hot_rejoin: null,
+    maint_drain: null,
+    rebuild_base: null,
     ...overrides,
   };
 }
 
+// A replica row as the backend projects the sync record: node, the status
+// string ("healthy" / "stale" / "standby"; "active" / "failed" on a
+// single-replica volume) and the record itself (null without one).
 export function makeReplica(
   overrides: Partial<Schemas['DashboardReplicaStatus']> = {}
 ): Schemas['DashboardReplicaStatus'] {
   return {
     node: 'runj-aws-1',
-    status: 'active',
-    access_method: 'nvmeof',
-    is_local: false,
-    raid_member_state: 'online',
-    raid_member_slot: 0,
-    rebuild_progress: null,
-    rebuild_target: null,
-    is_new_replica: false,
-    last_io_timestamp: null,
-    nvmf_target: null,
+    status: 'healthy',
     sync: makeSyncInfo(),
     ...overrides,
   };
@@ -50,28 +46,19 @@ export function makeVolume(
     size: '2Gi',
     replicas: 2,
     active_replicas: 2,
-    access_method: 'nvmeof',
-    local_nvme: false,
-    nvmeof_enabled: true,
-    nvmeof_targets: [],
     nodes: ['runj-aws-1', 'runj-aws-2'],
-    transport_type: 'tcp',
-    target_port: 4420,
     current_epoch: 'epoch-hr-e2e-1261',
     consumer_raids: [],
     replica_statuses: [
       makeReplica(),
-      makeReplica({ node: 'runj-aws-2', raid_member_slot: 1 }),
+      makeReplica({ node: 'runj-aws-2' }),
     ],
     spdk_validation_status: {
       has_spdk_backing: true,
       validation_severity: 'info',
       validation_message: null,
     },
-    raid_status: null,
-    rebuild_progress: null,
     pvc_info: null,
-    ublk_device: null,
     ...overrides,
   };
 }
@@ -110,7 +97,6 @@ export function makeDashboardData(
 ): Schemas['DashboardData'] {
   return {
     volumes: [makeVolume()],
-    raw_volumes: [],
     disks: [makeDisk(), makeDisk({ id: 'runj-aws-2:0000:00:1f.0', node: 'runj-aws-2' })],
     nodes: ['runj-aws-1', 'runj-aws-2', 'runj-aws-3'],
     node_info: {},
@@ -211,7 +197,6 @@ export function makeNodeSummary(
     disks_healthy: 1,
     disks_uninitialized: 0,
     volumes_total: 1,
-    local_nvme_volumes: 1,
     replicas_out_of_sync: 0,
     volumes_not_healthy: 0,
     capacity_gb: 110.0,
@@ -254,6 +239,7 @@ export function makeSnapshotList(): Schemas['DashboardSnapshot'][] {
     return {
       snapshot_uuid: uuid,
       snapshot_name: name,
+      kind: 'user',
       source_volume_id: volume,
       lvs_name: 'lvs_runk-aws-1_0000-00-1f-0',
       size_bytes: 2147483648,
@@ -269,9 +255,16 @@ export function makeSnapshotList(): Schemas['DashboardSnapshot'][] {
       })),
     };
   };
+  // Plus one engine epoch snapshot, which the tab counts separately.
+  const epoch: Schemas['DashboardSnapshot'] = {
+    ...snap(3, 'uuid-epoch', ['runk-aws-1', 'runk-aws-2']),
+    snapshot_name: `epoch-${volume}-41`,
+    kind: 'epoch',
+  };
   return [
     snap(1, 'uuid-1', ['runk-aws-1', 'runk-aws-2']),
     snap(2, 'uuid-2', ['runk-aws-1']),
+    epoch,
   ];
 }
 
@@ -329,6 +322,53 @@ export function makeSnapshotTimeline(
       user(1, 280), user(2, 160), user(3, 45),
     ],
     untracked_epochs: 1,
+    ...overrides,
+  };
+}
+
+// A consumer raid as the backend projects `bdev_raid_get_bdevs` on the node
+// that staged the volume: slot order is SPDK's, each base carries the
+// configured flag and the replica node the backend resolved it to. Modeled
+// on the hr-e2e volume assembled on runj-aws-1 with its remote leg on
+// runj-aws-2.
+export function makeConsumerRaid(
+  overrides: Partial<Schemas['ConsumerRaid']> = {}
+): Schemas['ConsumerRaid'] {
+  return {
+    node: 'runj-aws-1',
+    raid_name: 'raid_pvc-6ff1cf70-hr-e2e',
+    state: 'online',
+    num_base_bdevs: 2,
+    num_base_bdevs_operational: 2,
+    base_bdevs: [
+      {
+        name: 'lvs_runj-aws-1_0000-00-1f-0/vol_pvc-6ff1cf70-hr-e2e_replica_0',
+        uuid: 'c0f0a1d2-0000-4000-8000-000000000000',
+        is_configured: true,
+        replica_node: 'runj-aws-1',
+      },
+      {
+        name: 'nvme_pvc-6ff1cf70-hr-e2e_1n1',
+        uuid: 'c0f0a1d2-0000-4000-8000-000000000001',
+        is_configured: true,
+        replica_node: 'runj-aws-2',
+      },
+    ],
+    ...overrides,
+  };
+}
+
+// An orphaned lvol as the backend attributes it to a disk: a flint-shaped
+// name whose owning PV is gone.
+export function makeOrphan(
+  overrides: Partial<Schemas['OrphanedVolumeInfo']> = {}
+): Schemas['OrphanedVolumeInfo'] {
+  return {
+    spdk_volume_name: 'lvs_runj-aws-1_0000-00-1f-0/vol_pvc-deleted_replica_0',
+    spdk_volume_uuid: '0f0f0f0f-0000-4000-8000-00000000dead',
+    size_blocks: 4194304,
+    size_gb: 2,
+    orphaned_since: '2026-07-01T00:00:00Z',
     ...overrides,
   };
 }

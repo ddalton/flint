@@ -1,15 +1,17 @@
 import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { MemberStateChip, VolumeStateChip } from '../../ui/Chip';
-import { ProgressBar } from '../../ui/ProgressBar';
 import { SyncStateIndicator } from '../../ui/SyncStateIndicator';
-import type { Volume } from '../../../hooks/useDashboardData';
-import { raidLevelDisplayName, type TopologyDetail } from './buildTopology';
+import type { ConsumerRaid, Volume } from '../../../hooks/useDashboardData';
+import { primaryConsumerRaid } from '../../../hooks/useDashboardData';
+import { memberVisual, type TopologyDetail } from './buildTopology';
 
 // Details-on-demand (the Kiali pattern): everything that used to be inlined
-// into the page — NQNs, sync trees, rebuild blocks, the RAID/NVMe-oF
+// into the page — the consumer raid's base list, sync records, the
 // explainers — lives here, opened by selecting a node or edge. The diagram
-// itself stays quiet.
+// itself stays quiet. Every row is a field the backend sends; nothing is
+// derived from the pre-Tier-2 raid_status / rebuild_info model, which the
+// live backend never populated.
 
 function Row({ k, children }: { k: string; children: React.ReactNode }) {
   return (
@@ -35,69 +37,77 @@ function Mono({ children }: { children: React.ReactNode }) {
   return <span className="break-all font-mono text-xs">{children}</span>;
 }
 
-const RAID_PROTECTION_NOTES: Record<number, string[]> = {
-  0: [
-    'Data striped across all members',
-    'Maximum performance, no redundancy',
-    'A single member failure causes data loss',
-  ],
-  1: [
-    'Data mirrored across all members',
-    'Tolerates up to N−1 member failures',
-    'Read performance scales with members',
-    'Write performance limited by the slowest member',
-  ],
-  5: [
-    'Data striped with distributed parity',
-    'Tolerates a single member failure',
-    'Parity overhead: 1/N capacity',
-  ],
-  6: [
-    'Data striped with dual parity',
-    'Tolerates up to 2 member failures',
-    'Parity overhead: 2/N capacity',
-  ],
-};
+// One consumer raid as SPDK reports it on its node.
+function ConsumerRaidRows({ raid }: { raid: ConsumerRaid }) {
+  return (
+    <>
+      <Row k="Node">{raid.node}</Row>
+      <Row k="Raid bdev"><Mono>{raid.raid_name}</Mono></Row>
+      <Row k="State"><MemberStateChip state={raid.state} /></Row>
+      <Row k="Bases configured">
+        {raid.num_base_bdevs_operational}/{raid.num_base_bdevs}
+      </Row>
+      <ul className="mt-2 space-y-1">
+        {raid.base_bdevs.map((b, i) => (
+          <li key={i} className="flex items-center gap-2 rounded bg-gray-50 px-2 py-1 text-xs">
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 flex-shrink-0 rounded-full ${
+                b.is_configured ? 'bg-healthy-500' : 'bg-failed-500'
+              }`}
+            />
+            <span className="font-medium text-gray-700">slot {i}</span>
+            {b.is_configured ? (
+              <>
+                <span className="text-gray-600">{b.replica_node ?? 'unmatched'}</span>
+                <span className="ml-auto truncate font-mono text-gray-500" title={b.name ?? undefined}>
+                  {b.name ?? '—'}
+                </span>
+              </>
+            ) : (
+              <span className="text-failed-700">
+                {b.replica_node
+                  ? `removed — the leg on ${b.replica_node} is out of the raid`
+                  : 'failed slot — leg removed from the raid'}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
 
-function AboutContent({ volume }: { volume: Volume }) {
-  const raid = volume.raid_status;
+function AboutContent() {
   return (
     <div className="space-y-3 text-sm text-gray-600">
-      {raid && (
-        <div>
-          <h5 className="mb-1 font-medium text-gray-800">{raidLevelDisplayName(raid.raid_level)}</h5>
-          <ul className="list-inside list-disc space-y-0.5 text-xs">
-            {(RAID_PROTECTION_NOTES[raid.raid_level] ?? ['Custom RAID configuration']).map(n => (
-              <li key={n}>{n}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {volume.ublk_device && (
-        <div>
-          <h5 className="mb-1 font-medium text-gray-800">ublk</h5>
-          <p className="text-xs">
-            The volume is exposed to the consumer as a kernel block device
-            (module <Mono>ublk_drv</Mono>, kernel 6.0+); SPDK serves the I/O in
-            userspace and handles all replica management transparently.
-          </p>
-        </div>
-      )}
       <div>
-        <h5 className="mb-1 font-medium text-gray-800">NVMe-oF</h5>
+        <h5 className="mb-1 font-medium text-gray-800">How flint mirrors a volume</h5>
         <p className="text-xs">
-          NVMe over Fabrics carries block I/O between nodes: remote replicas are
-          reached through per-replica NVMe-oF targets (dashed edges). Clients
-          connect by NQN; failover, rebuild, and recovery are transparent to the
-          consumer.
+          The node that stages the volume assembles an SPDK raid bdev (level 1,
+          a mirror) over the replica legs: its own leg directly, the others
+          over NVMe-oF. The raid is ephemeral and is re-assembled wherever the
+          consumer lands; the replica lvols and the PV sync record are the
+          source of truth.
+        </p>
+      </div>
+      <div>
+        <h5 className="mb-1 font-medium text-gray-800">Replica recovery</h5>
+        <p className="text-xs">
+          A leg that misses writes is marked <em>stale</em> and excluded. The
+          controller catches it up from epoch snapshots to a <em>standby</em>,
+          then hot-rejoins it into the live raid in a short quiesce window. No
+          block-by-block rebuild runs, so there is no percentage to show:
+          progress is the epoch lag counting down, and the engine's events
+          (volume detail → Events) narrate each phase.
         </p>
       </div>
       <div>
         <h5 className="mb-1 font-medium text-gray-800">Reading this graph</h5>
         <ul className="list-inside list-disc space-y-0.5 text-xs">
-          <li>Left to right follows the data path: consumer → access device → RAID → members → disks</li>
-          <li>Solid member edges are local; dashed are NVMe-oF remotes</li>
-          <li>Marching dashes mean recovery is in flight (rebuild or epoch catch-up)</li>
+          <li>Left to right follows the data path: consumer → raid bdev → legs → disks</li>
+          <li>Solid leg edges are local to the consumer; dashed are NVMe-oF remotes</li>
+          <li>Marching dashes mean the leg is not in sync (catch-up in flight)</li>
           <li>Click any node or edge for its details</li>
         </ul>
       </div>
@@ -106,17 +116,26 @@ function AboutContent({ volume }: { volume: Volume }) {
 }
 
 function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail }) {
-  const raid = volume.raid_status;
+  const raid = primaryConsumerRaid(volume);
   switch (detail.kind) {
-    case 'app':
+    case 'consumer':
       return (
         <>
           <Section title="Consumer">
-            <Row k="Access method">{volume.access_method}</Row>
-            <Row k="Transport">{volume.transport_type}</Row>
-            <Row k="Volume state"><VolumeStateChip state={volume.state} /></Row>
+            {raid ? (
+              <>
+                <Row k="Node">{raid.node}</Row>
+                <Row k="Raid bdev"><Mono>{raid.raid_name}</Mono></Row>
+                <Row k="Raid state"><MemberStateChip state={raid.state} /></Row>
+                <Row k="Volume state"><VolumeStateChip state={volume.state} /></Row>
+              </>
+            ) : (
+              <p className="text-sm text-gray-600">
+                Not staged on any node — no raid is assembled for this volume.
+              </p>
+            )}
           </Section>
-          <Section title="Attached on nodes">
+          <Section title="Replica nodes">
             <div className="flex flex-wrap gap-1">
               {volume.nodes.map(n => (
                 <span key={n} className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">
@@ -124,7 +143,7 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
                 </span>
               ))}
               {volume.nodes.length === 0 && (
-                <span className="text-xs text-gray-500">not attached</span>
+                <span className="text-xs text-gray-500">none recorded</span>
               )}
             </div>
           </Section>
@@ -138,87 +157,38 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
         </>
       );
 
-    case 'access':
-      return (
-        <>
-          {volume.ublk_device && (
-            <Section title="ublk block device">
-              <Row k="Device path"><Mono>{volume.ublk_device.device_path}</Mono></Row>
-              <Row k="ublk ID">{volume.ublk_device.id}</Row>
-              <Row k="Kernel module"><Mono>ublk_drv</Mono></Row>
-              <Row k="Min kernel">6.0+</Row>
-            </Section>
-          )}
-          {volume.nvmeof_targets.length > 0 && (
-            <Section title={`NVMe-oF targets (${volume.nvmeof_targets.length})`}>
-              <div className="space-y-2">
-                {volume.nvmeof_targets.map((t, i) => (
-                  <div key={i} className="rounded bg-gray-50 p-2 text-xs">
-                    <div className="mb-1"><Mono>{t.nqn}</Mono></div>
-                    <div className="flex justify-between text-gray-600">
-                      <span>
-                        {t.target_ip}:{t.target_port} ({t.transport})
-                      </span>
-                      <span>
-                        {t.connection_count} conn{t.connection_count === 1 ? '' : 's'} •{' '}
-                        {t.active ? 'active' : 'inactive'}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Section>
-          )}
-        </>
-      );
-
     case 'raid':
       return (
         <>
           <Section title="Volume">
             <Row k="State"><VolumeStateChip state={volume.state} /></Row>
             <Row k="Size">{volume.size}</Row>
-            <Row k="Replicas">
-              {volume.active_replicas}/{volume.replicas} active
+            <Row k="Replicas in sync">
+              {volume.active_replicas}/{volume.replicas}
             </Row>
             <Row k="ID"><Mono>{volume.id}</Mono></Row>
           </Section>
-          {raid && (
-            <Section title={raidLevelDisplayName(raid.raid_level)}>
-              <Row k="RAID state"><MemberStateChip state={raid.state} /></Row>
-              <Row k="Members">
-                {raid.operational_members}/{raid.num_members} operational
-              </Row>
-              <Row k="Discovered">{raid.discovered_members}</Row>
-              <Row k="Auto-rebuild">{raid.auto_rebuild_enabled ? 'enabled' : 'disabled'}</Row>
-              {raid.superblock_version != null && (
-                <Row k="Superblock">v{raid.superblock_version}</Row>
-              )}
+          {volume.consumer_raids.length === 0 ? (
+            <Section title="RAID bdev">
+              <p className="text-sm text-gray-600">
+                Not assembled on any node. When a workload stages this volume,
+                the consumer node builds its raid from the replica legs and it
+                appears here.
+              </p>
             </Section>
+          ) : (
+            volume.consumer_raids.map(r => (
+              <Section key={r.node} title={`Assembled on ${r.node}`}>
+                <ConsumerRaidRows raid={r} />
+              </Section>
+            ))
           )}
-          {raid?.rebuild_info && (
-            <Section title="Active rebuild">
-              <Row k="Direction">
-                slot {raid.rebuild_info.source_slot} → slot {raid.rebuild_info.target_slot}
-              </Row>
-              <Row k="State">{raid.rebuild_info.state}</Row>
-              <div className="mt-2">
-                <ProgressBar
-                  value={raid.rebuild_info.progress_percentage}
-                  label="RAID rebuild progress"
-                  valueText={`${raid.rebuild_info.progress_percentage.toFixed(1)}%`}
-                  tone="warn"
-                  className="w-full"
-                />
-                <p className="mt-1 text-xs tabular-nums text-gray-600">
-                  {raid.rebuild_info.progress_percentage.toFixed(1)}% •{' '}
-                  {raid.rebuild_info.blocks_remaining.toLocaleString()} of{' '}
-                  {raid.rebuild_info.blocks_total.toLocaleString()} blocks remaining
-                  {raid.rebuild_info.estimated_time_remaining
-                    ? ` • ETA ${raid.rebuild_info.estimated_time_remaining}`
-                    : ''}
-                </p>
-              </div>
+          {volume.consumer_raids.length > 1 && (
+            <Section title="Note">
+              <p className="text-xs text-gray-600">
+                More than one node has this raid assembled — normal only
+                mid-cutover; the graph draws the first.
+              </p>
             </Section>
           )}
         </>
@@ -227,7 +197,7 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
     case 'member': {
       const { join } = detail;
       const replica = join.replica;
-      const rebuild = raid?.rebuild_info;
+      const { dashed } = memberVisual(join);
       return (
         <>
           {(join.member || join.raidPresent) && (
@@ -235,8 +205,14 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
               <Row k="Slot">{join.slot ?? 'not assembled'}</Row>
               {join.member && (
                 <>
-                  <Row k="State"><MemberStateChip state={join.member.state} /></Row>
-                  <Row k="Bdev"><Mono>{join.member.name}</Mono></Row>
+                  <Row k="Configured">
+                    {join.member.is_configured
+                      ? 'yes'
+                      : join.replica
+                        ? `no — the leg on ${join.replica.node} was removed from the raid`
+                        : 'no — failed slot'}
+                  </Row>
+                  <Row k="Bdev"><Mono>{join.member.name ?? '—'}</Mono></Row>
                   {join.member.uuid && <Row k="UUID"><Mono>{join.member.uuid}</Mono></Row>}
                 </>
               )}
@@ -245,12 +221,13 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
           {replica && (
             <Section title={`Replica on ${replica.node}`}>
               <Row k="Status"><MemberStateChip state={replica.status} /></Row>
-              <Row k="RAID state">{replica.raid_member_state}</Row>
-              <Row k="Access">{replica.is_local ? 'local' : 'remote'} • {replica.access_method}</Row>
-              {replica.is_new_replica && <Row k="Provisioned">new replica</Row>}
-              {replica.last_io_timestamp && (
-                <Row k="Last I/O">{new Date(replica.last_io_timestamp).toLocaleTimeString()}</Row>
-              )}
+              <Row k="Path">
+                {join.consumerNode
+                  ? dashed
+                    ? `NVMe-oF from ${join.consumerNode}`
+                    : 'local to the consumer'
+                  : '— (no consumer)'}
+              </Row>
             </Section>
           )}
           {replica?.sync && (
@@ -267,38 +244,6 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
                 )}
                 {replica.sync.reason && <div>{replica.sync.reason}</div>}
               </div>
-            </Section>
-          )}
-          {replica?.nvmf_target && (
-            <Section title="NVMe-oF target">
-              <Row k="Address">
-                {replica.nvmf_target.target_ip}:{replica.nvmf_target.target_port}
-              </Row>
-              <Row k="Transport">{replica.nvmf_target.transport_type}</Row>
-              <div className="mt-1 rounded bg-gray-50 p-2">
-                <Mono>{replica.nvmf_target.nqn}</Mono>
-              </div>
-            </Section>
-          )}
-          {(join.isRebuildTarget || join.isRebuildSource) && rebuild && (
-            <Section title="Rebuild role">
-              <Row k="Role">{join.isRebuildTarget ? 'target (being rebuilt)' : 'source'}</Row>
-              {join.isRebuildTarget && (
-                <div className="mt-2">
-                  <ProgressBar
-                    value={rebuild.progress_percentage}
-                    label="member rebuild progress"
-                    valueText={`${rebuild.progress_percentage.toFixed(1)}%`}
-                    tone="warn"
-                    className="w-full"
-                  />
-                  {rebuild.estimated_time_remaining && (
-                    <p className="mt-1 text-xs text-gray-600">
-                      ETA {rebuild.estimated_time_remaining}
-                    </p>
-                  )}
-                </div>
-              )}
             </Section>
           )}
         </>
@@ -343,15 +288,14 @@ function DetailBody({ volume, detail }: { volume: Volume; detail: TopologyDetail
     case 'about':
       return (
         <div className="px-4 py-3">
-          <AboutContent volume={volume} />
+          <AboutContent />
         </div>
       );
   }
 }
 
 const DETAIL_TITLES: Record<TopologyDetail['kind'], string> = {
-  app: 'Consumer',
-  access: 'Access layer',
+  consumer: 'Consumer',
   raid: 'RAID bdev',
   member: 'RAID member',
   disk: 'Backing disk',

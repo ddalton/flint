@@ -11,6 +11,8 @@ export type EventCategory =
   | 'cutover'
   | 'epoch'
   | 'health'
+  // A leg fenced out for a planned csi-node roll, and its readmission.
+  | 'maintenance'
   | 'other';
 
 // Wire types aliased from the generated OpenAPI schema (api/openapi.json);

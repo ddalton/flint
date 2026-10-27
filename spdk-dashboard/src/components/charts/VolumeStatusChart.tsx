@@ -1,9 +1,10 @@
 import React from 'react';
 import { volumeStateStyle } from '../ui/status';
-import { Database, Settings } from 'lucide-react';
+import { Database, RefreshCw } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { Chip } from '../ui/Chip';
 import type { Volume } from '../../hooks/useDashboardData';
+import { isVolumeRecovering } from '../../hooks/useDashboardData';
 
 interface VolumeStatusChartProps {
   volumes: Volume[];
@@ -19,14 +20,9 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
     return acc;
   }, {} as Record<string, number>);
 
-  // Count volumes with rebuilding replica activity separately
-  const volumesWithRebuilding = volumes.filter(v =>
-    v.replica_statuses.some(replica =>
-      replica.status === 'rebuilding' ||
-      replica.rebuild_progress !== null ||
-      replica.is_new_replica
-    )
-  ).length;
+  // Recovery is the Tier-2 signal: any replica not in_sync (the same
+  // predicate as the Recovering stat card and filter).
+  const recovering = volumes.filter(isVolumeRecovering).length;
 
   const total = volumes.length;
 
@@ -82,18 +78,18 @@ export const VolumeStatusChart: React.FC<VolumeStatusChartProps> = ({ volumes })
         </>
       )}
 
-      {/* Rebuilding activity indicator */}
-      {volumesWithRebuilding > 0 && (
+      {/* Recovery activity: replicas catching up (stale → standby → in sync) */}
+      {recovering > 0 && (
         <div className="p-3 bg-rebuilding-50 rounded-lg border border-rebuilding-200">
           <div className="flex items-center gap-2">
-            <Settings aria-hidden="true" className="w-4 h-4 text-rebuilding-600" />
+            <RefreshCw aria-hidden="true" className="w-4 h-4 text-rebuilding-600" />
             <span className="text-sm font-medium text-rebuilding-800">
-              Rebuilding Activity: {volumesWithRebuilding} volume{volumesWithRebuilding !== 1 ? 's' : ''}
-              {volumesWithRebuilding === 1 ? ' has' : ' have'} rebuilding replicas
+              Replica recovery: {recovering} volume{recovering !== 1 ? 's' : ''}
+              {recovering === 1 ? ' has' : ' have'} a replica catching up
             </span>
           </div>
           <div className="text-xs text-rebuilding-700 mt-1">
-            Replica recovery operations are in progress to restore full redundancy
+            Stale legs are caught up from epoch snapshots to standby, then hot-rejoined into the live raid
           </div>
         </div>
       )}

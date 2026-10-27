@@ -14,11 +14,7 @@ import type { Disk, ReplicaStatus, Volume } from '../../../hooks/useDashboardDat
 
 function mkReplica(node: string, overrides: Partial<ReplicaStatus> = {}): ReplicaStatus {
   return {
-    access_method: 'nvmeof',
-    is_local: false,
     node,
-    raid_member_state: 'online',
-    rebuild_progress: null,
     status: 'healthy',
     ...overrides,
   } as ReplicaStatus;
@@ -26,23 +22,15 @@ function mkReplica(node: string, overrides: Partial<ReplicaStatus> = {}): Replic
 
 function mkVolume(id: string, nodes: string[], overrides: Partial<Volume> = {}): Volume {
   return {
-    access_method: 'nvmeof',
     active_replicas: nodes.length,
     consumer_raids: [],
     id,
-    local_nvme: false,
     name: id,
     nodes: [],
-    nvmeof_enabled: true,
-    nvmeof_targets: [],
     replicas: nodes.length,
     size: '2 GiB',
     spdk_validation_status: { has_spdk_backing: true, validation_severity: 'info' },
     state: 'Healthy',
-    target_port: 4420,
-    transport_type: 'tcp',
-    ublk_device: null,
-    raid_status: null,
     replica_statuses: nodes.map(n => mkReplica(n)),
     ...overrides,
   } as Volume;

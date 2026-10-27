@@ -1,14 +1,12 @@
 import React, { lazy, Suspense, useState, useMemo, useEffect } from 'react';
 import { useSearchParams } from 'react-router';
-import { apiFetch } from '../../api/client';
-import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, Settings, Info, ShieldAlert, Trash2, Database } from 'lucide-react';
-import type { Disk, Volume, VolumeFilter, DiskFilter, RawSpdkVolume } from '../../hooks/useDashboardData';
-import { filterVolumesByType, isReplicaRecovering } from '../../hooks/useDashboardData';
+import { CheckCircle, X, Filter, HardDrive, AlertTriangle, XCircle, RefreshCw, Info, ShieldAlert, Database } from 'lucide-react';
+import type { Disk, Volume, VolumeFilter, DiskFilter } from '../../hooks/useDashboardData';
+import { filterVolumesByType, isVolumeRecovering } from '../../hooks/useDashboardData';
 import { volumeFilterDisplay, volumeStateStyle } from '../ui/status';
 import { VolumeSyncSummary } from '../ui/SyncStateIndicator';
 import { useOperations } from '../../contexts/OperationsContext';
-import { ConfirmModal } from '../ui/ConfirmModal';
-import { Button, IconButton } from '../ui/Button';
+import { Button } from '../ui/Button';
 import { Pagination } from '../ui/Pagination';
 
 // The detail modal is its own chunk — most sessions never open it.
@@ -17,26 +15,28 @@ const VolumeDetailAPI = lazy(() =>
 
 interface VolumesTableProps {
   volumes: Volume[];
-  rawVolumes?: RawSpdkVolume[];
   disks?: Disk[];
+  // The cluster's node names (the aggregate's `nodes`): a replica whose
+  // node is not among them sits on a node that has left the cluster, which
+  // the sync record alone does not say (dash1-aws-3 deleted, 2026-10-27:
+  // the idle r3 volume kept its leg there "in_sync").
+  nodes?: string[];
   activeFilter?: VolumeFilter;
   diskFilter?: DiskFilter;
   onClearFilter?: () => void;
   onClearDiskFilter?: () => void;
   onReplicaClick?: (volumeId: string, volumeName: string) => void;
-  onRefresh?: () => void;
 }
 
 export const VolumesTable: React.FC<VolumesTableProps> = ({ 
   disks,
-  volumes, 
-  rawVolumes = [],
-  activeFilter, 
+  nodes,
+  volumes,
+  activeFilter,
   diskFilter,
   onClearFilter,
   onClearDiskFilter,
   onReplicaClick,
-  onRefresh
 }) => {
   // Selection is by id in the URL (?volume=) — the detail modal derives its
   // volume from the live query data each render, so it tracks a drill at the
@@ -58,64 +58,18 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
 
-  // Delete dialog state
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
-  const [volumeToDelete, setVolumeToDelete] = useState<RawSpdkVolume | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
-
   useEffect(() => {
     setDialogVisible(selectedVolumeId !== null);
   }, [selectedVolumeId, setDialogVisible]);
 
-  // Extended volume interface for combining managed and raw volumes
-  interface ExtendedVolume extends Volume {
-    isRaw?: boolean;
-    rawVolumeData?: RawSpdkVolume;
-  }
-
-  // Combine managed and raw volumes into a single list
-  const combinedVolumes = useMemo(() => {
-    const managedVols: ExtendedVolume[] = volumes.map(v => ({ ...v, isRaw: false }));
-    
-    const rawVols: ExtendedVolume[] = rawVolumes.map(rv => ({
-      id: rv.uuid,
-      name: rv.name,
-      size: `${rv.size_gb.toFixed(1)}GB`,
-      state: 'Raw',
-      replicas: 0,
-      active_replicas: 0,
-      local_nvme: false,
-      access_method: 'raw',
-      rebuild_progress: null,
-      nodes: [rv.node],
-      replica_statuses: [],
-      nvmeof_targets: [],
-      nvmeof_enabled: false,
-      transport_type: '',
-      target_port: 0,
-      consumer_raids: [],
-      spdk_validation_status: {
-        has_spdk_backing: true,
-        validation_message: 'Raw SPDK volume (unmanaged)',
-        validation_severity: 'warning' as const
-      },
-      isRaw: true,
-      rawVolumeData: rv
-    }));
-    
-    return [...managedVols, ...rawVols];
-  }, [volumes, rawVolumes]);
-
   const filteredVolumes = useMemo(() => {
-    let result = combinedVolumes;
+    let result = volumes;
 
     // Apply volume filter first — the shared predicate (status/recovery
-    // semantics identical to the stat cards), plus the table-only
-    // 'orphaned' case for raw SPDK rows.
+    // semantics identical to the stat cards). 'orphaned' matches nothing
+    // here: orphans are per-disk lvols, listed on the Disks tab.
     if (activeFilter && activeFilter !== 'all') {
-      result = activeFilter === 'orphaned'
-        ? result.filter(v => v.isRaw)
-        : filterVolumesByType(result, activeFilter);
+      result = filterVolumesByType(result, activeFilter);
     }
 
     // Apply disk filter if present
@@ -133,7 +87,7 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     }
 
     return result;
-  }, [combinedVolumes, activeFilter, diskFilter, disks]);
+  }, [volumes, activeFilter, diskFilter, disks]);
 
   // Calculate pagination
   const totalPages = Math.ceil(filteredVolumes.length / pageSize);
@@ -150,48 +104,6 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
 
 
 
-  // Handle raw volume deletion - open dialog
-  const handleDeleteRaw = (rawVolume: RawSpdkVolume) => {
-    setVolumeToDelete(rawVolume);
-    setShowDeleteDialog(true);
-  };
-
-  // Confirm and execute deletion
-  const confirmDeleteRaw = async () => {
-    if (!volumeToDelete) return;
-
-    setIsDeleting(true);
-
-    // Close dialog immediately - deletion is asynchronous
-    setShowDeleteDialog(false);
-    setVolumeToDelete(null);
-    
-    try {
-      const response = await apiFetch(`/api/spdk/volumes/raw/${volumeToDelete.uuid}`, {
-        method: 'DELETE'
-      });
-      
-      if (response.ok) {
-        console.log(`Volume "${volumeToDelete.name}" deletion initiated successfully`);
-      } else {
-        console.error(`Failed to initiate volume deletion: ${response.status}`);
-      }
-    } catch (error) {
-      console.error('Error initiating volume deletion:', error);
-    } finally {
-      setIsDeleting(false);
-      // Refresh dashboard data to show updated state
-      onRefresh?.();
-    }
-  };
-
-  // Cancel deletion
-  const cancelDeleteRaw = () => {
-    setShowDeleteDialog(false);
-    setVolumeToDelete(null);
-    setIsDeleting(false);
-  };
-
   // Sort volumes by state priority (Failed -> Degraded -> Healthy)
   const sortedVolumes = paginatedVolumes.sort((a, b) => {
     const aInfo = getVolumeStateInfo(a.state);
@@ -199,17 +111,12 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
     return bInfo.priority - aInfo.priority; // Reverse sort for priority
   });
 
-  // Check if volume has recovery activity (Tier-2 sync state or legacy markers)
-  const hasRebuildingActivity = (volume: Volume) => {
-    return volume.replica_statuses.some(isReplicaRecovering);
-  };
-
   const handleVolumeNameClick = (volume: Volume) => {
     setSelectedVolumeId(volume.id);
   };
 
   const selectedVolumeDetail =
-    combinedVolumes.find(v => v.id === selectedVolumeId) ?? null;
+    volumes.find(v => v.id === selectedVolumeId) ?? null;
 
   const goToPage = (page: number) => {
     setCurrentPage(Math.max(1, Math.min(totalPages, page)));
@@ -297,7 +204,6 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">State</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Replicas</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Local NVMe</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sync</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nodes</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
@@ -309,8 +215,10 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
           <tbody className="bg-white divide-y divide-gray-200">
             {sortedVolumes.length === 0 ? (
               <tr>
-                <td colSpan={diskFilter ? 9 : 8} className="px-6 py-8 text-center text-gray-500">
-                  {activeFilter && activeFilter !== 'all' 
+                <td colSpan={diskFilter ? 8 : 7} className="px-6 py-8 text-center text-gray-500">
+                  {activeFilter === 'orphaned'
+                    ? 'Orphaned SPDK volumes are listed per disk on the Disks tab.'
+                    : activeFilter && activeFilter !== 'all'
                     ? `No volumes match the "${getFilterDisplayName(activeFilter)}" filter.`
                     : diskFilter
                     ? `No volumes found on disk "${diskFilter}".`
@@ -320,11 +228,24 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               </tr>
             ) : (
               sortedVolumes.map((volume) => {
-                const extVolume = volume as ExtendedVolume;
                 const stateInfo = getVolumeStateInfo(volume.state);
                 const StateIcon = stateInfo.icon;
-                const rebuildingActivity = hasRebuildingActivity(volume);
                 const hasSyncData = volume.replica_statuses.some(r => r.sync != null);
+                // What the missing replicas are: behind the record on a
+                // replica set; on a single-replica volume either gone (the
+                // lvol verify said no) or unverifiable (its node agent did
+                // not answer — a csi-node restart read "failed, not in sync"
+                // on dash1, 2026-10-27).
+                const missing = volume.replicas - volume.active_replicas;
+                const unverified =
+                  !hasSyncData &&
+                  (volume.replica_statuses.some(r => r.status === 'unknown') ||
+                    volume.spdk_validation_status?.validation_severity === 'warning');
+                const missingLabel = hasSyncData
+                  ? `${missing} replica${missing !== 1 ? 's' : ''} not in sync`
+                  : unverified
+                    ? `${missing} replica${missing !== 1 ? 's' : ''} unverified`
+                    : `${missing} replica${missing !== 1 ? 's' : ''} failed`;
 
                 return (
                   <tr key={volume.id} className="hover:bg-gray-50">
@@ -345,14 +266,28 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                           {volume.state}
                         </span>
 
-                        {/* SPDK Validation Status Indicator */}
+                        {/* No SPDK backing: a shield when the backend could
+                            not verify the lvol (error red, warning amber); a
+                            gray note when there is none by design — an NFS
+                            share owns no SPDK volume (severity "info"). */}
                         {volume.spdk_validation_status && !volume.spdk_validation_status.has_spdk_backing && (
-                          <span
-                            className="text-failed-500"
-                            title={volume.spdk_validation_status.validation_message || "No SPDK backing found"}
-                          >
-                            <ShieldAlert className="w-4 h-4" />
-                          </span>
+                          volume.spdk_validation_status.validation_severity === 'info' ? (
+                            <span
+                              className="text-gray-400"
+                              title={volume.spdk_validation_status.validation_message || 'No SPDK volume'}
+                            >
+                              <Info className="w-4 h-4" />
+                            </span>
+                          ) : (
+                            <span
+                              className={volume.spdk_validation_status.validation_severity === 'warning'
+                                ? 'text-warning-600'
+                                : 'text-failed-500'}
+                              title={volume.spdk_validation_status.validation_message || 'No SPDK backing found'}
+                            >
+                              <ShieldAlert className="w-4 h-4" />
+                            </span>
+                          )
                         )}
 
                         {stateInfo.tooltip && (
@@ -364,80 +299,72 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
                     </td>
 
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {extVolume.isRaw ? (
-                        <span className="text-gray-400">N/A</span>
-                      ) : (
-                        <Button
-                          variant="link"
-                          className="hover:underline"
-                          onClick={() => onReplicaClick?.(volume.id, volume.name)}
-                          title={`Click to see disks with replicas for ${volume.name}`}
+                      {volume.replicas === 0 ? (
+                        // No SPDK legs at all (an NFS share): nothing to count.
+                        <span
+                          className="text-gray-400"
+                          title={volume.spdk_validation_status?.validation_message || 'No SPDK replicas'}
                         >
-                          {volume.active_replicas}/{volume.replicas}
-                        </Button>
-                      )}
-                      {volume.active_replicas < volume.replicas && (
-                        <div className="text-xs text-failed-600 mt-1">
-                          {volume.replicas - volume.active_replicas} replica{volume.replicas - volume.active_replicas !== 1 ? 's' : ''} down
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {extVolume.isRaw ? (
-                        <span className="text-gray-400">N/A</span>
-                      ) : volume.local_nvme ? (
-                        <div className="flex items-center gap-1 text-healthy-600">
-                          <CheckCircle className="w-5 h-5" />
-                          <span className="text-xs">High Perf</span>
-                        </div>
+                          —
+                        </span>
                       ) : (
-                        <X className="w-5 h-5 text-gray-400" />
+                        <>
+                          <Button
+                            variant="link"
+                            className="hover:underline"
+                            onClick={() => onReplicaClick?.(volume.id, volume.name)}
+                            title={`Click to see disks with replicas for ${volume.name}`}
+                          >
+                            {volume.active_replicas}/{volume.replicas}
+                          </Button>
+                          {missing > 0 && (
+                            <div
+                              className={`text-xs mt-1 ${unverified ? 'text-gray-500' : 'text-failed-600'}`}
+                              title={unverified ? (volume.spdk_validation_status?.validation_message ?? undefined) : undefined}
+                            >
+                              {missingLabel}
+                            </div>
+                          )}
+                        </>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {extVolume.isRaw ? (
-                        <span className="text-gray-400">N/A</span>
-                      ) : hasSyncData ? (
+                      {hasSyncData ? (
                         <VolumeSyncSummary volume={volume} />
-                      ) : rebuildingActivity ? (
-                        <span className="text-xs text-rebuilding-600 font-medium">rebuild active</span>
                       ) : (
-                        <span className="text-gray-400 text-sm">-</span>
+                        // Single-replica volumes carry no sync record.
+                        <span className="text-gray-400 text-sm" title="Single-replica volume: no replication record">—</span>
                       )}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-wrap gap-1">
-                        {volume.nodes.map(node => (
-                          <span key={node} className="inline-flex px-2 py-1 text-xs bg-gray-100 text-gray-800 rounded">
-                            {node}
-                          </span>
-                        ))}
+                        {volume.nodes.map(node => {
+                          const gone = !!nodes && node !== '' && !nodes.includes(node);
+                          return gone ? (
+                            <span
+                              key={node}
+                              className="inline-flex px-2 py-1 text-xs bg-failed-100 text-failed-800 rounded line-through"
+                              title={`${node} is no longer in the cluster; the record still lists a leg there`}
+                            >
+                              {node}
+                            </span>
+                          ) : (
+                            <span key={node} className="inline-flex px-2 py-1 text-xs bg-gray-100 text-gray-800 rounded">
+                              {node}
+                            </span>
+                          );
+                        })}
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center gap-2">
-                        {extVolume.isRaw ? (
-                          <>
-                            {extVolume.rawVolumeData && (
-                              <IconButton
-                                icon={Trash2}
-                                aria-label="Delete orphaned SPDK volume"
-                                onClick={() => handleDeleteRaw(extVolume.rawVolumeData!)}
-                                className="p-1 text-failed-500 hover:text-failed-700 hover:bg-failed-50"
-                                iconClass="w-4 h-4"
-                                title="Delete orphaned SPDK volume"
-                              />
-                            )}
-                          </>
-                        ) : (
-                          <Button
-                            size="sm"
-                            icon={Info}
-                            onClick={() => handleVolumeNameClick(volume)}
-                          >
-                            Details
-                          </Button>
-                        )}
+                        <Button
+                          size="sm"
+                          icon={Info}
+                          onClick={() => handleVolumeNameClick(volume)}
+                        >
+                          Details
+                        </Button>
                       </div>
                     </td>
                     {diskFilter && (
@@ -519,8 +446,8 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
               <span>{filteredVolumes.filter(v => v.state === 'Failed').length} Failed</span>
             </div>
             <div className="flex items-center gap-2">
-              <Settings className="w-4 h-4 text-rebuilding-600" />
-              <span>{filteredVolumes.filter(v => hasRebuildingActivity(v)).length} With Rebuilding</span>
+              <RefreshCw className="w-4 h-4 text-rebuilding-600" />
+              <span>{filteredVolumes.filter(isVolumeRecovering).length} Recovering</span>
             </div>
           </div>
           {totalPages > 1 && (
@@ -544,53 +471,6 @@ export const VolumesTable: React.FC<VolumesTableProps> = ({
         </Suspense>
       )}
 
-      {/* Delete Orphaned Volume Confirmation Dialog (kit ConfirmModal) */}
-      {showDeleteDialog && volumeToDelete && (
-        <ConfirmModal
-          title="Delete Orphaned SPDK Volume"
-          subtitle={`${volumeToDelete.name} on ${volumeToDelete.node}`}
-          danger={
-            <>
-              <strong>Permanent deletion.</strong> The SPDK logical volume is
-              destroyed; space reclamation runs in the background (large
-              volumes can take minutes — LVS free space updates when it
-              completes).
-            </>
-          }
-          confirmLabel={isDeleting ? 'Deleting…' : 'Delete Volume'}
-          confirmPhrase="DELETE"
-          busy={isDeleting}
-          onConfirm={confirmDeleteRaw}
-          onCancel={cancelDeleteRaw}
-        >
-          <div className="bg-gray-50 rounded-lg p-4 space-y-2 mb-4 text-sm">
-            <div className="flex justify-between">
-              <span className="font-medium">Volume:</span>
-              <span className="font-mono">{volumeToDelete.name}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="font-medium">UUID:</span>
-              <span className="font-mono text-xs">{volumeToDelete.uuid}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="font-medium">Node:</span>
-              <span>{volumeToDelete.node}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="font-medium">Size:</span>
-              <span>{volumeToDelete.size_gb.toFixed(1)}GB</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="font-medium">LVS:</span>
-              <span className="font-mono text-xs">{volumeToDelete.lvs_name}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="font-medium">Status:</span>
-              <span className="text-stale-600">Orphaned (no Kubernetes tracking)</span>
-            </div>
-          </div>
-        </ConfirmModal>
-      )}
     </div>
   );
 };

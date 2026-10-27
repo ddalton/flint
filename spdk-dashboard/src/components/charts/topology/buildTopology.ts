@@ -1,6 +1,12 @@
 import type { Edge, Node } from 'reactflow';
-import type { Disk, RaidMember, ReplicaStatus, Volume } from '../../../hooks/useDashboardData';
-import { isReplicaRecovering } from '../../../hooks/useDashboardData';
+import type {
+  ConsumerRaid,
+  ConsumerRaidMember,
+  Disk,
+  ReplicaStatus,
+  Volume,
+} from '../../../hooks/useDashboardData';
+import { isReplicaRecovering, primaryConsumerRaid } from '../../../hooks/useDashboardData';
 import { memberStateStyle } from '../../ui/status';
 
 // Pure volume → graph projection for the topology view. Everything visual
@@ -9,61 +15,60 @@ import { memberStateStyle } from '../../ui/status';
 // what this returns.
 //
 // Layout is a fixed left→right layered DAG — the data path — NOT
-// force-directed: consumer → access device → RAID bdev → members → disks.
-// Deterministic positions mean nothing jumps between refreshes.
+// force-directed: consumer node → the raid it assembled → base legs →
+// backing disks. Deterministic positions mean nothing jumps between
+// refreshes.
+//
+// Sources, exactly as the backend sends them: `consumer_raids` (one row per
+// node that has `raid_<pv>` assembled, each base with its configured flag
+// and the replica node it backs) and `replica_statuses` (the Tier-2 sync
+// record). There is no raid-level rebuild_info: flint never runs the stock
+// blind rebuild, so "recovery" is a replica leaving in_sync and coming back
+// (stale → standby → hot rejoin), carried by the sync record.
 
-// One RAID slot joined with its replica status and backing disk. slot is
-// null for a replica the RAID hasn't assembled (standby / brand-new).
-// raidPresent distinguishes "not assembled into the RAID" from "this volume
-// reports no RAID at all" — only the former deserves that label.
+// One raid base joined with its replica status and backing disk.
 export interface MemberJoin {
+  // Position in the consumer raid's base list; null for a replica the raid
+  // has not assembled (a stale/standby leg, or no consumer at all).
   slot: number | null;
-  member: RaidMember | null;
+  member: ConsumerRaidMember | null;
   replica: ReplicaStatus | null;
   disk: Disk | null;
-  isRebuildTarget: boolean;
-  isRebuildSource: boolean;
+  // Node the consumer raid lives on; null when the volume has no consumer.
+  consumerNode: string | null;
+  // True when a consumer raid exists — only then is a slot-less replica
+  // "not assembled" rather than simply a replica.
   raidPresent: boolean;
 }
 
 export type TopologyDetail =
-  | { kind: 'app' }
-  | { kind: 'access' }
+  | { kind: 'consumer' }
   | { kind: 'raid' }
   | { kind: 'member'; join: MemberJoin }
   | { kind: 'disk'; disk: Disk; join: MemberJoin }
   | { kind: 'about' };
 
-export interface AppNodeData {
+export interface ConsumerNodeData {
   volume: Volume;
-  detail: TopologyDetail;
-}
-export interface AccessNodeData {
-  volume: Volume;
+  raid: ConsumerRaid | null;
   detail: TopologyDetail;
 }
 export interface RaidNodeData {
   volume: Volume;
+  raid: ConsumerRaid | null;
   // One ring segment per member, colored by its state.
   ringHexes: string[];
   detail: TopologyDetail;
 }
 export interface MemberNodeData {
   join: MemberJoin;
-  // Rebuild progress for the target slot; the node shows an inline bar.
-  rebuildPct: number | null;
   detail: TopologyDetail;
 }
 export interface DiskNodeData {
   disk: Disk;
   detail: TopologyDetail;
 }
-export type TopologyNodeData =
-  | AppNodeData
-  | AccessNodeData
-  | RaidNodeData
-  | MemberNodeData
-  | DiskNodeData;
+export type TopologyNodeData = ConsumerNodeData | RaidNodeData | MemberNodeData | DiskNodeData;
 
 // Edge clicks open the drawer for the entity the edge leads to.
 export interface TopologyEdgeData {
@@ -80,47 +85,43 @@ export interface MemberVisual {
   recovering: boolean;
 }
 
-// Edge/ring visual state for one member: member state wins (it is what the
-// RAID actually assembled), replica status fills in for unassembled
-// replicas. Recovery animates: legacy rebuild or Tier-2 non-in_sync.
+// Visual state for one member. A base the raid holds is what SPDK says it
+// is: configured → online; a nulled slot → the leg's own status when the
+// backend named the leg it belonged to (stale while it catches up), failed
+// when nothing is known about it. A replica outside the
+// raid shows its sync-record status (stale / standby). Dashed = reached
+// over NVMe-oF, i.e. on a node other than the consumer's. Recovery
+// (animated) = the replica is not in_sync.
 export function memberVisual(join: MemberJoin): MemberVisual {
-  const state = (join.member?.state ?? join.replica?.status ?? 'unknown').toLowerCase();
-  const recovering =
-    state === 'rebuilding' ||
-    join.isRebuildTarget ||
-    (join.replica ? isReplicaRecovering(join.replica) : false);
+  const state = join.member
+    ? join.member.is_configured
+      ? 'online'
+      : (join.replica?.status ?? 'failed').toLowerCase()
+    : (join.replica?.status ?? 'unknown').toLowerCase();
   return {
     state,
     hex: memberStateStyle(state).hex,
-    dashed: join.replica ? !join.replica.is_local : false,
-    recovering,
+    dashed: !!join.replica && !!join.consumerNode && join.replica.node !== join.consumerNode,
+    recovering: join.replica ? isReplicaRecovering(join.replica) : false,
   };
 }
 
-export function raidLevelDisplayName(raidLevel: number): string {
-  switch (raidLevel) {
-    case 0:
-      return 'RAID-0 (Striping)';
-    case 1:
-      return 'RAID-1 (Mirroring)';
-    case 5:
-      return 'RAID-5 (Distributed Parity)';
-    case 6:
-      return 'RAID-6 (Dual Parity)';
-    case 10:
-      return 'RAID-10 (Striped Mirrors)';
-    default:
-      return `RAID-${raidLevel}`;
+// Health of an assembled consumer raid, from SPDK's own state and the
+// configured-base count ("online" with operational < total is degraded).
+export function raidHealth(raid: ConsumerRaid): 'healthy' | 'degraded' | 'failed' {
+  if (raid.state === 'online') {
+    return raid.num_base_bdevs_operational < raid.num_base_bdevs ? 'degraded' : 'healthy';
   }
+  return raid.state === 'configuring' ? 'degraded' : 'failed';
 }
 
-// RAID slots (sorted) joined with replicas by raid_member_slot; replicas the
-// RAID doesn't know about yet are appended slot-less. Disks resolve through
-// what the API actually sends — the replica's node plus the disk's
-// provisioned_volumes — not the never-sent disk_ref the old cards keyed on.
+// Consumer-raid bases (in SPDK slot order) joined with replicas by the
+// replica_node the backend resolved; replicas the raid does not hold are
+// appended slot-less. Disks resolve through what the API actually sends —
+// the replica's node plus the disk's provisioned_volumes.
 export function joinMembers(volume: Volume, disks: Disk[]): MemberJoin[] {
-  const raid = volume.raid_status ?? null;
-  const rebuild = raid?.rebuild_info ?? null;
+  const raid = primaryConsumerRaid(volume);
+  const consumerNode = raid?.node ?? null;
   const joins: MemberJoin[] = [];
   const claimed = new Set<ReplicaStatus>();
 
@@ -136,32 +137,32 @@ export function joinMembers(volume: Volume, disks: Disk[]): MemberJoin[] {
   };
 
   if (raid) {
-    const members = [...raid.members].sort((a, b) => a.slot - b.slot);
-    for (const member of members) {
-      const replica =
-        volume.replica_statuses.find(r => r.raid_member_slot === member.slot) ?? null;
+    raid.base_bdevs.forEach((member, slot) => {
+      const replica = member.replica_node
+        ? volume.replica_statuses.find(
+            r => r.node === member.replica_node && !claimed.has(r)
+          ) ?? null
+        : null;
       if (replica) claimed.add(replica);
       joins.push({
-        slot: member.slot,
+        slot,
         member,
         replica,
         disk: backingDisk(replica),
-        isRebuildTarget: rebuild?.target_slot === member.slot,
-        isRebuildSource: rebuild?.source_slot === member.slot,
+        consumerNode,
         raidPresent: true,
       });
-    }
+    });
   }
 
   for (const replica of volume.replica_statuses) {
     if (claimed.has(replica)) continue;
     joins.push({
-      slot: replica.raid_member_slot ?? null,
+      slot: null,
       member: null,
       replica,
       disk: backingDisk(replica),
-      isRebuildTarget: false,
-      isRebuildSource: false,
+      consumerNode,
       raidPresent: raid !== null,
     });
   }
@@ -174,10 +175,9 @@ export function joinMembers(volume: Volume, disks: Disk[]): MemberJoin[] {
 // Column gaps are sized for the bezier edges: too little horizontal room
 // between the RAID node's right edge and the member column makes the curves
 // kink back on themselves (seen live at 830).
-const COL_X = { app: 0, access: 250, raid: 505, member: 930, disk: 1275 } as const;
+const COL_X = { consumer: 0, raid: 300, member: 725, disk: 1070 } as const;
 const ROW_H = 150;
-const APP_H = 64;
-const ACCESS_H = 64;
+const CONSUMER_H = 64;
 const RAID_H = 130;
 const MEMBER_H = 104;
 const DISK_H = 84;
@@ -191,8 +191,7 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
   edges: TopologyEdge[];
 } {
   const joins = joinMembers(volume, disks);
-  const raid = volume.raid_status ?? null;
-  const rebuild = raid?.rebuild_info ?? null;
+  const raid = primaryConsumerRaid(volume);
 
   const memberMid =
     joins.length > 0 ? ((joins.length - 1) * ROW_H + MEMBER_H) / 2 : RAID_H / 2;
@@ -200,31 +199,13 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
   const nodes: TopologyNode[] = [];
   const edges: TopologyEdge[] = [];
 
-  // --- Consumer + access layers -----------------------------------------
+  // --- Consumer ------------------------------------------------------------
   nodes.push({
-    id: 'app',
-    type: 'app',
-    position: { x: COL_X.app, y: memberMid - APP_H / 2 },
-    data: { volume, detail: { kind: 'app' } },
+    id: 'consumer',
+    type: 'consumer',
+    position: { x: COL_X.consumer, y: memberMid - CONSUMER_H / 2 },
+    data: { volume, raid, detail: { kind: 'consumer' } },
   });
-
-  const hasUblk = !!volume.ublk_device;
-  const hasAccess = hasUblk || volume.nvmeof_targets.length > 0;
-  if (hasAccess) {
-    nodes.push({
-      id: 'access',
-      type: 'access',
-      position: { x: COL_X.access, y: memberMid - ACCESS_H / 2 },
-      data: { volume, detail: { kind: 'access' } },
-    });
-    edges.push({
-      id: 'e-app-access',
-      source: 'app',
-      target: 'access',
-      style: { stroke: STRUCTURAL_STROKE, strokeWidth: 2 },
-      data: { detailRef: 'access' },
-    });
-  }
 
   // --- RAID bdev ---------------------------------------------------------
   const ringHexes =
@@ -235,11 +216,11 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
     id: 'raid',
     type: 'raid',
     position: { x: COL_X.raid, y: memberMid - RAID_H / 2 },
-    data: { volume, ringHexes, detail: { kind: 'raid' } },
+    data: { volume, raid, ringHexes, detail: { kind: 'raid' } },
   });
   edges.push({
-    id: hasAccess ? 'e-access-raid' : 'e-app-raid',
-    source: hasAccess ? 'access' : 'app',
+    id: 'e-consumer-raid',
+    source: 'consumer',
     target: 'raid',
     style: { stroke: STRUCTURAL_STROKE, strokeWidth: 2 },
     data: { detailRef: 'raid' },
@@ -248,7 +229,6 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
   // --- Members + backing disks -------------------------------------------
   const memberNodeId = (join: MemberJoin, index: number) =>
     join.slot !== null ? `member-${join.slot}` : `replica-${join.replica?.node ?? index}`;
-  const diskYByNodeId = new Map<string, number>();
 
   joins.forEach((join, i) => {
     const id = memberNodeId(join, i);
@@ -257,22 +237,13 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
       id,
       type: 'member',
       position: { x: COL_X.member, y: i * ROW_H },
-      data: {
-        join,
-        rebuildPct: join.isRebuildTarget ? rebuild?.progress_percentage ?? null : null,
-        detail: { kind: 'member', join },
-      },
+      data: { join, detail: { kind: 'member', join } },
     });
 
-    const pathLabel = join.replica
-      ? join.replica.is_local
-        ? 'local'
-        : `nvme-of${
-            join.replica.nvmf_target?.transport_type
-              ? `/${join.replica.nvmf_target.transport_type.toLowerCase()}`
-              : ''
-          }`
-      : undefined;
+    // Path label only when the consumer is known: local leg, or an NVMe-oF
+    // remote. The wire carries no transport detail beyond that.
+    const pathLabel =
+      join.replica && join.consumerNode ? (visual.dashed ? 'nvme-of' : 'local') : undefined;
 
     edges.push({
       id: `e-raid-${id}`,
@@ -293,12 +264,10 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
     if (join.disk) {
       const diskId = `disk-${join.disk.id}`;
       if (!nodes.some(n => n.id === diskId)) {
-        const diskY = i * ROW_H + (MEMBER_H - DISK_H) / 2;
-        diskYByNodeId.set(diskId, diskY);
         nodes.push({
           id: diskId,
           type: 'disk',
-          position: { x: COL_X.disk, y: diskY },
+          position: { x: COL_X.disk, y: i * ROW_H + (MEMBER_H - DISK_H) / 2 },
           data: { disk: join.disk, detail: { kind: 'disk', disk: join.disk, join } },
         });
       }
@@ -311,36 +280,6 @@ export function buildTopology(volume: Volume, disks: Disk[]): {
       });
     }
   });
-
-  // --- Rebuild data flow: source member → target member -------------------
-  if (rebuild) {
-    const sourceIdx = joins.findIndex(j => j.slot === rebuild.source_slot);
-    const targetIdx = joins.findIndex(j => j.slot === rebuild.target_slot);
-    const sourceJoin = joins[sourceIdx];
-    const targetJoin = joins[targetIdx];
-    if (sourceJoin && targetJoin && sourceIdx !== targetIdx) {
-      const sourceId = memberNodeId(sourceJoin, sourceIdx);
-      const targetId = memberNodeId(targetJoin, targetIdx);
-      const downward = targetIdx > sourceIdx;
-      edges.push({
-        id: 'e-rebuild',
-        source: sourceId,
-        target: targetId,
-        sourceHandle: downward ? 'rb-out-bottom' : 'rb-out-top',
-        targetHandle: downward ? 'rb-in-top' : 'rb-in-bottom',
-        animated: true,
-        label: `rebuild ${rebuild.progress_percentage.toFixed(1)}%`,
-        labelStyle: EDGE_LABEL_STYLE,
-        labelBgStyle: EDGE_LABEL_BG,
-        style: {
-          stroke: memberStateStyle('rebuilding').hex,
-          strokeWidth: 2.5,
-          strokeDasharray: '4 3',
-        },
-        data: { detailRef: targetId },
-      });
-    }
-  }
 
   return { nodes, edges };
 }

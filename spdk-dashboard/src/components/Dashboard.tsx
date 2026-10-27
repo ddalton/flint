@@ -4,7 +4,7 @@ import { Filter } from 'lucide-react';
 import { isFreshCluster, uninitializedDiskCount } from './setup/batchSetup';
 import { volumeFilterDisplay } from './ui/status';
 import { parseTab, parseVolumeFilter } from '../routes';
-import type { DashboardData, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
+import type { DashboardData, DashboardStats, VolumeFilter, DiskFilter, VolumeReplicaFilter } from '../hooks/useDashboardData';
 import { DashboardHeader } from './layout/DashboardHeader';
 import { StatCards } from './stats/StatCards';
 import { Button } from './ui/Button';
@@ -36,19 +36,7 @@ const EventsTab = lazy(() =>
 interface DashboardProps {
   data: DashboardData;
   loading: boolean;
-  stats: {
-    totalVolumes: number;
-    healthyVolumes: number;
-    degradedVolumes: number;
-    failedVolumes: number;
-    faultedVolumes: number;
-    volumesWithRebuilding: number;
-    localNVMeVolumes: number;
-    orphanedVolumes: number;
-    totalDisks: number;
-    healthyDisks: number;
-    formattedDisks: number;
-  };
+  stats: DashboardStats;
   autoRefresh: boolean;
   onAutoRefreshChange: (enabled: boolean) => void;
   onRefresh: () => void;
@@ -144,11 +132,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const handleFilterClick = (filter: VolumeFilter) => {
     // Clicking the active filter clears it; applying a filter jumps to the
-    // Volumes tab. Either way the other filters reset.
+    // tab that lists what it matches — orphans are per-disk lvols, so the
+    // Orphaned card lands on Disks; everything else is a volume. Either way
+    // the other filters reset.
     const toggled = volumeFilter === filter ? 'all' : filter;
     setFilterParams(
       { filter: toggled, disk: null, replicas: null },
-      toggled !== 'all' ? { tab: 'volumes' } : {}
+      toggled === 'all' ? {} : { tab: toggled === 'orphaned' ? 'disks' : 'volumes' }
     );
   };
 
@@ -205,14 +195,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return (
           <VolumesTable 
             volumes={diskFilter ? getVolumesOnDisk(diskFilter) : data.volumes}
-            rawVolumes={data.raw_volumes}
             disks={data.disks}
+            nodes={data.nodes}
             activeFilter={volumeFilter}
             diskFilter={diskFilter}
             onClearFilter={handleClearFilter}
             onClearDiskFilter={handleClearDiskFilter}
             onReplicaClick={handleReplicaClick}
-            onRefresh={onRefresh}
           />
         );
 

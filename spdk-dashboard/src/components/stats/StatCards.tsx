@@ -1,22 +1,25 @@
 import React from 'react';
-import { Database, CheckCircle, AlertTriangle, XCircle, Settings, Zap, Shield } from 'lucide-react';
-import type { VolumeFilter } from '../../hooks/useDashboardData';
+import { Database, CheckCircle, AlertTriangle, XCircle, RefreshCw, Shield } from 'lucide-react';
+import type { DashboardStats, VolumeFilter } from '../../hooks/useDashboardData';
 
 interface StatCardsProps {
-  stats: {
-    totalVolumes: number;
-    healthyVolumes: number;
-    degradedVolumes: number;
-    failedVolumes: number;
-    faultedVolumes: number;
-    volumesWithRebuilding: number;
-    localNVMeVolumes: number;
-    orphanedVolumes: number;
-  };
+  stats: Pick<
+    DashboardStats,
+    | 'totalVolumes'
+    | 'healthyVolumes'
+    | 'degradedVolumes'
+    | 'failedVolumes'
+    | 'recoveringVolumes'
+    | 'orphanedLvols'
+  >;
   activeFilter?: VolumeFilter;
   onFilterClick: (filter: VolumeFilter) => void;
 }
 
+// The quick-filter cards. Every number is derived from what the backend
+// actually emits: volume state, the per-replica sync record ("Recovering" =
+// any replica not in_sync), and the per-disk orphan lists ("Orphaned" =
+// SPDK lvols with no owning PV; the Disks tab lists and deletes them).
 export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFilterClick }) => {
   const cards = [
     {
@@ -36,7 +39,7 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       color: 'text-healthy-600',
       bgColor: 'bg-healthy-50',
       borderColor: 'border-healthy-200',
-      subtitle: 'All replicas operational'
+      subtitle: 'All replicas in sync'
     },
     {
       id: 'degraded' as VolumeFilter,
@@ -56,52 +59,42 @@ export const StatCards: React.FC<StatCardsProps> = ({ stats, activeFilter, onFil
       color: 'text-failed-600',
       bgColor: 'bg-failed-50',
       borderColor: 'border-failed-200',
-      subtitle: 'Immediate attention needed'
+      subtitle: 'No replica in sync'
     },
     {
       id: 'rebuilding' as VolumeFilter,
-      title: 'With Rebuilding',
-      value: stats.volumesWithRebuilding,
-      icon: Settings,
+      title: 'Recovering',
+      value: stats.recoveringVolumes,
+      icon: RefreshCw,
       color: 'text-rebuilding-600',
       bgColor: 'bg-rebuilding-50',
       borderColor: 'border-rebuilding-200',
-      subtitle: 'Replica recovery active'
-    },
-    {
-      id: 'local-nvme' as VolumeFilter,
-      title: 'Local NVMe',
-      value: stats.localNVMeVolumes,
-      icon: Zap,
-      color: 'text-brand-600',
-      bgColor: 'bg-brand-50',
-      borderColor: 'border-brand-200',
-      subtitle: 'High performance storage'
+      subtitle: 'Replicas catching up'
     },
     {
       id: 'orphaned' as VolumeFilter,
       title: 'Orphaned',
-      value: stats.orphanedVolumes,
+      value: stats.orphanedLvols,
       icon: Shield,
       color: 'text-warning-600',
       bgColor: 'bg-warning-50',
       borderColor: 'border-warning-200',
-      subtitle: 'Raw SPDK volumes (needs cleanup)'
+      subtitle: 'SPDK lvols with no owning PV'
     }
   ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 xl:grid-cols-7 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
       {cards.map((card) => {
         const isActive = activeFilter === card.id;
         const Icon = card.icon;
-        
+
         return (
           <button
             key={card.id}
             onClick={() => onFilterClick(card.id)}
             className={`bg-white rounded-lg shadow p-4 text-left transition-all duration-200 hover:shadow-lg hover:scale-105 ${
-              isActive 
+              isActive
                 ? `ring-2 ring-brand-500 ${card.bgColor} border-2 ${card.borderColor}`
                 : 'hover:bg-gray-50'
             }`}

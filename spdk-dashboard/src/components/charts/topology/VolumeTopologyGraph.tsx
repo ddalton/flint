@@ -5,8 +5,7 @@ import { Info } from 'lucide-react';
 import type { Disk, Volume } from '../../../hooks/useDashboardData';
 import { buildTopology } from './buildTopology';
 import {
-  AccessTopologyNode,
-  AppTopologyNode,
+  ConsumerTopologyNode,
   DiskTopologyNode,
   MemberTopologyNode,
   RaidTopologyNode,
@@ -22,8 +21,7 @@ const ABOUT = '__about__';
 
 // Module scope — React Flow requires a stable nodeTypes identity.
 const topologyNodeTypes = {
-  app: AppTopologyNode,
-  access: AccessTopologyNode,
+  consumer: ConsumerTopologyNode,
   raid: RaidTopologyNode,
   member: MemberTopologyNode,
   disk: DiskTopologyNode,
@@ -106,7 +104,7 @@ export function VolumeTopologyGraph({ volume, disks }: { volume: Volume; disks: 
               </svg>
               NVMe-oF
             </span>
-            <span>marching dashes = recovery</span>
+            <span>marching dashes = not in sync</span>
           </div>
         </Panel>
       </ReactFlow>

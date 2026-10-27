@@ -993,3 +993,315 @@ conversions are visual drop-ins. Remaining backlog after these waves:
 none of the three debts — next candidates are the DisksTable row
 windowing (if fleets outgrow pagination) and dark-mode theming (the
 semantic aliases are now the single place to re-hue).
+
+## 2026-10-27 — contract cleanup: the UI reads only what the backend emits
+
+Owner ask: make the dashboard reflect the backend faithfully, and say what
+dynamic progress it still cannot show. Finding, from the backend source
+(`spdk_dashboard_backend_minimal.rs`, every live construction site):
+
+**Fields the live backend never populates or emits as constants** — the
+frontend had been keying filters, cards, a progress bar and a whole graph
+layer on them:
+
+- `DashboardVolume.raid_status` (and its `rebuild_info` progress) — always
+  `null`; `RebuildInfo` is never constructed. The topology drawer's
+  "RAID rebuild progress" bar, the rebuild edge and the "RAID Rebuild in
+  Progress (x%)" chip could never render.
+- `rebuild_progress`, `is_new_replica`, `rebuild_target` — always null/false;
+  `replica.status === "rebuilding"` is produced only by test helpers. The
+  server-side `rebuilding` filter and the UI's stat card still OR'd them in.
+- `raw_volumes` — always `[]` ("orphans surface on disks"); the Orphaned
+  card counted it and so always read 0, and the Volumes tab's raw-row
+  delete button called `/api/spdk/volumes/raw/{uuid}`, a route the backend
+  does not serve.
+- `local_nvme: true` (comment: "Flint volumes are always local"),
+  `access_method: "Direct"`, `transport_type: "Local"`, `target_port: 0`,
+  `nvmeof_enabled: false`, `nvmeof_targets: []`, `ublk_device: null`,
+  `nvmf_target: null`, `raid_member_slot: null`, `raid_member_state: "none"`,
+  `last_io_timestamp: null`. The "Local NVMe" card therefore always
+  equalled Total, the "High Performance Path" chip always showed, the
+  "NVMe-oF Enabled" chip never did, and the topology's access layer never
+  rendered.
+
+**What IS live**: `state`, `replicas`/`active_replicas` (= in_sync count),
+`replica_statuses[].{node,status,is_local,sync}` (the PV
+`replica-sync-state` record: `sync_state`, `last_epoch`, `epoch_lag`,
+`since`, `reason`, `hot_rejoin`), `current_epoch`, `consumer_raids` (the
+raid each consumer node actually assembled, per-base configured flag +
+replica node), `spdk_validation_status`, `pvc_info`, per-disk
+`provisioned_volumes` (status = the replica's status on that node) and
+`orphaned_spdk_volumes`, `/api/events` (categorized engine events +
+parsed hot-rejoin windows), `/api/nodes` rollups.
+
+**Frontend changes (this pass):**
+
+- `Volume` / `ReplicaStatus` now `Omit` the dead wire fields, so reading
+  one is a compile error; the generated schema keeps them until the backend
+  drops them.
+- `isReplicaRecovering` is the sync record alone; `computeStats` exposes
+  `recoveringVolumes` and `orphanedLvols` (summed over disks); the
+  `local-nvme` filter/card is gone (`?filter=local-nvme` degrades to all);
+  the Orphaned card now lands on the Disks tab, whose `orphaned` filter
+  lists the disks carrying orphans (where the delete action already was).
+- Volumes tab: raw-row synthesis, its delete dialog and the dead endpoint
+  removed; "Local NVMe" column removed; sync column shows the record or an
+  honest dash.
+- Topology: rebuilt on `consumer_raids` — consumer node → the raid it
+  assembled (state, bases configured) → legs (configured / failed slot /
+  unassembled replica, local vs NVMe-oF relative to the consumer, animated
+  while not in sync) → disks. Access layer, rebuild edge and progress bars
+  removed; the always-on "RAID status is not available" banner is gone.
+- Volume detail: single-replica cards shrink to the one datum the backend
+  has (lvol present → active/failed); a **Recovery activity** panel (the
+  volume's catch-up / hot-rejoin / health events) appears under the replica
+  table while any replica is not in sync — the finest-grained progress the
+  backend publishes.
+- `status.ts`: member styles cover exactly the emitted states (online /
+  failed / configuring / offline / healthy / active / stale / standby);
+  `rebuilding` / `spare` / `removing` removed.
+
+**Backend changes (same day; built and tested on the Linux box):**
+
+- `DashboardVolume` / `DashboardReplicaStatus` lost the dead fields above;
+  `NvmfTarget`, `NvmeofTargetInfo`, `DashboardRaidStatus`, `RaidMember` and
+  `RebuildInfo` are gone; `raw_volumes` left the aggregate and
+  `/api/volumes`; `NodeSummary` and the overview lost `local_nvme_volumes`;
+  the server-side `rebuilding` filter is the sync record alone and
+  `local-nvme` is gone. `is_local` (replica node == the PV's node-name
+  attribute, which replica sets do not carry) is gone too: locality is the
+  consumer's property, `consumer_raids[].node`, and the UI derives it.
+- `ReplicaSyncInfo` gained `maint_drain` (projected only while the lease is
+  live, as the engine's own readers treat it) and `rebuild_base` (the
+  record's `reverted_to`: an epoch name for a delta catch-up, `"empty"` for
+  the thin-aware full build). The indicator renders "draining" and names
+  "full rebuild from empty" where it used to say only "catching up".
+- `api/openapi.json` and `src/api/schema.d.ts` regenerated; the frontend's
+  `Omit` narrowings are gone.
+
+**Still missing (controller work, not UI):**
+
+1. **Byte-level copy progress during a catch-up or full build.** The
+   controller polls `bdev_lvol_shallow_copy_status` (`copied_clusters` /
+   `total_clusters`) every 2 s for stall detection (`catchup.rs`) but
+   publishes nothing. A multi-hundred-GB full build therefore shows as
+   `stale` + "full rebuild from empty" for its whole duration. Cheapest
+   honest surface: the controller writes `{copied,total,src,started}` into
+   the replica's sync record (or a sibling annotation) at a bounded cadence
+   (e.g. every 10 s or 1 %), the backend projects it as
+   `ReplicaSyncInfo.copy_progress`, and the indicator shows a real bar.
+   Mind record-patch contention (epoch cadence halves under it — rev 5).
+2. **Replacement after node loss** (`ReplicaReplaced`,
+   `ReplicaReplacementBlocked`) is visible only as `catchup`-category events
+   and the new leg's `reason` ("re-placed from lost node X (U11)"). A
+   first-class marker on the record would let the table say so.
+3. **The Snapshots tab's storage analysis alarms on an estimate.** With one
+   user snapshot and six epoch snapshots of the 8 GiB r3 volume, the tab
+   read "Snapshot Overhead 15.0GB · 187.6% · Storage Efficiency Warning ·
+   HIGH PRIORITY: >50% snapshot overhead · Estimated wasted storage:
+   15.0GB" while the lvstore had about 6 GB allocated in total. The tree
+   endpoint's analytics fell back to the logical size for the active
+   volume (`actual_data_size` = `volume_size`, recommendation "Note: Using
+   estimated volume size (actual consumption unavailable)") because the
+   head's uuid changed at the catch-up revert and the lookup is by the
+   identity uuid, and it still emitted the HIGH PRIORITY line. Fix: key
+   the active-volume lookup on the live head (`live_lvol_uuid`), add an
+   `estimated` flag to `storage_analytics`, and have the tab show figures
+   as estimates with no alert while the flag is set. Not changed in this
+   set; the tab was outside the contract cleanup.
+4. **`/api/dashboard` takes ~26 s while one node agent is unreachable**
+   (dash1-aws-3 terminating, 2026-10-27 18:45Z; 1–2 s otherwise). The
+   aggregate fans out to every node agent for disks, lvols, raids and
+   memory with a 5 s timeout per call, and the calls to the dead node
+   stack up. The page keeps its last-known-good data behind the
+   connection-error banner, so the operator sees a stale page during the
+   very minutes a node is being lost. Fix: fan out per node concurrently
+   with one deadline, and drop a node from the agent set after N
+   consecutive timeouts (re-probe in the background).
+5. **A VolumeSnapshot that never produced an lvol is invisible.** The tab
+   lists SPDK lvol snapshots only. On dash1 a VolumeSnapshot of the idle r3
+   volume failed to cut ("Snapshot cut … Unavailable": its record still
+   listed a leg on the deleted node), so the CR sat `readyToUse: false`
+   with an error, and the Snapshots tab showed nothing about it. Read the
+   VolumeSnapshot / VolumeSnapshotContent objects as well and show
+   pending and failed ones with their error, matched to the lvol rows by
+   the CSI snapshot name (`snap_<vol>_<suffix>` ↔ `snapshot-<uid>`).
+6. **The access layer** (low priority). The consumer's frontend — the ublk
+   block device or the loopback NVMe-oF namespace the pod actually mounts
+   — is part of the data path the topology no longer draws, because the
+   old `ublk_device` / `nvmeof_targets` fields were never populated. The
+   node agent has both tables (`ublk_get_disks`, `nvmf_get_subsystems`), so
+   the backend could report `{backend: ublk|nvmeof, device_path, nqn,
+   state}` per consumer raid and the layer would come back with a real
+   field behind it. Diagnostic identity, not a health signal: health is
+   already carried by the volume state, the sync record and the consumer
+   raid, which is why this ranks below 1 and 2.
+
+### Live test on a trove cluster (dash1, 2026-10-27)
+
+Four i4i.large spot workers plus a spot control plane, chart 1.61.1 (the
+released backend), the dev frontend by digest, 30 s epochs, a `flint-r3`
+class (`numReplicas: "3"`). Workloads: an r3 RWO volume with a writer pod
+(16 MiB every 3 s), an r3 RWO volume bound once and left without a
+consumer, an r1 RWO volume, an RWX `flint-nfs` share with two readers,
+plus the chart's three pNFS data-server volumes. Every step was captured
+headless (each tab, the filters, the volume detail tabs, the topology
+drill) next to the raw `/api/dashboard`, `/api/events` and `/api/nodes`
+payloads, and the page was diffed against the wire.
+
+Setup findings, outside the dashboard:
+
+- trove's hand-written `flint-nfs` StorageClass names the pre-rename
+  provisioner `flint.csi.storage.io`; the driver registers as
+  `disk.csi.chert.us`, so an RWX claim on that class stays Pending forever
+  ("Waiting for a volume to be created either by the external provisioner
+  'flint.csi.storage.io'"). Re-applying the class with the real
+  provisioner bound the claim 15 s later (fix belongs in trove:
+  `backend/crates/providers/src/components/flint_csi.rs`, the `flint-nfs`
+  template).
+- The node agent's `/api/spdk/rpc` boundary refuses `bdev_lvol_delete` on
+  a head that is namespaced by a subsystem with a live controller
+  (`guarded_destroy`, the F36 guard-a shape) — so "delete a replica's head
+  from the node" is not a way to stale a leg while a consumer holds it.
+  That is the safety behaviour working; the earlier Q&A assumed it might
+  not apply to a live head.
+- Deleting the csi-node pod on a leg's node (spdk-tgt + agent restart,
+  ~35 s) changed nothing on the wire: the consumer's NVMe-oF initiator
+  reconnected within the outage, the raid never dropped the base bdev,
+  no leg went stale, no event was emitted. The dashboard showed a healthy
+  volume throughout, which is the truth. A planned outage that the engine
+  does see is a csi-node DaemonSet roll (`updateStrategy: OnDelete` +
+  `FLINT_MAINT_DRAIN=enabled`), which drains and readmits each node's
+  legs in turn — used below.
+
+Depiction gaps the baseline exposed, both fixed in this change set:
+
+| What the page said | What was true | Fix |
+|---|---|---|
+| RWX share: state "Unknown", replicas "0/1", red "1 replica not in sync", red shield "No node information"; Volume Status chart "Unknown · 1" | An `nfsEmptyDir` share owns no SPDK object by design; the backend verified a non-existent lvol on an empty node name | Backend emits an NFS-share row (`replicas: 0`, no legs, no epoch, severity-`info` note naming the backend); the table shows "—" for replicas and a gray info marker |
+| Control-plane disk (no volume store): Disks tab "100%", "0.00GB free"; Nodes tab "100% · 436/436GB"; `/api/nodes` `allocated_gb` = capacity | The agent reports `free_space` 0 for an uninitialized disk — "no store", not "full" | Backend zeroes allocation for such a disk and sums the node's capacity/allocation over initialized disks only; the frontend transform zeroes it too (older backends), the Disks tab shows "—"/"not initialized", the node row derives its figures from the node's initialized disks; the Disks tab's "Avg Utilization" (it divided GB by bytes, always 0%) is now a real mean over initialized disks |
+
+Everything else on the baseline matched the wire: the stat cards, the
+Volume Status chart, the table's state/replicas/sync/nodes columns, the
+RAID tab ("Assembled on dash1-aws-1 · online 3/3", one row per member
+with its base bdev name), the single-replica cards, the consumer-less r3
+volume ("Not assembled — no consumer"), the Disks and Nodes tabs' counts.
+
+**The csi-node DaemonSet roll (scenario 5c)** — a template env change on
+`flint-csi-node` with `updateStrategy: OnDelete`, so the maintenance
+roller drains and readmits one node at a time. On the wire, per node:
+`stale` (reason "maintenance drain (planned roll)", lag growing 0 → 3 as
+30 s epochs passed; consumer raid `online 2/3` with the slot nulled) →
+`standby` (reason "caught up; chasing epochs", lag 1) → `in_sync` with
+the raid back to 3/3, in ~5 min per node; the ~250 ms hot-rejoin window
+itself is too short for a 10 s poll. The page tracked every phase: the
+Recovering card and chart banner, the table's `Degraded 2/3` with the
+per-node chip ("stale · 1 epoch behind", later "standby"), the replica
+table with the lag, the since time and the reason, the RAID tab
+("degraded 2/3", the nulled slot), the topology (the detached leg with a
+marching amber, then blue, edge; "2/3 replicas in sync"). Three more
+gaps, fixed:
+
+| What the page said | What was true | Fix |
+|---|---|---|
+| Events tab empty; "Recovery activity: No engine events in recent history" throughout | The engine wrote 15 events on the PV in `default` (`MaintenanceDrain`, `ReplicaCatchupStarted`, `ReplicaStandby`, `HotRejoinSucceeded`, `HotRejoinLocalized`, `MaintenanceMarkCleared`, `VolumeDegraded`), all stamped `reportingComponent: disk.chert.us/node-agent`; `/api/events` kept only `disk.csi.chert.us*` | Backend accepts both stamps (`is_flint_engine_event`), categorizes `Maintenance*` as `maintenance`; the recovery panel shows that category too. This had hidden every engine event since the `chert.us` rename |
+| While worker 2's agent restarted: its three single-replica volumes read "Unknown · 0/1 · 1 replica not in sync" with a red shield; the pNFS data-server rows went red for ~40 s | The backend could not reach the agent ("Cannot verify: …", severity warning); nothing was known to be failed or out of sync | Backend emits replica status `unknown` (not `failed`) for the unverifiable case; the table says "1 replica unverified" in gray with the backend's message, amber shield; the member chip reads "unknown" |
+| RAID tab / topology: "failed slot — leg removed from the raid" as an anonymous red card beside a separate "not assembled" card for the drained leg | The nulled slot was the drained leg's (slot 1 ↔ `_replica_1` on worker 2); the sync record said so | Backend labels a nulled slot with the leg that held it, by position (legs are assembled in replica-index order; a hot rejoin refills the one empty slot; never a leg that is already a configured base); the topology then joins the slot with its replica (one card: "slot 1 · removed · remote", the leg's own state and lag) and the RAID tab says "Leg on dash1-aws-2 removed from the raid" |
+
+**Orphan lvol (scenario 9)**: a `vol_pvc-0ddba11e…_replica_0` created by hand
+on dash1-aws-4. Within a poll the Orphaned card read 1 and opened the Disks
+tab on its new `orphaned` filter ("1 of 5 disks have orphaned volumes"), the
+disk row read "+1 orphaned" with the lvol name, "1.00GB · Orphaned" and its
+delete control; `DELETE /api/orphans/{uuid}` (what the control calls)
+answered success and the card read 0 on the next capture. Page == wire
+throughout.
+
+**User snapshot (scenario 10)**: a VolumeSnapshot of r3-data was ReadyToUse
+in 5 s; the wire listed a `user-snapshot` row (read-only) on each of the
+three legs' disks, and none after the delete. The Snapshots tab counted it
+with the six retained engine epochs as "7 Total Snapshots", typed every
+row "Bdev" (a hard-coded constant; the filter offered "Standard /
+Clones / External", none of which exist) — so an operator could not tell
+their one snapshot from the engine's six. Fixed: the backend's
+`/api/snapshots` rows carry `kind` (`user` for `snap_<vol>_<suffix>`,
+`epoch` for `epoch-<vol>-<seq>`, `other`; the same name parser the
+per-disk list already used), the tab shows "User Snapshots" and "Engine
+Epochs" as separate tiles, labels each row ("user snapshot" / "engine
+epoch") and filters by kind; an older backend without `kind` gets the
+same split from the name prefix. The storage analysis still alarms on an
+estimate; see "Still missing" item 3.
+
+**Every Snapshots view (scenario 10b)**, with two more user snapshots of
+r3-data and one of the idle volume: the Timeline view already tells user
+snapshots (violet diamonds, CR times) from engine epochs (blue ribbon,
+sync-record times) and says so in its legend. The List view showed every
+row the same way and dated all eight "created … at 12:00:49 PM" — the
+capture time: the flat listing's `creation_time` is the node agent's list
+stamp (SPDK lvols store no creation time; the struct says so). Fixed: the
+list and the detail modal no longer present it as a creation time and
+point at the Timeline, and the "created atomically at <time>" line now
+states only what is true (one coordinated cut across N copies). Verified
+live with a third dev image built on the Mac (dist built natively,
+packaged for linux/amd64): "2 User Snapshots · 7 Engine Epochs", a chip
+per row, the kind filter, no fabricated times. A
+restore from a user snapshot (`dataSource: VolumeSnapshot` on the r3
+class) came up as a single-replica volume on dash1-aws-2 (`replica-count:
+"1"`, `source-snapshot` set) with the snapshot's files in place; the page
+showed it as "1/1 · active" — faithful, and worth knowing: a restore does
+not inherit the class's replica count. Its Size column read "0": the
+restore path stamps no `size` volume attribute, which was the backend's
+only source. The backend now falls back to the PV's `spec.capacity`
+(driver follow-up: stamp `size` on restores and clones too).
+
+**No consumer, then a consumer again (scenario 4)**: deleting the writer pod
+took the consumer raid off the wire within a poll; the page read "Consumer ·
+not staged on any node", "no raid assembled", three healthy in-sync replica
+cards, "3/3 replicas in sync · Not assembled — no consumer". Recreating the
+writer (the scheduler put it back on dash1-aws-1) brought "Assembled on
+dash1-aws-1 · online 3/3" back within a poll.
+
+**Permanent node loss (scenario 8)**: the spot instance behind dash1-aws-3
+was terminated with `FLINT_REPLICA_REPLACE_AFTER_SECS=120`. Wire and
+events: `EpochCutFailed` at +35 s (the cut could not reach the node), the
+Node `NotReady` at +60 s, `VolumeDegraded` + `ReplicaStale` at +80 s,
+`ReplicaReplaced` ("re-placed to dash1-aws-4; thin-aware full rebuild
+starts this cycle") at +206 s, `ReplicaFullBuildStarted` ("no shared
+epoch history within retention — head recreated empty, replaying the full
+source lineage from dash1-aws-2"), `ReplicaStandby` 33 s later,
+`HotRejoinSucceeded` at +326 s, `HotRejoinLocalized` 4 s after. The r3
+volume's record then read nodes {aws-1, aws-2, aws-4}, all in_sync, raid
+online 3/3; the single-replica volume on the lost node read "Unknown ·
+Cannot verify" (warning). The page tracked it (standby chip and "1 epoch
+behind" on the new leg, the RAID tab with the slot nulled, "Degraded 2/3"
+→ "Healthy 3/3"), with two caveats: `/api/dashboard` took 15–26 s per call
+while the dead agent was still in the set ("Still missing" item 4), so
+each full page load sat on its skeleton that long; and the `rebuild_base:
+"empty"` marker that would have named the full build is a new-backend
+field, so the chip read "standby" with the reason text only.
+
+**The dead Node object removed (scenario 8b)**: `kubectl delete node
+dash1-aws-3` (trove clusters have no cloud controller to do it). The
+aggregate dropped back to ~2 s. But the consumer-less r3 volume
+(`r3-idle`, never consumed, hence no epochs) still lists its leg on
+dash1-aws-3 as `in_sync` ten minutes later: no `ReplicaReplaced`, no
+`ReplicaReplacementBlocked`, nothing in the controller log. The replace
+guard "epochs exist" fails silently for a volume that never had a
+consumer, so its record keeps a leg on a node that no longer exists and
+the page shows "Healthy 3/3". Engine work (`replica_replace.rs`: emit
+`ReplicaReplacementBlocked` with the reason, or replace from the in_sync
+legs directly since nothing was ever written); on the page, a replica
+whose node is not in the cluster's node list is now marked "node gone".
+
+The roll then stopped by design: the roller refuses the consumer node
+("roll refuses dash1-aws-1: it consumes its own volume — its tgt hosts the
+raid composition, which the pod delete would destroy. Clear the cause,
+then re-run the campaign", one WARN per tick) and emits a
+`MaintenanceNodeRefused` event on the PV ("csi-node roll skipped
+dash1-aws-1: this volume is consumed on that node…"). That event was
+invisible too, for the same reporting-component reason; with the filter
+fixed it shows under `maintenance` in the Events tab and the recovery
+panel, so an operator can see why the DaemonSet sits at 4/5 updated.
+Clearing the cause here — deleting the writer pod so the volume has no
+consumer — let the roller finish within one tick, and recreating the
+writer re-assembled the raid wherever the scheduler put it.
+

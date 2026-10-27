@@ -7,7 +7,14 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { http, HttpResponse } from 'msw';
 import { server } from '../test/server';
-import { makeDashboardData, makeDisk, makeReplica, makeSyncInfo, makeVolume } from '../test/fixtures';
+import {
+  makeDashboardData,
+  makeDisk,
+  makeOrphan,
+  makeReplica,
+  makeSyncInfo,
+  makeVolume,
+} from '../test/fixtures';
 import * as api from '../api/client';
 import {
   computeStats,
@@ -90,14 +97,31 @@ describe('transformBackendData', () => {
     const wireVolume = wire.volumes[0] as Partial<(typeof wire.volumes)[number]>;
     const wireDisk = wire.disks[0] as Partial<(typeof wire.disks)[number]>;
     delete wireVolume.consumer_raids;
-    delete wireVolume.nvmeof_targets;
+    delete wireVolume.replica_statuses;
     delete wireDisk.provisioned_volumes;
+    delete wireDisk.orphaned_spdk_volumes;
 
     const data = transformBackendData(wire);
 
     expect(data.volumes[0]?.consumer_raids).toEqual([]);
-    expect(data.volumes[0]?.nvmeof_targets).toEqual([]);
+    expect(data.volumes[0]?.replica_statuses).toEqual([]);
     expect(data.disks[0]?.provisioned_volumes).toEqual([]);
+    expect(data.disks[0]?.orphaned_spdk_volumes).toEqual([]);
+  });
+
+  it('zeroes allocation and free space on a disk with no logical volume store', () => {
+    // The agent reports free_space 0 for an uninitialized disk; the released
+    // backend passes it through, which read as "100% used" on dash1-cp-1.
+    const wire = makeDashboardData();
+    wire.disks = [
+      makeDisk({ blobstore_initialized: false, free_space: 0, allocated_space: 435.86, capacity_gb: 435.86 }),
+    ];
+
+    const disk = transformBackendData(wire).disks[0];
+
+    expect(disk?.allocated_space).toBe(0);
+    expect(disk?.free_space).toBe(0);
+    expect(disk?.capacity_gb).toBe(435.86);
   });
 
   it('derives disk capacity fields when the backend omits the GB projections', () => {
@@ -138,14 +162,14 @@ describe('recovery detection (adaptive poll input)', () => {
     ).toBe(true);
   });
 
-  it('falls back to legacy rebuild markers when there is no sync record', () => {
+  it('a replica without a sync record is never recovering (single-replica volumes)', () => {
+    // The pre-Tier-2 rebuild markers left the wire on 2026-10-27; the sync
+    // record is the only recovery signal, and a missing lvol is "failed",
+    // which is not recovery.
     expect(isReplicaRecovering(asReplica(makeReplica({ sync: null })))).toBe(false);
     expect(
-      isReplicaRecovering(asReplica(makeReplica({ sync: null, rebuild_progress: 40.0 })))
-    ).toBe(true);
-    expect(
-      isReplicaRecovering(asReplica(makeReplica({ sync: null, status: 'rebuilding' })))
-    ).toBe(true);
+      isReplicaRecovering(asReplica(makeReplica({ sync: null, status: 'failed' })))
+    ).toBe(false);
   });
 
   it('flags the cluster while any replica chases and clears once all are in_sync', () => {
@@ -173,28 +197,46 @@ describe('recovery detection (adaptive poll input)', () => {
 });
 
 describe('computeStats', () => {
-  it('counts states, faulted union, and orphans from the aggregate', () => {
+  it('counts states, the faulted union, recovering volumes, and per-disk orphans', () => {
     const data = transformBackendData(
       makeDashboardData({
         volumes: [
           makeVolume(),
           makeVolume({ id: 'v2', name: 'v2', state: 'Degraded' }),
           makeVolume({ id: 'v3', name: 'v3', state: 'Failed' }),
-          makeVolume({ id: 'v4', name: 'v4', local_nvme: true }),
+          makeVolume({
+            id: 'v4',
+            name: 'v4',
+            state: 'Degraded',
+            active_replicas: 1,
+            replica_statuses: [
+              makeReplica(),
+              makeReplica({
+                node: 'runj-aws-2',
+                status: 'stale',
+                sync: makeSyncInfo({ sync_state: 'stale', epoch_lag: 2 }),
+              }),
+            ],
+          }),
         ],
-        raw_volumes: [{}],
+        disks: [
+          makeDisk({
+            orphaned_spdk_volumes: [makeOrphan(), makeOrphan({ spdk_volume_uuid: 'second' })],
+          }),
+          makeDisk({ id: 'runj-aws-2:0000:00:1f.0', node: 'runj-aws-2' }),
+        ],
       })
     );
 
     const stats = computeStats(data);
 
-    expect(stats.totalVolumes).toBe(5); // 4 managed + 1 orphan
-    expect(stats.healthyVolumes).toBe(2);
-    expect(stats.degradedVolumes).toBe(1);
+    expect(stats.totalVolumes).toBe(4);
+    expect(stats.healthyVolumes).toBe(1);
+    expect(stats.degradedVolumes).toBe(2);
     expect(stats.failedVolumes).toBe(1);
-    expect(stats.faultedVolumes).toBe(2);
-    expect(stats.localNVMeVolumes).toBe(1);
-    expect(stats.orphanedVolumes).toBe(1);
+    expect(stats.faultedVolumes).toBe(3);
+    expect(stats.recoveringVolumes).toBe(1);
+    expect(stats.orphanedLvols).toBe(2);
     expect(stats.formattedDisks).toBe(2);
   });
 });

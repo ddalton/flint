@@ -1153,7 +1153,7 @@
       },
       "ConsumerRaid": {
         "type": "object",
-        "description": "Tier-2 data plane (2b): each consumer node that stages the volume\nassembles `raid_<pv>` locally from the replica legs — one row per\nconsumer. Presence of the raid bdev on a node IS the consumer set;\nno VolumeAttachment inference.",
+        "description": "Tier-2 data plane (2b): each consumer node that stages the volume\nassembles `raid_<pv>` locally from the replica legs \u2014 one row per\nconsumer. Presence of the raid bdev on a node IS the consumer set;\nno VolumeAttachment inference.",
         "required": [
           "node",
           "raid_name",
@@ -1205,7 +1205,7 @@
               "string",
               "null"
             ],
-            "description": "SPDK nulls name+uuid when a leg fails on an online raid\n(raid_bdev_free_base_bdev_resource) — a null member IS a failed slot."
+            "description": "SPDK nulls name+uuid when a leg fails on an online raid\n(raid_bdev_free_base_bdev_resource) \u2014 a null member IS a failed slot."
           },
           "replica_node": {
             "type": [
@@ -1226,7 +1226,6 @@
         "type": "object",
         "required": [
           "volumes",
-          "raw_volumes",
           "disks",
           "nodes",
           "node_info"
@@ -1251,12 +1250,6 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
-          },
-          "raw_volumes": {
-            "type": "array",
-            "items": {
-              "type": "object"
             }
           },
           "volumes": {
@@ -1424,7 +1417,6 @@
           "degraded_volumes",
           "failed_volumes",
           "faulted_volumes",
-          "local_nvme_volumes",
           "total_disks",
           "healthy_disks",
           "initialized_disks",
@@ -1455,10 +1447,6 @@
             "type": "integer",
             "minimum": 0
           },
-          "local_nvme_volumes": {
-            "type": "integer",
-            "minimum": 0
-          },
           "total_disks": {
             "type": "integer",
             "minimum": 0
@@ -1473,134 +1461,16 @@
           }
         }
       },
-      "DashboardRaidStatus": {
-        "type": "object",
-        "required": [
-          "raid_level",
-          "state",
-          "num_members",
-          "operational_members",
-          "discovered_members",
-          "members",
-          "auto_rebuild_enabled"
-        ],
-        "properties": {
-          "auto_rebuild_enabled": {
-            "type": "boolean"
-          },
-          "discovered_members": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "members": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RaidMember"
-            }
-          },
-          "num_members": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "operational_members": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "raid_level": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "rebuild_info": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/RebuildInfo"
-              }
-            ]
-          },
-          "state": {
-            "type": "string"
-          },
-          "superblock_version": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          }
-        }
-      },
       "DashboardReplicaStatus": {
         "type": "object",
+        "description": "One replica leg. `status` is \"healthy\" / \"stale\" / \"standby\" projected\nfrom the sync record; a single-replica volume (no record) reads\n\"active\" / \"failed\" from verifying its one lvol. Whether a leg is served\nlocally is a property of the CONSUMER (consumer_raids[].node equals the\nreplica's node), not of the replica, so it is not repeated here.",
         "required": [
           "node",
-          "status",
-          "is_local",
-          "access_method",
-          "raid_member_state"
+          "status"
         ],
         "properties": {
-          "access_method": {
-            "type": "string"
-          },
-          "is_local": {
-            "type": "boolean"
-          },
-          "is_new_replica": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "last_io_timestamp": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "node": {
             "type": "string"
-          },
-          "nvmf_target": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/NvmfTarget"
-              }
-            ]
-          },
-          "raid_member_slot": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "minimum": 0
-          },
-          "raid_member_state": {
-            "type": "string"
-          },
-          "rebuild_progress": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "rebuild_target": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "status": {
             "type": "string"
@@ -1628,12 +1498,13 @@
           "creation_time",
           "ready_to_use",
           "node",
-          "replica_bdev_details"
+          "replica_bdev_details",
+          "kind"
         ],
         "properties": {
           "creation_time": {
             "type": "string",
-            "description": "Node-agent list stamp, not a real creation time (SPDK lvols store\nnone) — real times are the timeline endpoint's job."
+            "description": "Node-agent list stamp, not a real creation time (SPDK lvols store\nnone) \u2014 real times are the timeline endpoint's job."
           },
           "lvs_name": {
             "type": [
@@ -1665,10 +1536,14 @@
           },
           "snapshot_uuid": {
             "type": "string",
-            "description": "UUID of the first copy (nodes sorted) — a stable display id, not\nshared by the other copies."
+            "description": "UUID of the first copy (nodes sorted) \u2014 a stable display id, not\nshared by the other copies."
           },
           "source_volume_id": {
             "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "What made it: \"user\" for a CSI VolumeSnapshot (`snap_<vol>_<suffix>`),\n\"epoch\" for an engine common-epoch snapshot (`epoch-<vol>-<seq>`,\nretained for replica catch-up), \"other\" for any other lvol snapshot.\nThe tab counted both under one \"Total Snapshots\" until 2026-10-27."
           }
         }
       },
@@ -1681,24 +1556,16 @@
           "state",
           "replicas",
           "active_replicas",
-          "local_nvme",
-          "access_method",
           "nodes",
           "replica_statuses",
-          "nvmeof_targets",
-          "nvmeof_enabled",
-          "transport_type",
-          "target_port",
           "spdk_validation_status",
           "consumer_raids"
         ],
         "properties": {
-          "access_method": {
-            "type": "string"
-          },
           "active_replicas": {
             "type": "integer",
-            "format": "int32"
+            "format": "int32",
+            "description": "Replicas in_sync (single-replica: the count when the lvol verified)."
           },
           "consumer_raids": {
             "type": "array",
@@ -1715,9 +1582,6 @@
           "id": {
             "type": "string"
           },
-          "local_nvme": {
-            "type": "boolean"
-          },
           "name": {
             "type": "string"
           },
@@ -1725,16 +1589,8 @@
             "type": "array",
             "items": {
               "type": "string"
-            }
-          },
-          "nvmeof_enabled": {
-            "type": "boolean"
-          },
-          "nvmeof_targets": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NvmeofTargetInfo"
-            }
+            },
+            "description": "The replica nodes, one per leg \u2014 not the consumer (see consumer_raids)."
           },
           "pvc_info": {
             "oneOf": [
@@ -1745,23 +1601,6 @@
                 "$ref": "#/components/schemas/PvcInfo"
               }
             ]
-          },
-          "raid_status": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/DashboardRaidStatus"
-              }
-            ]
-          },
-          "rebuild_progress": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
           },
           "replica_statuses": {
             "type": "array",
@@ -1780,21 +1619,8 @@
             "$ref": "#/components/schemas/SpdkValidationStatus"
           },
           "state": {
-            "type": "string"
-          },
-          "target_port": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "transport_type": {
-            "type": "string"
-          },
-          "ublk_device": {
-            "type": [
-              "object",
-              "null"
-            ]
+            "type": "string",
+            "description": "Healthy / Degraded / Failed from the sync record (all / some / no\nreplicas in_sync). A single-replica volume (no record) reads Healthy\n/ Failed / Unknown from verifying its one lvol on its node."
           }
         }
       },
@@ -1905,7 +1731,7 @@
       },
       "DiskSetupResponse": {
         "type": "object",
-        "description": "Per-disk outcome shape for setup/initialize/reset. `failed_disks` holds\nPCI addresses only — human-readable causes ride in `warnings`.",
+        "description": "Per-disk outcome shape for setup/initialize/reset. `failed_disks` holds\nPCI addresses only \u2014 human-readable causes ride in `warnings`.",
         "required": [
           "success",
           "setup_disks",
@@ -1994,7 +1820,7 @@
       },
       "HotRejoinWindow": {
         "type": "object",
-        "description": "A completed hot-rejoin window parsed from a HotRejoinSucceeded event —\nthe after-the-fact record of the sub-2s window the 2a indicator cannot\ncatch live.",
+        "description": "A completed hot-rejoin window parsed from a HotRejoinSucceeded event \u2014\nthe after-the-fact record of the sub-2s window the 2a indicator cannot\ncatch live.",
         "required": [
           "volume",
           "node",
@@ -2101,7 +1927,7 @@
       },
       "NodeDiskListing": {
         "type": "object",
-        "description": "Disk row served by POST /api/disks/uninitialized — same compatibility\nshape minus the status-only telemetry fields.",
+        "description": "Disk row served by POST /api/disks/uninitialized \u2014 same compatibility\nshape minus the status-only telemetry fields.",
         "required": [
           "pci_address",
           "device_name",
@@ -2204,7 +2030,7 @@
       },
       "NodeDiskStatus": {
         "type": "object",
-        "description": "Disk row served by POST /api/disks/status — the Disk Setup tab's source.\nSeveral fields are fixed compatibility values the agent fabricates for the\nfrontend (vendor ids, empty serial, numa 0); typed here so the generated\nOpenAPI spec documents what is actually sent.",
+        "description": "Disk row served by POST /api/disks/status \u2014 the Disk Setup tab's source.\nSeveral fields are fixed compatibility values the agent fabricates for the\nfrontend (vendor ids, empty serial, numa 0); typed here so the generated\nOpenAPI spec documents what is actually sent.",
         "required": [
           "pci_address",
           "device_name",
@@ -2382,14 +2208,13 @@
       },
       "NodeSummary": {
         "type": "object",
-        "description": "Per-node fleet rollup — the nodes tab's landing payload. Grows with\nnode count only, never with per-volume/per-disk detail (that stays in\nthe aggregate, fetched when one node is drilled into).",
+        "description": "Per-node fleet rollup \u2014 the nodes tab's landing payload. Grows with\nnode count only, never with per-volume/per-disk detail (that stays in\nthe aggregate, fetched when one node is drilled into).",
         "required": [
           "name",
           "disks_total",
           "disks_healthy",
           "disks_uninitialized",
           "volumes_total",
-          "local_nvme_volumes",
           "replicas_out_of_sync",
           "volumes_not_healthy",
           "capacity_gb",
@@ -2418,17 +2243,12 @@
           "disks_uninitialized": {
             "type": "integer",
             "format": "int32",
-            "description": "Non-system disks with no blobstore — init candidates (onboarding\nwork, not a health condition).",
+            "description": "Non-system disks with no blobstore \u2014 init candidates (onboarding\nwork, not a health condition).",
             "minimum": 0
           },
           "health": {
             "type": "string",
             "description": "Worst condition on the node: \"critical\" | \"warning\" | \"ok\".\ncritical = unhealthy disk or failed volume/replica here;\nwarning = degraded volume or out-of-sync replica here."
-          },
-          "local_nvme_volumes": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
           },
           "name": {
             "type": "string"
@@ -2464,72 +2284,6 @@
             "items": {
               "$ref": "#/components/schemas/NodeSummary"
             }
-          }
-        }
-      },
-      "NvmeofTargetInfo": {
-        "type": "object",
-        "required": [
-          "nqn",
-          "target_ip",
-          "target_port",
-          "transport",
-          "node",
-          "bdev_name",
-          "active",
-          "connection_count"
-        ],
-        "properties": {
-          "active": {
-            "type": "boolean"
-          },
-          "bdev_name": {
-            "type": "string"
-          },
-          "connection_count": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "node": {
-            "type": "string"
-          },
-          "nqn": {
-            "type": "string"
-          },
-          "target_ip": {
-            "type": "string"
-          },
-          "target_port": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "transport": {
-            "type": "string"
-          }
-        }
-      },
-      "NvmfTarget": {
-        "type": "object",
-        "required": [
-          "nqn",
-          "target_ip",
-          "target_port",
-          "transport_type"
-        ],
-        "properties": {
-          "nqn": {
-            "type": "string"
-          },
-          "target_ip": {
-            "type": "string"
-          },
-          "target_port": {
-            "type": "string"
-          },
-          "transport_type": {
-            "type": "string"
           }
         }
       },
@@ -2618,85 +2372,6 @@
           }
         }
       },
-      "RaidMember": {
-        "type": "object",
-        "required": [
-          "slot",
-          "name",
-          "state"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "slot": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "state": {
-            "type": "string"
-          },
-          "uuid": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
-      "RebuildInfo": {
-        "type": "object",
-        "required": [
-          "state",
-          "target_slot",
-          "source_slot",
-          "blocks_remaining",
-          "blocks_total",
-          "progress_percentage"
-        ],
-        "properties": {
-          "blocks_remaining": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "blocks_total": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "estimated_time_remaining": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "progress_percentage": {
-            "type": "number",
-            "format": "double"
-          },
-          "source_slot": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "start_time": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "state": {
-            "type": "string"
-          },
-          "target_slot": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          }
-        }
-      },
       "RefreshResponse": {
         "type": "object",
         "required": [
@@ -2722,7 +2397,7 @@
       },
       "ReplicaSyncInfo": {
         "type": "object",
-        "description": "Per-replica sync state projected from the PV `replica-sync-state`\nannotation — the Tier-2 engine's live signal. `rebuild_progress` above\ntracks the pre-Tier-2 blind-rebuild model and stays for raid-level\nrebuild_info only; replica health is judged from here.",
+        "description": "Per-replica sync state projected from the PV `replica-sync-state`\nannotation \u2014 the Tier-2 engine's live signal; replica health is judged\nfrom here.",
         "required": [
           "sync_state"
         ],
@@ -2733,13 +2408,15 @@
               "null"
             ],
             "format": "int64",
+            "description": "Epochs behind current_epoch; 0 when in_sync; null when unknowable\n(no last_epoch \u2014 e.g. a full build from empty \u2014 or trimmed history).",
             "minimum": 0
           },
           "hot_rejoin": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "E_f epoch name while a hot rejoin is in flight (renders \"rejoining\")."
           },
           "last_epoch": {
             "type": [
@@ -2747,11 +2424,25 @@
               "null"
             ]
           },
+          "maint_drain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Maintenance-drain lease deadline (RFC3339) while the leg is fenced\nout for a planned csi-node roll and the catch-up skips it; only a\nLIVE mark is projected (an expired deadline reads as absent, as the\nengine's own readers treat it). Renders \"draining\"."
+          },
           "reason": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "rebuild_base": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the head was rebuilt from while a catch-up is in progress: an\nepoch name for a delta catch-up, \"empty\" for the thin-aware full\nbuild (no shared epoch history). Cleared when the replica returns\nto in_sync. With epoch_lag null this is the only phase signal the\nengine records \u2014 it publishes no byte-level copy progress."
           },
           "since": {
             "type": [
@@ -2916,7 +2607,7 @@
           },
           "now": {
             "type": "string",
-            "description": "Server time at response build — the frontend's \"now\" anchor."
+            "description": "Server time at response build \u2014 the frontend's \"now\" anchor."
           },
           "replicas": {
             "type": "array",
@@ -2927,7 +2618,7 @@
           "untracked_epochs": {
             "type": "integer",
             "format": "int64",
-            "description": "SPDK epoch snapshots not (or no longer) in the PV's retained-epoch\nrecord — mid-rotation stragglers. Counted, never plotted at a\nfabricated position.",
+            "description": "SPDK epoch snapshots not (or no longer) in the PV's retained-epoch\nrecord \u2014 mid-rotation stragglers. Counted, never plotted at a\nfabricated position.",
             "minimum": 0
           },
           "volume_id": {
@@ -3007,16 +2698,9 @@
       "VolumesResponse": {
         "type": "object",
         "required": [
-          "volumes",
-          "raw_volumes"
+          "volumes"
         ],
         "properties": {
-          "raw_volumes": {
-            "type": "array",
-            "items": {
-              "type": "object"
-            }
-          },
           "volumes": {
             "type": "array",
             "items": {

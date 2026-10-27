@@ -5,7 +5,6 @@ import { apiFetch } from '../api/client';
 
 const EMPTY_DASHBOARD: DashboardData = {
   volumes: [],
-  raw_volumes: [],
   disks: [],
   nodes: [],
 };
@@ -25,44 +24,44 @@ const fetchDashboard = async (filters?: DashboardFilters): Promise<DashboardData
   return transformBackendData(await response.json());
 };
 
-// A replica is mid-recovery when the Tier-2 engine reports it non-in_sync;
-// volumes without sync data fall back to the legacy rebuild markers.
+// A replica is mid-recovery when the Tier-2 engine reports it non-in_sync
+// (stale → standby → in_sync, or a live hot-rejoin marker). The sync record
+// is the ONLY recovery signal the backend emits: single-replica volumes have
+// no record and nothing to recover, and the pre-Tier-2 rebuild markers
+// (rebuild_progress / is_new_replica / status "rebuilding") were never
+// populated by the live backend, so they are no longer read.
 export const isReplicaRecovering = (replica: ReplicaStatus): boolean =>
-  replica.sync
-    ? replica.sync.sync_state !== 'in_sync'
-    : replica.status === 'rebuilding' ||
-      replica.rebuild_progress !== null ||
-      !!replica.is_new_replica;
+  !!replica.sync && replica.sync.sync_state !== 'in_sync';
+
+export const isVolumeRecovering = (volume: Volume): boolean =>
+  volume.replica_statuses.some(isReplicaRecovering);
 
 export const hasRecoveringReplicas = (data: DashboardData | undefined): boolean =>
-  !!data?.volumes.some(v =>
-    v.replica_statuses.some(isReplicaRecovering) || v.raid_status?.rebuild_info !== undefined
-  );
+  !!data?.volumes.some(isVolumeRecovering);
+
+// Orphaned SPDK lvols (flint-shaped names with no owning PV) are reported
+// per DISK by the backend; the aggregate's raw_volumes list is always empty.
+export const countOrphanedLvols = (disks: Disk[]): number =>
+  disks.reduce((sum, d) => sum + d.orphaned_spdk_volumes.length, 0);
 
 export const computeStats = (data: DashboardData): DashboardStats => {
   const healthyVolumes = data.volumes.filter(v => v.state === 'Healthy').length;
   const degradedVolumes = data.volumes.filter(v => v.state === 'Degraded').length;
   const failedVolumes = data.volumes.filter(v => v.state === 'Failed').length;
   const faultedVolumes = degradedVolumes + failedVolumes;
-
-  const volumesWithRebuilding = data.volumes.filter(v =>
-    v.replica_statuses.some(isReplicaRecovering) || v.raid_status?.rebuild_info !== undefined
-  ).length;
-
-  const localNVMeVolumes = data.volumes.filter(v => v.local_nvme).length;
-  const orphanedVolumes = data.raw_volumes.length;
+  const recoveringVolumes = data.volumes.filter(isVolumeRecovering).length;
+  const orphanedLvols = countOrphanedLvols(data.disks);
   const healthyDisks = data.disks.filter(d => d.healthy).length;
   const formattedDisks = data.disks.filter(d => d.blobstore_initialized).length;
 
   return {
-    totalVolumes: data.volumes.length + data.raw_volumes.length,
+    totalVolumes: data.volumes.length,
     healthyVolumes,
     degradedVolumes,
     failedVolumes,
     faultedVolumes,
-    volumesWithRebuilding,
-    localNVMeVolumes,
-    orphanedVolumes,
+    recoveringVolumes,
+    orphanedLvols,
     totalDisks: data.disks.length,
     healthyDisks,
     formattedDisks,
@@ -82,20 +81,18 @@ import type { components } from '../api/schema';
 
 type Schemas = components['schemas'];
 
-export type NvmeofTargetInfo = Schemas['NvmeofTargetInfo'];
-
+// The volume as the backend computes it: state and in-sync count from the
+// sync record, the replica rows, the consumer raids actually assembled, PVC
+// and SPDK-verification details. The pre-Tier-2 placeholders (raid_status /
+// rebuild_info, rebuild_progress, local_nvme, the access and transport
+// descriptors) left the wire on 2026-10-27: recovery is
+// replica_statuses[].sync, the data path is consumer_raids.
 export type Volume = Omit<
   Schemas['DashboardVolume'],
-  'replica_statuses' | 'spdk_validation_status' | 'ublk_device'
+  'replica_statuses' | 'spdk_validation_status'
 > & {
   replica_statuses: ReplicaStatus[]; // narrowed sync tree (SyncState union)
   spdk_validation_status: SpdkValidationStatus; // narrowed severity union
-  // Untyped SPDK passthrough on the wire; this shape is a frontend
-  // assumption, not a backend contract.
-  ublk_device?: {
-    id: number;
-    device_path: string; // e.g., "/dev/ublkb42"
-  } | null;
 };
 
 export type ConsumerRaid = Schemas['ConsumerRaid'];
@@ -140,12 +137,11 @@ export interface SpdkVolumeDetails {
 // --- End of new/updated interfaces ---
 
 
-export type RaidStatus = Schemas['DashboardRaidStatus'];
-export type RaidMember = Schemas['RaidMember'];
-export type RebuildInfo = Schemas['RebuildInfo'];
-
-// Tier-2 live sync state from the PV replica-sync-state annotation;
-// absent on single-replica volumes.
+// One replica row: node, the status string ("healthy" / "stale" /
+// "standby" projected from the sync record; "active" / "failed" on a
+// single-replica volume, from verifying its one lvol), and the Tier-2 sync
+// state — absent on single-replica volumes, which have no record. Whether
+// a leg is served locally is the consumer's property: isLegServedLocally.
 export type ReplicaStatus = Omit<Schemas['DashboardReplicaStatus'], 'sync'> & {
   sync?: ReplicaSyncInfo | null; // narrowed SyncState union
 };
@@ -153,13 +149,14 @@ export type ReplicaStatus = Omit<Schemas['DashboardReplicaStatus'], 'sync'> & {
 export type SyncState = 'in_sync' | 'stale' | 'standby';
 
 // epoch_lag: epochs behind current; 0 when in_sync, null when unknowable
-// (epoch history trimmed and names not comparable). Lag → 0 is the catch-up.
-// hot_rejoin: E_f epoch name while a hot rejoin is in flight; null otherwise.
+// (no last_epoch — a full build from empty — or trimmed history). Lag → 0 is
+// the catch-up. hot_rejoin: E_f epoch name while a hot rejoin is in flight.
+// maint_drain: live lease deadline while the leg is fenced out for a planned
+// csi-node roll. rebuild_base: what the head was rebuilt from while a
+// catch-up is in progress — an epoch name (delta) or "empty" (full build).
 export type ReplicaSyncInfo = Omit<Schemas['ReplicaSyncInfo'], 'sync_state'> & {
   sync_state: SyncState;
 };
-
-export type NvmfTarget = Schemas['NvmfTarget'];
 
 // capacity is bytes; capacity_gb / allocated_space / free_space are GB.
 // is_system_disk: root/boot disk — never an init candidate.
@@ -168,25 +165,13 @@ export type Disk = Schemas['DashboardDisk'];
 export type ProvisionedVolume = Schemas['ProvisionedVolume'];
 export type OrphanedVolumeInfo = Schemas['OrphanedVolumeInfo'];
 
-// raw_volumes are an untyped SPDK lvol passthrough on the wire
-// (Vec<serde_json::Value> backend-side); this shape is a frontend
-// assumption, not a backend contract.
-export interface RawSpdkVolume {
-  name: string;
-  uuid: string;
-  node: string;
-  lvs_name: string;
-  size_blocks: number;
-  size_gb: number;
-  is_managed: boolean;
-}
-
 export type PvcInfo = Schemas['PvcInfo'];
 export type NodeInfo = Schemas['NodeInfo'];
 
+// The wire aggregate also carries raw_volumes; the backend always sends it
+// empty (orphans are attributed per disk), so it is not modeled here.
 export interface DashboardData {
   volumes: Volume[];
-  raw_volumes: RawSpdkVolume[];
   disks: Disk[];
   nodes: string[];
   node_info?: Record<string, NodeInfo>;  // Optional for backward compatibility
@@ -198,23 +183,26 @@ export interface DashboardStats {
   degradedVolumes: number;
   failedVolumes: number;
   faultedVolumes: number;
-  volumesWithRebuilding: number;
-  localNVMeVolumes: number;
-  orphanedVolumes: number;
+  // Volumes with at least one replica not in_sync (catch-up, standby, or a
+  // hot rejoin in flight).
+  recoveringVolumes: number;
+  // Orphaned SPDK lvols across all disks (cleanup candidates).
+  orphanedLvols: number;
   totalDisks: number;
   healthyDisks: number;
   formattedDisks: number;
 }
 
-export type VolumeFilter = 
-  | 'all' 
-  | 'orphaned'     // Show only raw/orphaned volumes
-  | 'healthy' 
-  | 'degraded' 
-  | 'failed' 
+// 'orphaned' is a DISK-side filter (orphans are per-disk lvols with no
+// owning volume): it matches no managed volume and lands on the Disks tab.
+export type VolumeFilter =
+  | 'all'
+  | 'orphaned'
+  | 'healthy'
+  | 'degraded'
+  | 'failed'
   | 'faulted'
-  | 'rebuilding'
-  | 'local-nvme';
+  | 'rebuilding';
 
 export type DiskFilter = string | null;
 export type VolumeReplicaFilter = string | null;
@@ -294,26 +282,27 @@ export const useDashboardData = (autoRefresh: boolean = true, filters?: Dashboar
 
 // Normalize the wire aggregate (generated DashboardData schema) into the
 // frontend shape: harden array fields against partial payloads and apply
-// the documented narrowings (SyncState/severity unions, ublk shape) — the
-// three `as` casts below are those narrowings, asserted once at this
-// boundary. Exported for tests: this IS the wire boundary.
+// the documented narrowings (SyncState/severity unions) — the two `as`
+// casts below are those narrowings, asserted once at this boundary.
+// Exported for tests: this IS the wire boundary.
 export const transformBackendData = (backendData: Schemas['DashboardData']): DashboardData => {
   return {
     volumes: (backendData.volumes || []).map(vol => ({
       ...vol,
-      nvmeof_targets: vol.nvmeof_targets || [],
       replica_statuses: (vol.replica_statuses || []) as ReplicaStatus[],
       nodes: vol.nodes || [],
       consumer_raids: vol.consumer_raids || [],
       spdk_validation_status: vol.spdk_validation_status as SpdkValidationStatus,
-      ublk_device: vol.ublk_device as Volume['ublk_device'],
     })),
-    raw_volumes: (backendData.raw_volumes || []) as unknown as RawSpdkVolume[],
     disks: (backendData.disks || []).map(disk => {
       // Backend already returns capacity_gb and free_space in GB (not bytes!)
       const sizeGB = disk.capacity_gb || Math.round((disk.capacity || 0) / (1024 * 1024 * 1024));
-      const freeGB = disk.free_space || 0;  // Already in GB from backend
-      const allocatedGB = disk.allocated_space || (sizeGB - freeGB);
+      // A disk without a logical volume store has nothing allocated. The
+      // agent reports free_space 0 for it, which the released backend passes
+      // through and which read as "100% used" on dash1-cp-1 (2026-10-27).
+      const initialized = disk.blobstore_initialized !== false;
+      const freeGB = initialized ? (disk.free_space || 0) : 0;  // Already in GB from backend
+      const allocatedGB = initialized ? (disk.allocated_space || (sizeGB - freeGB)) : 0;
 
       return {
         ...disk,
@@ -377,11 +366,9 @@ export const useAuth = () => {
 
 // THE volume-filter predicate — every filtered view (volumes table, disks
 // table, nodes view) routes through here so a filter always matches the
-// stat card that advertised it. 'rebuilding' uses isReplicaRecovering
-// (Tier-2 sync state first, legacy markers as fallback) exactly like
-// computeStats.volumesWithRebuilding: pre-Phase-3, the views used the
-// legacy markers only, so a stale/standby replica counted on the card but
-// vanished from the filtered table.
+// stat card that advertised it. 'rebuilding' is isVolumeRecovering, exactly
+// like computeStats.recoveringVolumes. 'orphaned' matches no managed
+// volume: orphans are per-disk lvols (DisksTable filters disks by them).
 export const filterVolumesByType = <V extends Volume>(volumes: V[], filter: VolumeFilter): V[] => {
   switch (filter) {
     case 'healthy':
@@ -393,83 +380,27 @@ export const filterVolumesByType = <V extends Volume>(volumes: V[], filter: Volu
     case 'faulted':
       return volumes.filter(v => v.state === 'Degraded' || v.state === 'Failed');
     case 'rebuilding':
-      return volumes.filter(v =>
-        v.replica_statuses.some(isReplicaRecovering) || v.raid_status?.rebuild_info !== undefined
-      );
-    case 'local-nvme':
-      return volumes.filter(v => v.local_nvme);
+      return volumes.filter(isVolumeRecovering);
+    case 'orphaned':
+      return [];
     case 'all':
     default:
       return volumes;
   }
 };
 
-export const getNvmeofStatus = (volume: Volume): {
-  enabled: boolean;
-  targets: NvmeofTargetInfo[];
-} => {
-  const enabled = Boolean(
-    volume.nvmeof_enabled ||
-    (volume.nvmeof_targets && volume.nvmeof_targets.length > 0) ||
-    volume.access_method === 'nvmeof'
-  );
-  
-  return {
-    enabled,
-    targets: volume.nvmeof_targets || []
-  };
-};
+// The consumer raid the volume's data path runs through. The backend emits
+// one ConsumerRaid per node that currently has `raid_<pv>` assembled
+// (normally one; more than one only mid-cutover). None → the volume is not
+// staged anywhere.
+export const primaryConsumerRaid = (volume: Volume): ConsumerRaid | null =>
+  volume.consumer_raids[0] ?? null;
 
-export const getAccessMethodDisplayName = (accessMethod: string): string => {
-  switch (accessMethod) {
-    case 'nvmeof':
-      return 'NVMe-oF';
-    case 'remote-nvmeof':
-      return 'Remote NVMe-oF';
-    case 'local-nvmeof':
-      return 'Local NVMe-oF';
-    case 'local-nvme':
-      return 'Local NVMe';
-    case 'iscsi':
-      return 'iSCSI';
-    default:
-      return accessMethod || 'Unknown';
-  }
-};
-
-export const hasHighPerformanceAccess = (volume: Volume): boolean => {
-  return volume.local_nvme && (
-    volume.access_method === 'nvmeof' || 
-    volume.nvmeof_enabled
-  );
-};
-
-export const getRaidDisplayName = (raidStatus?: RaidStatus): string => {
-  if (!raidStatus) return 'No RAID';
-  return `RAID-${raidStatus.raid_level}`;
-};
-
-export const getRaidHealthStatus = (raidStatus?: RaidStatus): {
-  status: string;
-  color: string;
-  severity: 'healthy' | 'degraded' | 'failed';
-} => {
-  if (!raidStatus) {
-    return { status: 'Unknown', color: 'gray', severity: 'failed' };
-  }
-
-  const { state, operational_members, num_members } = raidStatus;
-  
-  if (state === 'online' && operational_members === num_members) {
-    return { status: 'Healthy', color: 'green', severity: 'healthy' };
-  } else if (state === 'degraded' || operational_members < num_members) {
-    return { status: 'Degraded', color: 'yellow', severity: 'degraded' };
-  } else if (state === 'failed' || operational_members === 0) {
-    return { status: 'Failed', color: 'red', severity: 'failed' };
-  } else {
-    return { status: state, color: 'blue', severity: 'healthy' };
-  }
-};
+// A leg is served locally when a consumer raid is assembled on its own node;
+// the other legs are reached over NVMe-oF. null when the volume has no
+// consumer at all (nothing is being served).
+export const isLegServedLocally = (volume: Volume, node: string): boolean | null =>
+  volume.consumer_raids.length === 0 ? null : volume.consumer_raids.some(c => c.node === node);
 
 // Disk Setup Types and Hook
 // The agent's /api/disks/status row plus the node name the tab attaches.

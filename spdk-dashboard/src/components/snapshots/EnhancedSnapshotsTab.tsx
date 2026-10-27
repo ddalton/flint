@@ -1,11 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import { apiFetch } from '../../api/client';
-import { 
-  Camera, RefreshCw, Search, Filter, ChevronDown, FileText, 
-  GitBranch, HardDrive, BarChart3, CheckCircle, Layers, Database, 
-  Copy, Download, AlertTriangle, TrendingUp
-} from 'lucide-react';
+import { Camera, RefreshCw, Search, Filter, ChevronDown, FileText, GitBranch, HardDrive, BarChart3, CheckCircle, Layers, Database, AlertTriangle, TrendingUp, Clock } from 'lucide-react';
 import { SnapshotsListView } from './SnapshotsListView';
 import { EnhancedSnapshotsTreeView } from './EnhancedSnapshotsTreeView';
 import { SnapshotStorageView } from './SnapshotStorageView';
@@ -133,13 +129,24 @@ export const EnhancedSnapshotsTab: React.FC = () => {
   // Map wire rows onto the tab's SnapshotDetails shape. This listing
   // carries no clone lineage (SPDK lvol listings don't expose it), so
   // parent/child relationships stay empty.
+  // A backend older than 2026-10-27 sends no `kind`: read it off the name
+  // the same way the backend does (epoch-<vol>-<seq> / snap_<vol>_<suffix>).
+  const kindOf = (snap: BackendSnapshot): string =>
+    snap.kind ??
+    (snap.snapshot_name.startsWith('epoch-')
+      ? 'epoch'
+      : snap.snapshot_name.startsWith('snap_')
+        ? 'user'
+        : 'other');
   const toSnapshotDetails = (backendSnapshots: BackendSnapshot[]): SnapshotDetails[] =>
     backendSnapshots.map(snap => ({
       ...snap,
       snapshot_id: snap.snapshot_uuid,
-      snapshot_type: 'Bdev',
+      snapshot_type: kindOf(snap),
       child_snapshot_ids: [],
     }));
+  const userSnapshots = snapshots.filter(s => s.snapshot_type === 'user');
+  const epochSnapshots = snapshots.filter(s => s.snapshot_type === 'epoch');
 
   // Filter and search logic
   const filteredSnapshots = useMemo(() => {
@@ -217,14 +224,13 @@ export const EnhancedSnapshotsTab: React.FC = () => {
     return new Date(timeString).toLocaleString();
   };
 
-  // raw on purpose: snapshot-type identity palette (Bdev=blue, clone=green,
-  // external=purple), a categorical coding, not status.
+  // raw on purpose: snapshot-kind identity palette (user=blue camera,
+  // engine epoch=gray clock), a categorical coding, not status.
   const getSnapshotTypeIcon = (type: string) => {
     switch (type) {
-      case 'Bdev': return <Camera className="w-4 h-4 text-blue-600" />;
-      case 'LvolClone': return <Copy className="w-4 h-4 text-green-600" />;
-      case 'External': return <Download className="w-4 h-4 text-purple-600" />;
-      default: return <Database className="w-4 h-4 text-gray-600" />;
+      case 'user': return <Camera className="w-4 h-4 text-blue-600" aria-label="user snapshot" />;
+      case 'epoch': return <Clock className="w-4 h-4 text-gray-500" aria-label="engine epoch" />;
+      default: return <Database className="w-4 h-4 text-gray-600" aria-label="snapshot" />;
     }
   };
 
@@ -307,11 +313,16 @@ export const EnhancedSnapshotsTab: React.FC = () => {
         )}
 
         {/* Enhanced Statistics with Storage Information */}
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
           <div className="bg-brand-50 rounded-lg p-4 text-center">
-            <Database className="w-6 h-6 text-brand-600 mx-auto mb-2" />
-            <p className="text-stat text-brand-600">{snapshots.length}</p>
-            <p className="text-sm text-gray-600">Total Snapshots</p>
+            <Camera className="w-6 h-6 text-brand-600 mx-auto mb-2" />
+            <p className="text-stat text-brand-600">{userSnapshots.length}</p>
+            <p className="text-sm text-gray-600">User Snapshots</p>
+          </div>
+          <div className="bg-gray-50 rounded-lg p-4 text-center" title="Engine common-epoch snapshots, retained so a stale replica can catch up; not user data">
+            <Clock className="w-6 h-6 text-gray-500 mx-auto mb-2" />
+            <p className="text-stat text-gray-600">{epochSnapshots.length}</p>
+            <p className="text-sm text-gray-600">Engine Epochs</p>
           </div>
           <div className="bg-healthy-50 rounded-lg p-4 text-center">
             <CheckCircle className="w-6 h-6 text-healthy-600 mx-auto mb-2" />
@@ -430,18 +441,18 @@ export const EnhancedSnapshotsTab: React.FC = () => {
 
               {/* Type Filter */}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
+                <label htmlFor="snapshot-type-filter" className="block text-sm font-medium text-gray-700 mb-2">
                   Snapshot Type
                 </label>
                 <select
+                  id="snapshot-type-filter"
                   value={typeFilter}
                   onChange={(e) => setTypeFilter(e.target.value as SnapshotTypeFilter)}
                   className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"
                 >
-                  <option value="all">All Types</option>
-                  <option value="Bdev">Standard Snapshots</option>
-                  <option value="LvolClone">Clones</option>
-                  <option value="External">External</option>
+                  <option value="all">All kinds</option>
+                  <option value="user">User snapshots (VolumeSnapshot)</option>
+                  <option value="epoch">Engine epochs (replica catch-up)</option>
                 </select>
               </div>
 

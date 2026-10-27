@@ -22,8 +22,8 @@ describe('volumeStateStyle', () => {
     );
   });
 
-  it('degrades unknown states (e.g. the table-synthesized "Raw") to the gray token', () => {
-    expect(volumeStateStyle('Raw')).toBe(UNKNOWN_VOLUME_STATE);
+  it('degrades unknown states (e.g. the backend\'s "Unknown" verify result) to the gray token', () => {
+    expect(volumeStateStyle('Unknown')).toBe(UNKNOWN_VOLUME_STATE);
     expect(volumeStateStyle('')).toBe(UNKNOWN_VOLUME_STATE);
   });
 });
@@ -41,6 +41,12 @@ describe('memberStateStyle', () => {
   it('falls back to the unknown token for unmapped states', () => {
     expect(memberStateStyle('exploded')).toBe(UNKNOWN_MEMBER_STATE);
   });
+
+  it('covers every consumer-raid and replica state the backend emits', () => {
+    for (const s of ['online', 'configuring', 'offline', 'healthy', 'active', 'failed', 'stale', 'standby']) {
+      expect(memberStateStyle(s), `unmapped state '${s}'`).not.toBe(UNKNOWN_MEMBER_STATE);
+    }
+  });
 });
 
 describe('volumeFilterDisplay', () => {
@@ -53,7 +59,6 @@ describe('volumeFilterDisplay', () => {
       'failed',
       'faulted',
       'rebuilding',
-      'local-nvme',
     ]) {
       expect(VOLUME_FILTER_DISPLAY[filter], `missing display for '${filter}'`).toBeDefined();
     }

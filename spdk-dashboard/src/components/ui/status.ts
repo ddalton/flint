@@ -3,8 +3,6 @@ import {
   CheckCircle,
   Clock,
   HardDrive,
-  Settings,
-  Shield,
   X,
   XCircle,
   type LucideIcon,
@@ -23,7 +21,7 @@ export interface SyncStateStyle {
   description: string;
 }
 
-export type SyncDisplayState = SyncState | 'rejoining';
+export type SyncDisplayState = SyncState | 'rejoining' | 'draining';
 
 export const SYNC_STATE_STYLES: Record<SyncDisplayState, SyncStateStyle> = {
   in_sync: {
@@ -49,6 +47,12 @@ export const SYNC_STATE_STYLES: Record<SyncDisplayState, SyncStateStyle> = {
     chip: 'bg-rejoining-100 text-rejoining-800 border-rejoining-200',
     dot: 'bg-rejoining-500',
     description: 'Hot rejoin in flight',
+  },
+  draining: {
+    label: 'draining',
+    chip: 'bg-warning-100 text-warning-800 border-warning-200',
+    dot: 'bg-warning-500',
+    description: 'Fenced out on purpose for a planned csi-node roll; readmitted when the roll completes',
   },
 };
 
@@ -152,10 +156,14 @@ export function nodeHealthStyle(health: string): NodeHealthStyle {
   return NODE_HEALTH_STYLES[health as NodeHealth] ?? UNKNOWN_NODE_HEALTH;
 }
 
-// --- Raid-member / legacy replica states --------------------------------
-// Lowercase keys: SPDK member states (online/degraded/failed/rebuilding/
-// spare/removing), the legacy replica statuses, and the Tier-2 sync states
-// (whose chips reuse SYNC_STATE_STYLES so both renderings can never drift).
+// --- Raid / replica member states ---------------------------------------
+// Lowercase keys, covering exactly what the backend emits: consumer-raid
+// states (bdev_raid: online / configuring / offline), the per-base
+// projection (online = configured, failed = a nulled slot), the replica
+// statuses (healthy / stale / standby from the sync record; active / failed
+// on a single-replica volume), and the Tier-2 sync states (whose chips
+// reuse SYNC_STATE_STYLES so both renderings can never drift). Disk health
+// reuses healthy / failed.
 
 export interface MemberStateStyle {
   chip: string;
@@ -191,27 +199,24 @@ const MEMBER_STATE_STYLES: Record<string, MemberStateStyle> = {
     iconClass: 'text-failed-600',
     hex: '#dc2626',
   },
-  rebuilding: {
-    chip: 'bg-rebuilding-100 text-rebuilding-800 border-rebuilding-200',
-    icon: Settings,
-    // Motion with meaning: the gear itself is static — real progress renders
-    // through the data-bound sync indicator / ProgressBar.
-    iconClass: 'text-rebuilding-600',
-    hex: '#ea580c',
+  active: {
+    chip: 'bg-healthy-100 text-healthy-800 border-healthy-200',
+    icon: CheckCircle,
+    iconClass: 'text-healthy-600',
+    hex: '#059669',
   },
-  spare: {
+  // bdev_raid is still gathering its bases: a transient assembly state.
+  configuring: {
     chip: 'bg-standby-100 text-standby-800 border-standby-200',
-    icon: Shield,
+    icon: Clock,
     iconClass: 'text-standby-600',
     hex: '#2563eb',
   },
-  removing: {
-    // Raw purple on purpose: no semantic alias fits (rejoining also aliases
-    // purple but means the opposite of leaving). Rare legacy SPDK state.
-    chip: 'bg-purple-100 text-purple-800 border-purple-200',
-    icon: Clock,
-    iconClass: 'text-purple-600',
-    hex: '#9333ea',
+  offline: {
+    chip: 'bg-failed-100 text-failed-800 border-failed-200',
+    icon: X,
+    iconClass: 'text-failed-600',
+    hex: '#dc2626',
   },
   stale: {
     chip: SYNC_STATE_STYLES.stale.chip,
@@ -308,25 +313,16 @@ export const VOLUME_FILTER_DISPLAY: Record<string, VolumeFilterDisplay> = {
     short: 'recovering',
     severity: 'recovery',
     icon: '🔄',
-    description: 'Volumes with replica recovery activity (catch-up, standby, or legacy rebuild)',
+    description: 'Volumes with a replica not in sync: catching up, standby, or hot-rejoining',
     bgColor: 'bg-rebuilding-50',
     borderColor: 'border-rebuilding-200',
   },
-  'local-nvme': {
-    name: 'Local NVMe Volumes',
-    short: 'local NVMe',
-    severity: 'performance',
-    icon: '⚡',
-    description: 'High-performance local storage',
-    bgColor: 'bg-brand-50',
-    borderColor: 'border-brand-200',
-  },
   orphaned: {
-    name: 'Orphaned Volumes (Raw SPDK)',
+    name: 'Orphaned SPDK Volumes',
     short: 'orphaned',
     severity: 'cleanup',
     icon: '🛡️',
-    description: 'Raw SPDK volumes without Kubernetes backing - cleanup candidates',
+    description: 'SPDK logical volumes with no owning PV, listed per disk on the Disks tab - cleanup candidates',
     bgColor: 'bg-warning-50',
     borderColor: 'border-warning-200',
   },

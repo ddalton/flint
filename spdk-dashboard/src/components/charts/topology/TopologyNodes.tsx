@@ -3,11 +3,9 @@ import { Handle, Position, type NodeProps } from 'reactflow';
 import { Database, HardDrive, Monitor, Network, Zap, type LucideIcon } from 'lucide-react';
 import { MemberStateChip } from '../../ui/Chip';
 import { SyncStateIndicator } from '../../ui/SyncStateIndicator';
-import { ProgressBar } from '../../ui/ProgressBar';
 import { memberVisual } from './buildTopology';
 import type {
-  AccessNodeData,
-  AppNodeData,
+  ConsumerNodeData,
   DiskNodeData,
   MemberNodeData,
   RaidNodeData,
@@ -16,6 +14,9 @@ import type {
 // Custom React Flow nodes for the topology view. Status renders as
 // icon+label chips from the shared kit (never color alone); text stays in
 // ink tokens — the colored ring/edges carry state, the words carry identity.
+// Every figure shown is a backend datum: the consumer raid's node and
+// configured-base count, each base's configured flag, the replica's sync
+// state. Nothing here is estimated or animated without a value behind it.
 
 // The graph is read-only: handles exist so edges have anchors, but they are
 // not visible or interactive.
@@ -84,59 +85,30 @@ export function StatusRing({
   );
 }
 
-export function AppTopologyNode({ selected }: NodeProps<AppNodeData>) {
+export function ConsumerTopologyNode({ data, selected }: NodeProps<ConsumerNodeData>) {
+  const raid = data.raid;
   return (
-    <NodeCard selected={selected} width="w-44">
+    <NodeCard selected={selected} width="w-48">
       <div className="flex items-center gap-2">
-        {/* Raw purple on purpose: consumer/app identity accent, not the
+        {/* Raw purple on purpose: consumer identity accent, not the
             rejoining sync state the purple alias carries. */}
         <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-purple-300 bg-purple-100">
           <Monitor className="h-4 w-4 text-purple-600" aria-hidden="true" />
         </div>
         <div className="min-w-0">
           <p className="text-sm font-medium text-gray-800">Consumer</p>
-          <p className="truncate text-xs text-gray-500">Pod / application</p>
-        </div>
-      </div>
-      <Handle type="source" position={Position.Right} className={HIDDEN_HANDLE} />
-    </NodeCard>
-  );
-}
-
-export function AccessTopologyNode({ data, selected }: NodeProps<AccessNodeData>) {
-  const ublk = data.volume.ublk_device;
-  return (
-    <NodeCard selected={selected} width="w-48">
-      <div className="flex items-center gap-2">
-        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-indigo-300 bg-indigo-100">
-          {ublk ? (
-            <HardDrive className="h-4 w-4 text-indigo-600" aria-hidden="true" />
-          ) : (
-            <Network className="h-4 w-4 text-indigo-600" aria-hidden="true" />
-          )}
-        </div>
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-gray-800">
-            {ublk ? 'ublk block device' : 'NVMe-oF access'}
-          </p>
-          <p className="truncate font-mono text-xs text-gray-500">
-            {ublk
-              ? ublk.device_path
-              : `${data.volume.nvmeof_targets.length} target${
-                  data.volume.nvmeof_targets.length === 1 ? '' : 's'
-                }`}
+          <p className="truncate text-xs text-gray-500" title={raid?.node}>
+            {raid ? raid.node : 'not staged on any node'}
           </p>
         </div>
       </div>
-      <Handle type="target" position={Position.Left} className={HIDDEN_HANDLE} />
       <Handle type="source" position={Position.Right} className={HIDDEN_HANDLE} />
     </NodeCard>
   );
 }
 
 export function RaidTopologyNode({ data, selected }: NodeProps<RaidNodeData>) {
-  const { volume, ringHexes } = data;
-  const raid = volume.raid_status;
+  const { volume, ringHexes, raid } = data;
   return (
     <NodeCard selected={selected} width="w-64">
       <div className="flex items-start gap-3">
@@ -145,17 +117,18 @@ export function RaidTopologyNode({ data, selected }: NodeProps<RaidNodeData>) {
           <p className="truncate text-sm font-semibold text-gray-800" title={volume.name}>
             {volume.name}
           </p>
-          <p className="text-xs text-gray-500">
-            {raid ? 'SPDK RAID bdev' : 'SPDK bdev'} • {volume.size}
+          <p className="truncate text-xs text-gray-500" title={raid?.raid_name}>
+            {raid ? `SPDK raid bdev on ${raid.node}` : 'no raid assembled'} • {volume.size}
           </p>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {raid && <MemberStateChip state={raid.state} />}
-            {raid && <span className="text-xs font-medium text-gray-600">RAID-{raid.raid_level}</span>}
-          </div>
           {raid && (
-            <p className="mt-1 text-xs tabular-nums text-gray-600">
-              {raid.operational_members}/{raid.num_members} members operational
-            </p>
+            <>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <MemberStateChip state={raid.state} />
+              </div>
+              <p className="mt-1 text-xs tabular-nums text-gray-600">
+                {raid.num_base_bdevs_operational}/{raid.num_base_bdevs} bases configured
+              </p>
+            </>
           )}
         </div>
       </div>
@@ -166,9 +139,11 @@ export function RaidTopologyNode({ data, selected }: NodeProps<RaidNodeData>) {
 }
 
 export function MemberTopologyNode({ data, selected }: NodeProps<MemberNodeData>) {
-  const { join, rebuildPct } = data;
+  const { join } = data;
   const replica = join.replica;
-  const { state } = memberVisual(join);
+  const { state, dashed } = memberVisual(join);
+  // Path is only knowable relative to a consumer.
+  const path = replica && join.consumerNode ? (dashed ? 'remote' : 'local') : null;
   return (
     <NodeCard selected={selected} width="w-56">
       <div className="flex items-center gap-2">
@@ -177,57 +152,35 @@ export function MemberTopologyNode({ data, selected }: NodeProps<MemberNodeData>
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-gray-800">
-            {replica?.node ?? join.member?.name ?? 'unknown'}
+            {replica?.node ?? join.member?.name ?? 'failed slot'}
           </p>
-          <p className="truncate text-xs text-gray-500" title={join.member?.name}>
+          <p className="truncate text-xs text-gray-500" title={join.member?.name ?? undefined}>
             {join.slot !== null
-              ? `slot ${join.slot}`
+              ? `slot ${join.slot}${join.member && !join.member.is_configured ? ' • removed' : ''}`
               : join.raidPresent
                 ? 'not assembled'
                 : 'replica'}
-            {replica ? (replica.is_local ? ' • local' : ' • remote') : ''}
+            {path ? ` • ${path}` : ''}
           </p>
         </div>
-        {replica &&
-          (replica.is_local ? (
-            <Zap className="h-3.5 w-3.5 flex-shrink-0 text-brand-600" aria-label="local access" />
-          ) : (
-            // Raw purple on purpose: network-path accent, not the rejoining
-            // sync state the purple alias carries.
-            <Network
-              className="h-3.5 w-3.5 flex-shrink-0 text-purple-600"
-              aria-label="network access"
-            />
-          ))}
+        {path === 'local' && (
+          <Zap className="h-3.5 w-3.5 flex-shrink-0 text-brand-600" aria-label="local access" />
+        )}
+        {path === 'remote' && (
+          // Raw purple on purpose: network-path accent, not the rejoining
+          // sync state the purple alias carries.
+          <Network
+            className="h-3.5 w-3.5 flex-shrink-0 text-purple-600"
+            aria-label="network access"
+          />
+        )}
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
         <MemberStateChip state={state} />
         {replica?.sync && <SyncStateIndicator sync={replica.sync} compact />}
-        {replica?.is_new_replica && (
-          <span className="rounded-full bg-brand-500 px-1.5 py-0.5 text-[10px] font-medium text-white">
-            NEW
-          </span>
-        )}
       </div>
-      {rebuildPct !== null && (
-        <div className="mt-1.5">
-          <ProgressBar
-            value={rebuildPct}
-            label={`slot ${join.slot ?? '?'} rebuild progress`}
-            valueText={`${rebuildPct.toFixed(1)}%`}
-            tone="warn"
-            className="w-full"
-          />
-        </div>
-      )}
       <Handle type="target" position={Position.Left} className={HIDDEN_HANDLE} />
       <Handle type="source" position={Position.Right} className={HIDDEN_HANDLE} />
-      {/* Rebuild data-flow anchors (top/bottom) so a member→member edge runs
-          down the column instead of looping around the layer. */}
-      <Handle type="source" position={Position.Top} id="rb-out-top" className={HIDDEN_HANDLE} />
-      <Handle type="target" position={Position.Top} id="rb-in-top" className={HIDDEN_HANDLE} />
-      <Handle type="source" position={Position.Bottom} id="rb-out-bottom" className={HIDDEN_HANDLE} />
-      <Handle type="target" position={Position.Bottom} id="rb-in-bottom" className={HIDDEN_HANDLE} />
     </NodeCard>
   );
 }
