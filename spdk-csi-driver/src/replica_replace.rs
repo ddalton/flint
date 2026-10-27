@@ -8,7 +8,7 @@
 //!
 //! Flow (a pre-pass of the per-volume catch-up task, under the same
 //! volume claim):
-//!   1. Candidate: a Stale OR Standby, un-hot-rejoin-marked replica whose
+//!   1. Candidate: an un-hot-rejoin-marked replica of ANY sync state whose
 //!      Node object is deleted, or NotReady for longer than
 //!      FLINT_REPLICA_REPLACE_AFTER_SECS. One replacement per volume/tick.
 //!      (Standby since 2026-07-29 — the F57 fix: a standby whose node
@@ -16,12 +16,38 @@
 //!      chase-source exhaustion, the raid monitor marks members only,
 //!      and this filter skipped Standby — so a dead mid-rebuild standby
 //!      parked the volume at reduced redundancy until an operator
-//!      intervened.  The swap itself is the demotion: the swapped-in
-//!      record is minted STALE and the full build re-promotes it.)
-//!   2. Guards: an in_sync source exists, epoch history exists (the full
-//!      build needs a target), the PV is not RWX (its synthetic backing PV
-//!      mirrors identity attributes — swap choreography is future work),
-//!      not being deleted, autoRebuild != "false", orchestrator enabled.
+//!      intervened.  InSync since 2026-10-27: a volume nobody consumes has
+//!      no raid, so no monitor ever demoted its leg on a deleted node —
+//!      dash1's r3-idle read "3/3 in_sync" with one leg on a Node that
+//!      no longer existed. The node being gone is the gate, not the
+//!      state: an in_sync leg nobody can reach holds no redundancy — with
+//!      ONE exception, found by the formal model the same day
+//!      (flint-e4, formal/FlintReplication.tla, gone-node tranche): an
+//!      in_sync leg that is a member of the recorded F36c writer_set may
+//!      hold acknowledged writes no other leg has (the raid faulted the
+//!      others out before the monitor marked them stale), and swapping it
+//!      prunes it from the set, so the next assembly passes the gate with
+//!      the write silently gone. Such a leg is never a candidate here; the
+//!      gate decides at the next assembly (defer, or serve with the risk
+//!      surfaced), the set is re-stamped, and only then may the replacer
+//!      swap. A volume never assembled has no writer_set, so dash1's case
+//!      still heals; a volume that WAS assembled and is now detached keeps
+//!      its dead in_sync leg until something stages it — by design. The
+//!      swap itself is the demotion: the swapped-in record is minted
+//!      STALE and the full build re-promotes it.)
+//!   2. Guards: another in_sync source exists (not the candidate), the PV
+//!      is not RWX (its synthetic backing PV mirrors identity attributes —
+//!      swap choreography is future work), not being deleted, autoRebuild
+//!      != "false", orchestrator enabled. Epoch history is NOT required:
+//!      the catch-up cuts a first epoch on demand when a stale leg needs a
+//!      full build and none exists (`catchup::ensure_epoch_for_rebuild`) —
+//!      a detached volume never gets scheduler cuts, and waiting for one
+//!      here parked the swap silently forever. The old "wait for an epoch"
+//!      guard had a second, unwritten job: staging enforced stale exclusion
+//!      only once epochs existed, so it kept the empty placeholder out of
+//!      an epoch-less record. Staging now excludes every stale leg, epochs
+//!      or not, and the placeholder is minted `empty_head`, which the
+//!      forced-stale fallback never admits (`replacement_record`).
 //!   3. A placeholder lvol named {volume}_replica_{index} is created on the
 //!      max-free healthy node hosting no other leg. The thin-aware full
 //!      build later recreates it empty, sized to the source
@@ -56,7 +82,7 @@ use crate::catchup::{CatchupRpc, CatchupStore, RpcError};
 use crate::driver::SpdkCsiDriver;
 use crate::minimal_models::ReplicaInfo;
 use crate::replica_sync::{
-    self, ReplicaSyncRecord, SyncState, VolumeSyncRecord, REPLICAS_OVERRIDE_ANNOTATION,
+    self, ReplicaSyncRecord, SyncState, VolumeSyncRecord, WriterSet, REPLICAS_OVERRIDE_ANNOTATION,
     SYNC_STATE_ANNOTATION,
 };
 
@@ -118,18 +144,52 @@ pub fn node_gone(presence: &NodePresence, after: Duration, now_epoch_s: i64) -> 
 /// exhaustion — which needs the node back; the raid-health monitor marks
 /// only raid MEMBERS; and the pre-fix filter here skipped Standby), so a
 /// dead mid-rebuild standby parked the volume at reduced redundancy
-/// forever.  The swap needs no explicit demotion: the swapped-in record
-/// is minted STALE (`swapped_record_enters_stale_and_drops_old_identity`
-/// pins it) and the full build re-promotes.  `hot_rejoin.is_none()`
-/// stays load-bearing for BOTH states — a marked leg mid-window is owned
-/// by `hot_rejoin::resume_standby` (a MARKED standby on a dead node
+/// forever.  Widened again 2026-10-27 to IN_SYNC: the same reasoning
+/// applies one state up. A detached volume has no raid, so the monitor
+/// never demotes its leg when the node dies; the leg stays in_sync in
+/// the record while its Node object is deleted, and the pre-fix filter
+/// here skipped it (dash1 r3-idle, scenario 8b). The caller's node-gone
+/// check (`node_gone`: Node deleted, or NotReady past the budget) is the
+/// real gate; this filter only excludes legs another flow owns.  The
+/// swap needs no explicit demotion: the swapped-in record is minted
+/// STALE (`swapped_record_enters_stale_and_drops_old_identity` pins it)
+/// and the full build re-promotes.  `hot_rejoin.is_none()` stays
+/// load-bearing for every state — a marked leg mid-window is owned by
+/// `hot_rejoin::resume_standby` (a MARKED standby on a dead node
 /// therefore still parks: the tracked F57 residual, needing a
 /// window-unwind, not a swap).  Retention note: swapping a standby out
 /// drops its `last_epoch` retention need; the replacement's own
 /// `catchup_stale` re-pins before its build, so no retained epoch is
 /// exposed in between (`pin_retention` precedes the revert).
-pub fn is_replace_candidate(rec: &ReplicaSyncRecord) -> bool {
-    matches!(rec.sync_state, SyncState::Stale | SyncState::Standby) && rec.hot_rejoin.is_none()
+///
+/// The one in_sync leg that is NOT a candidate: a member of the recorded
+/// F36c writer set (`writer_set`, the legs of the last serving assembly).
+/// Model-checked the same day (formal/FlintReplication.tla): with two
+/// legs, l1 faulted out of the raid but not yet marked stale, write 1
+/// acked on l2 alone, then l2's node gone — swapping l2 would prune it
+/// from the writer set and the next assembly on l1 would pass the gate
+/// with write 1 lost and no risk surfaced. Stale and standby legs are
+/// never in the set (`mark_stale` prunes; a standby is admitted into it
+/// only at assembly), so the guard bites in_sync alone.
+pub fn is_replace_candidate(rec: &ReplicaSyncRecord, writer_set: Option<&WriterSet>) -> bool {
+    rec.hot_rejoin.is_none()
+        && !(rec.sync_state == SyncState::InSync && writer_set_holds(writer_set, &rec.lvol_uuid))
+}
+
+/// Pure: is `lvol_uuid` a member of the recorded writer set?
+pub fn writer_set_holds(writer_set: Option<&WriterSet>, lvol_uuid: &str) -> bool {
+    writer_set.map_or(false, |ws| ws.lvol_uuids.iter().any(|u| u == lvol_uuid))
+}
+
+/// Pure: can `candidate_uuid`'s leg be rebuilt after the swap? Some OTHER
+/// replica must be in_sync — the candidate itself may be in_sync in the
+/// record (a detached volume's leg on a deleted node), and counting it
+/// would swap away the only copy.
+pub fn has_rebuild_source(record: &VolumeSyncRecord, candidate_uuid: &str) -> bool {
+    record
+        .replicas
+        .iter()
+        .any(|r| r.lvol_uuid != candidate_uuid && r.sync_state == SyncState::InSync)
 }
 
 /// Pure: pick the max-free candidate not hosting an existing leg.
@@ -142,6 +202,57 @@ pub fn pick_replacement_node(
         .filter(|(name, _)| !excluded.contains(name))
         .max_by_key(|(_, free)| *free)
         .map(|(name, _)| name.clone())
+}
+
+/// Pure: the nodes a replacement may not land on, beyond those already
+/// hosting a leg (2026-10-27): the CONSUMER's node. The catch-up refuses to
+/// build a leg on a node where the volume's raid is online
+/// (`catchup::clear_head_sb`: the rebuilt head carries the raid's
+/// superblock, and examining it under a live raid of the same name risks a
+/// claim), so a leg placed there stayed stale for as long as the consumer
+/// stayed — on dash1, until its pod was deleted. The formal model
+/// (formal/FlintReplication.tla, GoneConsumerNode) found the lasso even
+/// with a spare node free; with this exclusion GoneLegRebuilt holds
+/// (GoneConsumerFixed), and with no other node it waits, loudly
+/// (GoneConsumerBlocked). A consumer that later moves ONTO a stale leg's
+/// node meets the same refusal; placement cannot prevent that one.
+pub fn replacement_excluded(consumer_node: Option<&str>) -> HashSet<String> {
+    consumer_node.into_iter().map(str::to_string).collect()
+}
+
+/// Pure: the record of a freshly swapped-in replacement leg — STALE (the
+/// full build re-promotes it) and `empty_head` (2026-10-27): the placeholder
+/// holds nothing until that build, so neither staging nor the forced-stale
+/// fallback may ever serve it. Before the flag, a two-leg volume whose one
+/// survivor attached force-admitted this empty leg to reach two bases
+/// (formal/FlintReplication.tla, EmptyHeadU11 — pre-existing since U11).
+pub fn replacement_record(
+    target: &str,
+    node_uid: &str,
+    new_uuid: &str,
+    lost_node: &str,
+    lost_state: SyncState,
+    now_rfc3339: &str,
+) -> ReplicaSyncRecord {
+    ReplicaSyncRecord {
+        node_name: target.to_string(),
+        node_uid: node_uid.to_string(),
+        lvol_uuid: new_uuid.to_string(),
+        sync_state: SyncState::Stale,
+        last_epoch: None,
+        since: Some(now_rfc3339.to_string()),
+        reason: Some(format!(
+            "re-placed from lost node {} (U11; the lost leg was {})",
+            lost_node,
+            lost_state.as_str()
+        )),
+        active_lvol_uuid: None,
+        reverted_to: None,
+        hot_rejoin: None,
+        hot_rejoin_at: None,
+        maint_drain: None,
+        empty_head: true,
+    }
 }
 
 /// Pure: the swapped sync record. The old uuid's entry is replaced in place
@@ -193,11 +304,14 @@ async fn node_presence(client: &kube::Client, name: &str) -> Result<NodePresence
 /// Re-place at most one permanently-lost replica of this volume. Returns the
 /// swapped identity list when a replacement landed (the caller feeds it to
 /// the same tick's catch-up), None when there is nothing to do.
+/// `consumer_node` is the node serving the volume (its raid, or the RWX
+/// NFS server's): never a replacement target — see [`replacement_excluded`].
 pub async fn maybe_replace_for_volume(
     driver: &Arc<SpdkCsiDriver>,
     store: &dyn CatchupStore,
     volume_id: &str,
     replicas: &[ReplicaInfo],
+    consumer_node: Option<&str>,
     cfg: &ReplaceConfig,
 ) -> Result<Option<Vec<ReplicaInfo>>, RpcError> {
     if !cfg.enabled {
@@ -228,20 +342,17 @@ pub async fn maybe_replace_for_volume(
     let Some(record) = store.load(volume_id).await? else {
         return Ok(None);
     };
-    if record.epochs.is_empty() {
-        // The full build needs an epoch target; the scheduler cuts one
-        // within its interval — re-placement simply waits a tick.
-        return Ok(None);
-    }
-    if !record.replicas.iter().any(|r| r.sync_state == SyncState::InSync) {
-        return Ok(None); // nothing to rebuild from — never touch identities
-    }
+    // No epoch-history guard here (removed 2026-10-27): a detached volume
+    // never receives scheduler cuts, so "wait a tick for an epoch" waited
+    // forever and said nothing. The catch-up that follows this pre-pass
+    // cuts a first epoch on demand for a stale leg with no shared history
+    // (`catchup::ensure_epoch_for_rebuild`).
 
-    // Candidate: first stale-or-standby, unmarked replica whose node is
-    // gone (see is_replace_candidate for the F57 widening).
+    // Candidate: first unmarked replica whose node is gone, in any sync
+    // state (see is_replace_candidate for the F57 and detached widenings).
     let now_epoch_s = k8s_openapi::jiff::Timestamp::now().as_second();
     let mut candidate: Option<(usize, &ReplicaInfo, &ReplicaSyncRecord)> = None;
-    for rec in record.replicas.iter().filter(|r| is_replace_candidate(r)) {
+    for rec in record.replicas.iter().filter(|r| r.hot_rejoin.is_none()) {
         let Some((index, identity)) = replicas
             .iter()
             .enumerate()
@@ -250,14 +361,54 @@ pub async fn maybe_replace_for_volume(
             continue;
         };
         let presence = node_presence(&driver.kube_client, &identity.node_name).await?;
-        if node_gone(&presence, cfg.after, now_epoch_s) {
-            candidate = Some((index, identity, rec));
-            break;
+        if !node_gone(&presence, cfg.after, now_epoch_s) {
+            continue;
         }
+        if !is_replace_candidate(rec, record.writer_set.as_ref()) {
+            // An in_sync member of the last serving assembly on a gone node:
+            // it may hold acked writes no other leg has. The F36c gate
+            // rules on it at the next assembly; say so instead of nothing.
+            store
+                .emit(
+                    volume_id,
+                    "Warning",
+                    "ReplicaReplacementBlocked",
+                    &format!(
+                        "Replica on lost node {} is in_sync and a member of the last serving \
+                         assembly's writer set: it may hold acknowledged writes no other leg \
+                         has, so it is not re-placed; the assembly freshness gate decides at \
+                         the next stage",
+                        identity.node_name
+                    ),
+                )
+                .await;
+            continue;
+        }
+        candidate = Some((index, identity, rec));
+        break;
     }
-    let Some((index, lost, _rec)) = candidate else {
+    let Some((index, lost, lost_rec)) = candidate else {
         return Ok(None);
     };
+    if !has_rebuild_source(&record, &lost_rec.lvol_uuid) {
+        // Nothing to rebuild from — never touch identities. Loud: with the
+        // candidate itself possibly in_sync, silence here would read as
+        // "nothing wrong" on a volume down to its last unreachable copy.
+        store
+            .emit(
+                volume_id,
+                "Warning",
+                "ReplicaReplacementBlocked",
+                &format!(
+                    "Replica on lost node {} ({}) cannot be re-placed: no other in_sync \
+                     replica to rebuild from",
+                    lost.node_name,
+                    lost_rec.sync_state.as_str()
+                ),
+            )
+            .await;
+        return Ok(None);
+    }
 
     // Target: max-free Ready node with lvstore room, hosting no leg.
     let size_bytes = pv
@@ -303,8 +454,13 @@ pub async fn maybe_replace_for_volume(
     }
     let ranked: Vec<(String, u64)> =
         candidates.iter().map(|(n, f, _, _)| (n.clone(), *f)).collect();
-    let Some(target) = pick_replacement_node(&ranked, &HashSet::new()) else {
-        // Loud: the operator must add capacity — nothing here can.
+    let excluded = replacement_excluded(consumer_node);
+    let Some(target) = pick_replacement_node(&ranked, &excluded) else {
+        // Loud: the operator must add capacity (or the consumer must move)
+        // — nothing here can.
+        let consumer_was_only = consumer_node
+            .map(|c| ranked.iter().any(|(n, _)| n == c))
+            .unwrap_or(false);
         store
             .emit(
                 volume_id,
@@ -312,8 +468,19 @@ pub async fn maybe_replace_for_volume(
                 "ReplicaReplacementBlocked",
                 &format!(
                     "Replica on lost node {} cannot be re-placed: no Ready node with {}B free \
-                     outside the volume's current nodes",
-                    lost.node_name, size_bytes
+                     outside the volume's current nodes{}",
+                    lost.node_name,
+                    size_bytes,
+                    if consumer_was_only {
+                        format!(
+                            " except the node serving it ({}), where the rebuild cannot run \
+                             under the live raid; it is re-placed when that consumer moves or \
+                             a node with room joins",
+                            consumer_node.unwrap_or_default()
+                        )
+                    } else {
+                        String::new()
+                    }
                 ),
             )
             .await;
@@ -357,20 +524,14 @@ pub async fn maybe_replace_for_volume(
     let old_uid = new_replicas[index].node_uid.clone();
     new_replicas[index] = new_replica.clone();
 
-    let new_rec = ReplicaSyncRecord {
-        node_name: target.clone(),
-        node_uid: node_uid.clone(),
-        lvol_uuid: new_uuid.clone(),
-        sync_state: SyncState::Stale,
-        last_epoch: None,
-        since: Some(replica_sync::now_rfc3339()),
-        reason: Some(format!("re-placed from lost node {} (U11)", lost.node_name)),
-        active_lvol_uuid: None,
-        reverted_to: None,
-        hot_rejoin: None,
-        hot_rejoin_at: None,
-        maint_drain: None,
-    };
+    let new_rec = replacement_record(
+        &target,
+        &node_uid,
+        &new_uuid,
+        &lost.node_name,
+        lost_rec.sync_state,
+        &replica_sync::now_rfc3339(),
+    );
 
     if let Err(e) = swap_identity_on_pv(
         &driver.kube_client,
@@ -395,9 +556,12 @@ pub async fn maybe_replace_for_volume(
             "Warning",
             "ReplicaReplaced",
             &format!(
-                "Replica on lost node {} re-placed to {} (lvol {}); thin-aware full rebuild \
-                 starts this cycle",
-                lost.node_name, target, new_uuid
+                "Replica on lost node {} ({} in the record) re-placed to {} (lvol {}); \
+                 thin-aware full rebuild starts this cycle",
+                lost.node_name,
+                lost_rec.sync_state.as_str(),
+                target,
+                new_uuid
             ),
         )
         .await;
@@ -524,12 +688,17 @@ mod tests {
     }
 
     #[test]
-    fn candidacy_covers_stale_and_standby_but_never_marked_or_insync() {
+    fn candidacy_covers_every_state_but_never_a_marked_leg() {
         // The F57 fix: a STANDBY on a gone node is re-placeable (pre-fix
-        // it parked forever — no demotion path, no replacement); a
-        // hot-rejoin-marked leg of EITHER state stays owned by
+        // it parked forever — no demotion path, no replacement). The
+        // 2026-10-27 fix: an IN_SYNC leg on a gone node is too — a
+        // detached volume has no raid, so nothing demoted dash1 r3-idle's
+        // leg when its Node was deleted, and the pre-fix filter skipped
+        // it (3/3 "in_sync" with one leg nobody could reach, forever).
+        // The node-gone check is the gate; this filter only excludes a
+        // hot-rejoin-marked leg of ANY state, which stays owned by
         // resume_standby (the marked-standby-on-dead-node park is the
-        // tracked residual); InSync is never a candidate.
+        // tracked residual).
         let mk = |state: SyncState, marked: bool| {
             let mut rec = crate::replica_sync::VolumeSyncRecord::initial(&[replica("n1", "u1")])
                 .replicas
@@ -538,11 +707,73 @@ mod tests {
             rec.hot_rejoin = marked.then(|| "epoch-vol-3".to_string());
             rec
         };
-        assert!(is_replace_candidate(&mk(SyncState::Stale, false)));
-        assert!(is_replace_candidate(&mk(SyncState::Standby, false)));
-        assert!(!is_replace_candidate(&mk(SyncState::Stale, true)));
-        assert!(!is_replace_candidate(&mk(SyncState::Standby, true)));
-        assert!(!is_replace_candidate(&mk(SyncState::InSync, false)));
+        assert!(is_replace_candidate(&mk(SyncState::Stale, false), None));
+        assert!(is_replace_candidate(&mk(SyncState::Standby, false), None));
+        assert!(is_replace_candidate(&mk(SyncState::InSync, false), None));
+        assert!(!is_replace_candidate(&mk(SyncState::Stale, true), None));
+        assert!(!is_replace_candidate(&mk(SyncState::Standby, true), None));
+        assert!(!is_replace_candidate(&mk(SyncState::InSync, true), None));
+    }
+
+    #[test]
+    fn an_in_sync_writer_set_member_is_never_a_candidate() {
+        // The model's trace (formal/FlintReplication.tla, gone-node
+        // tranche, 2026-10-27): u1 holds the only copy of an acked write
+        // because the raid faulted the other leg out before the monitor
+        // marked it stale; swapping u1 would prune it from the writer set
+        // and the next assembly would pass the F36c gate with the write
+        // gone. A set that names OTHER legs, or no set at all (a volume
+        // never assembled — dash1's r3-idle), leaves u1 a candidate; a
+        // stale or standby u1 is one regardless, as the set never holds
+        // those.
+        let mut rec = crate::replica_sync::VolumeSyncRecord::initial(&[replica("n1", "u1")])
+            .replicas
+            .remove(0);
+        let holds_u1 = WriterSet { lvol_uuids: vec!["u1".into(), "u2".into()], since: "t".into() };
+        let holds_others = WriterSet { lvol_uuids: vec!["u2".into()], since: "t".into() };
+        assert!(!is_replace_candidate(&rec, Some(&holds_u1)));
+        assert!(is_replace_candidate(&rec, Some(&holds_others)));
+        assert!(is_replace_candidate(&rec, None));
+        rec.sync_state = SyncState::Stale;
+        assert!(is_replace_candidate(&rec, Some(&holds_u1)));
+        rec.sync_state = SyncState::Standby;
+        assert!(is_replace_candidate(&rec, Some(&holds_u1)));
+    }
+
+    #[test]
+    fn rebuild_source_excludes_the_candidate_itself() {
+        // Three legs, all in_sync in the record (the detached shape): u3's
+        // node is gone. u1 and u2 can source its rebuild.
+        let mut record = crate::replica_sync::VolumeSyncRecord::initial(&[
+            replica("n1", "u1"),
+            replica("n2", "u2"),
+            replica("n3", "u3"),
+        ]);
+        assert!(has_rebuild_source(&record, "u3"));
+
+        // Only the candidate is in_sync: the others are stale. Swapping it
+        // would discard the last copy — refused.
+        record.mark_stale("u1", "leg failed", "t0");
+        record.mark_stale("u2", "leg failed", "t0");
+        assert!(!has_rebuild_source(&record, "u3"));
+        // …while a stale candidate with one in_sync survivor still has one.
+        assert!(has_rebuild_source(&record, "u1"));
+    }
+
+    #[test]
+    fn the_consumers_node_is_never_a_replacement_target() {
+        // dash1, 2026-10-27: the only node without a leg was the consumer's,
+        // the replacement landed there, and its build was refused every
+        // tick while the raid stayed online on that node.
+        let ranked = vec![("consumer".to_string(), 99u64), ("spare".to_string(), 10u64)];
+        let excluded = replacement_excluded(Some("consumer"));
+        assert_eq!(pick_replacement_node(&ranked, &excluded), Some("spare".to_string()));
+        // Only the consumer's node has room: no target — the caller emits
+        // ReplicaReplacementBlocked and retries next tick.
+        let only = vec![("consumer".to_string(), 99u64)];
+        assert_eq!(pick_replacement_node(&only, &excluded), None);
+        // Detached volume: nothing excluded.
+        assert_eq!(pick_replacement_node(&only, &replacement_excluded(None)), Some("consumer".to_string()));
     }
 
     #[test]
@@ -552,6 +783,16 @@ mod tests {
         assert_eq!(pick_replacement_node(&cands, &excluded), Some("b".into()));
         excluded.insert("b".to_string());
         assert_eq!(pick_replacement_node(&cands, &excluded), Some("c".into()));
+    }
+
+    #[test]
+    fn a_replacement_leg_is_stale_and_empty() {
+        let rec = replacement_record("n4", "uid-n4", "u4", "n3", SyncState::InSync, "t0");
+        assert_eq!(rec.sync_state, SyncState::Stale);
+        assert!(rec.empty_head, "the placeholder holds nothing until its full build");
+        assert!(rec.head_not_built());
+        assert!(!crate::replica_sync::forced_stale_admissible(Some(&rec), "t0"));
+        assert_eq!(rec.reason.as_deref(), Some("re-placed from lost node n3 (U11; the lost leg was in_sync)"));
     }
 
     #[test]
@@ -573,6 +814,7 @@ mod tests {
             hot_rejoin: None,
             hot_rejoin_at: None,
             maint_drain: None,
+            empty_head: true,
         };
         let swapped = build_swapped_record(&record, "u2", new_rec, &new_replicas).unwrap();
         assert_eq!(swapped.replicas.len(), 2);
@@ -602,6 +844,7 @@ mod tests {
             hot_rejoin: None,
             hot_rejoin_at: None,
             maint_drain: None,
+            empty_head: true,
         };
         assert!(build_swapped_record(&record, "nope", new_rec, &old).is_none());
     }

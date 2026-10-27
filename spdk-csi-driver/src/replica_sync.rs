@@ -50,6 +50,18 @@ pub const REPLICAS_OVERRIDE_ANNOTATION: &str = "disk.chert.us/replicas-override"
 /// autoRebuild StorageClass parameter, echoed into volumeAttributes by
 /// CreateVolume. "false" opts the volume out of replica re-placement.
 pub const AUTO_REBUILD_ATTRIBUTE: &str = "disk.chert.us/auto-rebuild";
+/// Comma-separated lvol uuids that CreateVolume seeds STALE: the empty
+/// placeholder legs of a multi-replica restore from a VolumeSnapshot
+/// (2026-10-27). The provisioner writes volumeAttributes atomically with
+/// the PV, so a sync-record annotation that never landed (the PV did not
+/// exist when the controller tried) or was lost can never read those legs
+/// as in_sync — which is what the record's `initial` default would say,
+/// and what would let an EMPTY lvol into a raid. `initial_seeded` honours
+/// it wherever a record is synthesized from volumeAttributes.
+pub const SEEDED_STALE_ATTRIBUTE: &str = "disk.chert.us/replicas-seeded-stale";
+/// The reason stamped on a seeded-stale leg.
+pub const SEEDED_STALE_REASON: &str =
+    "restored from a snapshot: empty leg awaiting the full build from the clone";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -143,9 +155,48 @@ pub struct ReplicaSyncRecord {
     /// completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maint_drain: Option<String>,
+    /// The head is an EMPTY placeholder that has never held the volume's
+    /// data (2026-10-27): a restore's extra leg (seeded at CreateVolume) or
+    /// a U11 replacement leg (minted at the swap). Cleared when the leg
+    /// reaches standby or in_sync — a full build has then filled it. While
+    /// set the leg is never served: it is stale, so staging excludes it,
+    /// and the forced-stale fallback skips it (`head_not_built`). The flag
+    /// exists because "stale" alone does not say "empty": the fallback's
+    /// whole premise is that a stale leg missed only a TAIL, and it admits
+    /// one to avoid bricking the volume — an availability trade that is
+    /// destruction when the head holds nothing (formal/FlintReplication.tla,
+    /// Inv_NoVirginServing, worlds EmptyHeadRestore and EmptyHeadU11).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub empty_head: bool,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// The `reverted_to` value of a thin-aware full build in progress: the head
+/// was recreated EMPTY and the source's lineage is being replayed onto it
+/// (catch-up §9-5). `catchup::FULL_BUILD_BASE` is this constant.
+pub const FULL_BUILD_MARKER: &str = "empty";
+
 impl ReplicaSyncRecord {
+    /// The head does not hold a crash-consistent image of the volume: an
+    /// empty placeholder (`empty_head`), or ANY catch-up revert not yet
+    /// admitted in_sync (`reverted_to` set). A full build
+    /// ([`FULL_BUILD_MARKER`]) recreated the head empty; a delta catch-up
+    /// reverted it to an epoch OLDER than the leg's own content and then
+    /// shallow-copies the lineage cluster by cluster in address order
+    /// (SPDK bs_shallow_copy_cluster_find_next), so an interrupted copy is
+    /// an address-ordered mix of two epochs — newer metadata over older
+    /// data — not a prefix. A stale leg that merely missed a tail is a
+    /// prefix and crash-consistent; these are not (flint-e4's review of the
+    /// code, 2026-10-27; the model's catch-up is atomic and cannot see it).
+    /// Conservative: a standby demoted back to stale keeps its marker and
+    /// is skipped, at an availability cost only.
+    pub fn head_not_built(&self) -> bool {
+        self.empty_head || self.reverted_to.is_some()
+    }
+
     /// The uuid that addresses the live head lvol (post-revert override, or
     /// the immutable identity uuid).
     pub fn live_lvol_uuid(&self) -> &str {
@@ -265,9 +316,25 @@ impl VolumeSyncRecord {
                     hot_rejoin: None,
                     hot_rejoin_at: None,
                     maint_drain: None,
+                    empty_head: false,
                 })
                 .collect(),
         }
+    }
+
+    /// `initial`, with the legs in `stale_uuids` entered STALE (reason
+    /// [`SEEDED_STALE_REASON`], `since` = `now`) and `empty_head` instead
+    /// of in_sync — the multi-replica restore's empty placeholders. Unknown
+    /// uuids are ignored. With an empty list this is exactly `initial`.
+    pub fn initial_seeded(replicas: &[ReplicaInfo], stale_uuids: &[String], now_rfc3339: &str) -> Self {
+        let mut record = Self::initial(replicas);
+        for uuid in stale_uuids {
+            record.mark_stale(uuid, SEEDED_STALE_REASON, now_rfc3339);
+            if let Some(rec) = record.replicas.iter_mut().find(|r| r.lvol_uuid == *uuid) {
+                rec.empty_head = true;
+            }
+        }
+        record
     }
 
     pub fn from_annotation(s: &str) -> serde_json::Result<Self> {
@@ -315,6 +382,10 @@ impl VolumeSyncRecord {
                         hot_rejoin: None,
                         hot_rejoin_at: None,
                         maint_drain: None,
+                        // Unknown content, not known-empty: an identity that
+                        // appears through membership drift is stale pending
+                        // fenced admission, and the fallback may still weigh it.
+                        empty_head: false,
                     })
             })
             .collect();
@@ -500,6 +571,11 @@ impl VolumeSyncRecord {
                     rec.last_epoch = Some(last_epoch.to_string());
                     changed = true;
                 }
+                // A standby is built through `last_epoch`: no longer empty.
+                if rec.empty_head {
+                    rec.empty_head = false;
+                    changed = true;
+                }
                 changed
             }
             None => false,
@@ -535,6 +611,10 @@ impl VolumeSyncRecord {
                 }
                 if rec.reverted_to.is_some() {
                     rec.reverted_to = None;
+                    changed = true;
+                }
+                if rec.empty_head {
+                    rec.empty_head = false;
                     changed = true;
                 }
                 // Hot-rejoin localization complete (or ordinary admission
@@ -1101,6 +1181,38 @@ pub fn is_rwx_pv(pv: &PersistentVolume) -> bool {
 /// The authoritative replica-identity JSON for this PV: the re-placement
 /// override annotation when present (identity swapped after permanent node
 /// loss, U11), else the immutable CreateVolume attribute.
+/// Pure: may the stage's forced-stale fallback admit this stale leg? Never a
+/// hot-rejoin artifact or a leg under a live maintenance mark (the 07-29
+/// StaleFloor guards), and — 2026-10-27 — never a head that does not hold
+/// the volume's lineage ([`ReplicaSyncRecord::head_not_built`]). A leg with
+/// no record entry keeps the legacy answer (admissible). This governs both
+/// the fallback's pool (filling to two bases) and its last-resort serve
+/// (one admitted leg serving alone): there is one loop, and this is its gate.
+pub fn forced_stale_admissible(rec: Option<&ReplicaSyncRecord>, now_rfc3339: &str) -> bool {
+    match rec {
+        None => true,
+        Some(r) => r.hot_rejoin.is_none() && !r.maint_drain_live(now_rfc3339) && !r.head_not_built(),
+    }
+}
+
+/// The lvol uuids a CreateVolume seeded STALE ([`SEEDED_STALE_ATTRIBUTE`]),
+/// empty when the attribute is absent.
+pub fn seeded_stale_from_pv(pv: &PersistentVolume) -> Vec<String> {
+    pv.spec
+        .as_ref()
+        .and_then(|s| s.csi.as_ref())
+        .and_then(|c| c.volume_attributes.as_ref())
+        .and_then(|a| a.get(SEEDED_STALE_ATTRIBUTE))
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn raw_replicas_json(pv: &PersistentVolume) -> Option<&String> {
     if let Some(j) = pv
         .metadata
@@ -1187,9 +1299,9 @@ where
             );
         }
         let baseline = parsed.and_then(|p| p.ok());
-        let mut record = baseline
-            .clone()
-            .unwrap_or_else(|| VolumeSyncRecord::initial(&replicas));
+        let mut record = baseline.clone().unwrap_or_else(|| {
+            VolumeSyncRecord::initial_seeded(&replicas, &seeded_stale_from_pv(&pv), &now_rfc3339())
+        });
         record.reconcile_membership(&replicas);
         mutate(&mut record);
 
@@ -1557,6 +1669,103 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn initial_seeded_enters_the_listed_legs_stale_and_the_rest_in_sync() {
+        let replicas = vec![
+            replica("n1", "u1"),
+            replica("n2", "u2"),
+            replica("n3", "u3"),
+        ];
+        let record = VolumeSyncRecord::initial_seeded(
+            &replicas,
+            &["u2".to_string(), "u3".to_string(), "unknown".to_string()],
+            "2026-10-27T21:00:00Z",
+        );
+        let states: Vec<(&str, SyncState)> =
+            record.replicas.iter().map(|r| (r.lvol_uuid.as_str(), r.sync_state.clone())).collect();
+        assert_eq!(
+            states,
+            vec![("u1", SyncState::InSync), ("u2", SyncState::Stale), ("u3", SyncState::Stale)]
+        );
+        let u2 = record.get("u2").unwrap();
+        assert_eq!(u2.reason.as_deref(), Some(SEEDED_STALE_REASON));
+        assert_eq!(u2.since.as_deref(), Some("2026-10-27T21:00:00Z"));
+        assert!(record.epochs.is_empty());
+        // No list: exactly the plain initial record.
+        assert_eq!(VolumeSyncRecord::initial_seeded(&replicas, &[], "t"), VolumeSyncRecord::initial(&replicas));
+    }
+
+    #[test]
+    fn a_restore_placeholder_is_empty_until_built() {
+        let replicas = vec![replica("n1", "u1"), replica("n2", "u2")];
+        let mut record = VolumeSyncRecord::initial_seeded(&replicas, &["u2".to_string()], "t0");
+        assert!(!record.get("u1").unwrap().empty_head);
+        assert!(record.get("u2").unwrap().empty_head);
+        assert!(record.get("u2").unwrap().head_not_built());
+        // Built to standby: the flag clears (and stays clear at in_sync).
+        assert!(record.mark_standby("u2", "epoch-v-1", "caught up", "t1"));
+        assert!(!record.get("u2").unwrap().empty_head);
+        record.replicas.iter_mut().find(|r| r.lvol_uuid == "u2").unwrap().empty_head = true;
+        assert!(record.mark_in_sync("u2", "epoch-v-2", "admitted", "t2"));
+        assert!(!record.get("u2").unwrap().empty_head);
+    }
+
+    #[test]
+    fn the_forced_stale_fallback_never_admits_an_unbuilt_head() {
+        // Inv_NoVirginServing (formal/FlintReplication.tla): EmptyHeadRestore
+        // (a restore placeholder) and EmptyHeadU11 (a replacement leg on a
+        // two-leg volume, PRE-EXISTING) both served an empty head through
+        // this fallback; a full build in progress (reverted_to = "empty")
+        // is the same hazard half-way, and a delta catch-up in flight is
+        // torn (below).
+        let mut rec = VolumeSyncRecord::initial(&[replica("n1", "u1")]).replicas.remove(0);
+        rec.sync_state = SyncState::Stale;
+        assert!(forced_stale_admissible(Some(&rec), "2026-10-27T22:00:00Z"));
+        assert!(forced_stale_admissible(None, "2026-10-27T22:00:00Z"));
+
+        let mut empty = rec.clone();
+        empty.empty_head = true;
+        assert!(!forced_stale_admissible(Some(&empty), "2026-10-27T22:00:00Z"));
+
+        let mut building = rec.clone();
+        building.reverted_to = Some(FULL_BUILD_MARKER.to_string());
+        assert!(!forced_stale_admissible(Some(&building), "2026-10-27T22:00:00Z"));
+
+        // A delta catch-up in flight is torn, not behind: reverted to an
+        // OLDER epoch, then copied cluster by cluster in address order.
+        let mut delta = rec.clone();
+        delta.reverted_to = Some("epoch-v-3".to_string());
+        assert!(!forced_stale_admissible(Some(&delta), "2026-10-27T22:00:00Z"));
+
+        let mut marked = rec.clone();
+        marked.hot_rejoin = Some("epoch-v-3".to_string());
+        assert!(!forced_stale_admissible(Some(&marked), "2026-10-27T22:00:00Z"));
+    }
+
+    #[test]
+    fn empty_head_is_omitted_when_false_and_round_trips_when_true() {
+        // Records written before the flag existed parse; an unflagged record
+        // serializes exactly as before.
+        let mut record = VolumeSyncRecord::initial(&[replica("n1", "u1")]);
+        let plain = record.to_annotation();
+        assert!(!plain.contains("empty_head"));
+        assert_eq!(VolumeSyncRecord::from_annotation(&plain).unwrap(), record);
+        record.replicas[0].empty_head = true;
+        let flagged = record.to_annotation();
+        assert!(flagged.contains("\"empty_head\":true"));
+        assert_eq!(VolumeSyncRecord::from_annotation(&flagged).unwrap(), record);
+    }
+
+    #[test]
+    fn seeded_stale_attribute_is_read_from_the_pv() {
+        let mut pv = pv_with("pvc-abc", &["ReadWriteOnce"]);
+        assert!(seeded_stale_from_pv(&pv).is_empty());
+        let attrs: std::collections::BTreeMap<String, String> =
+            [(SEEDED_STALE_ATTRIBUTE.to_string(), " u2, u3,,".to_string())].into_iter().collect();
+        pv.spec.as_mut().unwrap().csi.as_mut().unwrap().volume_attributes = Some(attrs);
+        assert_eq!(seeded_stale_from_pv(&pv), vec!["u2".to_string(), "u3".to_string()]);
     }
 
     #[test]

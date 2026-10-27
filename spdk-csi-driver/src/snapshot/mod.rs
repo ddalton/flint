@@ -24,6 +24,7 @@ pub mod snapshot_routes;
 pub mod snapshot_csi;
 pub mod preflight;
 pub mod multi_replica;  // Multi-replica VolumeSnapshots (incremental-rebuild §11, phase 5b)
+pub mod restore;  // Restore with the StorageClass's replica count: clone + seeded-stale legs (2026-10-27)
 
 // Re-export commonly used types
 pub use snapshot_service::SnapshotService;

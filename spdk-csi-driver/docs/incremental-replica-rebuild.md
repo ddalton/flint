@@ -1588,9 +1588,27 @@ Restore resolves the snapshot's copies by listing the candidate replicas'
 lvols (the `select_base_epoch` discipline: presence is verified, never
 inferred from records), prefers an in-sync replica off the consumer node
 (`pick_source`), and clones there. The snapshot's recorded "home node"
-degrades to a hint. Restored volumes remain single-replica (today's
-semantic); a multi-replica restore is a single-replica clone plus phase-5
-full builds for the remaining replicas — explicitly out of scope here.
+degrades to a hint. A multi-replica restore (since 2026-10-27,
+`snapshot/restore.rs`) is exactly that single-replica clone plus phase-5
+full builds for the remaining replicas: the clone is leg 0 (`vol_<vol>_
+replica_0`), the other legs are empty placeholders on the freest other
+nodes, seeded STALE both in the sync record and in volumeAttributes
+(`disk.chert.us/replicas-seeded-stale` — the record is patched
+best-effort after CreateVolume, and a record synthesized without the
+list would read an empty leg as in_sync), and the catch-up cuts the
+volume's first epoch on the clone (`ensure_epoch_for_rebuild`, below)
+before the thin-aware full builds. The placeholders are also marked
+`empty_head` in the record until they reach standby. Two staging rules
+keep them out of service meanwhile: a record-stale leg is excluded at
+stage whether or not epochs exist yet, and the forced-stale fallback never
+admits an empty or half-built head. So the clone serves alone until the
+others are built. A first version had neither; a WaitForFirstConsumer pod
+staged the restore before any epoch, the raid was assembled from the clone
+and both empty legs, and the node formatted it (dash1, 2026-10-27; the
+model's RestoreLoss and EmptyHeadRestore). Too few nodes with room refuse
+the create, as a plain multi-replica create does. Cloning each node's own
+copy was rejected: copies are equivalent, not identical (cut skew), and
+a raid of legs that differ is not a raid.
 
 ### Deletion: tombstone-driven convergence, never absence-driven
 

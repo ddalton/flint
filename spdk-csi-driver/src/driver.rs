@@ -650,6 +650,21 @@ impl SpdkCsiDriver {
         volume_id: &str,
         replicas: &[ReplicaInfo],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let record = crate::replica_sync::VolumeSyncRecord::initial(replicas);
+        self.seed_replica_record(volume_id, replicas, &record).await
+    }
+
+    /// The labels of [`Self::add_replica_node_labels`] plus a caller-built
+    /// sync record — the multi-replica restore seeds its placeholder legs
+    /// STALE (2026-10-27). Best effort: the PV may not exist yet (the
+    /// provisioner writes it after CreateVolume returns), which is why a
+    /// restore ALSO carries the seeded-stale list in volumeAttributes.
+    pub async fn seed_replica_record(
+        &self,
+        volume_id: &str,
+        replicas: &[ReplicaInfo],
+        sync_record: &crate::replica_sync::VolumeSyncRecord,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use k8s_openapi::api::core::v1::PersistentVolume;
         use kube::api::{Patch, PatchParams};
 
@@ -674,7 +689,6 @@ impl SpdkCsiDriver {
             return Ok(());
         }
 
-        let sync_record = crate::replica_sync::VolumeSyncRecord::initial(replicas);
         let patch = serde_json::json!({
             "metadata": {
                 "labels": labels,
@@ -2031,11 +2045,21 @@ impl SpdkCsiDriver {
         println!("🔧 [DRIVER] Creating RAID 1 on node: {}", current_node);
         println!("🔧 [DRIVER] Processing {} replicas...", replicas.len());
 
-        // Staging is sync-state-aware (incremental-rebuild phase 4). The
-        // record is consulted best-effort, and enforced only when the volume
-        // has epoch history — without epochs the catch-up machinery cannot
-        // heal an excluded replica, so legacy behavior (attach everything,
-        // warn on stale admission) is the lesser hazard.
+        // Staging is sync-state-aware (incremental-rebuild phase 4). A
+        // record-STALE leg is excluded whether or not the volume has epoch
+        // history (2026-10-27). The epoch gate this replaced ("without
+        // epochs the catch-up cannot heal an excluded replica, so attach
+        // everything") lost acked writes: a leg faulted out of the raid on a
+        // fresh volume before its first cut came back and was stamped
+        // in_sync (formal/FlintReplication.tla, FreshStaleLoss), and a
+        // restore's empty placeholders were assembled as members and the
+        // node formatted the raid over the clone (dash1, RestoreLoss). The
+        // catch-up now cuts a first epoch on demand for a stale leg
+        // (`catchup::ensure_epoch_for_rebuild`), so an excluded leg heals —
+        // while the orchestrators and the full build are enabled; with them
+        // off it stays out, degraded but never wrong. Standby deferral and
+        // hot-rejoin exclusion keep the epoch gate: neither state exists
+        // without epochs.
         let store = catchup::KubeStore { client: self.kube_client.clone() };
         // FAIL CLOSED on a load ERROR, best-effort only on ABSENCE (2026-07-30).
         // These were collapsed to `None` together, and they are not the same
@@ -2104,10 +2128,10 @@ impl SpdkCsiDriver {
                 deferred_standbys.push(replica);
                 continue;
             }
-            if enforce && state == SyncState::Stale {
+            if state == SyncState::Stale {
                 println!(
-                    "   Replica {}: STALE on {} — excluded from assembly (missed writes; \
-                     the catch-up orchestrator heals it in the background)",
+                    "   Replica {}: STALE on {} — excluded from assembly (missed writes, or an \
+                     empty placeholder; the catch-up orchestrator heals it in the background)",
                     i + 1,
                     replica.node_name
                 );
@@ -2310,10 +2334,24 @@ impl SpdkCsiDriver {
             // from `excluded_stale`). A permanently-gone leg still reaches
             // ServeWithRisk and serves — this buys a bounded wait for a
             // TRANSIENTLY absent one, and surfaces the risk either way.
+            // Only legs the forced-stale fallback MAY admit can rescue the
+            // floor: an empty or half-built head never will (2026-10-27).
+            let rescuable_stale = {
+                let now = crate::replica_sync::now_rfc3339();
+                excluded_stale
+                    .iter()
+                    .filter(|(_, r)| {
+                        crate::replica_sync::forced_stale_admissible(
+                            record.as_ref().and_then(|rec| rec.get(&r.lvol_uuid)),
+                            &now,
+                        )
+                    })
+                    .count()
+            };
             let headed_for_direct_serve = gate::headed_for_direct_serve(
                 replicas.len(),
                 base_bdevs.len(),
-                excluded_stale.len(),
+                rescuable_stale,
             );
             if headed_for_direct_serve {
                 for (r, _) in &unavailable_replicas {
@@ -2566,17 +2604,25 @@ impl SpdkCsiDriver {
                 // exclusion phase's own rule ("never admit it directly,
                 // whatever its sync_state") which this loop previously
                 // bypassed — or a leg under a LIVE maintenance-drain mark
-                // (its tgt is about to restart; the roller owns it).
-                if let Some(rec) = record.as_ref().and_then(|r| r.get(&replica.lvol_uuid)) {
-                    let now = crate::replica_sync::now_rfc3339();
-                    if rec.hot_rejoin.is_some() || rec.maint_drain_live(&now) {
-                        println!(
-                            "   ⤷ {} skipped for forced-stale admission (hot-rejoin marker \
-                             or live maintenance mark)",
-                            replica.lvol_uuid
-                        );
-                        continue;
-                    }
+                // (its tgt is about to restart; the roller owns it). And,
+                // 2026-10-27, never a head that is not a crash-consistent
+                // image: an empty placeholder (restore, U11 replacement) or
+                // any catch-up revert in flight (full build: empty, partly
+                // replayed; delta: reverted to an older epoch, copied in
+                // address order). This fallback trades a missed TAIL for
+                // availability; those heads are not a tail
+                // (Inv_NoVirginServing: EmptyHeadRestore, EmptyHeadU11).
+                // One loop covers both the pool fill and the last-resort
+                // single-leg serve.
+                let rec = record.as_ref().and_then(|r| r.get(&replica.lvol_uuid));
+                let now = crate::replica_sync::now_rfc3339();
+                if !crate::replica_sync::forced_stale_admissible(rec, &now) {
+                    println!(
+                        "   ⤷ {} skipped for forced-stale admission (hot-rejoin marker, live \
+                         maintenance mark, or a head that is empty or mid catch-up)",
+                        replica.lvol_uuid
+                    );
+                    continue;
                 }
                 let live_uuid = record
                     .as_ref()
@@ -2649,8 +2695,8 @@ impl SpdkCsiDriver {
         // node = "need minimum 2 replicas, only 1 available" forever —
         // the exact outage replicas exist to survive) while a LIVE raid
         // losing the same leg keeps serving 1/2. Staleness is policed
-        // explicitly above (Stale excluded when epoch history exists,
-        // standbys deferred, hot-rejoin markers excluded); a
+        // explicitly above (Stale always excluded, standbys deferred,
+        // hot-rejoin markers excluded, unbuilt heads never force-admitted); a
         // merely-UNAVAILABLE replica contributes no data, so refusing to
         // serve without it protects nothing. Assemble with whatever
         // in-sync legs attached; refuse only at zero. SPDK raid1 accepts
