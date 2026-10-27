@@ -1,6 +1,9 @@
 = Flint
+// GitHub has its own outline button; a :toc: there renders above the badges.
+ifndef::env-github[]
 :toc:
 :toclevels: 2
+endif::[]
 
 image:https://github.com/ddalton/flint/actions/workflows/rust-ci.yml/badge.svg?branch=main[rust-ci,link=https://github.com/ddalton/flint/actions/workflows/rust-ci.yml]
 image:https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml/badge.svg?branch=main[dashboard-ci,link=https://github.com/ddalton/flint/actions/workflows/dashboard-ci.yml]
