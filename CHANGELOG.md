@@ -12,75 +12,6 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
-## [1.61.2] - 2026-10-27
-
-A security patch release. Every image that talks to S3 or STS shipped
-`rustls-webpki` 0.103.15, which accepted certificate paths through the
-compromised eMudhra intermediates (CVE-2026-111943), and the door's JWT
-verifier shipped `jsonwebtoken` 9.3.1 (CVE-2026-25537). No flint source
-changed except one test: the door builds against `jsonwebtoken` 11.1 with
-its code as before, and the CSI driver, its StorageClass parameters and
-its volume_context keys are as in 1.61.1. The crates are unchanged
-(`flint-lean` 0.12.0, `flint-lean-gateway` 0.10.0, `flint-store` 0.2.1),
-since only their lockfiles moved. Releases now refuse a known advisory
-(`scripts/cve-gate.sh`), and this one passed that check.
-
-Validated 2026-10-27 on the Linux box, everything `--locked`. With default
-features, flint-store's 37 tests pass, lean/syncer's 413, lean/gateway's
-69, forge/syncer's 217 and spdk-csi-driver's lib 2,695. With the release
-features (`s3`; `s3,gitcgi` for forge) they pass 55, 413, 69 and 222, and
-`rustls-webpki` 0.103.16 is in every shipped dependency graph. The lean
-syncer passes as a non-root uid with none skipped, and the s3csi module's
-124 tests pass as root with none skipped. The new JWT test fails on
-`jsonwebtoken` 9.3.1 and passes on 11.1. On the release tree, the lite
-operator and s3csi suites pass 289 tests, the 29 render and guide-pin
-tests among them, and the render fixture is current. The CSI driver's
-restart gate is waived: no flint code on the restart path changed, and
-`tokio` 1.53.1 to 1.53.3 is a bug-fix patch release.
-
-### Security
-
-- **TLS no longer accepts the compromised eMudhra intermediates**
-  (2026-10-27; every `Cargo.lock`). `rustls-webpki` 0.103.15 accepted
-  certificate paths through the eight emSign intermediates whose private
-  keys turned out to be recoverable (RUSTSEC-2026-0382,
-  CVE-2026-111943), and 1.61.1 shipped it in every image that talks to
-  S3 or STS. It is now 0.103.16, which refuses those keys whatever roots
-  are trusted; this matters because the AWS SDK path trusts the image's
-  CA bundle, not a bundled list. `webpki-roots` (the CSI driver's
-  `reqwest`) is 1.0.11, without the emSign G3, C1 and ECC C3 roots. In
-  the same pass: `tokio` 1.53.3 (RUSTSEC-2026-0386, `AsyncFd` I/O
-  safety) and `ctutils` 0.4.4 (RUSTSEC-2026-0385, a timing leak).
-  Lockfile changes only; no flint code changed.
-- **The door refuses a JWT whose `nbf` is not a number** (2026-10-27;
-  `spdk-csi-driver/Cargo.toml`, `lite_gateway/jwt.rs`). `jsonwebtoken`
-  9.3.1 (CVE-2026-25537) read a standard claim of the wrong JSON type as
-  absent and skipped its check, so a token its issuer signed with
-  `"nbf": "<string>"` was accepted before its not-before time. `exp` was
-  never exposed, because the door reads it as a required integer. Now
-  `jsonwebtoken` 11.1 on the `aws_lc_rs` backend, the provider rustls
-  already uses here, so no crypto library is added. A regression test
-  mints the string `nbf` with the door's own test key, against a numeric
-  control, and fails on 9.3.1.
-- **A release now refuses a known advisory** (2026-10-27;
-  `scripts/cve-gate.sh`, `osv-scanner.toml`,
-  `.github/workflows/cve-scan.yml`). Nothing in the build or the release
-  checked dependencies, which is how 1.61.1 shipped six days after the
-  advisory above. `stage-prebuilt.sh`, `publish-images.sh` and
-  `release.sh` (except `check`, which reports) now scan every committed
-  `Cargo.lock` with osv-scanner, which reads both RustSec and GitHub's
-  advisory database, and refuse on any finding not accepted in
-  `osv-scanner.toml` with a reason and an end date. CI runs the same scan
-  on lockfile changes and daily, and a failing daily run opens a tracking
-  issue. `cargo-deny` alone would have missed two of today's findings:
-  `jsonwebtoken`'s CVE-2026-25537 and `block-buffer`'s
-  GHSA-qwgh-2vcv-g2f7 are GitHub-only, and on default features it never
-  saw `rustls-webpki` in `flint-store`, `lean/syncer` or `forge/syncer`.
-  Two findings are accepted until 2027-01-27, each with its reason in
-  `osv-scanner.toml`: `block-buffer` 0.10.4 (the fix needs the next
-  generation of the RustCrypto crates) and the unmaintained
-  `unsafe-libyaml` (no fix exists; it comes in through `serde_yaml`).
-
 ### Changed
 
 - **The dashboard reads only what its backend emits** (2026-10-27;
@@ -154,6 +85,75 @@ restart gate is waived: no flint code on the restart path changed, and
   fallback are labelled "(est.)" and raise no efficiency alert (the
   backend now sends `estimated` and emits no "HIGH PRIORITY" line on an
   estimate).
+
+## [1.61.2] - 2026-10-27
+
+A security patch release. Every image that talks to S3 or STS shipped
+`rustls-webpki` 0.103.15, which accepted certificate paths through the
+compromised eMudhra intermediates (CVE-2026-111943), and the door's JWT
+verifier shipped `jsonwebtoken` 9.3.1 (CVE-2026-25537). No flint source
+changed except one test: the door builds against `jsonwebtoken` 11.1 with
+its code as before, and the CSI driver, its StorageClass parameters and
+its volume_context keys are as in 1.61.1. The crates are unchanged
+(`flint-lean` 0.12.0, `flint-lean-gateway` 0.10.0, `flint-store` 0.2.1),
+since only their lockfiles moved. Releases now refuse a known advisory
+(`scripts/cve-gate.sh`), and this one passed that check.
+
+Validated 2026-10-27 on the Linux box, everything `--locked`. With default
+features, flint-store's 37 tests pass, lean/syncer's 413, lean/gateway's
+69, forge/syncer's 217 and spdk-csi-driver's lib 2,695. With the release
+features (`s3`; `s3,gitcgi` for forge) they pass 55, 413, 69 and 222, and
+`rustls-webpki` 0.103.16 is in every shipped dependency graph. The lean
+syncer passes as a non-root uid with none skipped, and the s3csi module's
+124 tests pass as root with none skipped. The new JWT test fails on
+`jsonwebtoken` 9.3.1 and passes on 11.1. On the release tree, the lite
+operator and s3csi suites pass 289 tests, the 29 render and guide-pin
+tests among them, and the render fixture is current. The CSI driver's
+restart gate is waived: no flint code on the restart path changed, and
+`tokio` 1.53.1 to 1.53.3 is a bug-fix patch release.
+
+### Security
+
+- **TLS no longer accepts the compromised eMudhra intermediates**
+  (2026-10-27; every `Cargo.lock`). `rustls-webpki` 0.103.15 accepted
+  certificate paths through the eight emSign intermediates whose private
+  keys turned out to be recoverable (RUSTSEC-2026-0382,
+  CVE-2026-111943), and 1.61.1 shipped it in every image that talks to
+  S3 or STS. It is now 0.103.16, which refuses those keys whatever roots
+  are trusted; this matters because the AWS SDK path trusts the image's
+  CA bundle, not a bundled list. `webpki-roots` (the CSI driver's
+  `reqwest`) is 1.0.11, without the emSign G3, C1 and ECC C3 roots. In
+  the same pass: `tokio` 1.53.3 (RUSTSEC-2026-0386, `AsyncFd` I/O
+  safety) and `ctutils` 0.4.4 (RUSTSEC-2026-0385, a timing leak).
+  Lockfile changes only; no flint code changed.
+- **The door refuses a JWT whose `nbf` is not a number** (2026-10-27;
+  `spdk-csi-driver/Cargo.toml`, `lite_gateway/jwt.rs`). `jsonwebtoken`
+  9.3.1 (CVE-2026-25537) read a standard claim of the wrong JSON type as
+  absent and skipped its check, so a token its issuer signed with
+  `"nbf": "<string>"` was accepted before its not-before time. `exp` was
+  never exposed, because the door reads it as a required integer. Now
+  `jsonwebtoken` 11.1 on the `aws_lc_rs` backend, the provider rustls
+  already uses here, so no crypto library is added. A regression test
+  mints the string `nbf` with the door's own test key, against a numeric
+  control, and fails on 9.3.1.
+- **A release now refuses a known advisory** (2026-10-27;
+  `scripts/cve-gate.sh`, `osv-scanner.toml`,
+  `.github/workflows/cve-scan.yml`). Nothing in the build or the release
+  checked dependencies, which is how 1.61.1 shipped six days after the
+  advisory above. `stage-prebuilt.sh`, `publish-images.sh` and
+  `release.sh` (except `check`, which reports) now scan every committed
+  `Cargo.lock` with osv-scanner, which reads both RustSec and GitHub's
+  advisory database, and refuse on any finding not accepted in
+  `osv-scanner.toml` with a reason and an end date. CI runs the same scan
+  on lockfile changes and daily, and a failing daily run opens a tracking
+  issue. `cargo-deny` alone would have missed two of today's findings:
+  `jsonwebtoken`'s CVE-2026-25537 and `block-buffer`'s
+  GHSA-qwgh-2vcv-g2f7 are GitHub-only, and on default features it never
+  saw `rustls-webpki` in `flint-store`, `lean/syncer` or `forge/syncer`.
+  Two findings are accepted until 2027-01-27, each with its reason in
+  `osv-scanner.toml`: `block-buffer` 0.10.4 (the fix needs the next
+  generation of the RustCrypto crates) and the unmaintained
+  `unsafe-libyaml` (no fix exists; it comes in through `serde_yaml`).
 
 ### Fixed
 
