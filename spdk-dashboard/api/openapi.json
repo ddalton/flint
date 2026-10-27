@@ -1153,7 +1153,7 @@
       },
       "ConsumerRaid": {
         "type": "object",
-        "description": "Tier-2 data plane (2b): each consumer node that stages the volume\nassembles `raid_<pv>` locally from the replica legs \u2014 one row per\nconsumer. Presence of the raid bdev on a node IS the consumer set;\nno VolumeAttachment inference.",
+        "description": "Tier-2 data plane (2b): each consumer node that stages the volume\nassembles `raid_<pv>` locally from the replica legs — one row per\nconsumer. Presence of the raid bdev on a node IS the consumer set;\nno VolumeAttachment inference.",
         "required": [
           "node",
           "raid_name",
@@ -1205,14 +1205,14 @@
               "string",
               "null"
             ],
-            "description": "SPDK nulls name+uuid when a leg fails on an online raid\n(raid_bdev_free_base_bdev_resource) \u2014 a null member IS a failed slot."
+            "description": "SPDK nulls name+uuid when a leg fails on an online raid\n(raid_bdev_free_base_bdev_resource) — a null member IS a failed slot."
           },
           "replica_node": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Replica (by node) this base backs, resolved against the sync record;\nNone when unmatchable (failed slot, no record)."
+            "description": "Replica (by node) this base backs, resolved against the sync record.\nFor a nulled slot: the leg that held it, by position (legs are\nassembled in replica-index order and a hot rejoin refills the one\nempty slot), set only when that replica is not already a configured\nbase. None when unmatchable (no record, ambiguous)."
           },
           "uuid": {
             "type": [
@@ -1504,7 +1504,11 @@
         "properties": {
           "creation_time": {
             "type": "string",
-            "description": "Node-agent list stamp, not a real creation time (SPDK lvols store\nnone) \u2014 real times are the timeline endpoint's job."
+            "description": "Node-agent list stamp, not a real creation time (SPDK lvols store\nnone) — real times are the timeline endpoint's job."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What made it: \"user\" for a CSI VolumeSnapshot (`snap_<vol>_<suffix>`),\n\"epoch\" for an engine common-epoch snapshot (`epoch-<vol>-<seq>`,\nretained for replica catch-up), \"other\" for any other lvol snapshot.\nThe tab counted both under one \"Total Snapshots\" until 2026-10-27."
           },
           "lvs_name": {
             "type": [
@@ -1536,14 +1540,10 @@
           },
           "snapshot_uuid": {
             "type": "string",
-            "description": "UUID of the first copy (nodes sorted) \u2014 a stable display id, not\nshared by the other copies."
+            "description": "UUID of the first copy (nodes sorted) — a stable display id, not\nshared by the other copies."
           },
           "source_volume_id": {
             "type": "string"
-          },
-          "kind": {
-            "type": "string",
-            "description": "What made it: \"user\" for a CSI VolumeSnapshot (`snap_<vol>_<suffix>`),\n\"epoch\" for an engine common-epoch snapshot (`epoch-<vol>-<seq>`,\nretained for replica catch-up), \"other\" for any other lvol snapshot.\nThe tab counted both under one \"Total Snapshots\" until 2026-10-27."
           }
         }
       },
@@ -1590,7 +1590,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The replica nodes, one per leg \u2014 not the consumer (see consumer_raids)."
+            "description": "The replica nodes, one per leg — not the consumer (see consumer_raids)."
           },
           "pvc_info": {
             "oneOf": [
@@ -1731,7 +1731,7 @@
       },
       "DiskSetupResponse": {
         "type": "object",
-        "description": "Per-disk outcome shape for setup/initialize/reset. `failed_disks` holds\nPCI addresses only \u2014 human-readable causes ride in `warnings`.",
+        "description": "Per-disk outcome shape for setup/initialize/reset. `failed_disks` holds\nPCI addresses only — human-readable causes ride in `warnings`.",
         "required": [
           "success",
           "setup_disks",
@@ -1820,7 +1820,7 @@
       },
       "HotRejoinWindow": {
         "type": "object",
-        "description": "A completed hot-rejoin window parsed from a HotRejoinSucceeded event \u2014\nthe after-the-fact record of the sub-2s window the 2a indicator cannot\ncatch live.",
+        "description": "A completed hot-rejoin window parsed from a HotRejoinSucceeded event —\nthe after-the-fact record of the sub-2s window the 2a indicator cannot\ncatch live.",
         "required": [
           "volume",
           "node",
@@ -1927,7 +1927,7 @@
       },
       "NodeDiskListing": {
         "type": "object",
-        "description": "Disk row served by POST /api/disks/uninitialized \u2014 same compatibility\nshape minus the status-only telemetry fields.",
+        "description": "Disk row served by POST /api/disks/uninitialized — same compatibility\nshape minus the status-only telemetry fields.",
         "required": [
           "pci_address",
           "device_name",
@@ -2030,7 +2030,7 @@
       },
       "NodeDiskStatus": {
         "type": "object",
-        "description": "Disk row served by POST /api/disks/status \u2014 the Disk Setup tab's source.\nSeveral fields are fixed compatibility values the agent fabricates for the\nfrontend (vendor ids, empty serial, numa 0); typed here so the generated\nOpenAPI spec documents what is actually sent.",
+        "description": "Disk row served by POST /api/disks/status — the Disk Setup tab's source.\nSeveral fields are fixed compatibility values the agent fabricates for the\nfrontend (vendor ids, empty serial, numa 0); typed here so the generated\nOpenAPI spec documents what is actually sent.",
         "required": [
           "pci_address",
           "device_name",
@@ -2208,7 +2208,7 @@
       },
       "NodeSummary": {
         "type": "object",
-        "description": "Per-node fleet rollup \u2014 the nodes tab's landing payload. Grows with\nnode count only, never with per-volume/per-disk detail (that stays in\nthe aggregate, fetched when one node is drilled into).",
+        "description": "Per-node fleet rollup — the nodes tab's landing payload. Grows with\nnode count only, never with per-volume/per-disk detail (that stays in\nthe aggregate, fetched when one node is drilled into).",
         "required": [
           "name",
           "disks_total",
@@ -2243,7 +2243,7 @@
           "disks_uninitialized": {
             "type": "integer",
             "format": "int32",
-            "description": "Non-system disks with no blobstore \u2014 init candidates (onboarding\nwork, not a health condition).",
+            "description": "Non-system disks with no blobstore — init candidates (onboarding\nwork, not a health condition).",
             "minimum": 0
           },
           "health": {
@@ -2397,7 +2397,7 @@
       },
       "ReplicaSyncInfo": {
         "type": "object",
-        "description": "Per-replica sync state projected from the PV `replica-sync-state`\nannotation \u2014 the Tier-2 engine's live signal; replica health is judged\nfrom here.",
+        "description": "Per-replica sync state projected from the PV `replica-sync-state`\nannotation — the Tier-2 engine's live signal; replica health is judged\nfrom here.",
         "required": [
           "sync_state"
         ],
@@ -2408,7 +2408,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Epochs behind current_epoch; 0 when in_sync; null when unknowable\n(no last_epoch \u2014 e.g. a full build from empty \u2014 or trimmed history).",
+            "description": "Epochs behind current_epoch; 0 when in_sync; null when unknowable\n(no last_epoch — e.g. a full build from empty — or trimmed history).",
             "minimum": 0
           },
           "hot_rejoin": {
@@ -2442,7 +2442,7 @@
               "string",
               "null"
             ],
-            "description": "What the head was rebuilt from while a catch-up is in progress: an\nepoch name for a delta catch-up, \"empty\" for the thin-aware full\nbuild (no shared epoch history). Cleared when the replica returns\nto in_sync. With epoch_lag null this is the only phase signal the\nengine records \u2014 it publishes no byte-level copy progress."
+            "description": "What the head was rebuilt from while a catch-up is in progress: an\nepoch name for a delta catch-up, \"empty\" for the thin-aware full\nbuild (no shared epoch history). Cleared when the replica returns\nto in_sync. With epoch_lag null this is the only phase signal the\nengine records — it publishes no byte-level copy progress."
           },
           "since": {
             "type": [
@@ -2607,7 +2607,7 @@
           },
           "now": {
             "type": "string",
-            "description": "Server time at response build \u2014 the frontend's \"now\" anchor."
+            "description": "Server time at response build — the frontend's \"now\" anchor."
           },
           "replicas": {
             "type": "array",
@@ -2618,7 +2618,7 @@
           "untracked_epochs": {
             "type": "integer",
             "format": "int64",
-            "description": "SPDK epoch snapshots not (or no longer) in the PV's retained-epoch\nrecord \u2014 mid-rotation stragglers. Counted, never plotted at a\nfabricated position.",
+            "description": "SPDK epoch snapshots not (or no longer) in the PV's retained-epoch\nrecord — mid-rotation stragglers. Counted, never plotted at a\nfabricated position.",
             "minimum": 0
           },
           "volume_id": {

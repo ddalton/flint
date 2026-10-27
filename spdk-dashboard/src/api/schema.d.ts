@@ -327,8 +327,11 @@ export interface components {
              */
             name?: string | null;
             /**
-             * @description Replica (by node) this base backs, resolved against the sync record;
-             *     None when unmatchable (failed slot, no record).
+             * @description Replica (by node) this base backs, resolved against the sync record.
+             *     For a nulled slot: the leg that held it, by position (legs are
+             *     assembled in replica-index order and a hot rejoin refills the one
+             *     empty slot), set only when that replica is not already a configured
+             *     base. None when unmatchable (no record, ambiguous).
              */
             replica_node?: string | null;
             uuid?: string | null;
@@ -417,7 +420,6 @@ export interface components {
              *     none) — real times are the timeline endpoint's job.
              */
             creation_time: string;
-            lvs_name?: string | null;
             /**
              * @description What made it: "user" for a CSI VolumeSnapshot (`snap_<vol>_<suffix>`),
              *     "epoch" for an engine common-epoch snapshot (`epoch-<vol>-<seq>`,
@@ -425,6 +427,7 @@ export interface components {
              *     The tab counted both under one "Total Snapshots" until 2026-10-27.
              */
             kind: string;
+            lvs_name?: string | null;
             /** @description Node of the first copy; the copy list is authoritative. */
             node: string;
             ready_to_use: boolean;
