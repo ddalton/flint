@@ -537,7 +537,7 @@ trap print_profile EXIT
 
 # ── SHARDING: which modules does THIS process check? ───────────────────
 #
-# The gate is 295 TLC runs.  On the 4-vCPU CI runner that does not fit in
+# The gate is 293 TLC runs.  On the 4-vCPU CI runner that does not fit in
 # a job, so the workflow splits it across a matrix and each process is
 # handed a group of modules in TLA_MODULES (space-separated).  Empty or
 # unset means the whole gate, which is what a developer running this by
@@ -919,8 +919,16 @@ mutation_run FlintReplication FlintReplicationEmptyHeadU11.cfg "forced-stale fal
 mutation_run FlintReplication FlintReplicationEmptyHeadRestore.cfg "broader stage rule alone: the fallback attaches an empty restore placeholder" "Inv_NoVirginServing"
 strict_run FlintReplication FlintReplicationEmptyHeadU11Fixed.cfg "fallback skips empty heads, U11 world (liveness included)"
 strict_run FlintReplication FlintReplicationEmptyHeadRestoreFixed.cfg "fallback skips empty heads + broader rule, restore (the clone serves alone until the placeholders are built)"
-strict_run FlintReplication FlintReplicationEmptyHeadFreshFixed.cfg "fallback skips empty heads + broader rule, fresh volume"
-strict_run FlintReplication FlintReplicationGateRollingPolicy.cfg "gate policy strict, 3-leg rolling upgrade (a writer down while another leg catches up)"
+# NOT IN THIS GATE: two strict worlds whose liveness TLC cannot finish in a
+# shard — FlintReplicationEmptyHeadFreshFixed.cfg (the fallback skipping empty
+# heads + the broader rule, fresh volume) and FlintReplicationGateRollingPolicy.cfg
+# (the gate policy, 3-leg rolling upgrade: a writer down while another leg
+# catches up).  TLC's safety pass on the first is 4 min; its temporal check
+# was still running after an hour (box, 2 workers, 2026-10-27).  tla-mc 0.1.2
+# compiled, model 7f12bd11, 4 workers on the box (2026-10-28): both HOLD,
+# every invariant and the three properties — 828,445 distinct, depth 31, 106 s;
+# 1,565,366 distinct, depth 31, 183 s.  Their safety is in the gate through
+# EmptyHeadU11Fixed / EmptyHeadRestoreFixed and GatePolicy above.
 
 # ── FlintCatchup.tla: the §5 catch-up at block-content level (2026-10-27) ───
 #

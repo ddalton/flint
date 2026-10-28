@@ -23,6 +23,7 @@
 # module<TAB>seconds<TAB># provenance
 FlintA2Probe	3	# measured 3/3 runs
 FlintAdmission	4	# measured 5/5 runs
+FlintCatchup	210	# NOT MEASURED on a runner — 12/12 runs took 210 s with TLC on the box at 2 workers (2026-10-28)
 FlintClaims	3	# measured 3/3 runs
 FlintClientIdentity	450	# NOT MEASURED — never reached before the 120-min timeout; 15 runs at 30s
 FlintComposition	530	# measured 33/33 runs
@@ -30,7 +31,7 @@ FlintCsiMount	360	# NOT MEASURED — never reached before the 120-min timeout; 1
 FlintDelegRecall	330	# NOT MEASURED — never reached before the 120-min timeout; 11 runs at 30s
 FlintExtents	1174	# measured 15/15 runs
 FlintExtentsProbe	47	# measured 11/11 runs
-FlintReplication	2685	# measured 71/71 runs
+FlintReplication	4175	# measured 2685 s for 71/71 runs; + 1490 s for the 25 runs of 2026-10-27, TLC on the box at 2 workers, NOT MEASURED on a runner
 FlintShareDisk	6	# measured 7/7 runs
 FlintSnapshots	4	# measured 4/4 runs
 FlintTierEpoch	159	# measured 8/8 runs
