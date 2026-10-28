@@ -103,6 +103,24 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A VolumeSnapshot keeps its data after its source PVC is deleted**
+  (2026-10-28; `spdk-csi-driver/src/driver.rs`, `orphan_sweep.rs`,
+  `node_agent.rs`, chart `rbac.yaml`). Two deleters treated a user
+  snapshot (`snap_<vol>_*`) as part of its source volume: the replicated
+  DeleteVolume's teardown sweep deleted every copy with the volume, and the
+  node orphan sweep condemned a single-replica volume's snapshot once its PV
+  was gone, three cycles (~3 min) later. Either way the VolumeSnapshot
+  stayed `readyToUse` and a restore from it failed NOT_FOUND, forever.
+  Reproduced on the kind tier at one and three replicas (write, snapshot,
+  delete the PVC, restore). CSI lets a snapshot outlive its source, and
+  DeleteSnapshot already finds and deletes copies by name when the PV is
+  gone. Now volume teardown never deletes a user snapshot (heads go first,
+  then epochs newest first; deleting an epoch under a user snapshot is safe,
+  SPDK merges a snapshot with one clone into it), and the orphan sweep
+  reaps one only when its PV is gone and no VolumeSnapshotContent names it
+  or its uuid. That list needs the node ClusterRole's new `list` on
+  `volumesnapshotcontents`; when it cannot be read, every user snapshot is
+  spared.
 - **A repeated NodePublish no longer stacks a second mount, and
   NodeUnpublish no longer reports success over a mount it left**
   (2026-10-28; `spdk-csi-driver/src/main.rs`, `mount_util.rs`). Found by

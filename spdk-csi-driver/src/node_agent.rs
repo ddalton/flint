@@ -5092,7 +5092,29 @@ impl NodeAgent {
             existing_pvs,
             pv_known_replica_uuids,
             unbound_pvc_volumes: Default::default(),
+            snapshot_handles: None,
         };
+        // A user snapshot belongs to its VolumeSnapshotContent, not its
+        // source PV (SweepInput::snapshot_handles). Read only when some
+        // user snapshot has no PV; any error -- RBAC, no snapshot CRDs --
+        // leaves None, which spares them all.
+        if input.needs_snapshot_handles() {
+            use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
+            let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+                "snapshot.storage.k8s.io",
+                "v1",
+                "VolumeSnapshotContent",
+            ));
+            let contents: Api<DynamicObject> = Api::all_with(self.driver.kube_client.clone(), &ar);
+            match contents.list(&ListParams::default()).await {
+                Ok(list) => {
+                    input.snapshot_handles =
+                        Some(crate::orphan_sweep::snapshot_handles(list.items.iter().map(|o| &o.data)))
+                }
+                Err(e) => debug!(error = %e,
+                    "[ORPHAN_SWEEP] VolumeSnapshotContents unreadable: every user snapshot spared this cycle"),
+            }
+        }
         // A volume whose PVC is still unbound is being created, PV or not
         // (a thick replica is zeroed for minutes). Read only when needed;
         // an error skips the cycle, as for the PV list.

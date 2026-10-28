@@ -19,7 +19,12 @@
 //! * **PV absence is the only condemnation authority** for PV-backed
 //!   objects, and only a successful PV list proves absence — an API error
 //!   skips the whole cycle. RWX synthetic ids resolve through
-//!   [`crate::replica_sync::record_pv_name`] before the check.
+//!   [`crate::replica_sync::record_pv_name`] before the check. The one
+//!   exception is a user snapshot (`snap_<vol>_<u64>`): CSI lets it
+//!   outlive its source volume, so it also needs a successful
+//!   VolumeSnapshotContent list naming neither it nor its uuid (2026-10-28:
+//!   condemning on PV absence alone cost every VolumeSnapshot of a deleted
+//!   PVC its data).
 //! * **Ordered candidacy breaks the ephemeral circularity.** Inline
 //!   ephemeral volumes (`eph_*`, kubelet ids like `csi-…`) never have a
 //!   PV, so PV absence proves nothing for them. Order: (1) PV-owned
@@ -110,13 +115,44 @@ pub struct SweepInput {
     /// pending: the PV name the external-provisioner will create for it.
     /// Empty unless [`SweepInput::needs_unbound_pvcs`] asked for it.
     pub unbound_pvc_volumes: HashSet<String>,
+    /// Every snapshot handle a VolumeSnapshotContent carries (status and
+    /// pre-provisioned spec), from a successful full list. `None` = could
+    /// not be read this cycle (or no snapshot CRDs): no user snapshot is
+    /// condemned.
+    pub snapshot_handles: Option<HashSet<String>>,
 }
 
 impl SweepInput {
+    /// A user (CSI) snapshot belongs to its VolumeSnapshotContent, not its
+    /// source PV: CSI lets it outlive the volume, and DeleteSnapshot is
+    /// what deletes it. Condemning it on PV absence lost the data of every
+    /// VolumeSnapshot whose PVC was deleted, three cycles later (its
+    /// restore then failed NOT_FOUND; 2026-10-28). It is an orphan only
+    /// when its PV is gone AND a successful VolumeSnapshotContent list
+    /// names neither it nor its uuid (pre-fix single-replica handles).
+    fn user_snapshot_unowned(&self, lvol: &LvolEntry, id: &str) -> bool {
+        self.owner_gone(id)
+            && self
+                .snapshot_handles
+                .as_ref()
+                .is_some_and(|h| !h.contains(&lvol.name) && !h.contains(&lvol.uuid))
+    }
+
     /// The owner of a PV-backed object is gone: no PV, and no unbound PVC
     /// whose volume is still being created.
     fn owner_gone(&self, id: &str) -> bool {
         !pv_exists(&self.existing_pvs, id) && !pv_exists(&self.unbound_pvc_volumes, id)
+    }
+
+    /// Some user snapshot has no PV: only then is the VolumeSnapshotContent
+    /// list worth reading (until it is, every user snapshot is spared).
+    pub fn needs_snapshot_handles(&self) -> bool {
+        self.lvols.iter().any(|l| {
+            matches!(
+                crate::identity::lvol_owner(&l.name),
+                Some((id, crate::identity::LvolKind::UserSnapshot)) if self.owner_gone(id)
+            )
+        })
     }
 
     /// Some lvol or subsystem has no PV: only then is the PVC list worth
@@ -126,6 +162,17 @@ impl SweepInput {
         self.lvols.iter().any(|l| matches!(classify_lvol(&l.name), Some(Owner::Pv(id)) if absent(&id)))
             || self.subsystems.iter().any(|s| classify_subsystem_nqn(&s.nqn).is_some_and(|id| absent(&id)))
     }
+}
+
+/// Every snapshot handle in a VolumeSnapshotContent list (the objects'
+/// `data`): the bound handle in status, and spec.source.snapshotHandle for a
+/// pre-provisioned content not yet bound.
+pub fn snapshot_handles<'a>(contents: impl IntoIterator<Item = &'a serde_json::Value>) -> HashSet<String> {
+    contents
+        .into_iter()
+        .flat_map(|c| [&c["status"]["snapshotHandle"], &c["spec"]["source"]["snapshotHandle"]])
+        .filter_map(|h| h.as_str().filter(|h| !h.is_empty()).map(str::to_string))
+        .collect()
 }
 
 /// `pvc-<uid>` of every PVC in `pvcs` that is unbound and not being deleted.
@@ -168,7 +215,18 @@ pub fn plan_sweep(
     let mut condemned_aliases: Vec<String> = Vec::new();
     let mut eph_lvols: Vec<&LvolEntry> = Vec::new();
     for lvol in &input.lvols {
+        let user_snapshot = matches!(
+            crate::identity::lvol_owner(&lvol.name),
+            Some((_, crate::identity::LvolKind::UserSnapshot))
+        );
         match classify_lvol(&lvol.name) {
+            Some(Owner::Pv(id)) if user_snapshot => {
+                if input.user_snapshot_unowned(lvol, &id) {
+                    condemned_lvols.insert(lvol.name.as_str());
+                    condemned_lvols.insert(lvol.uuid.as_str());
+                    condemned_aliases.push(lvol.alias());
+                }
+            }
             Some(Owner::Pv(id)) if input.owner_gone(&id) => {
                 condemned_lvols.insert(lvol.name.as_str());
                 condemned_lvols.insert(lvol.uuid.as_str());
@@ -300,7 +358,7 @@ mod tests {
             .iter()
             .flat_map(|l| [l.name.clone(), l.uuid.clone(), l.alias()])
             .collect();
-        SweepInput { lvols, subsystems, ublk_bdevs, all_bdevs, existing_pvs: pvs(existing), pv_known_replica_uuids: Default::default(), unbound_pvc_volumes: Default::default() }
+        SweepInput { lvols, subsystems, ublk_bdevs, all_bdevs, existing_pvs: pvs(existing), pv_known_replica_uuids: Default::default(), unbound_pvc_volumes: Default::default(), snapshot_handles: Some(HashSet::new()) }
     }
 
     // --- classification -------------------------------------------------
@@ -441,6 +499,48 @@ mod tests {
         assert_eq!(plan.delete_lvol_aliases.len(), 4);
     }
 
+    /// 2026-10-28, live on the kind tier: a VolumeSnapshot of a deleted
+    /// PVC lost its lvol three cycles after the PV went, and its restore
+    /// failed NOT_FOUND. The snapshot object, not the PV, owns it.
+    #[test]
+    fn a_user_snapshot_outlives_its_pv_while_a_snapshot_object_names_it() {
+        let snap = lvol("lvs0", "snap_pvc-dead_76878503594463742", "u-snap");
+        let legacy = lvol("lvs0", "snap_pvc-dead_1718000001", "u-legacy");
+        let head = lvol("lvs0", "vol_pvc-dead", "u-head");
+        let base = input(vec![snap.clone(), legacy.clone(), head.clone()], vec![], Some(vec![]), &[]);
+        let handles = |h: &[&str]| SweepInput { snapshot_handles: Some(pvs(h)), ..base.clone() };
+
+        // Named by handle (name, or a pre-fix uuid handle): only the head goes.
+        let plan = plan_once(&handles(&["snap_pvc-dead_76878503594463742", "u-legacy"]));
+        assert_eq!(plan.delete_lvol_aliases, vec!["lvs0/vol_pvc-dead"]);
+
+        // The list could not be read: every user snapshot is spared.
+        let plan = plan_once(&SweepInput { snapshot_handles: None, ..base.clone() });
+        assert_eq!(plan.delete_lvol_aliases, vec!["lvs0/vol_pvc-dead"]);
+
+        // CONTROL: no snapshot object names them -- the copies a failed
+        // DeleteSnapshot left are orphans, and go with the head.
+        let plan = plan_once(&handles(&[]));
+        assert_eq!(plan.delete_lvol_aliases.len(), 3);
+
+        // A live PV still protects its snapshots whatever the list says.
+        let plan = plan_once(&SweepInput { existing_pvs: pvs(&["pvc-dead"]), ..handles(&[]) });
+        assert!(plan.delete_lvol_aliases.is_empty());
+    }
+
+    #[test]
+    fn snapshot_handles_come_from_status_and_preprovisioned_spec() {
+        let contents = [
+            serde_json::json!({"spec": {"source": {"volumeHandle": "pvc-a"}}, "status": {"snapshotHandle": "snap_pvc-a_1"}}),
+            serde_json::json!({"spec": {"source": {"snapshotHandle": "u-legacy"}}}),
+            serde_json::json!({"spec": {"source": {"volumeHandle": "pvc-b"}}}),
+        ];
+        assert_eq!(snapshot_handles(contents.iter()), pvs(&["snap_pvc-a_1", "u-legacy"]));
+        let needs = input(vec![lvol("lvs0", "snap_pvc-dead_1", "u")], vec![], Some(vec![]), &[]);
+        assert!(needs.needs_snapshot_handles());
+        assert!(!SweepInput { existing_pvs: pvs(&["pvc-dead"]), ..needs }.needs_snapshot_handles());
+    }
+
     #[test]
     fn existing_pv_protects_everything() {
         let input = input(
@@ -479,7 +579,7 @@ mod tests {
         // (the §3/§10-8 zombie-consumer case) — raid teardown is
         // NodeUnstage's job, and yanking the export from under a live
         // mount is exactly the D-state hang bug #4 fixed. Survive.
-        let mk = |raid_present: bool| SweepInput { pv_known_replica_uuids: Default::default(), unbound_pvc_volumes: Default::default(),
+        let mk = |raid_present: bool| SweepInput { pv_known_replica_uuids: Default::default(), unbound_pvc_volumes: Default::default(), snapshot_handles: Some(HashSet::new()),
             lvols: vec![],
             subsystems: vec![SubsystemEntry {
                 nqn: "nqn.2024-11.com.flint:volume:pvc-dead".into(),
@@ -666,6 +766,7 @@ mod tests {
             existing_pvs: pvs(&["pvc-x"]),
             pv_known_replica_uuids: known.clone(),
             unbound_pvc_volumes: Default::default(),
+            snapshot_handles: Some(HashSet::new()),
         };
         let mut strikes = HashMap::new();
         // Strikes 1 and 2: watched, not condemned.

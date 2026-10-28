@@ -1023,7 +1023,7 @@ impl SpdkCsiDriver {
             }
         };
         let (mut deleted, mut failed) = (0, 0);
-        for (name, uuid) in owned {
+        for (name, uuid) in teardown_order(volume_id, owned) {
             match self.delete_lvol(node_name, &uuid).await {
                 Ok(()) => {
                     info!(node_name, lvol = %name, "[CONTROLLER] Teardown sweep deleted lvol (F51)");
@@ -1054,11 +1054,8 @@ impl SpdkCsiDriver {
 
     /// DeleteVolume for a volume that no PV names (a successful PV list
     /// proved it): nothing records where its lvols live, so look on every
-    /// node and delete what the volume owns by name -- head, legs,
-    /// hot-rejoin heads, epochs, the clone source -- heads first and epochs
-    /// newest first, so no snapshot is deleted under a live clone. Never a
-    /// user snapshot (`snap_<vol>_*`): CSI lets a snapshot outlive its
-    /// source volume. A node whose lvols cannot be listed is skipped and
+    /// node and delete what the volume owns by name, in [`teardown_order`]
+    /// (never a user snapshot). A node whose lvols cannot be listed is skipped and
     /// named in the log; with the PV absent, the orphan sweep on that node
     /// reaps them (the F51 backstop). `Err` when a listed lvol could not
     /// be deleted: the volume is still on disk, so the CO must retry.
@@ -1066,7 +1063,6 @@ impl SpdkCsiDriver {
         &self,
         volume_id: &crate::identity::StorageId,
     ) -> Result<usize, String> {
-        use crate::identity::LvolKind;
         let nodes = self
             .get_all_nodes()
             .await
@@ -1082,21 +1078,7 @@ impl SpdkCsiDriver {
                     continue;
                 }
             };
-            let mut doomed: Vec<(u8, u64, String, String)> = owned
-                .into_iter()
-                .filter_map(|(name, uuid)| {
-                    let (_, kind) = crate::identity::lvol_owner(&name)?;
-                    let rank = match kind {
-                        LvolKind::UserSnapshot => return None,
-                        LvolKind::Primary | LvolKind::Replica => 0,
-                        LvolKind::EpochSnapshot | LvolKind::CloneSource => 1,
-                    };
-                    let seq = crate::identity::epoch_seq(volume_id.as_str(), &name).unwrap_or(0);
-                    Some((rank, u64::MAX - seq, name, uuid))
-                })
-                .collect();
-            doomed.sort();
-            for (_, _, name, uuid) in doomed {
+            for (name, uuid) in teardown_order(volume_id, owned) {
                 match self.delete_lvol(node, &uuid).await {
                     Ok(()) => {
                         info!(node_name = %node, lvol = %name, "[CONTROLLER] PV-less delete removed lvol");
@@ -4448,6 +4430,37 @@ mod pv_name_of_handle_tests {
 }
 
 
+/// The lvols a volume teardown deletes, in the order it deletes them:
+/// heads and legs first, then epochs newest first and the clone source, so
+/// no snapshot is deleted while a clone of it is still there to delete
+/// (SPDK refuses a snapshot with two clones). Never a user snapshot
+/// (`snap_<vol>_*`): CSI lets one outlive its source volume, and
+/// DeleteSnapshot is what deletes it. The replicated DeleteVolume's sweep
+/// used to take every copy with the volume, so a VolumeSnapshot whose PVC
+/// was deleted could no longer be restored (2026-10-28). Deleting an epoch
+/// that is a user snapshot's parent is safe: SPDK merges a snapshot with
+/// one clone into that clone.
+pub fn teardown_order(
+    volume_id: &crate::identity::StorageId,
+    owned: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    use crate::identity::LvolKind;
+    let mut doomed: Vec<(u8, u64, String, String)> = owned
+        .into_iter()
+        .filter_map(|(name, uuid)| {
+            let rank = match crate::identity::lvol_owner(&name)?.1 {
+                LvolKind::UserSnapshot => return None,
+                LvolKind::Primary | LvolKind::Replica => 0,
+                LvolKind::EpochSnapshot | LvolKind::CloneSource => 1,
+            };
+            let seq = crate::identity::epoch_seq(volume_id.as_str(), &name).unwrap_or(0);
+            Some((rank, u64::MAX - seq, name, uuid))
+        })
+        .collect();
+    doomed.sort();
+    doomed.into_iter().map(|(_, _, name, uuid)| (name, uuid)).collect()
+}
+
 /// The entry of a `bdev_get_bdevs` answer that carries `alias`.
 fn bdev_with_alias<'a>(bdevs: &'a Value, alias: &str) -> Option<&'a Value> {
     bdevs.as_array()?.iter().find(|b| {
@@ -4468,6 +4481,38 @@ fn existing_lvol_fits(size_bytes: u64) -> impl Fn(&Value) -> Option<String> {
 #[cfg(test)]
 mod create_adoption_tests {
     use super::*;
+
+    #[test]
+    fn a_teardown_deletes_heads_then_epochs_newest_first_and_keeps_user_snapshots() {
+        let vol = "pvc-a6846916-3267-404e-bb22-72d820652299";
+        let owned = [
+            format!("snap_{vol}_76878503594463742"),
+            format!("epoch-{vol}-1"),
+            format!("epoch-{vol}-12"),
+            format!("vol_{vol}_replica_0"),
+            format!("epoch-{vol}-2"),
+            format!("vol_{vol}_replica_0_hr"),
+            format!("temp_pvc_clone_{vol}"),
+        ]
+        .into_iter()
+        .map(|n| (n.clone(), format!("uuid-of-{n}")))
+        .collect();
+        let order: Vec<String> = teardown_order(&crate::identity::StorageId::of_handle(vol), owned)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            order,
+            [
+                format!("vol_{vol}_replica_0"),
+                format!("vol_{vol}_replica_0_hr"),
+                format!("epoch-{vol}-12"),
+                format!("epoch-{vol}-2"),
+                format!("epoch-{vol}-1"),
+                format!("temp_pvc_clone_{vol}"),
+            ]
+        );
+    }
 
     #[test]
     fn an_existing_lvol_is_adopted_only_when_it_holds_the_request() {
