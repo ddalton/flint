@@ -3256,6 +3256,12 @@ mod tests {
         let mut ecfg = crate::tier::epoch::EpochConfig::new("t/", "hub-drill7".into());
         ecfg.heartbeat = Duration::from_secs(3600);
         ecfg.lease_misses = 1000;
+        // Self-recognition is gated on proven single occupancy, a
+        // process-global flag. The rig's memory backend is structurally
+        // private, so say so here: without it this test passed only
+        // when an earlier test in the run had set the flag, and failed
+        // alone or under any filter that left those tests out.
+        crate::state_backend::declare_private_state();
 
         let l1 = crate::tier::epoch::claim(&store_dyn, &ecfg, "t/").await.unwrap();
         assert_eq!(l1.epoch, 1);
