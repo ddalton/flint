@@ -104,6 +104,22 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A replica fence no longer passes on a check that failed** (2026-10-28;
+  `spdk-csi-driver/src/nvmeof_export.rs`). Staging a volume on a new node
+  fences the previous consumer off each replica's export, then waits until
+  that consumer's NVMe-oF controllers are gone before the new raid uses
+  the replica. A controller query that failed, or a reply without a
+  controller list, counted as "none connected". The fence could therefore
+  pass while the old consumer was still connected and able to write a
+  replica the new raid then served. A Flint host that had connected while
+  the export admitted any host was never checked at all: it is in no host
+  list, and turning off allow-any-host disconnects nobody. The check now
+  passes only when a query succeeds and shows no Flint host outside the
+  admitted list. Otherwise the attach fails after the existing 10 s bound,
+  and the replica is left out of the raid and marked stale. Exports
+  created with fencing disabled (`FLINT_NVMF_FENCING=disabled`) remain
+  unfenced.
+
 - **A file created while another's removal was still being recorded is
   no longer dropped from the tier** (2026-10-28;
   `spdk-csi-driver/src/tier/identity.rs`, `nfs/v4/operations/fileops.rs`).

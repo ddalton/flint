@@ -571,10 +571,11 @@ pub async fn ensure_export(
 
 /// Converge the subsystem's admitted-host state onto `allowed` (fencing,
 /// doc §3): default-closed, exactly the listed Flint hosts admitted. Only
-/// hosts under FLINT_HOST_NQN_PREFIX are ever removed. After removing a
-/// host, polls until its controllers are actually gone — SPDK's disconnect
+/// hosts under FLINT_HOST_NQN_PREFIX are ever removed. Then polls until no
+/// Flint host outside `allowed` has a controller left — SPDK's disconnect
 /// on host removal is asynchronous, and the §3 fence is only real once the
-/// old consumer's qpairs are torn down.
+/// old consumer's qpairs are torn down — and fails if that is not
+/// confirmed in time.
 async fn converge_hosts(
     rpc: &dyn SpdkRpcTransport,
     nqn: &str,
@@ -646,42 +647,52 @@ async fn converge_hosts(
         }
     }
 
-    // Post-fence verification: wait (bounded) for the removed hosts'
-    // controllers to drain.
-    if !removed.is_empty() {
-        for _ in 0..20 {
-            let ctrlrs = json!({
-                "method": "nvmf_subsystem_get_controllers",
-                "params": { "nqn": nqn }
-            });
-            let still_connected = match rpc.rpc(&ctrlrs).await {
-                Ok(resp) => resp
-                    .get("result")
-                    .and_then(|r| r.as_array())
-                    .map(|cs| {
-                        cs.iter().any(|c| {
-                            c.get("hostnqn")
-                                .and_then(|h| h.as_str())
-                                .map(|h| removed.contains(&h))
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false),
-                Err(_) => false,
-            };
-            if !still_connected {
-                return Ok(());
-            }
+    // Post-fence verification: no controller of a Flint host outside
+    // `allowed` may remain. That is the hosts just removed, and any Flint
+    // host that connected while the subsystem admitted any host: it is in
+    // no host list, so nothing above removes it, and turning
+    // allow_any_host off disconnects nobody. Fail closed: only a probe
+    // that succeeds and lists no such controller passes. A failed probe
+    // or a reply without a controller list counts as still connected and
+    // costs a retry; at the bound the caller's attach fails.
+    let mut seen = String::new();
+    for attempt in 0..20 {
+        if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        return Err(format!(
-            "Fenced host(s) {:?} still have live controllers on {} after 10s",
-            removed, nqn
-        )
-        .into());
+        let ctrlrs = json!({
+            "method": "nvmf_subsystem_get_controllers",
+            "params": { "nqn": nqn }
+        });
+        seen = match rpc.rpc(&ctrlrs).await {
+            Ok(resp) => match resp.get("result").and_then(|r| r.as_array()) {
+                Some(cs) => {
+                    let fenced: Vec<&str> = cs
+                        .iter()
+                        .filter_map(|c| c.get("hostnqn").and_then(|h| h.as_str()))
+                        .filter(|h| is_fenced_host(h, allowed))
+                        .collect();
+                    if fenced.is_empty() {
+                        return Ok(());
+                    }
+                    format!("live controllers of {:?}", fenced)
+                }
+                None => "a controller probe reply with no controller list".to_string(),
+            },
+            Err(e) => format!("a failed controller probe ({})", e),
+        };
     }
+    Err(format!(
+        "Fence on {} not confirmed after 10s (removed {:?}): {}",
+        nqn, removed, seen
+    )
+    .into())
+}
 
-    Ok(())
+/// A host the fence must keep out: a Flint host not in `allowed`.
+/// Non-Flint hosts are outside the fence's scope.
+fn is_fenced_host(host: &str, allowed: &[String]) -> bool {
+    host.starts_with(FLINT_HOST_NQN_PREFIX) && !allowed.iter().any(|a| a == host)
 }
 
 /// Local unix-socket transport (node agent side).
@@ -720,6 +731,7 @@ fn serial_for_nqn(nqn: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     /// Scripted transport: records calls, returns canned responses per method.
     struct FakeRpc {
@@ -1263,4 +1275,127 @@ mod tests {
         assert!(matches!(parts[3].chars().next().unwrap(), '8' | '9' | 'a' | 'b'), "variant: {a}");
     }
 
+    /// Scripted `nvmf_subsystem_get_controllers` for the post-fence drain
+    /// check: replies are served in order and the last one repeats. Every
+    /// other method succeeds.
+    struct DrainRpc {
+        replies: Vec<Result<Value, &'static str>>,
+        polls: Mutex<usize>,
+    }
+
+    impl DrainRpc {
+        fn new(replies: Vec<Result<Value, &'static str>>) -> Self {
+            Self { replies, polls: Mutex::new(0) }
+        }
+
+        fn polls(&self) -> usize {
+            *self.polls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl SpdkRpcTransport for DrainRpc {
+        async fn rpc(&self, payload: &Value) -> Result<Value, RpcError> {
+            if payload["method"] != "nvmf_subsystem_get_controllers" {
+                return Ok(json!({ "result": true }));
+            }
+            let mut n = self.polls.lock().unwrap();
+            let reply = self.replies[(*n).min(self.replies.len() - 1)].clone();
+            *n += 1;
+            reply.map_err(|e| e.into())
+        }
+    }
+
+    const DRAIN_NQN: &str = "nqn.2024-11.com.flint:volume:pvc-fence_1";
+
+    fn fence_subsystem(allow_any_host: bool, hosts: &[String]) -> Value {
+        json!({
+            "nqn": DRAIN_NQN,
+            "allow_any_host": allow_any_host,
+            "hosts": hosts.iter().map(|h| json!({ "nqn": h })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn controllers_of(hosts: &[&str]) -> Result<Value, &'static str> {
+        Ok(json!({
+            "result": hosts
+                .iter()
+                .enumerate()
+                .map(|(i, h)| json!({ "cntlid": i + 1, "hostnqn": h }))
+                .collect::<Vec<_>>()
+        }))
+    }
+
+    /// A probe that fails says nothing about the old consumer's
+    /// controllers, so it must not confirm the fence: the old code read
+    /// the error as "none connected" and let a zombie keep writing a leg
+    /// the new raid configures (FlintCatchupT rev 9, OracleTrustLagANL).
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_controller_probe_does_not_confirm_the_fence() {
+        let (old, new) = (flint_host_nqn("node-x"), flint_host_nqn("node-y"));
+        let rpc = DrainRpc::new(vec![Err("Code=-32603 Msg=Internal error")]);
+        let t0 = tokio::time::Instant::now();
+        let r = converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[old])), &[new]).await;
+        assert!(r.is_err(), "a failed probe confirmed the fence");
+        assert_eq!(rpc.polls(), 20, "the bound is 20 probes");
+        assert!(t0.elapsed() >= Duration::from_millis(9_500), "{:?}", t0.elapsed());
+    }
+
+    /// The same for a reply that carries no controller list.
+    #[tokio::test(start_paused = true)]
+    async fn a_reply_without_a_controller_list_does_not_confirm_the_fence() {
+        let (old, new) = (flint_host_nqn("node-x"), flint_host_nqn("node-y"));
+        let rpc = DrainRpc::new(vec![Ok(json!({ "jsonrpc": "2.0" }))]);
+        let r = converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[old])), &[new]).await;
+        assert!(r.is_err(), "a reply without a controller list confirmed the fence");
+    }
+
+    /// A Flint host that connected while the subsystem admitted any host
+    /// is in no host list, so nothing removes it, and turning
+    /// allow_any_host off disconnects nobody (SPDK
+    /// spdk_nvmf_subsystem_set_allow_any_host only flips the flag). Its
+    /// live controller must fail the fence.
+    #[tokio::test(start_paused = true)]
+    async fn a_flint_host_admitted_by_allow_any_host_fails_the_fence() {
+        let (old, new) = (flint_host_nqn("node-x"), flint_host_nqn("node-y"));
+        let rpc = DrainRpc::new(vec![controllers_of(&[&old])]);
+        let r = converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(true, &[])), &[new]).await;
+        assert!(r.is_err(), "a stray Flint controller survived the fence");
+    }
+
+    /// The ordinary flip: the removed host's controller is gone by the
+    /// second probe.
+    #[tokio::test(start_paused = true)]
+    async fn a_removed_hosts_controller_that_drains_passes_the_fence() {
+        let (old, new) = (flint_host_nqn("node-x"), flint_host_nqn("node-y"));
+        let rpc = DrainRpc::new(vec![controllers_of(&[&old, &new]), controllers_of(&[&new])]);
+        converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[old])), &[new])
+            .await
+            .expect("drained on the second probe");
+        assert_eq!(rpc.polls(), 2);
+    }
+
+    /// Nothing to fence: one successful probe, no wait.
+    #[tokio::test(start_paused = true)]
+    async fn nothing_to_fence_passes_without_waiting() {
+        let new = flint_host_nqn("node-y");
+        let rpc = DrainRpc::new(vec![controllers_of(&[&new])]);
+        let t0 = tokio::time::Instant::now();
+        converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[new.clone()])), &[new])
+            .await
+            .expect("nothing to fence");
+        assert!(rpc.polls() <= 1, "{} probes", rpc.polls());
+        assert_eq!(t0.elapsed(), Duration::ZERO, "no wait when nothing is fenced");
+    }
+
+    /// Non-Flint hosts stay out of the fence's scope, as before.
+    #[tokio::test(start_paused = true)]
+    async fn a_non_flint_hosts_controller_does_not_fail_the_fence() {
+        let new = flint_host_nqn("node-y");
+        let foreign = "nqn.2014-08.org.nvmexpress:uuid:00000000-0000-0000-0000-000000000001";
+        let rpc = DrainRpc::new(vec![controllers_of(&[foreign, &new])]);
+        converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[new.clone()])), &[new])
+            .await
+            .expect("a non-Flint host is out of scope");
+    }
 }

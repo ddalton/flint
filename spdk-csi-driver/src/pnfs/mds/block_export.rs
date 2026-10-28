@@ -4958,10 +4958,13 @@ pub(crate) mod tests {
             .filter(|m| {
                 // Reads, not mutations. `bdev_raid_get_bdevs` is the
                 // composition probe every converge makes to decide
-                // whether a raid should exist.
+                // whether a raid should exist, and
+                // `nvmf_subsystem_get_controllers` is the fence's
+                // controller probe, also made on every converge.
                 !m.starts_with("bdev_get_")
                     && !m.starts_with("nvmf_get_")
                     && m != "bdev_raid_get_bdevs"
+                    && m != "nvmf_subsystem_get_controllers"
             })
             .collect();
         assert!(mutating.is_empty(), "second ensure mutated: {mutating:?}");
@@ -6743,6 +6746,8 @@ pub(crate) mod tests {
                     && !m.starts_with("nvmf_get")
                     && !m.starts_with("bdev_lvol_get")
                     && m != "ublk_get_disks"
+                    // The fence's controller probe: a read on every converge.
+                    && m != "nvmf_subsystem_get_controllers"
             })
             .collect();
         assert!(
