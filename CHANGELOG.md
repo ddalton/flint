@@ -104,6 +104,34 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A catch-up no longer deletes a stale leg that a raid on its own node
+  is serving** (2026-10-28; `spdk-csi-driver/src/catchup.rs`). When too few
+  in-sync legs attach, the forced-stale fallback serves a stale leg, and
+  the leg stays stale in the record. If that leg was on the consumer's own
+  node, the raid held it as a local base, with no nvmf export. The F36
+  guard looks only for an export with live controllers, so it let the
+  catch-up through. The catch-up's revert then ran `bdev_lvol_delete` on
+  the head, and SPDK pulled it out of the live raid (lvol delete checks no
+  claim). If the raid's other leg had faulted out while its record still
+  said in_sync (the monitor's detection lag, or a failed best-effort
+  record write at assembly), every write acked since then lived only on
+  that head, and the delete destroyed it. clear_head_sb's refusal of an
+  ONLINE raid came later, at attach, after the head was gone. It also
+  refused when the raid did not hold the head at all, so a stale leg on
+  the consumer's node was never rebuilt while the pod stayed.
+  Now the catch-up and the standby chase both defer (`ReplicaHeadIsLocalBase`,
+  failing closed when the node's raids cannot be read) while any raid on
+  the replica's node holds the head as a configured base, before anything
+  touches it. clear_head_sb refuses only an ONLINE raid that holds the head,
+  and it never deletes an ONLINE raid, so a leg on the consumer's node is
+  rebuilt beside the live raid and hot-rejoined. Model: formal/FlintLocalLeg.tla
+  (flint-e4, md5 3a8813da, TLC 1.7.4). The shipped code loses an acked write
+  at depth 10 (FlintLocalLegShippedLoss, also at 3 legs). Either half of
+  the fix alone fails: the precise refusal alone still loses the write, and
+  the pre-revert check alone never rebuilds the leg. Both together hold every
+  invariant and the leg is rebuilt (7,075 states, 158,065 at 3 legs).
+  Deleting the online raid breaks it (FlintLocalLegDeleteOnline).
+
 - **A VolumeSnapshot keeps its data after its source PVC is deleted**
   (2026-10-28; `spdk-csi-driver/src/driver.rs`, `orphan_sweep.rs`,
   `node_agent.rs`, chart `rbac.yaml`). Two deleters treated a user

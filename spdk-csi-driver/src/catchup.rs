@@ -1154,6 +1154,93 @@ pub(crate) async fn head_live_consumer(
     Ok(None)
 }
 
+/// The ids a head answers to, as F36 matches them: the live lvol uuid
+/// (a reverted head is a re-created clone under a new uuid), the identity
+/// uuid, the `lvs/name` alias and the bare lvol name.
+fn head_ids_of<'a>(
+    live_uuid: &'a str,
+    identity: &'a ReplicaInfo,
+    head_alias: &'a str,
+) -> [&'a str; 4] {
+    [live_uuid, identity.lvol_uuid.as_str(), head_alias, identity.lvol_name.as_str()]
+}
+
+/// Does `raid` hold the head as a CONFIGURED base? A failed slot (SPDK
+/// nulls its name and uuid, `is_configured:false`) holds nothing.
+fn raid_holds_head(raid: &Value, head_ids: &[&str]) -> bool {
+    raid.get("base_bdevs_list")
+        .and_then(|b| b.as_array())
+        .map(|bases| {
+            bases.iter().any(|b| {
+                b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false)
+                    && [b.get("name"), b.get("uuid")].iter().any(|v| {
+                        v.and_then(|x| x.as_str()).map(|s| head_ids.contains(&s)).unwrap_or(false)
+                    })
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// FlintLocalLeg (2026-10-28): the raid on the replica's OWN node that
+/// holds this head as a configured base, if any. [`head_live_consumer`]
+/// sees a head only through an nvmf export with live controllers; a leg
+/// the consumer's raid holds locally (its node is the consumer's node)
+/// has neither, so F36 passed it and the revert deleted it from under
+/// the raid — `bdev_lvol_delete` checks no claim, the raid loses the
+/// base. Returns the raid's name.
+pub(crate) async fn head_local_raid_base(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    head_ids: &[&str],
+) -> Result<Option<String>, RpcError> {
+    Ok(get_raids(rpc, node).await?.iter().find(|r| raid_holds_head(r, head_ids)).map(|r| {
+        r.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string()
+    }))
+}
+
+/// The FlintLocalLeg defer, shared by the bulk catch-up and the chase:
+/// true when the head is a configured base of a raid on its own node, or
+/// when that cannot be checked (fail closed: an unknown raid state must
+/// not authorize a delete or a copy onto the head).
+async fn local_raid_base_defers(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    rec: &ReplicaSyncRecord,
+    node: &str,
+    head_ids: &[&str],
+    what: &str,
+) -> bool {
+    match head_local_raid_base(rpc, node, head_ids).await {
+        Ok(None) => false,
+        Ok(Some(raid)) => {
+            warn!(volume_id, node, raid = %raid,
+                "[CATCHUP] stale head is a LOCAL base of a live raid — {} deferred \
+                 (FlintLocalLeg)", what);
+            store
+                .emit(
+                    volume_id,
+                    "Warning",
+                    "ReplicaHeadIsLocalBase",
+                    &format!(
+                        "{} of replica {} on {} deferred: raid {} on that node holds it as a \
+                         configured base — rebuilding would pull it out of a live raid, with \
+                         any writes only it holds",
+                        what, rec.lvol_uuid, node, raid
+                    ),
+                )
+                .await;
+            true
+        }
+        Err(e) => {
+            warn!(volume_id, node, error = %e,
+                "[CATCHUP] cannot read the replica node's raids — {} deferred \
+                 (FlintLocalLeg fail-closed)", what);
+            true
+        }
+    }
+}
+
 /// F48 (runah 2.9 run A): among a [`HeadConsumer`]'s hosts, the ones
 /// PROVEN to be zombies — flint-node controllers whose node has no
 /// configured raid base backed by this head (neither by the deterministic
@@ -1449,13 +1536,22 @@ pub(crate) async fn align_dst_head_size(
 /// assemble, and delete it WITH clear_sb — the head then presents a zeroed
 /// block 0 wherever it registers next (critically: on the source node at
 /// attach, where a surviving sb would mean a phantom — or a blind rebuild if
-/// the source node's consumer raid is ONLINE). An ONLINE raid under the
-/// volume's name on the replica node itself is a zombie consumer or a live
-/// local assembly: refuse to touch it.
+/// the source node's consumer raid is ONLINE).
+///
+/// An ONLINE raid is never deleted here. If it holds THIS head as a
+/// configured base the head is being served: refuse (the catch-up's own
+/// [`local_raid_base_defers`] stops that case before the revert; this is
+/// the belt). An ONLINE raid that does not hold the head is the
+/// consumer's raid on its own node, serving the other legs: leave it be
+/// and go on. Refusing it outright (the rule until 2026-10-28) left a
+/// stale leg on the consumer's node unbuilt for as long as the pod
+/// stayed (FlintLocalLegShippedStuck). Every flint raid is created with
+/// `superblock: false`, so the examine below cannot re-add the head to it.
 async fn clear_head_sb(
     rpc: &dyn CatchupRpc,
     node: &str,
     head_alias: &str,
+    head_ids: &[&str],
     raid_name: &str,
 ) -> Result<(), RpcError> {
     let examine = json!({ "method": "bdev_examine", "params": { "name": head_alias } });
@@ -1464,18 +1560,20 @@ async fn clear_head_sb(
         .spdk_rpc(node, &json!({ "method": "bdev_wait_for_examine" }))
         .await;
 
-    for raid in get_raids(rpc, node).await? {
-        if raid.get("name").and_then(|n| n.as_str()) != Some(raid_name) {
+    let raids = get_raids(rpc, node).await?;
+    let online = |r: &Value| r.get("state").and_then(|s| s.as_str()) == Some("online");
+    if let Some(raid) = raids.iter().find(|r| online(r) && raid_holds_head(r, head_ids)) {
+        return Err(format!(
+            "ONLINE raid {} on replica node {} holds the head as a configured base — \
+             catch-up refused while it is served",
+            raid.get("name").and_then(|n| n.as_str()).unwrap_or("?"),
+            node
+        )
+        .into());
+    }
+    for raid in raids {
+        if raid.get("name").and_then(|n| n.as_str()) != Some(raid_name) || online(&raid) {
             continue;
-        }
-        let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
-        if state == "online" {
-            return Err(format!(
-                "ONLINE raid {} exists on replica node {} — a zombie consumer or live local \
-                 assembly still holds the replica; catch-up refused until hygiene clears it",
-                raid_name, node
-            )
-            .into());
         }
         let delete = json!({
             "method": "bdev_raid_delete",
@@ -1547,7 +1645,8 @@ async fn ensure_dst_attached(
         detach_controller(rpc, src_node, &controller).await;
     }
 
-    clear_head_sb(rpc, &dst.node_name, head_alias, raid_name).await?;
+    let head_ids = head_ids_of(head_uuid, dst, head_alias);
+    clear_head_sb(rpc, &dst.node_name, head_alias, &head_ids, raid_name).await?;
 
     let conn = rpc
         .export_replica(&dst.node_name, head_uuid, &sid, replica_index, src_node)
@@ -2001,12 +2100,7 @@ async fn catchup_stale(
     // delete. Defer with a loud event; the tick retries after.
     let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
     let live_head_uuid = rec.live_lvol_uuid().to_string();
-    let head_ids = [
-        live_head_uuid.as_str(),
-        rec.lvol_uuid.as_str(),
-        head_alias.as_str(),
-        identity.lvol_name.as_str(),
-    ];
+    let head_ids = head_ids_of(&live_head_uuid, identity, &head_alias);
     match head_live_consumer(rpc, &identity.node_name, &head_ids).await {
         Ok(Some(consumer)) => {
             // F48 (runah 2.9 run A): before deferring, distinguish a GENUINE
@@ -2075,6 +2169,20 @@ async fn catchup_stale(
                 "[CATCHUP] cannot verify head consumers — rebuild deferred (F36 fail-closed)");
             return Ok(());
         }
+    }
+
+    // FlintLocalLeg: F36's other half. The forced-stale fallback can serve
+    // this stale leg from a raid on its own node (the consumer moved there,
+    // or was always there), where no nvmf controller shows it. The revert
+    // below would hot-remove it from that raid; if the raid's other leg had
+    // faulted out with its record still in_sync, the acked writes only this
+    // head holds went with it (FlintLocalLegShippedLoss, model e31608ad).
+    if local_raid_base_defers(
+        rpc, store, volume_id, rec, &identity.node_name, &head_ids, "Catch-up",
+    )
+    .await
+    {
+        return Ok(());
     }
 
     // Pin BEFORE the revert: from here the session's foundation must not be
@@ -2341,6 +2449,16 @@ async fn chase_standby(
 
     let head_alias = format!("{}/{}", identity.lvs_name, identity.lvol_name);
     let live_uuid = rec.live_lvol_uuid().to_string();
+    // FlintLocalLeg: a chase copies over the head; never while a raid on
+    // its own node holds it.
+    if local_raid_base_defers(
+        rpc, store, volume_id, rec, &identity.node_name,
+        &head_ids_of(&live_uuid, identity, &head_alias), "Standby chase",
+    )
+    .await
+    {
+        return Ok(());
+    }
     let dst_bdev = ensure_dst_attached(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )
@@ -2744,7 +2862,11 @@ async fn admit_one_standby(
     // the §3-disciplined fenced re-export, which flips the subsystem's host
     // list from the copy source to the consumer.
     let bdev = if identity.node_name == consumer_node {
-        clear_head_sb(rpc, consumer_node, &head_alias, raid_name).await?;
+        clear_head_sb(
+            rpc, consumer_node, &head_alias, &head_ids_of(&live_uuid, identity, &head_alias),
+            raid_name,
+        )
+        .await?;
         live_uuid.clone()
     } else {
         let bdev = ensure_dst_attached(
@@ -3942,7 +4064,7 @@ mod tests {
             vec![json!({ "name": "raid_vol1", "state": "configuring",
                          "base_bdevs_list": [{ "name": "lvol-uuid-b" }] })],
         );
-        clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", "raid_vol1").await.unwrap();
+        clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", HEAD_B_IDS, "raid_vol1").await.unwrap();
         // examine → wait → delete with clear_sb.
         assert_eq!(rpc.calls_of("bdev_examine").len(), 1);
         assert_eq!(rpc.calls_of("bdev_wait_for_examine").len(), 1);
@@ -3960,25 +4082,55 @@ mod tests {
             "node-b".to_string(),
             vec![json!({ "name": "raid_vol1", "state": "configuring" })],
         );
-        clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", "raid_vol1").await.unwrap();
+        clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", HEAD_B_IDS, "raid_vol1").await.unwrap();
         let deletes = rpc.calls_of("bdev_raid_delete");
         assert_eq!(deletes.len(), 2);
         assert_eq!(deletes[0].1["params"]["clear_sb"], true);
         assert!(deletes[1].1["params"].get("clear_sb").is_none());
     }
 
+    /// The ids replica b's head answers to in these tests (live uuid,
+    /// identity uuid, alias, lvol name).
+    const HEAD_B_IDS: &[&str] = &["uuid-b", "uuid-b", "lvs0/lvol-uuid-b", "lvol-uuid-b"];
+
+    /// The consumer's raid on node-b: legs a and c configured (remote), and
+    /// b configured LOCALLY (by uuid) when `holds_b`.
+    fn local_raid_b(holds_b: bool) -> Value {
+        let mut bases = vec![
+            json!({ "name": "nvme_a_n1", "uuid": "uuid-a", "is_configured": true }),
+            json!({ "name": "nvme_c_n1", "uuid": "uuid-c", "is_configured": true }),
+        ];
+        if holds_b {
+            bases.push(json!({ "name": "uuid-b", "uuid": "uuid-b", "is_configured": true }));
+        } else {
+            // b's slot as SPDK leaves it once the leg fails out: nulled.
+            bases.push(json!({ "name": null, "uuid": null, "is_configured": false }));
+        }
+        json!({ "name": "raid_vol1", "state": "online", "base_bdevs_list": bases })
+    }
+
     #[tokio::test]
-    async fn clear_head_sb_refuses_online_raid() {
+    async fn clear_head_sb_refuses_an_online_raid_that_holds_the_head() {
         let rpc = FakeRpc::new("u");
-        rpc.raids.lock().unwrap().insert(
-            "node-b".to_string(),
-            vec![json!({ "name": "raid_vol1", "state": "online" })],
-        );
-        let err = clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", "raid_vol1")
+        rpc.raids.lock().unwrap().insert("node-b".to_string(), vec![local_raid_b(true)]);
+        let err = clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", HEAD_B_IDS, "raid_vol1")
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("ONLINE raid"), "got: {}", err);
+        assert!(err.to_string().contains("ONLINE raid raid_vol1"), "got: {}", err);
         assert!(rpc.calls_of("bdev_raid_delete").is_empty());
+    }
+
+    /// FlintLocalLeg: the consumer's raid on the stale leg's node, serving
+    /// the OTHER legs, is neither a reason to refuse (that left the leg
+    /// unbuilt while the pod stayed) nor a phantom to delete
+    /// (FlintLocalLegDeleteOnline: a staged consumer under a deleted raid).
+    #[tokio::test]
+    async fn clear_head_sb_leaves_an_online_raid_without_the_head_alone() {
+        let rpc = FakeRpc::new("u");
+        rpc.raids.lock().unwrap().insert("node-b".to_string(), vec![local_raid_b(false)]);
+        clear_head_sb(&rpc, "node-b", "lvs0/lvol-uuid-b", HEAD_B_IDS, "raid_vol1").await.unwrap();
+        assert!(rpc.calls_of("bdev_raid_delete").is_empty());
+        assert_eq!(rpc.raids.lock().unwrap()["node-b"].len(), 1, "the live raid stands");
     }
 
     #[tokio::test]
@@ -4255,6 +4407,136 @@ mod tests {
         let events = store.events.lock().unwrap().clone();
         let reasons: Vec<&str> = events.iter().map(|(r, _)| r.as_str()).collect();
         assert_eq!(reasons, vec!["ReplicaCatchupStarted", "ReplicaStandby"]);
+    }
+
+    /// bulk_catchup_full_choreography's world: b stale with epochs 3 and 4,
+    /// a's chain through 5.
+    fn bulk_world() -> FakeRpc {
+        let mut rpc = FakeRpc::new("uuid-b-v2");
+        rpc.lvols.insert(
+            "node-b".to_string(),
+            vec![
+                ("lvol-uuid-b".to_string(), "uuid-b".to_string()),
+                (epoch("vol1", 3), "s3".to_string()),
+                (epoch("vol1", 4), "s4".to_string()),
+            ],
+        );
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        rpc
+    }
+
+    /// FlintLocalLeg (model e31608ad, ShippedLoss): the forced-stale
+    /// fallback serves stale b from the consumer's raid on b's own node.
+    /// No nvmf controller shows it, so F36 passed it, and the revert's
+    /// bdev_lvol_delete pulled it out of the live raid — with every write
+    /// acked since the other legs faulted out. Nothing may touch the head.
+    #[tokio::test]
+    async fn catchup_defers_while_a_raid_on_its_node_holds_the_head() {
+        let rpc = bulk_world();
+        rpc.raids.lock().unwrap().insert("node-b".to_string(), vec![local_raid_b(true)]);
+        let store = FakeStore::new(stale_b_record());
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), Some("node-b"), &cfg())
+            .await
+            .unwrap();
+
+        assert!(rpc.calls_of("bdev_lvol_delete").is_empty(), "the served head was deleted");
+        assert!(rpc.calls_of("bdev_lvol_clone").is_empty());
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert!(store.ops.lock().unwrap().is_empty(), "no pin, no revert record");
+        let reasons: Vec<String> =
+            store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(reasons, vec!["ReplicaHeadIsLocalBase".to_string()]);
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Stale
+        );
+    }
+
+    /// The fix's other half (FlintLocalLegFixed, Prop_StaleRebuilt): a raid
+    /// on b's node that does NOT hold b — the consumer moved there after b
+    /// failed out — no longer blocks the rebuild. It runs as it does with no
+    /// raid there, and the live raid is never deleted.
+    #[tokio::test]
+    async fn catchup_runs_beside_a_raid_on_its_node_that_does_not_hold_the_head() {
+        let rpc = bulk_world();
+        rpc.raids.lock().unwrap().insert("node-b".to_string(), vec![local_raid_b(false)]);
+        let store = FakeStore::new(stale_b_record());
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), Some("node-b"), &cfg())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.ops.lock().unwrap().clone(),
+            vec![
+                format!("pin:{}", epoch("vol1", 4)),
+                format!("revert:{}:uuid-b-v2", epoch("vol1", 4)),
+                format!("standby:{}", epoch("vol1", 5)),
+            ]
+        );
+        assert!(rpc.calls_of("bdev_raid_delete").is_empty(), "the live raid was deleted");
+        assert_eq!(rpc.raids.lock().unwrap()["node-b"].len(), 1);
+    }
+
+    /// Fail closed: when the replica node's raids cannot be read, the head
+    /// may be a served base — defer, as F36 does on a probe error.
+    #[tokio::test]
+    async fn catchup_defers_when_its_node_raids_cannot_be_read() {
+        let mut rpc = bulk_world();
+        rpc.fail.insert(
+            ("node-b".to_string(), "bdev_raid_get_bdevs".to_string()),
+            "connection refused".to_string(),
+        );
+        let store = FakeStore::new(stale_b_record());
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        assert!(rpc.calls_of("bdev_lvol_delete").is_empty());
+        assert!(store.ops.lock().unwrap().is_empty());
+        // A defer, not a failure: an earlier step erroring would also leave
+        // the head alone, and would emit ReplicaCatchupFailed.
+        assert!(store.events.lock().unwrap().is_empty(), "{:?}", store.events.lock().unwrap());
+        assert_eq!(rpc.calls_of("bdev_raid_get_bdevs").len(), 1, "the probe ran and failed");
+    }
+
+    #[tokio::test]
+    async fn chase_defers_while_a_raid_on_its_node_holds_the_head() {
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.replicas[1].reverted_to = Some(epoch("vol1", 4));
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        let store = FakeStore::new(record);
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+        // Held by its live (post-revert) uuid.
+        let mut raid = local_raid_b(false);
+        raid["base_bdevs_list"][2] =
+            json!({ "name": "uuid-b-v2", "uuid": "uuid-b-v2", "is_configured": true });
+        rpc.raids.lock().unwrap().insert("node-b".to_string(), vec![raid]);
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), Some("node-b"), &cfg())
+            .await
+            .unwrap();
+
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert!(rpc.calls_of("bdev_nvme_attach_controller").is_empty());
+        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty());
+        let reasons: Vec<String> =
+            store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(reasons, vec!["ReplicaHeadIsLocalBase".to_string()]);
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().last_epoch.as_deref(),
+            Some(epoch("vol1", 4).as_str())
+        );
     }
 
     #[tokio::test]

@@ -1102,8 +1102,24 @@ Rejected alternatives:
      re-add — a stock blind full rebuild. If a raid does claim the attached
      destination: CONFIGURING → released (no `clear_sb` — its bases can
      include the source's own live lvols); ONLINE → loud abort, never
-     fight it. An ONLINE raid on the *replica's* node likewise refuses the
-     catch-up (zombie consumer; §2 fact 3).
+     fight it. An ONLINE raid on the *replica's* node refuses the catch-up
+     only if it holds THIS head as a configured base (zombie consumer, §2
+     fact 3, or the forced-stale fallback serving the leg locally), and it is
+     never deleted. An ONLINE raid there that does not hold the head is the
+     consumer's own, serving the other legs: the catch-up proceeds beside it
+     (2026-10-28; until then any ONLINE raid refused, and a stale leg on the
+     consumer's node stayed unbuilt while the pod stayed). Since flint raids
+     are created with `superblock: false`, no head carries a raid sb today,
+     and the examine above cannot re-add one to a live raid.
+   - **Served-locally guard, before the revert** (FlintLocalLeg,
+     2026-10-28): F36's `head_live_consumer` finds a served head through
+     its nvmf export, and a head the consumer's raid holds LOCALLY has none.
+     So the bulk catch-up and the chase also read the replica node's raids
+     and defer (`ReplicaHeadIsLocalBase`; fail closed on a probe error)
+     while any raid holds the head as a configured base. Without that, the
+     revert's `bdev_lvol_delete` hot-removed a served base (SPDK checks no
+     claim), and with the raid's other leg already faulted out, the acked
+     writes only that head held went with it (`formal/FlintLocalLeg.tla`).
    - **Fenced re-export:** the per-replica subsystem's host list converges
      to exactly the source node (the copy writer) — a previous consumer's
      auto-reconnecting initiator is locked out; phase-4 staging re-flips
