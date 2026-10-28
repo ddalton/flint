@@ -17,6 +17,80 @@
 
 use std::time::Duration;
 
+/// One `/proc/self/mountinfo` mount: which filesystem (`dev` major:minor,
+/// `root` within it) is visible at `mount_point`, and whether that mount
+/// is read-only. Publish idempotency compares a target's entry with its
+/// staging path's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountEntry {
+    pub dev: String,
+    pub root: String,
+    pub mount_point: String,
+    pub read_only: bool,
+}
+
+/// mountinfo escapes space, tab, newline and backslash as `\ooo`.
+fn unescape_mountinfo(field: &str) -> String {
+    let b = field.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn mounts_named<'a>(mountinfo: &'a str, path: &str) -> impl Iterator<Item = MountEntry> + 'a {
+    let trimmed = path.trim_end_matches('/');
+    let want = if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() };
+    mountinfo.lines().filter_map(move |line| {
+        let f: Vec<&str> = line.split(' ').collect();
+        if f.len() < 6 {
+            return None;
+        }
+        let mount_point = unescape_mountinfo(f[4]);
+        (mount_point == want).then(|| MountEntry {
+            dev: f[2].to_string(),
+            root: unescape_mountinfo(f[3]),
+            mount_point,
+            read_only: f[5].split(',').any(|o| o == "ro"),
+        })
+    })
+}
+
+/// The mount visible at `path` in `mountinfo` text: the LAST line naming
+/// it, since a later mount on the same point hides the earlier ones.
+pub fn mount_at_in(mountinfo: &str, path: &str) -> Option<MountEntry> {
+    mounts_named(mountinfo, path).last()
+}
+
+/// How many mounts are stacked at `path`.
+pub fn mounts_at_in(mountinfo: &str, path: &str) -> usize {
+    mounts_named(mountinfo, path).count()
+}
+
+fn own_mountinfo() -> String {
+    std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default()
+}
+
+/// [`mount_at_in`] over this process's mount table. Reading the table never
+/// touches the mounted filesystem, so unlike a stat or `mountpoint(1)` it
+/// cannot hang on a dead one.
+pub fn mount_at(path: &str) -> Option<MountEntry> {
+    mount_at_in(&own_mountinfo(), path)
+}
+
+/// [`mounts_at_in`] over this process's mount table.
+pub fn mounts_at(path: &str) -> usize {
+    mounts_at_in(&own_mountinfo(), path)
+}
+
 /// argv for layer 1 (separated from the spawn for testability).
 fn umount_argv(target: &str, lazy: bool, deadline_secs: u64) -> Vec<String> {
     let mut argv = vec![
@@ -283,6 +357,30 @@ pub fn fstype_is_nfs(fstype: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The worker's table after csi-sanity's ten-publish idempotency spec
+    /// against the pre-fix NodePublish (2026-10-28): the staging mount and
+    /// the same filesystem bound onto the target once per call.
+    const STACKED: &str = "\
+1401 1388 259:7 / /var/lib/kubelet/sanity/stage rw,relatime shared:620 - ext4 /dev/nvme6n1 rw
+1402 1388 259:7 / /var/lib/kubelet/sanity/mount/target rw,relatime shared:620 - ext4 /dev/nvme6n1 rw
+1403 1402 259:7 / /var/lib/kubelet/sanity/mount/target rw,relatime shared:620 - ext4 /dev/nvme6n1 rw
+1404 1403 259:7 / /var/lib/kubelet/sanity/mount/target ro,relatime shared:620 - ext4 /dev/nvme6n1 rw
+1405 1388 0:52 / /var/lib/kubelet/with\\040space rw - tmpfs tmpfs rw";
+
+    #[test]
+    fn the_visible_mount_is_the_last_one_stacked_on_the_point() {
+        let t = "/var/lib/kubelet/sanity/mount/target";
+        assert_eq!(mounts_at_in(STACKED, t), 3);
+        let top = mount_at_in(STACKED, t).unwrap();
+        assert!(top.read_only, "the top of the stack is the ro bind");
+        assert_eq!((top.dev.as_str(), top.root.as_str()), ("259:7", "/"));
+        let staged = mount_at_in(STACKED, "/var/lib/kubelet/sanity/stage/").unwrap();
+        assert_eq!((staged.dev, staged.root), (top.dev, top.root));
+        assert_eq!(mount_at_in(STACKED, "/var/lib/kubelet/sanity/mount"), None);
+        assert_eq!(mount_at_in(STACKED, "/var/lib/kubelet/with space").unwrap().dev, "0:52");
+        assert_eq!(mounts_at_in("", t), 0);
+    }
 
     /// The drill-A truth table: only a clean "not a mountpoint" (exit 1)
     /// skips the unmount. Timeout 124 was previously read as "not

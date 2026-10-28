@@ -147,6 +147,10 @@ pub enum MinimalStateError {
     /// off, still zeroing a thick volume -- and the CO should retry
     /// (CreateVolume answers ABORTED).
     InProgress { message: String },
+    /// A volume of this name exists but does not match the request (a
+    /// different size, or a create with other parameters still running):
+    /// CreateVolume answers ALREADY_EXISTS, which the CO does not retry.
+    AlreadyExists { message: String },
 }
 
 impl std::fmt::Display for MinimalStateError {
@@ -180,6 +184,8 @@ impl std::fmt::Display for MinimalStateError {
                     write!(f, "Internal error: {}", message),
                 MinimalStateError::InProgress { message } =>
                     write!(f, "In progress: {}", message),
+                MinimalStateError::AlreadyExists { message } =>
+                    write!(f, "Already exists: {}", message),
         }
     }
 }

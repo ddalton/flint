@@ -103,6 +103,77 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A repeated NodePublish no longer stacks a second mount, and
+  NodeUnpublish no longer reports success over a mount it left**
+  (2026-10-28; `spdk-csi-driver/src/main.rs`, `mount_util.rs`). Found by
+  csi-sanity's idempotency spec on the kind tier: ten NodePublish calls
+  for one target bound the staging mount onto it ten times; NodeUnpublish
+  removed one, logged "still shows as mounted" and answered OK; NodeUnstage
+  then disconnected the device under the other nine, and the next unmount
+  slept in D state until the initiator's `ctrl_loss_tmo`, refusing every
+  connection to the node plugin meanwhile. CSI makes publish idempotent,
+  and kubelet retries a timed-out publish. Now a target that already shows
+  this volume's staging mount (same device, root and read-only flag) is
+  published as is, and any other mount there is refused with
+  ALREADY_EXISTS. NodeUnpublish unmounts through the bounded helper (a
+  lazy unmount that drops the last mount of a superblock syncs it inside
+  the syscall, so `umount -l` does block on a dead device), peels any
+  mounts still stacked on the target by reading the mount table, and
+  fails rather than succeeds while one remains.
+- **Replicated (numReplicas > 1) volumes report usage and health to
+  kubelet, and pass ValidateVolumeCapabilities** (2026-10-28;
+  `spdk-csi-driver/src/main.rs`, `driver.rs`). Both RPCs looked a volume up
+  through the single-replica attributes (node name, lvol uuid) that a
+  replicated volume's PV does not carry, so NodeGetVolumeStats returned no
+  usage and an abnormal "Volume not found" condition for every r2/r3
+  volume, and ValidateVolumeCapabilities answered NOT_FOUND. Found by
+  csi-sanity's r3 pass with the provisioner stand-in (`tests/sanity`). Same
+  pass: a replicated CreateVolume whose legs exist with a smaller size
+  answers ALREADY_EXISTS (its legs' error was wrapped as INTERNAL); cloning
+  a replicated volume, which this path never supported, answers
+  FAILED_PRECONDITION and names snapshot-and-restore instead of an INTERNAL
+  the provisioner retried forever; and a replicated CreateVolume no longer
+  spends ~2 s retrying a PV patch that cannot succeed (the provisioner
+  writes the PV after CreateVolume returns).
+- **CreateSnapshot is idempotent for single-replica volumes, and
+  ControllerPublish answers NOT_FOUND for a node that does not exist**
+  (2026-10-28; `spdk-csi-driver/src/snapshot/snapshot_csi.rs`, `main.rs`,
+  `driver.rs`). The single-replica snapshot was named for the current unix
+  second: a retry within the second failed with SPDK's "File exists" and a
+  later one cut a second snapshot. It is now named from the CSI request
+  name, as the multi-replica path already was, and a retry adopts the
+  snapshot it finds under that name. ControllerPublish to a made-up node
+  id used to succeed.
+- **DeleteVolume no longer answers success without deleting**
+  (2026-10-28; `spdk-csi-driver/src/main.rs`, `driver.rs`). When reading
+  the volume's PV failed for any reason, DeleteVolume returned OK with
+  every lvol still on disk; the orphan sweep removed them minutes later,
+  but a transient API error was enough to make the CO forget a volume
+  nothing had looked at. Now a failed read answers UNAVAILABLE, and a
+  successful read that finds no PV deletes the volume's lvols by name on
+  every node (head, legs, hot-rejoin heads, epochs newest first, the clone
+  source; never a user snapshot, which CSI lets outlive its volume).
+- **Every CSI RPC refuses a missing required field with INVALID_ARGUMENT
+  before doing anything** (2026-10-28; new `spdk-csi-driver/src/csi_args.rs`,
+  `identity.rs`). csi-sanity v5.6.0 found DeleteVolume, ControllerUnpublish,
+  DeleteSnapshot, NodeUnpublish and NodeGetVolumeStats succeeding with an
+  empty id or path; CreateVolume with no name creating an lvol named
+  `vol_` that the orphan sweep can never reap; and other RPCs answering
+  NOT_FOUND, UNAVAILABLE or INTERNAL from a PV lookup under an empty name,
+  or doing real work first (NodePublish made its target directory and
+  attempted a restage). Also: a CreateVolume whose name already exists
+  with a smaller size, or whose create with other parameters is still
+  running, answers ALREADY_EXISTS instead of INTERNAL; `numReplicas` and
+  `thinProvision` values that do not parse are refused instead of read as
+  1 and true; NodeGetVolumeStats and NodeExpandVolume answer NOT_FOUND for
+  a volume path that does not exist. CreateVolume refuses names longer
+  than 46 bytes and names outside `[A-Za-z0-9.-]`: lvol, epoch and
+  snapshot names are minted from the volume name, SPDK caps lvol names at
+  63 bytes (a longer name failed INTERNAL after some legs were made), and
+  a `_` would let `<id>_replica_3` parse back as another volume's leg,
+  which is what the orphan sweep condemns by. Kubernetes' `pvc-<uuid>`
+  names are 40 bytes and always pass; csi-sanity's 128-byte name spec
+  stays refused.
 - **`release.sh` no longer reads "the registry did not answer" as "the
   image is not published"** (2026-10-27; `scripts/release.sh`). Its
   registry check threw away `imagetools inspect`'s error, so every

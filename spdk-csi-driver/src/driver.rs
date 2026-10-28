@@ -389,8 +389,16 @@ impl SpdkCsiDriver {
                 for r in created {
                     let _ = self.delete_lvol(&r.node_name, &r.lvol_uuid).await;
                 }
-                return Err(MinimalStateError::InternalError {
-                    message: format!("Failed to create replica {}: {}", i + 1, e)
+                // A leg that already exists and does not fit is the whole
+                // volume's ALREADY_EXISTS (CSI); wrapping it as INTERNAL made
+                // the CO retry an answer that cannot change (csi-sanity r3).
+                return Err(match e {
+                    MinimalStateError::AlreadyExists { message } => MinimalStateError::AlreadyExists {
+                        message: format!("replica {}: {}", i + 1, message),
+                    },
+                    e => MinimalStateError::InternalError {
+                        message: format!("Failed to create replica {}: {}", i + 1, e),
+                    },
                 });
             }
         };
@@ -539,7 +547,7 @@ impl SpdkCsiDriver {
             .await
         {
             Joined::Done(result) => result,
-            Joined::ParamsDiffer => Err(MinimalStateError::InvalidParameter {
+            Joined::ParamsDiffer => Err(MinimalStateError::AlreadyExists {
                 message: format!(
                     "a create of {volume_id} with a different size, replica count or \
                      thinProvision is already running"
@@ -705,6 +713,14 @@ impl SpdkCsiDriver {
                     let label_count = labels.len();
                     info!(volume_id, label_count, "[DRIVER] Replica node labels added to PV");
                     return Ok(());
+                }
+                // Absent is not transient here: the external-provisioner
+                // writes the PV from CreateVolume's response, after the call
+                // returns, so waiting inside a create cannot help -- the two
+                // sleeps cost every replicated create ~2 s (csi-sanity r3,
+                // 2026-10-28).
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                    return Err(format!("PV {volume_id} not written yet: {}", ae.message).into());
                 }
                 Err(e) if attempt < 3 => {
                     let err = e.to_string();
@@ -928,7 +944,7 @@ impl SpdkCsiDriver {
                 info!(node_name, alias, uuid, "[CONTROLLER] Lvol already created (an earlier create of this volume): adopting it");
                 Ok(uuid)
             }
-            None if found.is_some() => Err(MinimalStateError::InvalidParameter {
+            None if found.is_some() => Err(MinimalStateError::AlreadyExists {
                 message: format!("{alias} exists on {node_name} but is smaller than the {size_bytes} bytes requested"),
             }),
             None => Err(MinimalStateError::InProgress {
@@ -1021,6 +1037,80 @@ impl SpdkCsiDriver {
             }
         }
         (deleted, failed)
+    }
+
+    /// ControllerPublish's NOT_FOUND for a node that does not exist (the CSI
+    /// node id is the Kubernetes node name, `spec.nodeName`); UNAVAILABLE
+    /// when the API cannot say. Publishing to a made-up node id used to
+    /// succeed (csi-sanity, 2026-10-28).
+    pub async fn require_node(&self, node_id: &str) -> Result<(), Status> {
+        let nodes: Api<k8sNode> = Api::all(self.kube_client.clone());
+        match nodes.get_opt(node_id).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(Status::not_found(format!("node {node_id} does not exist"))),
+            Err(e) => Err(Status::unavailable(format!("cannot read node {node_id}: {e}"))),
+        }
+    }
+
+    /// DeleteVolume for a volume that no PV names (a successful PV list
+    /// proved it): nothing records where its lvols live, so look on every
+    /// node and delete what the volume owns by name -- head, legs,
+    /// hot-rejoin heads, epochs, the clone source -- heads first and epochs
+    /// newest first, so no snapshot is deleted under a live clone. Never a
+    /// user snapshot (`snap_<vol>_*`): CSI lets a snapshot outlive its
+    /// source volume. A node whose lvols cannot be listed is skipped and
+    /// named in the log; with the PV absent, the orphan sweep on that node
+    /// reaps them (the F51 backstop). `Err` when a listed lvol could not
+    /// be deleted: the volume is still on disk, so the CO must retry.
+    pub async fn delete_unrecorded_volume_lvols(
+        &self,
+        volume_id: &crate::identity::StorageId,
+    ) -> Result<usize, String> {
+        use crate::identity::LvolKind;
+        let nodes = self
+            .get_all_nodes()
+            .await
+            .map_err(|e| format!("cannot list nodes to find {volume_id}'s lvols: {e}"))?;
+        let mut deleted = 0;
+        let mut failed = Vec::new();
+        for node in &nodes {
+            let owned = match self.list_volume_lvols(node, volume_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(node_name = %node, volume_id = volume_id.as_str(), error = %e,
+                        "[CONTROLLER] Could not list lvols for a PV-less delete -- leaving them to the orphan sweep");
+                    continue;
+                }
+            };
+            let mut doomed: Vec<(u8, u64, String, String)> = owned
+                .into_iter()
+                .filter_map(|(name, uuid)| {
+                    let (_, kind) = crate::identity::lvol_owner(&name)?;
+                    let rank = match kind {
+                        LvolKind::UserSnapshot => return None,
+                        LvolKind::Primary | LvolKind::Replica => 0,
+                        LvolKind::EpochSnapshot | LvolKind::CloneSource => 1,
+                    };
+                    let seq = crate::identity::epoch_seq(volume_id.as_str(), &name).unwrap_or(0);
+                    Some((rank, u64::MAX - seq, name, uuid))
+                })
+                .collect();
+            doomed.sort();
+            for (_, _, name, uuid) in doomed {
+                match self.delete_lvol(node, &uuid).await {
+                    Ok(()) => {
+                        info!(node_name = %node, lvol = %name, "[CONTROLLER] PV-less delete removed lvol");
+                        deleted += 1;
+                    }
+                    Err(e) => failed.push(format!("{node}/{name}: {e}")),
+                }
+            }
+        }
+        if failed.is_empty() {
+            Ok(deleted)
+        } else {
+            Err(format!("could not delete {}", failed.join("; ")))
+        }
     }
 
     /// Check if backing storage exists on a node (for graceful deletion)
@@ -1717,7 +1807,7 @@ impl SpdkCsiDriver {
             }
         }
         
-        Err("PV not found".into())
+        Err(Box::new(PvNotFound(volume_id.to_string())))
     }
 
     /// Get volume info from PV volumeAttributes (fast path)
@@ -1859,7 +1949,7 @@ impl SpdkCsiDriver {
             }
         }
         
-        Err("PV not found".into())
+        Err(Box::new(PvNotFound(volume_id.to_string())))
     }
 
     /// Update PV to mark filesystem as initialized (after formatting)
@@ -3965,6 +4055,25 @@ pub fn pick_placement_node(candidates: &[(String, u64)], preferred: &[String]) -
         .map(|(name, _)| name.clone())
 }
 
+/// No PV carries this volumeHandle, as proved by a successful PV list.
+/// Typed so a caller can tell it from a failed API call, which proves
+/// nothing: DeleteVolume used to read either as "already deleted" and
+/// return success with the lvols still on disk (csi-sanity 2026-10-28).
+#[derive(Debug)]
+pub struct PvNotFound(pub String);
+
+impl std::fmt::Display for PvNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PV not found")
+    }
+}
+
+impl std::error::Error for PvNotFound {}
+
+pub fn is_pv_not_found(e: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    e.downcast_ref::<PvNotFound>().is_some()
+}
+
 /// Volume information
 #[derive(Debug, Clone)]
 pub struct VolumeInfo {
@@ -3996,6 +4105,19 @@ pub struct BackingStorageHealth {
     pub message: String,
     /// Whether the node was reachable for the health check
     pub node_reachable: bool,
+}
+
+impl BackingStorageHealth {
+    /// A replicated volume has no single backing lvol to check: its health
+    /// is the local raid's, which NodeGetVolumeStats reads next.
+    pub fn replicated() -> Self {
+        Self {
+            exists: true,
+            healthy: true,
+            message: "replicated volume: health is the local raid's".to_string(),
+            node_reachable: true,
+        }
+    }
 }
 
 /// NQNs of flint-owned NVMe-oF subsystems (`:volume:` NQNs) that export

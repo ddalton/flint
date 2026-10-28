@@ -91,13 +91,26 @@ fn stable_snapshot_suffix(csi_name: &str) -> u64 {
     hash
 }
 
-/// SPDK rejects lvol names of 64+ chars (SPDK_LVOL_NAME_MAX includes the
-/// terminator), so the decimal suffix is reduced modulo the digit budget
-/// left after `snap_<vol>_`. A 40-char `pvc-<uuid>` id leaves 17 digits;
-/// determinism (and so retry idempotency) is unaffected.
-const SPDK_LVOL_NAME_USABLE: usize = 63;
+// SPDK rejects lvol names of 64+ chars (SPDK_LVOL_NAME_MAX includes the
+// terminator), so the decimal suffix is reduced modulo the digit budget
+// left after `snap_<vol>_`. A 40-char `pvc-<uuid>` id leaves 17 digits;
+// determinism (and so retry idempotency) is unaffected.
+use crate::identity::SPDK_LVOL_NAME_USABLE;
 
-fn multi_replica_snapshot_name(volume_id: &str, csi_name: &str) -> String {
+/// The `(uuid, size_bytes)` of the `bdev_get_bdevs` entry carrying `alias`,
+/// when it is an lvol snapshot (a same-named head is not adopted).
+fn snapshot_entry(bdevs: &serde_json::Value, alias: &str) -> Option<(String, i64)> {
+    let b = bdevs.as_array()?.iter().find(|b| {
+        b["aliases"].as_array().is_some_and(|al| al.iter().any(|x| x == alias))
+    })?;
+    if b["driver_specific"]["lvol"]["snapshot"].as_bool() != Some(true) {
+        return None;
+    }
+    let bytes = b["num_blocks"].as_i64()?.checked_mul(b["block_size"].as_i64()?)?;
+    Some((b["uuid"].as_str()?.to_string(), bytes))
+}
+
+fn stable_snapshot_name(volume_id: &str, csi_name: &str) -> String {
     let prefix_len = "snap_".len() + volume_id.len() + "_".len();
     let budget = SPDK_LVOL_NAME_USABLE.saturating_sub(prefix_len).min(19) as u32;
     let suffix = stable_snapshot_suffix(csi_name) % 10u64.pow(budget.max(1));
@@ -156,35 +169,56 @@ impl SnapshotController {
 
         tracing::info!("✅ [SNAPSHOT_CSI] Found source volume on node: {}", volume_info.node_name);
 
-        // Step 2: Generate unique snapshot name
-        // Format: snap_{volume_id}_{timestamp}
+        // Step 2: The snapshot name derives from the CSI request name, as on
+        // the multi-replica path, so a retry finds the snapshot it already
+        // made. It used to be the current unix second: a retry within the
+        // second failed SPDK's "File exists" and a later one cut a second
+        // snapshot (csi-sanity's idempotency spec, 2026-10-28).
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let snapshot_name = crate::identity::user_snapshot_name(&req.source_volume_id, timestamp);
+        let snapshot_name = stable_snapshot_name(&req.source_volume_id, &req.name);
+        let alias = format!("{}/{}", volume_info.lvs_name, snapshot_name);
 
-        tracing::info!("📸 [SNAPSHOT_CSI] Generated snapshot name: {}", snapshot_name);
+        tracing::info!("📸 [SNAPSHOT_CSI] Snapshot name: {} (from CSI name {})", snapshot_name, req.name);
 
-        // Step 3: Call node agent to create snapshot
-        let payload = serde_json::json!({
-            "lvol_name": volume_info.lvol_uuid,
-            "snapshot_name": snapshot_name
-        });
-
-        let response = self.driver
-            .call_node_agent(&volume_info.node_name, "/api/snapshots/create", &payload)
+        // Step 3: Adopt the snapshot if an earlier attempt made it, else
+        // create it (and adopt after all if a concurrent attempt won).
+        let (snapshot_uuid, size_bytes) = match self
+            .existing_snapshot(&volume_info.node_name, &alias)
             .await
-            .map_err(|e| Status::internal(format!("Failed to create snapshot: {}", e)))?;
+        {
+            Some(found) => {
+                tracing::info!("✅ [SNAPSHOT_CSI] Snapshot {} already exists: adopting it", snapshot_name);
+                found
+            }
+            None => {
+                let payload = serde_json::json!({
+                    "lvol_name": volume_info.lvol_uuid,
+                    "snapshot_name": snapshot_name
+                });
+                match self
+                    .driver
+                    .call_node_agent(&volume_info.node_name, "/api/snapshots/create", &payload)
+                    .await
+                {
+                    Ok(response) => {
+                        let uuid = response["snapshot_uuid"]
+                            .as_str()
+                            .ok_or_else(|| Status::internal("No snapshot UUID in response"))?
+                            .to_string();
+                        (uuid, response["size_bytes"].as_i64().unwrap_or(0))
+                    }
+                    Err(e) => self
+                        .existing_snapshot(&volume_info.node_name, &alias)
+                        .await
+                        .ok_or_else(|| Status::internal(format!("Failed to create snapshot: {}", e)))?,
+                }
+            }
+        };
 
-        let snapshot_uuid = response["snapshot_uuid"]
-            .as_str()
-            .ok_or_else(|| Status::internal("No snapshot UUID in response"))?
-            .to_string();
-
-        let size_bytes = response["size_bytes"].as_i64().unwrap_or(0);
-
-        tracing::info!("✅ [SNAPSHOT_CSI] Snapshot created: {} (uuid {})", snapshot_name, snapshot_uuid);
+        tracing::info!("✅ [SNAPSHOT_CSI] Snapshot ready: {} (uuid {})", snapshot_name, snapshot_uuid);
 
         // Step 4: Return CSI response. The snapshot id is the lvol NAME, not
         // the SPDK uuid — identical to the multi-replica path, so every
@@ -209,6 +243,15 @@ impl SnapshotController {
         Ok(Response::new(CreateSnapshotResponse {
             snapshot: Some(snapshot),
         }))
+    }
+
+    /// `(uuid, size_bytes)` of the snapshot lvol `alias` on `node`, when one
+    /// exists. The name embeds the source volume and the CSI name, so a
+    /// snapshot under it is this request's.
+    async fn existing_snapshot(&self, node: &str, alias: &str) -> Option<(String, i64)> {
+        let payload = serde_json::json!({ "method": "bdev_get_bdevs", "params": { "name": alias } });
+        let resp = self.driver.call_node_agent(node, "/api/spdk/rpc", &payload).await.ok()?;
+        snapshot_entry(&resp["result"], alias)
     }
 
     /// Multi-replica CreateSnapshot (§11, phase 5b): cut the same name on
@@ -241,7 +284,7 @@ impl SnapshotController {
         // so external-snapshotter retries converge on the SAME copies (via
         // the cut's EEXIST handling) instead of piling up snapshots under
         // fresh timestamps.
-        let snapshot_name = multi_replica_snapshot_name(&req.source_volume_id, &req.name);
+        let snapshot_name = stable_snapshot_name(&req.source_volume_id, &req.name);
         tracing::info!(
             "📸 [SNAPSHOT_CSI] Multi-replica snapshot {} (from CSI name {})",
             snapshot_name, req.name
@@ -715,12 +758,27 @@ mod tests {
     }
 
     #[test]
-    fn multi_replica_snapshot_name_is_stable_and_parseable() {
+    fn a_retry_adopts_only_a_snapshot_under_its_own_name() {
+        let alias = "lvs_kind/snap_pvc-1_123";
+        let entry = |snapshot: bool| {
+            serde_json::json!([{
+                "uuid": "u-1", "aliases": [alias], "num_blocks": 131072, "block_size": 512,
+                "driver_specific": {"lvol": {"snapshot": snapshot}}
+            }])
+        };
+        assert_eq!(snapshot_entry(&entry(true), alias), Some(("u-1".to_string(), 64 << 20)));
+        assert_eq!(snapshot_entry(&entry(false), alias), None, "a head is not a snapshot");
+        assert_eq!(snapshot_entry(&entry(true), "lvs_kind/snap_pvc-1_124"), None);
+        assert_eq!(snapshot_entry(&serde_json::json!([]), alias), None);
+    }
+
+    #[test]
+    fn stable_snapshot_name_is_stable_and_parseable() {
         // Same CSI request name → same name (retry idempotency).
         let vol = "pvc-abc123";
-        let name = multi_replica_snapshot_name(vol, "snapshot-5c2e9a1f");
-        assert_eq!(name, multi_replica_snapshot_name(vol, "snapshot-5c2e9a1f"));
-        assert_ne!(name, multi_replica_snapshot_name(vol, "snapshot-other"));
+        let name = stable_snapshot_name(vol, "snapshot-5c2e9a1f");
+        assert_eq!(name, stable_snapshot_name(vol, "snapshot-5c2e9a1f"));
+        assert_ne!(name, stable_snapshot_name(vol, "snapshot-other"));
 
         // The generated id round-trips through the §11 id parser.
         let suffix = name.rsplit('_').next().unwrap().parse::<u64>().unwrap();
@@ -732,18 +790,18 @@ mod tests {
     }
 
     #[test]
-    fn multi_replica_snapshot_name_fits_spdk_lvol_name_limit() {
+    fn stable_snapshot_name_fits_spdk_lvol_name_limit() {
         // Live-cluster regression (stage-2 e2e, 2026-06-12): a full FNV-1a64
         // decimal suffix on a `pvc-<uuid>` id produced 65 chars and SPDK
         // rejected the cut with -32602. The clamp must keep every realistic
         // id shape within the 63 usable chars.
         let pvc_id = "pvc-a6846916-3267-404e-bb22-72d820652299";
-        let name = multi_replica_snapshot_name(pvc_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
+        let name = stable_snapshot_name(pvc_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
         assert!(name.len() <= SPDK_LVOL_NAME_USABLE, "{} is {} chars", name, name.len());
 
         // RWX synthetic handles are longer; the suffix shrinks to fit.
         let rwx_id = "nfs-server-pvc-a6846916-3267-404e-bb22-72d820652299";
-        let name = multi_replica_snapshot_name(rwx_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
+        let name = stable_snapshot_name(rwx_id, "snapshot-8579ba0c-eb50-4bbe-bd02-3199e8b4f8f5");
         assert!(name.len() <= SPDK_LVOL_NAME_USABLE, "{} is {} chars", name, name.len());
         assert!(crate::replica_sync::parse_user_snapshot_id(&name).is_some());
     }

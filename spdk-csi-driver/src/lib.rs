@@ -25,6 +25,7 @@
 static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod identity;  // Canonical volume identity: VolumeRef + naming + parsers (identity-unification Phase 0)
+pub mod csi_args;  // Argument checks every CSI RPC runs first (INVALID_ARGUMENT before any work; csi-sanity 2026-10-28)
 pub mod spdk_native;
 pub mod nvmeof_utils;
 pub mod nvmeof_export;  // Convergent NVMe-oF export (phase 0 idempotency fix)

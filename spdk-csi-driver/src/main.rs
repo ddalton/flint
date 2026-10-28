@@ -1195,6 +1195,18 @@ impl MinimalControllerService {
             ));
         }
 
+        // A replicated source carries a replica list, not the single-replica
+        // node/lvol attributes this path clones from. That used to surface
+        // as INTERNAL "missing node metadata", which the provisioner retries
+        // forever (csi-sanity r3, 2026-10-28); say so, finally, as for pNFS.
+        if spdk_csi_driver::replica_sync::raw_replicas_json(&source_pv).is_some() {
+            return Err(tonic::Status::failed_precondition(format!(
+                "PVC clone source {source_volume_id} is a replicated volume (numReplicas > 1); \
+                 cloning one is not supported yet. Snapshot it and restore from the snapshot, \
+                 which does support replicated volumes"
+            )));
+        }
+
         let source_node = volume_attributes.get("disk.chert.us/node-name")
             .ok_or_else(|| tonic::Status::internal("Source volume missing node metadata"))?
             .clone();
@@ -1589,6 +1601,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::CreateVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::create_volume(&req)?;
         let volume_id = req.name.clone();
         println!("🎯 [CONTROLLER] Creating volume: {}", volume_id);
 
@@ -1899,9 +1912,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
 
                     // The class's replica count applies to a restore too
                     // (2026-10-27); autoRebuild rides along as on a plain create.
-                    let replica_count = req.parameters.get("numReplicas")
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(1);
+                    let replica_count = spdk_csi_driver::csi_args::replica_count(&req.parameters)?;
                     let auto_rebuild = req.parameters.get("autoRebuild").cloned();
 
                     match source_type {
@@ -1939,13 +1950,9 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .and_then(|cr| if cr.required_bytes > 0 { Some(cr.required_bytes) } else { Some(cr.limit_bytes) })
             .unwrap_or(1024 * 1024 * 1024) as u64; // Default 1GB
 
-        let replica_count = req.parameters.get("numReplicas")
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(1);
+        let replica_count = spdk_csi_driver::csi_args::replica_count(&req.parameters)?;
 
-        let thin_provision = req.parameters.get("thinProvision")
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(true);
+        let thin_provision = spdk_csi_driver::csi_args::thin_provision(&req.parameters)?;
 
         let nfs_empty_dir = req.parameters.get("nfsEmptyDir")
             .map(|v| v == "true")
@@ -2170,6 +2177,10 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 println!("⏳ [CONTROLLER] Volume {} still being created: {}", volume_id, message);
                 Err(tonic::Status::aborted(format!("Volume creation in progress: {}", message)))
             }
+            Err(spdk_csi_driver::minimal_models::MinimalStateError::AlreadyExists { message }) => {
+                println!("❌ [CONTROLLER] Volume {} exists and does not match: {}", volume_id, message);
+                Err(tonic::Status::already_exists(message))
+            }
             Err(e) => {
                 println!("❌ [CONTROLLER] Volume creation failed: {}", e);
                 Err(tonic::Status::internal(format!("Volume creation failed: {}", e)))
@@ -2182,6 +2193,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::DeleteVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::DeleteVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::delete_volume(&req)?;
         let volume_id = req.volume_id.clone();
 
         println!("🗑️ [CONTROLLER] Deleting volume: {}", volume_id);
@@ -2421,11 +2433,35 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                 // SINGLE REPLICA: Use existing logic
                 println!("📊 [CONTROLLER] Single-replica volume");
             }
-            Err(e) => {
-                println!("⚠️ [CONTROLLER] Volume not found (may already be deleted): {}", e);
-                // Not an error - idempotent delete
+            Err(e) if spdk_csi_driver::driver::is_pv_not_found(e.as_ref()) => {
+                // No PV names this volume (a successful list proved it), so
+                // nothing records where its lvols are: find them by name on
+                // every node. This arm used to return success without
+                // looking, which left every lvol of a PV-less delete on disk
+                // until the orphan sweep came by (csi-sanity, 2026-10-28).
                 self.driver.role_resolver.invalidate(&volume_id);
-                return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
+                if spdk_csi_driver::identity::parse_backing_handle(&volume_id).is_some() {
+                    println!("ℹ️  [CONTROLLER] No PV for backing handle {}: its lvols are the user volume's, not this handle's", volume_id);
+                    return Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}));
+                }
+                let sid = spdk_csi_driver::identity::StorageId::of_handle(&volume_id);
+                return match self.driver.delete_unrecorded_volume_lvols(&sid).await {
+                    Ok(n) => {
+                        println!("✅ [CONTROLLER] Volume {} had no PV: {} lvol(s) found by name and deleted", volume_id, n);
+                        Ok(tonic::Response::new(spdk_csi_driver::csi::DeleteVolumeResponse {}))
+                    }
+                    Err(why) => Err(tonic::Status::unavailable(format!(
+                        "volume {volume_id} has no PV and {why}; retry"
+                    ))),
+                };
+            }
+            Err(e) => {
+                // A failed read proves nothing about the volume: answering
+                // success here let the CO forget a volume whose lvols were
+                // never looked at.
+                return Err(tonic::Status::unavailable(format!(
+                    "cannot read the PV of {volume_id} to find its replicas ({e}); not deleting blind -- retry"
+                )));
             }
         }
 
@@ -2544,6 +2580,8 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::ControllerPublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerPublishVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::controller_publish(&req)?;
+        self.driver.require_node(&req.node_id).await?;
         let volume_id = req.volume_id.clone();
         let node_id = req.node_id.clone();
         
@@ -2952,6 +2990,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::ControllerUnpublishVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerUnpublishVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::controller_unpublish(&req)?;
         let volume_id = req.volume_id.clone();
         let node_id = req.node_id.clone();
         
@@ -3108,11 +3147,16 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         use spdk_csi_driver::csi::volume_capability::access_mode::Mode;
         
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::validate_volume_capabilities(&req)?;
         println!("🔵 [CONTROLLER] ValidateVolumeCapabilities for volume: {}", req.volume_id);
         
-        // Check if volume exists
-        let _volume_info = self.driver.get_volume_info(&req.volume_id).await
-            .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+        // Check if volume exists. A replicated volume has a replica list,
+        // not the single-replica attributes get_volume_info reads: it used
+        // to answer NOT_FOUND for every r2/r3 volume (csi-sanity r3).
+        if !matches!(self.driver.get_replicas_from_pv(&req.volume_id).await, Ok(Some(_))) {
+            self.driver.get_volume_info(&req.volume_id).await
+                .map_err(|e| tonic::Status::not_found(format!("Volume not found: {}", e)))?;
+        }
         
         // Supported access modes
         let supported_modes = vec![
@@ -3214,6 +3258,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::CreateSnapshotRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::CreateSnapshotResponse>, tonic::Status> {
         use spdk_csi_driver::snapshot::SnapshotController;
+        spdk_csi_driver::csi_args::create_snapshot(request.get_ref())?;
         let snapshot_controller = SnapshotController::new(self.driver.clone());
         snapshot_controller.create_snapshot(request).await
     }
@@ -3223,6 +3268,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::DeleteSnapshotRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::DeleteSnapshotResponse>, tonic::Status> {
         use spdk_csi_driver::snapshot::SnapshotController;
+        spdk_csi_driver::csi_args::delete_snapshot(request.get_ref())?;
         let snapshot_controller = SnapshotController::new(self.driver.clone());
         snapshot_controller.delete_snapshot(request).await
     }
@@ -3242,6 +3288,7 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
         request: tonic::Request<spdk_csi_driver::csi::ControllerExpandVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::ControllerExpandVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::controller_expand(&req)?;
         let volume_id = req.volume_id.clone();
         let new_size_bytes = req.capacity_range
             .ok_or_else(|| tonic::Status::invalid_argument("capacity_range is required"))?
@@ -3518,6 +3565,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::node_stage(&req)?;
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         let publish_context = req.publish_context.clone();
@@ -4396,6 +4444,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeUnstageVolumeResponse>, tonic::Status> {
         println!("🔵 [GRPC] Node.NodeUnstageVolume called");
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::node_unstage(&req)?;
         let volume_id = req.volume_id.clone();
         let staging_target_path = req.staging_target_path.clone();
         
@@ -4776,6 +4825,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::node_publish(&req)?;
         eprintln!("📦 [NODE_PUBLISH] Volume ID: {}", req.volume_id);
         eprintln!("📦 [NODE_PUBLISH] Target path: {}", req.target_path);
         let volume_id = req.volume_id.clone();
@@ -5387,20 +5437,54 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 }
             }
 
-            let mut mount_cmd = std::process::Command::new("mount");
-            if readonly {
-                mount_cmd.args(["--bind", "-o", "ro", &staging_target_path, &target_path]);
+            // CSI publish is idempotent: a target already showing this
+            // staging mount is published. Binding again stacked one more
+            // mount per call -- csi-sanity's ten-publish spec left ten;
+            // NodeUnpublish took one off and answered OK, NodeUnstage
+            // pulled the device from under the other nine, and the next
+            // unmount hung in D state until ctrl_loss_tmo (2026-10-28).
+            let already_published = match spdk_csi_driver::mount_util::mount_at(&target_path) {
+                None => false,
+                Some(existing) => match spdk_csi_driver::mount_util::mount_at(&staging_target_path) {
+                    Some(staged)
+                        if staged.dev == existing.dev
+                            && staged.root == existing.root
+                            && existing.read_only == readonly =>
+                    {
+                        true
+                    }
+                    staged => {
+                        return Err(tonic::Status::already_exists(format!(
+                            "{} already holds a mount (dev {} root {}, read_only={}) that is not this \
+                             volume's staging mount ({:?}) with read_only={}; not stacking another on it",
+                            target_path,
+                            existing.dev,
+                            existing.root,
+                            existing.read_only,
+                            staged.map(|s| format!("dev {} root {}", s.dev, s.root)),
+                            readonly
+                        )));
+                    }
+                },
+            };
+            if already_published {
+                println!("✅ [NODE] {} already publishes volume {}: nothing to bind", target_path, volume_id);
             } else {
-                mount_cmd.args(["--bind", &staging_target_path, &target_path]);
-            }
-            let mount_output = mount_cmd
-                .output()
-                .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
+                let mut mount_cmd = std::process::Command::new("mount");
+                if readonly {
+                    mount_cmd.args(["--bind", "-o", "ro", &staging_target_path, &target_path]);
+                } else {
+                    mount_cmd.args(["--bind", &staging_target_path, &target_path]);
+                }
+                let mount_output = mount_cmd
+                    .output()
+                    .map_err(|e| tonic::Status::internal(format!("Failed to execute mount: {}", e)))?;
 
-            if !mount_output.status.success() {
-                let error = String::from_utf8_lossy(&mount_output.stderr);
-                println!("❌ [NODE] Mount failed: {}", error);
-                return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
+                if !mount_output.status.success() {
+                    let error = String::from_utf8_lossy(&mount_output.stderr);
+                    println!("❌ [NODE] Mount failed: {}", error);
+                    return Err(tonic::Status::internal(format!("Failed to mount: {}", error)));
+                }
             }
         }
 
@@ -5428,6 +5512,7 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeUnpublishVolumeResponse>, tonic::Status> {
         println!("🔵 [GRPC] Node.NodeUnpublishVolume called");
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::node_unpublish(&req)?;
         let volume_id = req.volume_id.clone();
         let target_path = req.target_path.clone();
         
@@ -5544,28 +5629,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                 // even if the backing NFS server is dead. Only fall back to
                 // force+lazy if the lazy-only attempt fails.
                 println!("🔍 [DEBUG] Step 3a: Trying 'umount -l {}' (lazy-only, non-blocking)...", target_path);
-                let lazy_result = std::process::Command::new("umount")
-                    .arg("-l")
-                    .arg(&target_path)
-                    .output();
+                // Bounded, not a bare `umount -l`: dropping the LAST mount of
+                // a superblock syncs it inside the umount syscall, so even a
+                // lazy unmount of a dead device sleeps in D state -- one did
+                // here and froze the node plugin until ctrl_loss_tmo
+                // (2026-10-28, jbd2_log_wait_commit under cleanup_mnt). The
+                // lazy unmount detaches the mount before that sync, so a
+                // timed-out one is gone from the mount table and needs no
+                // fallback (a second blocking umount would just hang too).
+                let lazy_ok =
+                    spdk_csi_driver::mount_util::bounded_umount(&target_path, true, 10).await;
+                if lazy_ok {
+                    println!("✅ [NODE] Lazy unmount succeeded");
+                } else {
+                    println!("⚠️ [NODE] Lazy unmount did not confirm (failed or timed out)");
+                }
 
-                let lazy_ok = match &lazy_result {
-                    Ok(output) if output.status.success() => {
-                        println!("✅ [NODE] Lazy unmount succeeded");
-                        true
-                    }
-                    Ok(output) => {
-                        let error = String::from_utf8_lossy(&output.stderr);
-                        println!("⚠️ [NODE] Lazy unmount failed: {}", error);
-                        false
-                    }
-                    Err(e) => {
-                        println!("⚠️ [NODE] Lazy unmount exec error: {}", e);
-                        false
-                    }
-                };
-
-                if !lazy_ok {
+                if !lazy_ok && spdk_csi_driver::mount_util::mount_at(&target_path).is_some() {
                     println!("🔍 [DEBUG] Step 3b: Falling back to 'timeout 10 umount -f -l {}'...", target_path);
                     let umount_result = std::process::Command::new("timeout")
                         .arg("10")
@@ -5587,6 +5667,26 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
                             println!("⚠️ [NODE] Force+lazy unmount exec error: {} (continuing cleanup)", e);
                         }
                     }
+                }
+
+                // Peel every mount still stacked on the target (the pre-fix
+                // NodePublish bound once per call), checking the mount table
+                // rather than probing the path. A mount that survives is an
+                // error, not a warning behind success: NodeUnstage would
+                // otherwise disconnect the device from under it.
+                let mut peeled = 0;
+                while spdk_csi_driver::mount_util::mount_at(&target_path).is_some() && peeled < 16 {
+                    spdk_csi_driver::mount_util::bounded_umount(&target_path, true, 10).await;
+                    peeled += 1;
+                }
+                if peeled > 0 {
+                    println!("🔧 [NODE] Peeled {} more mount(s) stacked on {}", peeled, target_path);
+                }
+                if spdk_csi_driver::mount_util::mount_at(&target_path).is_some() {
+                    return Err(tonic::Status::internal(format!(
+                        "{} is still a mountpoint after {} more unmounts; not reporting it unpublished",
+                        target_path, peeled
+                    )));
                 }
 
                 // Verify unmount — bounded: an unbounded mountpoint(1) here
@@ -5747,14 +5847,23 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         request: tonic::Request<spdk_csi_driver::csi::NodeGetVolumeStatsRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeGetVolumeStatsResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::node_get_volume_stats(&req)?;
+        spdk_csi_driver::csi_args::volume_path_exists(&req.volume_path)?;
         println!("🔵 [GRPC] Node.NodeGetVolumeStats called for volume: {}", req.volume_id);
         println!("   Volume path: {}", req.volume_path);
 
         use spdk_csi_driver::csi::{VolumeUsage, VolumeCondition, volume_usage::Unit};
 
-        // Get volume info to find the lvol UUID and node
+        // Get volume info to find the lvol UUID and node. A replicated
+        // volume carries a replica list instead of the single-replica
+        // node/lvol attributes read here; its health is the local raid's
+        // (below). Returning early for it left every r2/r3 volume with no
+        // usage and an abnormal "Volume not found" condition (csi-sanity,
+        // 2026-10-28).
+        let replicated = matches!(self.driver.get_replicas_from_pv(&req.volume_id).await, Ok(Some(_)));
         let volume_info = match self.driver.get_volume_info(&req.volume_id).await {
-            Ok(info) => info,
+            Ok(info) => Some(info),
+            Err(_) if replicated => None,
             Err(e) => {
                 println!("⚠️ [NODE] Could not get volume info: {}", e);
                 // Volume not found - report as abnormal
@@ -5769,7 +5878,10 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         };
 
         // Check if backing storage exists and is healthy
-        let health = self.driver.check_backing_storage_health(&volume_info.node_name, &volume_info.lvol_uuid).await;
+        let health = match &volume_info {
+            Some(info) => self.driver.check_backing_storage_health(&info.node_name, &info.lvol_uuid).await,
+            None => Ok(spdk_csi_driver::driver::BackingStorageHealth::replicated()),
+        };
 
         let (abnormal, message) = match health {
             Ok(h) if h.exists && h.healthy => {
@@ -5940,6 +6052,8 @@ impl spdk_csi_driver::csi::node_server::Node for MinimalNodeService {
         request: tonic::Request<spdk_csi_driver::csi::NodeExpandVolumeRequest>,
     ) -> Result<tonic::Response<spdk_csi_driver::csi::NodeExpandVolumeResponse>, tonic::Status> {
         let req = request.into_inner();
+        spdk_csi_driver::csi_args::node_expand(&req)?;
+        spdk_csi_driver::csi_args::volume_path_exists(&req.volume_path)?;
         println!("🔵 [GRPC] Node.NodeExpandVolume called for volume: {}", req.volume_id);
         println!("   Volume path: {}", req.volume_path);
         println!("   Capacity range: {:?}", req.capacity_range);

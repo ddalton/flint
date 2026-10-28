@@ -340,6 +340,58 @@ pub fn expand_refusal(vref: &VolumeRef) -> Option<&'static str> {
 /// The dead-controller reaper and orphan sweep key on this prefix.
 pub const VOLUME_NQN_PREFIX: &str = "nqn.2024-11.com.flint:volume:";
 
+/// SPDK's lvol name limit: `SPDK_LVOL_NAME_MAX` is 64 bytes with the
+/// terminator.
+pub const SPDK_LVOL_NAME_USABLE: usize = 63;
+
+/// The longest storage id (= CreateVolume name = PV name) that every lvol
+/// name minted below still fits: the hot-rejoin head
+/// `vol_<id>_replica_<i>_hr` with a one-digit index is 4 + id + 9 + 1 + 3
+/// bytes. At this length an epoch name keeps 10 digits of sequence and a
+/// single-replica user snapshot its 10-digit timestamp. Kubernetes names
+/// PVs `pvc-<uuid>` (40 bytes). csi-sanity (2026-10-28) found longer names
+/// failing CreateVolume with INTERNAL once SPDK refused the lvol (EINVAL),
+/// after other legs of the same volume had been made; CreateVolume now
+/// refuses them before any work.
+pub const MAX_STORAGE_ID_LEN: usize = 46;
+
+/// The replica count the naming budget covers: a one-digit leg index.
+pub const MAX_REPLICAS: u32 = 9;
+
+/// Why `name` cannot become a storage id, or `None` when it can. The
+/// alphabet is what the name parsers read back unambiguously: `_` splits
+/// the replica and snapshot suffixes (`vol_<id>_replica_<i>`,
+/// `snap_<vol>_<n>`), so an id holding `_replica_3` would read as another
+/// volume's leg, and the orphan sweep condemns by that reading. The
+/// backing-handle prefix is the driver's own (an RWX volume's NFS server
+/// stages under it) and resolves to a different storage id. Kubernetes PV
+/// names (DNS subdomains under `pvc-`) always pass.
+pub fn storage_id_refusal(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("name is required".to_string());
+    }
+    if name.len() > MAX_STORAGE_ID_LEN {
+        return Some(format!(
+            "name is {} bytes; this driver supports at most {MAX_STORAGE_ID_LEN} (the SPDK lvol \
+             names derived from it are limited to {SPDK_LVOL_NAME_USABLE} bytes)",
+            name.len()
+        ));
+    }
+    if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '.')) {
+        return Some(format!(
+            "name {name:?} holds {c:?}; this driver accepts ASCII letters, digits, '-' and '.' \
+             (the lvol, NQN and epoch names derived from it are parsed back)"
+        ));
+    }
+    if parse_backing_handle(name).is_some() {
+        return Some(format!(
+            "name {name:?} starts with {NFS_BACKING_PREFIX:?}, which this driver reserves for the \
+             NFS backing volumes of RWX volumes"
+        ));
+    }
+    None
+}
+
 /// Single/primary lvol for a volume: `vol_<id>` (driver.rs, clone paths,
 /// minimal_disk_service). Also applied to replica volume ids — a replica
 /// lvol is `lvol_name(replica_volume_id(vol, i))`.
@@ -1080,6 +1132,45 @@ mod tests {
     }
     fn sh(s: &str) -> StagedHandle {
         StagedHandle::new(s)
+    }
+
+    #[test]
+    fn every_lvol_name_fits_at_the_longest_storage_id() {
+        let id = format!("pvc-{}", "a".repeat(MAX_STORAGE_ID_LEN - 4));
+        assert_eq!(storage_id_refusal(&id), None);
+        let last = (MAX_REPLICAS - 1) as usize;
+        for name in [
+            lvol_name(&id),
+            replica_lvol_name(&sid(&id), last),
+            hr_head_lvol_name(&sid(&id), last),
+            epoch_snapshot_name(&id, 9_999_999_999),
+            // single-replica snapshots take the 10-digit unix seconds
+            user_snapshot_name(&id, 9_999_999_999),
+            temp_clone_snapshot_name(&id),
+        ] {
+            assert!(name.len() <= SPDK_LVOL_NAME_USABLE, "{name} is {} bytes", name.len());
+        }
+        // The bound is the hr head's, not a round number: one byte more
+        // and it no longer fits.
+        let over = format!("{id}a");
+        assert!(hr_head_lvol_name(&sid(&over), last).len() > SPDK_LVOL_NAME_USABLE);
+        assert!(storage_id_refusal(&over).unwrap().contains("at most 46"));
+    }
+
+    #[test]
+    fn a_storage_id_is_refused_when_its_derived_names_would_misparse() {
+        assert_eq!(storage_id_refusal(VOL), None);
+        assert_eq!(storage_id_refusal("Sanity-Vol.1-CCB0BC82"), None);
+        assert_eq!(storage_id_refusal("").as_deref(), Some("name is required"));
+        // `_replica_3` would read back as leg 3 of pvc-x — and the orphan
+        // sweep condemns by that reading.
+        let leg = "pvc-x_replica_3";
+        assert!(storage_id_refusal(leg).unwrap().contains("'_'"));
+        assert_eq!(classify_lvol(&lvol_name(leg)), Some(Owner::Pv("pvc-x".into())));
+        for bad in ["a/b", "a b", "a:b", "pvc~m1", "vol\u{e9}"] {
+            assert!(storage_id_refusal(bad).is_some(), "{bad:?} accepted");
+        }
+        assert!(storage_id_refusal(&backing_handle("pvc-x")).unwrap().contains("reserves"));
     }
 
     // -- the typed domains (F45 rec 2) ---------------------------------------
