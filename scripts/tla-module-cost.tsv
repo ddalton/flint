@@ -24,6 +24,7 @@
 FlintA2Probe	3	# measured 3/3 runs
 FlintAdmission	4	# measured 5/5 runs
 FlintCatchup	573	# NOT MEASURED on a runner — 12/12 runs took 573 s with TLC on the box at 2 workers under load (2026-10-28; the Probe and NoPin runs check IndInv)
+FlintLocalLeg	40	# NOT MEASURED on a runner — 9/9 runs took 24 s with TLC on the box at 2 workers (2026-10-28)
 FlintClaims	3	# measured 3/3 runs
 FlintClientIdentity	450	# NOT MEASURED — never reached before the 120-min timeout; 15 runs at 30s
 FlintComposition	530	# measured 33/33 runs
