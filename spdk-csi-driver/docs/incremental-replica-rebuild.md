@@ -626,6 +626,17 @@ failure window leaves no observation after the last tick; the survivors
 can disagree and no survivor is provably complete. That is §6's survivor
 divergence, accepted there, and this rule does not close it.
 
+**Liveness cost.** The rule makes every cut depend on one read of the
+consumer node's raid. A cut whose membership read fails yields an epoch
+trusted on no leg: safe, but every catch-up then waits for the next
+observation, where today's scheduler cuts regardless of the consumer node.
+The scheduler should treat a failed membership read as it treats a failed
+snapshot on a target, a failed cut that records nothing, so the cost is one
+missed cadence rather than a retained epoch nobody can use. A volume whose
+consumer node stays unreachable gets no new trusted epochs until it is
+restaged, which is also when its record is next observed; modelled as a
+FlintCatchupT arm (flint-e4).
+
 **Status.** Interim, shipped first: the *source tie* (each copy session
 records its source before copying; admission refuses unless every source is
 still `in_sync`, unchanged since the copy, and attached), the *base floor*
