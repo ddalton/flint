@@ -1,8 +1,33 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
-**Status:** design / proposal — **revision 5**
-**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12
+**Status:** design / proposal — **revision 6**
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
+
+**What changed in rev 6** (2026-10-28, after the three-replica model and a
+live reproduction): §5's correctness note bounded only the *destination's*
+divergence and assumed the copy source holds every acknowledged write. At
+three replicas that assumption fails inside the source's own failure
+window: raid1 acks a write via one surviving leg, the record keeps the
+failed leg `in_sync` for the monitor's detection lag (or for good, when the
+stale mark never lands), the scheduler cuts a "common" epoch on it over the
+control plane, and a replica rebuilt from it is admitted missing an acked
+write (`formal/FlintCatchupN.tla`; reproduced on kind 2026-10-28, an
+O_DIRECT write acknowledged and then unreadable). §5 now states the source's
+trust condition explicitly and moves trust from the leg to the **epoch**:
+an epoch on a leg is trusted iff the leg was a configured base of the
+authoritative raid at the cut and still configured at the first observation
+after every pre-cut write completed; the record carries that membership per
+epoch, written by the consumer node. The interim guards shipped first
+(source tie, base floor, forced re-revert) are a conservative encoding of
+the same rule. §7's hot-rejoin sequence takes its window source from the
+raid under the quiesce rather than from the record, bases the landing pad
+on its own newest trusted epoch, and reaps at its revert as §5 does. The
+record gains three positive writes (an unstage capture gated on being the
+consumer, the monitor gated on the consumer node, the fence flip marking
+the co-located leg stale) and names its residual: a consumer crash inside a
+failure window leaves survivor divergence (§6). Review and session asks:
+`docs/plans/catchup-design-review-2026-10-28.md`.
 
 **What changed in rev 5** (2026-06-12, after the full e2e cluster campaign):
 phases 0–5b were **validated end-to-end on a live 4-node cluster** — epoch
@@ -422,7 +447,10 @@ snapshot RPCs are far older.
   least `T_back` (the maximum NVMe-oF I/O timeout plus a clock-skew margin)
   **before** the raid declared R_dst failed — see the correctness note below
   for why. In practice: step back one extra epoch whenever `T_snap` is smaller
-  than the I/O timeout.
+  than the I/O timeout. **Rev 6:** that back-off is one instance of the
+  per-epoch trust rule ("Source trust" below): `E_b` is R_dst's own newest
+  *trusted* epoch, and every epoch copied from R_src must be trusted on
+  R_src.
   0. **Revert R_dst to its own `E_b`** — discard everything R_dst's head holds
      beyond that snapshot (its own unacked in-flight tail, or zombie loopback
      writes): there is no in-place revert RPC, so delete the head and re-create
@@ -540,6 +568,75 @@ admitting equalized bases as in-sync with no rebuild (§6, demonstrated live
 during the phase-0 recovery validation); the phase-3/4 cluster suite must pin
 that invariant with a regression test — an SPDK version bump could silently
 change it.
+
+### Source trust: the per-epoch rule (rev 6, 2026-10-28)
+
+The argument above bounds R_dst. It assumes R_src holds every acknowledged
+write, which the failure-window paragraph itself shows is false for a leg
+inside its own window: a write acked via another leg alone is missing from
+R_src, and an R_src epoch cut during the detection lag records that gap as
+"common". At two replicas the assumption is free, since the source is the
+sole survivor; at three it is not. `formal/FlintCatchupN.tla` (rev 7)
+violates admission faithfulness under both zombie premises at two failures,
+and the loss was reproduced live on kind on 2026-10-28.
+
+**The ground truth is the raid's base list.** raid1 fails a base at its
+first failed write (the `raid1.c` write-error path; the repro saw the leg
+fail as the stuck write completed), so a configured base of the
+authoritative raid has completed every acked write. The record's `in_sync`
+is a lagging proxy for that: written on the monitor's tick from any node
+that holds a raid, written at assembly from reachability alone, and never
+written at NodeUnstage, the one place a clean pod move still has the raid's
+last observation.
+
+**The rule.** The record carries, per retained epoch, the legs that were
+configured bases of the consumer's raid at the cut (the scheduler reads
+`bdev_raid_get_bdevs` on the VolumeAttachment's node as part of the cut).
+An epoch `E` on leg `s` is **trusted** iff `s` was configured at `E`'s cut
+**and** still configured at the first observation after every write
+submitted before the cut completed. The next cut or monitor tick after
+`T_back` is such an observation; a drained NodeUnstage capture is another,
+valid at once. Trust is per (leg, epoch), fixed at the cut, never revoked.
+An epoch copied onto a leg inherits trust only when the source epoch was
+trusted and the destination's base was trusted. Under this rule:
+
+- **Source selection.** A copy session (bulk, chase, final delta, the §7
+  window and backfill) uses a source only for epochs trusted on it. The
+  check runs before the copy starts; admission then checks only the final
+  delta's source.
+- **Base selection.** `E_b` is R_dst's own newest trusted epoch. For a
+  returning leg that is the `T_back` back-off made exact; for a head that
+  holds copies it is the base of the last trusted copy, which the interim
+  *base floor* approximates from below.
+- **§3's exclusion, enforced.** A leg co-located with a zombie consumer is
+  not configured in the authoritative raid after the fence flip, so its
+  later epochs are untrusted and it is neither cut nor copied from.
+- **The writer set (F36c)** is the configured set at the last observation.
+
+**Observations the record needs** (three positive writes): the base list
+captured at NodeUnstage before `bdev_raid_delete`, marking the
+non-configured legs stale in the same write, **only when this node is still
+the volume's consumer** (the attached VolumeAttachment names it and the
+raid's base list is within the record's writer set) — a late unstage on a
+former consumer sees a raid missing exactly the healthy legs fenced off
+from it and must write nothing; the raid-health monitor's stale marks
+gated on the VolumeAttachment's node; and the fence flip marking the
+co-located leg stale. **Residual:** a consumer that crashes inside a
+failure window leaves no observation after the last tick; the survivors
+can disagree and no survivor is provably complete. That is §6's survivor
+divergence, accepted there, and this rule does not close it.
+
+**Status.** Interim, shipped first: the *source tie* (each copy session
+records its source before copying; admission refuses unless every source is
+still `in_sync`, unchanged since the copy, and attached), the *base floor*
+(no base above the stale episode's first revert base) and a *forced
+re-revert* after any demotion. That is a conservative encoding of the rule;
+its cost is that a complete standby loses its copy whenever a source is
+merely unattached at the next stage (`spdk-csi-driver/src/catchup.rs`,
+`replica_sync.rs`; FlintCatchupN arms Tie, TieDemoteAsCode,
+TieFloorFirstOnly). Per-epoch membership itself is being modelled
+(FlintCatchupN `PerEpochTrust`) ahead of code; once it lands, the three
+interim guards are redundant.
 
 ### Tunables and space overhead
 
@@ -867,6 +964,30 @@ carried as one more `.patch` in `Dockerfile.spdk`.
 > Longhorn holds IO across snapshot→grow or relies solely on grow's internal
 > quiesce is open question §10-2 — our sequence above is the conservative
 > ordering that is correct regardless.
+
+> **Rev 6 amendment (2026-10-28; §5's per-epoch rule).** Three corrections
+> to the sequence above, found by `formal/FlintCatchupN.tla`'s hot-rejoin
+> arms and the kind repro, where an inline rejoin put a leg rebuilt from a
+> record-`in_sync` but raid-failed source into the live raid:
+>
+> 1. **The window's source is read from the raid, not the record.** R_src in
+>    step 2 must be a *configured base* of the live raid as read under the
+>    quiesce; `in_sync` per the record is not sufficient, since a leg in its
+>    failure window is `in_sync` and missing acked writes. `E_f` cut under
+>    the quiesce is trusted on every configured base: the quiesce is the
+>    observation.
+> 2. **The landing pad's base is its own newest trusted epoch**, not its
+>    chain top: a stale leg's chain top was never backed off, and a demoted
+>    standby's chain top is a copy. Step 4's backfill uses only epochs
+>    trusted on the backfill source, per §5.
+> 3. **The pad's revert reaps as §5's does**: epochs newer than the base,
+>    and for a full build every retained epoch name. Localization today
+>    reaps nothing, so a stale leg's old epoch survives a full-build
+>    localization and a second rejoin can re-base on it.
+>
+> The code for these awaits the bound-C model run (FlintCatchupN3CHotFix);
+> until it lands, hot rejoin carries the exposure the stage path's interim
+> guards close.
 
 ### What we deliberately do not port
 
