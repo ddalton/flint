@@ -608,6 +608,21 @@ trusted and the destination's base was trusted. Under this rule:
   returning leg that is the `T_back` back-off made exact; for a head that
   holds copies it is the base of the last trusted copy, which the interim
   *base floor* approximates from below.
+- **Admission at stage.** The final delta's source must hold every acked
+  write through the end of the previous raid lifetime, which only a
+  drained observation shows: the unstage capture after a clean unstage, or
+  the quiesce in §7. After a consumer crash no such observation exists, for
+  any survivor. The design does **not** wait for one. The assembly that
+  serves a head is itself the observation that defines the volume's history
+  from that point, so a standby equalized by the final delta to a leg the
+  new assembly admits as a member joins at that member's standing, no
+  better and no worse. After a crash that standing is §6's survivor
+  divergence, which the standby neither widens nor narrows. Refusing it
+  would cost a raid lifetime of redundancy for everything else on the
+  volume and would tie rebuild latency to the next clean unstage, which
+  the performance envelope below forbids. The capture is what makes the
+  members' heads provably complete rather than conventionally so; it is
+  not a precondition of admission.
 - **§3's exclusion, enforced.** A leg co-located with a zombie consumer is
   not configured in the authoritative raid after the fence flip, so its
   later epochs are untrusted and it is neither cut nor copied from.
