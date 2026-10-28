@@ -1,0 +1,66 @@
+FlintCatchupProof (TLAPS), 2026-10-28 -- the §5 catch-up is safe for every bound
+
+THEOREM Safety == Spec => []Inv                       (FlintCatchup.tla)
+  Inv = TypeOK /\ Inv_AdmitFaithful /\ Inv_MemberAgrees /\ Inv_SourceHoldsAcked
+under Shipped (Backoff, Revert, BaseInclusive, ReapNewer, FinalDelta,
+FullBuildReaps, FinalCutStrict all TRUE) with PinRetention FREE, and Const
+(MaxVer, MaxEpoch, MaxFails, Retain \in Nat, Retain >= 1; Blocks any set):
+any number of blocks, writes, epochs, failures and retained epochs.
+TLC had checked it at two bounds (3,514,284 and 560,079 distinct); this
+removes the bounds.
+
+Inductive invariant: the model's IndInv (FlintCatchup.tla) -- TypeOK, S's
+chain linear and reading through, one write in flight per block with A1
+and S's landed writes at or after their cut, the record's epoch names,
+head tracking while D is clean, Agree(e) for common epochs at or below the
+risk bound and for a cut D took clean, and the session (selected base,
+reverted head, full build, standby at its mark).  The §5 argument is two
+lemmas: CopyTracks (a base-inclusive copy from a base that agrees with S
+lands D on S's target epoch off S's later writes) and AdmExact (the final
+delta makes D's head EQUAL to S's; the strict final cut is what makes S's
+head the final epoch).
+
+Inputs (md5, asserted by rec.sh before tlapm ran):
+  b3bf1a2d1cdab3da2629148f19faefd2  FlintCatchup.tla        (= the TLC runs' model)
+  c96dd9e2e646ae31afc5666b35b17385  FlintCatchupProof.tla
+Box 10.0.0.249, /mnt/nvme/catchup-proof-2026-10-28; tlapm bfa9468
+(/mnt/nvme/tlaps/unpack), --toolbox 0 0 --cleanfp --stretch 4 --threads 4,
+under nice -n 10 (box shared with a kind cluster, load ~12).
+
+RECORD: "All 4265 obligations proved." 21m36s wall, 11.3 GB peak RSS
+(tlapm).  Some obligations time z3 out at 20 s under that load and are
+closed by Zenon or Isabelle; none is left failed or omitted.
+
+CONTROLS (the one Shipped line set FALSE, cache seeded from the record run;
+lines are FlintCatchupProof.tla's):
+  Backoff = FALSE         1/4265 failed: 1214 SelectBase (the selected base
+                          is no longer below the risk bound, so not Agree)
+  Revert = FALSE          1/4265 failed: 2157 RevertD (the reverted head is
+                          not its base)
+  ReapNewer = FALSE       1/4265 failed: 2157 RevertD (D keeps names above
+                          its base; same step as Revert: one step states both)
+  BaseInclusive = FALSE   3/4265 failed: 414 StageAdmitFacts (the final delta
+                          skips the mark's own blob), 2075 CopyAlignSame and
+                          2086 CopyAlignFresh (the copy starts above its base)
+  FinalDelta = FALSE      1/4265 failed: 414 StageAdmitFacts (admission on the
+                          last chase alone)
+  FullBuildReaps = FALSE  1/4265 failed: 2143 RevertD, full build (D keeps
+                          snapshots under recorded names)
+  FinalCutStrict = FALSE  1/4265 failed: 414 StageAdmitFacts (the final epoch
+                          may be a leftover older than S's head)
+  Each guard fails only the step that uses it, and TLC's seven mutation
+  worlds (FlintCatchupNo*.cfg, FlintCatchupFinalCutLeftover.cfg) refute the
+  same guards with traces.  PinRetention appears in no step: the proof is
+  for both values (FlintCatchupNoPinRetention.cfg checks IndInv without it).
+  (tlapm --toolbox exits 0 on failed obligations; read the summary line.)
+
+TLC on the same model (tla2tools 1.7.4, 2 workers, round 8): 12/12 as
+expected -- FlintCatchup / Probe 3,514,284 d38, F75 / ProbeF75 560,079 d40,
+NoPinRetention 4,660,758 d38 (all HOLD, the Probe and NoPin runs checking
+IndInv); NoBackoff, NoRevert, NoBaseInclusive, NoFinalDelta,
+FinalCutLeftover, NoReapNewer, NoFullBuildReap all violate Inv.  573 s in
+all.  Removing RECURSIVE Anc/Line (tlapm refuses any module defining one)
+left every count unchanged (compiled tla-mc, 2026-10-28).
+
+Logs (record + control outputs, TLC outputs) stay on the box; they are
+generated output.

@@ -36,7 +36,9 @@
 (*                                                                         *)
 (* THE THEOREMS.  Inv_AdmitFaithful: every admission leaves D's head equal *)
 (* to S's.  Inv_MemberAgrees: while D is a healthy raid member its head    *)
-(* equals S's on every block with no write in flight.                     *)
+(* equals S's on every block with no write in flight.  FlintCatchupProof   *)
+(* proves both for EVERY bound (TLAPS) from the inductive invariant IndInv *)
+(* below; TLC checks IndInv at two bounds (FlintCatchupProbe*.cfg).        *)
 (*                                                                         *)
 (* THE TIMING ASSUMPTIONS, stated as guards (the design's own premises):   *)
 (*   A1  an I/O outlives at most one cut boundary: a cut may begin only   *)
@@ -193,17 +195,11 @@ Init ==
 Latest == nextSeq - 1                      \* newest epoch ever recorded
 Pending(x) == \E w \in pend : w.b = x
 
-\* r's snapshot lineage: the snapshots reachable from its head by parent
-\* links (lineage_chain walks exactly these).  Parents always name an older
-\* epoch, so MaxEpoch steps reach the root.
-RECURSIVE Anc(_, _, _)
-Anc(r, e, n) == IF e = 0 \/ n = 0 THEN {} ELSE {e} \cup Anc(r, sPar[r][e], n - 1)
-Line(r) == Anc(r, hPar[r], MaxEpoch)
-
-\* S never reverts, so its lineage IS its set of present snapshots
-\* (Inv_SLinear checks the two agree on every state TLC visits).  The
-\* actions read SLine, which keeps recursion out of the next-state relation
-\* and so out of the TLAPS proof.
+\* S never reverts, so its lineage (the snapshots reachable from its head by
+\* parent links, which lineage_chain walks) IS its set of present snapshots:
+\* Inv_SLinear states the chain is linear, each parent the newest present
+\* snapshot below.  The actions read SLine.  No operator here is RECURSIVE:
+\* tlapm refuses a module that defines one, used or not.
 SLine == sPres["S"]
 
 \* One copy session: S's lineage elements in lo..target, each shallow-copied
@@ -673,8 +669,10 @@ Inv_SourceHoldsAcked == \A x \in Blocks : head["S"][x] >= acked[x]
 Inv == TypeOK /\ Inv_AdmitFaithful /\ Inv_MemberAgrees /\ Inv_SourceHoldsAcked
 
 (***************************************************************************)
-(* Candidate strengthenings for the inductive proof (checked by TLC as     *)
-(* plain invariants first; FlintCatchupProbe*.cfg).                        *)
+(* The inductive invariant (FlintCatchupProof.tla proves IndInv inductive *)
+(* for every bound; FlintCatchupProbe*.cfg check it at two).  Inv_Chain   *)
+(* is structure the proof does not need (D's chain never matters: only    *)
+(* contents do) and stays a probe.                                         *)
 (***************************************************************************)
 
 \* Blobstore structure: a blob's unallocated clusters read through to its
@@ -688,9 +686,26 @@ ChainOK(r) ==
   /\ FallThrough(r, hPar[r], hAl[r], head[r])
 Inv_Chain == ChainOK("S") /\ ChainOK("D")
 
-\* S never reverts: its snapshots are exactly its head's lineage, and every
-\* recorded epoch is one of them.
-Inv_SLinear == sPres["S"] = Line("S") /\ recorded \subseteq sPres["S"]
+\* S's chain is linear: each snapshot's parent is the newest present one
+\* below it, the head's the newest of all; every recorded epoch is present.
+Inv_SLinear ==
+  /\ \A e \in sPres["S"] :
+       /\ sPar["S"][e] \in sPres["S"] \cup {0} /\ sPar["S"][e] < e
+       /\ \A f \in sPres["S"] : f < e => f <= sPar["S"][e]
+  /\ hPar["S"] \in sPres["S"] \cup {0}
+  /\ \A f \in sPres["S"] : f <= hPar["S"]
+  /\ recorded \subseteq sPres["S"]
+
+\* Reading S: a snapshot (or the head) holds, on a block no newer blob
+\* allocated, what the older snapshot a holds (a = 0: nothing, zero).
+SC(a) == IF a = 0 THEN Zero ELSE sCon["S"][a]
+Inv_SReads ==
+  /\ \A t \in sPres["S"] : \A a \in sPres["S"] \cup {0} : \A x \in Blocks :
+       (a < t /\ \A f \in sPres["S"] : (a < f /\ f <= t) => x \notin sAl["S"][f])
+         => sCon["S"][t][x] = SC(a)[x]
+  /\ \A a \in sPres["S"] \cup {0} : \A x \in Blocks :
+       (x \notin hAl["S"] /\ \A f \in sPres["S"] : a < f => x \notin sAl["S"][f])
+         => head["S"][x] = SC(a)[x]
 
 \* S's clusters written at or after its cut e (resp. strictly after m): the
 \* blocks a base-inclusive copy from e (resp. a chase from m) still moves.
@@ -698,19 +713,128 @@ AllocFrom(e) == hAl["S"] \cup UNION {sAl["S"][f] : f \in {g \in sPres["S"] : g >
 AllocAfter(m) == hAl["S"] \cup UNION {sAl["S"][f] : f \in {g \in sPres["S"] : g > m}}
 InFlightS(x) == \E w \in pend : w.b = x /\ "S" \notin w.landed
 
-\* §5's base lemma as a state property: every base the selector may pick
-\* agrees with S's same-named epoch on every block the copy will not move.
+\* D's epoch e is S's epoch e except where S wrote at or after e, or a write
+\* that reached D is still in flight to S: §5's base lemma for one epoch.
+Agree(e) ==
+  \A x \in Blocks :
+    x \notin AllocFrom(e) => (sCon["D"][e][x] = sCon["S"][e][x] \/ InFlightS(x))
+Common == recorded \cap sPres["D"] \cap sPres["S"]
+
+\* Writes in flight: one per block, S always a target and never dropped,
+\* A1 (cutAt is the current or the previous name), and a write S took is
+\* S's head value, in a blob at or after the cut it was submitted under.
+PendUniq == \A w1, w2 \in pend : w1.b = w2.b => w1 = w2
+PendW(w) ==
+  /\ "S" \in w.to /\ "S" \notin w.dropped
+  /\ w.landed \subseteq w.to /\ w.dropped \subseteq w.to
+  /\ w.landed \cap w.dropped = {}
+  /\ w.recAt = w.cutAt - 1
+  /\ w.cutAt \in {nextSeq - 1, nextSeq}
+  /\ (cutK # 0 \/ nextSeq \in sPres["S"]) => w.cutAt = nextSeq
+  /\ "S" \in w.landed => (head["S"][w.b] = w.v /\ w.b \in AllocFrom(w.cutAt))
+  /\ acked[w.b] < w.v /\ w.v <= ver
+PendGlobal ==
+  /\ \A x \in Blocks : acked[x] <= ver
+  /\ attached => "S" \in members
+  /\ ~attached => (members = {} /\ pend = {})
+Inv_Pend == PendUniq /\ (\A w \in pend : PendW(w)) /\ PendGlobal
+
+\* Where D may be, given its record state.
+Inv_Phase ==
+  /\ dPath = "ok" => (dState = "insync" /\ riskRec = NoRisk)
+  /\ (attached /\ dPath = "ok") => "D" \in members
+  /\ "D" \in members => dPath \in {"ok", "failing"}
+  /\ dState # "insync" => dPath \in {"out", "back"}
+  /\ dState = "standby" => dPath = "back"
+  /\ dState = "insync" => (sb = -1 /\ reverted = -1)
+  /\ dState = "standby" => sb = -1
+  /\ (dState = "stale" /\ reverted # -1) => sb = reverted
+  /\ (cutK # 0 /\ "D" \in cutTgt) =>
+       (dState = "insync" \/ (dState = "stale" /\ sb = -1 /\ reverted = -1))
+  /\ riskRec # NoRisk => riskRec < nextSeq
+
+\* Epoch names: the record is a run of names ending at the newest, a cut
+\* in progress is the next name, S holds no name past it and D none past
+\* the newest except the in-progress cut it took.
+Inv_Epochs ==
+  /\ cutK # 0 => (cutK = nextSeq /\ "S" \in cutTgt /\ cutDone \subseteq cutTgt)
+  /\ cutK = 0 => (cutTgt = {} /\ cutDone = {})
+  /\ recorded \subseteq 1..(nextSeq - 1)
+  /\ nextSeq > 1 => nextSeq - 1 \in recorded
+  /\ \A e \in sPres["S"] : e <= nextSeq
+  /\ \A e \in sPres["D"] : e < nextSeq \/ (e = cutK /\ "D" \in cutDone)
+  /\ "S" \in cutDone => cutK \in sPres["S"]
+  /\ "D" \in cutDone => cutK \in sPres["D"]
+
+\* While D took every write since it was last whole: its head is S's on
+\* every block with no write in flight, and per write in flight each side
+\* that took it holds it.
+HeadsTracked == riskRec = NoRisk /\ (dState = "insync" \/ (cutK # 0 /\ "D" \in cutTgt))
+HeadsW(w) ==
+  /\ "D" \in w.to /\ "D" \notin w.dropped
+  /\ "D" \in w.landed => head["D"][w.b] = w.v
+  /\ ("S" \in w.landed <=> "D" \in w.landed) => head["D"][w.b] = head["S"][w.b]
+Inv_Heads ==
+  HeadsTracked =>
+    /\ \A x \in Blocks : ~Pending(x) => head["D"][x] = head["S"][x]
+    /\ \A w \in pend : HeadsW(w)
+
+\* Every common epoch at or below the risk bound agrees; so does a cut in
+\* progress that D took while clean (against S's head until S takes it).
+AgreeLow == \A e \in Common : e <= riskRec => Agree(e)
+CutVsHead ==
+  \A x \in Blocks : x \notin hAl["S"] => (sCon["D"][cutK][x] = head["S"][x] \/ InFlightS(x))
+AgreeCut ==
+  (cutK # 0 /\ "D" \in cutDone /\ riskRec = NoRisk) =>
+    IF cutK \in sPres["S"] THEN Agree(cutK) ELSE CutVsHead
+Inv_Agree == AgreeLow /\ AgreeCut
+
+\* The catch-up session: a selected base agrees, and so does every common
+\* epoch below it; a reverted head IS its base, with nothing newer left on
+\* D; a full build's head is empty, with nothing left at a recorded name;
+\* a standby is S at its mark except where S wrote after the mark.
+SessSel == (dState = "stale" /\ sb # -1) => recorded # {}
+SessBase ==
+  (dState = "stale" /\ sb > 0) =>
+    /\ sb < nextSeq
+    /\ Agree(sb)
+    /\ \A e \in Common : e <= sb => Agree(e)
+SessRev ==
+  (dState = "stale" /\ reverted > 0) =>
+    /\ head["D"] = sCon["D"][reverted]
+    /\ \A e \in sPres["D"] : e <= reverted
+    /\ \A e \in Common : Agree(e)
+SessFull ==
+  (dState = "stale" /\ reverted = 0) =>
+    /\ head["D"] = Zero
+    /\ recorded # {}
+    /\ \A e \in sPres["D"] : \A f \in recorded : e < f
+StandbyAt(m) ==
+  \A x \in Blocks : x \notin AllocAfter(m) => (head["D"][x] = sCon["S"][m][x] \/ InFlightS(x))
+SessStandby ==
+  dState = "standby" =>
+    /\ mark \in 1..(nextSeq - 1)
+    /\ StandbyAt(mark)
+    /\ \A e \in sPres["D"] : e <= mark
+    /\ \A e \in Common : Agree(e)
+Inv_Session == SessSel /\ SessBase /\ SessRev /\ SessFull /\ SessStandby
+
+IndInv ==
+  /\ TypeOK
+  /\ ~badAdmit
+  /\ Inv_SourceHoldsAcked
+  /\ Inv_SLinear /\ Inv_SReads
+  /\ Inv_Pend /\ Inv_Phase /\ Inv_Epochs
+  /\ Inv_Heads /\ Inv_Agree /\ Inv_Session
+
+\* The two probes the first proof sketch named (implied by IndInv).
 Inv_BaseSafe ==
   dState = "stale" =>
     \A e \in BaseCandidates : \A x \in Blocks :
       x \notin AllocFrom(e) => (sCon["D"][e][x] = sCon["S"][e][x] \/ InFlightS(x))
-
-\* A standby is S at its mark, except where S wrote after the mark or a
-\* write that reached D is still in flight to S.
 Inv_StandbyTracks ==
   dState = "standby" =>
-    /\ mark \in sPres["S"]
-    /\ \A x \in Blocks : x \notin AllocAfter(mark) =>
-         (head["D"][x] = sCon["S"][mark][x] \/ InFlightS(x))
+    \A x \in Blocks : x \notin AllocAfter(mark) =>
+      (head["D"][x] = sCon["S"][mark][x] \/ InFlightS(x))
 
 =============================================================================
