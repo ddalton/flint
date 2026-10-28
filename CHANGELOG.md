@@ -104,6 +104,25 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A file created while another's removal was still being recorded is
+  no longer dropped from the tier** (2026-10-28;
+  `spdk-csi-driver/src/tier/identity.rs`, `nfs/v4/operations/fileops.rs`).
+  REMOVE, and a RENAME over an existing file, record the dead file by its
+  inode number and apply that record at a later drain, after the unlink.
+  ext4 hands a freed inode number straight back, so a file created in that
+  window could be given the same number. The drain then treated the new
+  file as the removed one: it deleted the new file's dirty row and forgot
+  its capture state and eviction marker. The write was acknowledged, but
+  the file was never uploaded to the bucket. The handlers now hold the dead
+  file's inode open (an `O_PATH` descriptor taken before the unlink) until
+  its record has applied, so no new file can take the number in between.
+  Found through a lib-suite flake. In 3 of 5 full runs a pNFS drill test's
+  own removals cleared the eviction markers of tier tests' new files, and
+  in 2 a tier test failed; with the fix, none of 10 full runs failed a tier
+  test. Not reproduced on a live hub: the production window was
+  read from the code, and it needs a create to land between a REMOVE's
+  unlink and its drain.
+
 - **A rebuilt replica is no longer admitted holding a copy from a source
   that was already missing acknowledged writes** (2026-10-28;
   `spdk-csi-driver/src/catchup.rs`, `replica_sync.rs`). The catch-up picks

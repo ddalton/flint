@@ -2746,9 +2746,15 @@ mod tests {
         moved: (u64, u64),
         new_path: &Path,
         covered: Option<(u64, u64)>,
+        covered_pin: crate::tier::identity::InodePin,
     ) {
         for _ in 0..50 {
-            crate::tier::identity::note_rename(Some(moved), new_path, covered);
+            crate::tier::identity::note_rename(
+                Some(moved),
+                new_path,
+                covered,
+                covered_pin.clone(),
+            );
             let _ = crate::tier::durable::drain_pending(&rigg.backend).await;
             let moved_ok = rigg
                 .backend
@@ -2799,9 +2805,13 @@ mod tests {
             let content = format!("packfile generation {} payload", i).into_bytes();
             std::fs::write(&tmp, &content).unwrap();
             note_and_land(&r, &tmp, Mutation::Whole).await;
+            // Pinned before the rename frees it, as fileops does.
+            let pin = prev_ident
+                .map(|p| crate::tier::identity::InodePin::of(&final_path, p))
+                .unwrap_or_default();
             std::fs::rename(&tmp, &final_path).unwrap();
             let moved = ident(&final_path);
-            rename_and_land(&r, moved, &final_path, prev_ident).await;
+            rename_and_land(&r, moved, &final_path, prev_ident, pin).await;
 
             // The tick sequence, run deterministically so the OUTCOME
             // is assertable per iteration.
@@ -2854,7 +2864,7 @@ mod tests {
 
         let b = r.root.join("b.bin");
         std::fs::rename(&a, &b).unwrap();
-        rename_and_land(&r, idn, &b, None).await;
+        rename_and_land(&r, idn, &b, None, Default::default()).await;
 
         r.orch.tick().await;
         let g2 = r.orch.generation_of(idn.0, idn.1).unwrap();
@@ -3086,9 +3096,11 @@ mod tests {
         r.orch.tick().await;
         assert!(r.mem.head("t/victim.bin").await.is_ok());
 
+        // Pinned before the unlink frees it, as fileops does.
+        let pin = crate::tier::identity::InodePin::of(&f, idn);
         std::fs::remove_file(&f).unwrap();
         for _ in 0..50 {
-            crate::tier::identity::note_remove(idn, 0);
+            crate::tier::identity::note_remove(idn, 0, pin.clone());
             let _ = crate::tier::durable::drain_pending(&r.backend).await;
             if r.backend
                 .tier_list_tombstones()
@@ -3358,7 +3370,7 @@ mod tests {
         for _ in 0..50 {
             // ONE name remains — exactly what fileops passes from the
             // pre-unlink stat.
-            crate::tier::identity::note_remove(idn, 1);
+            crate::tier::identity::note_remove(idn, 1, Default::default());
             let _ = crate::tier::durable::drain_pending(&r.backend).await;
             if r.backend
                 .tier_list_tombstones()
@@ -3414,7 +3426,7 @@ mod tests {
         note_and_land(&r, &first, Mutation::Whole).await;
         std::fs::remove_file(&first).unwrap();
         assert!(second.exists(), "precondition: the inode still has a name");
-        crate::tier::identity::note_remove(idn, 1);
+        crate::tier::identity::note_remove(idn, 1, Default::default());
         let _ = crate::tier::durable::drain_pending(&r.backend).await;
 
         // Tick 1 discovers the name is gone and re-points the row;

@@ -3943,12 +3943,16 @@ impl FileOperationHandler {
                 // The link count is read from the SAME pre-unlink
                 // stat as the identity: `note_remove` needs to know
                 // whether this unlink takes the last name, and after
-                // the unlink nothing can tell it.
+                // the unlink nothing can tell it. The pin holds the
+                // inode from before the unlink until the event has
+                // applied, so no new file can take its number first.
                 #[cfg(unix)]
                 let tier_ident = (crate::tier::capture::enabled() && metadata.is_file())
                     .then(|| {
                         use std::os::unix::fs::MetadataExt;
-                        ((metadata.dev(), metadata.ino()), metadata.nlink())
+                        let ident = (metadata.dev(), metadata.ino());
+                        let pin = crate::tier::identity::InodePin::of(&target_path, ident);
+                        (ident, metadata.nlink(), pin)
                     });
                 // ── §2A leg A3 ──────────────────────────────────────
                 // Removing a NAME is permission on the directory that
@@ -4065,8 +4069,12 @@ impl FileOperationHandler {
                         // A7: tombstone the removed file's generation
                         // (durable pre-ack via the dispatcher drain).
                         #[cfg(unix)]
-                        if let Some(id) = tier_ident {
-                            crate::tier::identity::note_remove(id.0, id.1.saturating_sub(1));
+                        if let Some((ident, nlink, pin)) = tier_ident {
+                            crate::tier::identity::note_remove(
+                                ident,
+                                nlink.saturating_sub(1),
+                                pin,
+                            );
                         }
                         RemoveRes {
                             status: Nfs4Status::Ok,
@@ -4256,14 +4264,20 @@ impl FileOperationHandler {
         // A7: the covered destination's identity, resolved BEFORE the
         // rename destroys its last name — rename-over must tombstone
         // its generation atomically with the rename's durable half.
+        // The pin holds the covered inode from before the rename until
+        // the event has applied (`tier::identity::InodePin`).
         #[cfg(unix)]
         let mut tier_covered: Option<(u64, u64)> = None;
+        #[cfg(unix)]
+        let mut tier_covered_pin = crate::tier::identity::InodePin::default();
         if !is_self_rename {
             if let Ok(dest_meta) = dest_path.symlink_metadata() {
                 #[cfg(unix)]
                 if crate::tier::capture::enabled() && dest_meta.is_file() {
                     use std::os::unix::fs::MetadataExt;
-                    tier_covered = Some((dest_meta.dev(), dest_meta.ino()));
+                    let covered = (dest_meta.dev(), dest_meta.ino());
+                    tier_covered = Some(covered);
+                    tier_covered_pin = crate::tier::identity::InodePin::of(&dest_path, covered);
                 }
                 let src_is_dir = source_path
                     .symlink_metadata()
@@ -4427,7 +4441,12 @@ impl FileOperationHandler {
                         .filter(|m| m.is_file())
                         .map(|m| (m.dev(), m.ino()));
                     if moved.is_some() || tier_covered.is_some() {
-                        crate::tier::identity::note_rename(moved, &dest_path, tier_covered);
+                        crate::tier::identity::note_rename(
+                            moved,
+                            &dest_path,
+                            tier_covered,
+                            tier_covered_pin,
+                        );
                     }
                 }
                 // Real brackets per directory (were fabricated 1→2
@@ -5512,6 +5531,105 @@ mod tests {
             }
         }
         assert!(landed, "the rename's identity event never landed in our backend");
+    }
+
+    /// A REMOVE frees its file's inode at the unlink, but the identity
+    /// event naming it by `(dev, ino)` applies later, at a drain. The
+    /// handler must pin the inode across that gap: ext4 hands a freed
+    /// number straight back, and the drain would then delete a NEW
+    /// file's dirty row and forget its capture state. A parallel test's
+    /// drain may take our event (and its pin) at any moment, so a round
+    /// counts only if the event is still queued after our creates.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn remove_pins_the_dead_inode_until_its_event_applies() {
+        let _excl = crate::tier::capture::test_exclusive();
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, temp) = create_test_handler();
+        let be: std::sync::Arc<dyn crate::state_backend::StateBackend> =
+            std::sync::Arc::new(crate::state_backend::memory::MemoryBackend::new());
+        let mut ctx = CompoundContext::new(0);
+        assert_eq!(handler.handle_putrootfh(PutRootFhOp, &mut ctx).status, Nfs4Status::Ok);
+
+        let mut seen = false;
+        for round in 0..50 {
+            let name = format!("victim-{}.bin", round);
+            std::fs::write(temp.path().join(&name), b"soon gone").unwrap();
+            let md = std::fs::metadata(temp.path().join(&name)).unwrap();
+            let ident = (md.dev(), md.ino());
+            let res = handler.handle_remove(RemoveOp { target: name }, &ctx).await;
+            assert_eq!(res.status, Nfs4Status::Ok);
+            let reused = fresh_files_taking(temp.path(), round, ident);
+            let queued = crate::tier::identity::queued_pin_of(ident);
+            let _ = crate::tier::durable::drain_pending(&be).await;
+            let Some(held) = queued else { continue };
+            assert_eq!(reused, None, "a file created while the REMOVE's event was queued took its inode");
+            let held = held.expect("REMOVE must pin the inode it frees");
+            assert_eq!((held.dev(), held.ino(), held.nlink()), (ident.0, ident.1, 0));
+            seen = true;
+            break;
+        }
+        assert!(seen, "the REMOVE's event was never still queued when we looked");
+    }
+
+    /// Rename-over frees the covered file's inode the same way.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn rename_over_pins_the_covered_inode_until_its_event_applies() {
+        let _excl = crate::tier::capture::test_exclusive();
+        use std::os::unix::fs::MetadataExt;
+        crate::tier::capture::force_enable();
+        let (handler, temp) = create_test_handler();
+        let be: std::sync::Arc<dyn crate::state_backend::StateBackend> =
+            std::sync::Arc::new(crate::state_backend::memory::MemoryBackend::new());
+        let mut ctx = CompoundContext::new(0);
+        assert_eq!(handler.handle_putrootfh(PutRootFhOp, &mut ctx).status, Nfs4Status::Ok);
+        ctx.saved_fh = ctx.current_fh.clone();
+
+        let mut seen = false;
+        for round in 0..50 {
+            let (src, dst) = (format!("new-{}.bin", round), "final.bin".to_string());
+            std::fs::write(temp.path().join(&src), b"new").unwrap();
+            std::fs::write(temp.path().join(&dst), b"covered").unwrap();
+            let md = std::fs::metadata(temp.path().join(&dst)).unwrap();
+            let covered = (md.dev(), md.ino());
+            let res = handler
+                .handle_rename(RenameOp { oldname: src, newname: dst }, &ctx)
+                .await;
+            assert_eq!(res.status, Nfs4Status::Ok);
+            let reused = fresh_files_taking(temp.path(), round, covered);
+            let queued = crate::tier::identity::queued_pin_of(covered);
+            let _ = crate::tier::durable::drain_pending(&be).await;
+            let Some(held) = queued else { continue };
+            assert_eq!(reused, None, "a file created while the rename's event was queued took the covered inode");
+            let held = held.expect("rename-over must pin the inode it frees");
+            assert_eq!((held.dev(), held.ino(), held.nlink()), (covered.0, covered.1, 0));
+            seen = true;
+            break;
+        }
+        assert!(seen, "the rename's event was never still queued when we looked");
+    }
+
+    /// Create files beside a just-freed inode and return the one that
+    /// was handed its number, if any (ext4 hands it straight back).
+    #[cfg(target_os = "linux")]
+    fn fresh_files_taking(
+        dir: &std::path::Path,
+        round: usize,
+        dead: (u64, u64),
+    ) -> Option<std::path::PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        let mut took = None;
+        for i in 0..32 {
+            let p = dir.join(format!("fresh-{}-{}.bin", round, i));
+            std::fs::write(&p, b"new").unwrap();
+            let m = std::fs::metadata(&p).unwrap();
+            if (m.dev(), m.ino()) == dead {
+                took = Some(p);
+            }
+        }
+        took
     }
 
     /// Step 10 (C2): GETATTR of an evicted file serves the LOGICAL
