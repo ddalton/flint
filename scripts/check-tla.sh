@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and eighty-three runs, ALL required.
+# Two hundred and ninety-five runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -19,10 +19,11 @@
 #
 #   98 FlintReplication    34 ForgeSync           33 FlintComposition
 #   15 FlintExtents        15 FlintClientIdentity  12 FlintCsiMount
-#   11 FlintExtentsProbe   11 FlintDelegRecall      8 FlintTierEpoch
-#    7 FlintTruncate        7 FlintTierSession      7 FlintTierMarker
-#    7 FlintShareDisk       5 FlintAdmission        4 FlintSnapshots
-#    3 FlintClaims          3 FlintA2Probe          3 ForgeMergeChain)
+#   12 FlintCatchup        11 FlintExtentsProbe    11 FlintDelegRecall
+#    8 FlintTierEpoch       7 FlintTruncate         7 FlintTierSession
+#    7 FlintTierMarker      7 FlintShareDisk        5 FlintAdmission
+#    4 FlintSnapshots       3 FlintClaims           3 FlintA2Probe
+#    3 ForgeMergeChain)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -536,7 +537,7 @@ trap print_profile EXIT
 
 # ── SHARDING: which modules does THIS process check? ───────────────────
 #
-# The gate is 283 TLC runs.  On the 4-vCPU CI runner that does not fit in
+# The gate is 295 TLC runs.  On the 4-vCPU CI runner that does not fit in
 # a job, so the workflow splits it across a matrix and each process is
 # handed a group of modules in TLA_MODULES (space-separated).  Empty or
 # unset means the whole gate, which is what a developer running this by
@@ -920,6 +921,49 @@ strict_run FlintReplication FlintReplicationEmptyHeadU11Fixed.cfg "fallback skip
 strict_run FlintReplication FlintReplicationEmptyHeadRestoreFixed.cfg "fallback skips empty heads + broader rule, restore (the clone serves alone until the placeholders are built)"
 strict_run FlintReplication FlintReplicationEmptyHeadFreshFixed.cfg "fallback skips empty heads + broader rule, fresh volume"
 strict_run FlintReplication FlintReplicationGateRollingPolicy.cfg "gate policy strict, 3-leg rolling upgrade (a writer down while another leg catches up)"
+
+# ── FlintCatchup.tla: the §5 catch-up at block-content level (2026-10-27) ───
+#
+# FlintReplication models content as a write-set and a cut as one event;
+# FlintSnapshots gives the target no snapshots of its own.  Neither can state
+# §5's argument (F75's write-up §7).  This module can: two replicas, each
+# with its OWN epoch snapshots (content, allocated clusters, parent), skewed
+# per-replica cuts, raid1 writes landing leg by leg, zombie writes, the
+# blobstore's absorb-on-delete GC, and the catch-up exactly as catchup_stale /
+# chase_standby / admit_one_standby run it.  The back-off premise (A2) is a
+# ghost bound; the real T_back is wall-clock, so the selector may pick ANY
+# eligible base, or none (the full build).
+#
+# Its first runs found two data paths in shipped code, both fixed on main
+# (8da1efb5, c8f6c784):
+#   * admit_one_standby's final cut is named latest+1 — the scheduler's next
+#     name — and execute_cut takes EEXIST as the cut, so an aborted
+#     scheduler cut's leftover on the source (older than its head) became
+#     the "final" epoch and the standby was admitted without the writes after
+#     it (FinalCutLeftover; fix: the strict cut, defer).
+#   * F75 through the FULL BUILD: revert_head_to_empty left D's snapshots
+#     under retained names, one of them cut in the detection lag with a
+#     zombie write; the align took it as converged and a second failure's
+#     time back-off chose it as the base (NoFullBuildReap; fix: reap the
+#     retained names on the full build too).
+#
+# Two bounds, both complete in minutes: one failure / two writes / three
+# epochs / one retained, and the two-failure bound (one write, four epochs,
+# two retained) the F75 corners need.  The Probe runs carry the TLAPS
+# proof's strengthening invariants.  PinRetention is NOT a safety guard:
+# the lineage-coverage check is (NoPinRetention must HOLD).
+strict_run FlintCatchup FlintCatchup.cfg "catch-up strict (every §5 guard, both reaps, the strict final cut)"
+strict_run FlintCatchup FlintCatchupF75.cfg "catch-up strict, two-failure bound (the second-failure corners)"
+strict_run FlintCatchup FlintCatchupProbe.cfg "catch-up proof invariants (blob chain, S linear, base lemma, standby tracking)"
+strict_run FlintCatchup FlintCatchupProbeF75.cfg "catch-up proof invariants, two-failure bound"
+strict_run FlintCatchup FlintCatchupNoPinRetention.cfg "catch-up without the retention pin (the lineage-coverage check is the safety; the pin buys progress)"
+mutation_run FlintCatchup FlintCatchupNoBackoff.cfg "catch-up mutation (Backoff=FALSE: a base holding a zombie or missing a write)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoRevert.cfg "catch-up mutation (Revert=FALSE: D keeps its own tail)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoBaseInclusive.cfg "catch-up mutation (BaseInclusive=FALSE: the base's own delta is skipped)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoFinalDelta.cfg "catch-up mutation (FinalDelta=FALSE: admission on the last chase alone)" "Inv"
+mutation_run FlintCatchup FlintCatchupFinalCutLeftover.cfg "SHIPPED admission (FinalCutStrict=FALSE: the final cut adopts an aborted cut's leftover)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoReapNewer.cfg "pre-F75 revert (ReapNewer=FALSE: a pre-failure leftover becomes a later base)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoFullBuildReap.cfg "SHIPPED full build (FullBuildReaps=FALSE: F75 through the full build)" "Inv"
 
 mutation_run FlintClaims FlintClaimsNoGrace.cfg "F50 mutation (MarkerGrace=FALSE: scrub under a live window, cold admission)" "Inv_NoColdAdmission"
 
