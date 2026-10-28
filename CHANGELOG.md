@@ -19,8 +19,9 @@ covered by the stability guarantee.
   kind cluster with SPDK on in-memory disks, and runs csi-sanity v5.6.0 at
   one and three replicas in two modes: raw, against the controller (argument
   checks, error codes, PV-free idempotency), and through `coshim`, a test-only
-  gRPC proxy that does the external-provisioner's part (PV per CreateVolume,
-  `pvc-<uuid>` names) so the calls that read the PV are reached. After each
+  gRPC proxy that does the external-provisioner's and attacher's parts (a PV
+  per CreateVolume under a `pvc-<uuid>` name, a VolumeAttachment per
+  ControllerPublish) so the calls that read them are reached. After each
   pass a census lists the lvols, PVs and host NVMe controllers left behind.
   The first runs found the fixes listed below; the known remaining failures
   are in `tests/sanity/README.md`.

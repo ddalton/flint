@@ -31,12 +31,18 @@ mount and staging directories). `summary.txt` collects one line per pass.
   (`identity::MAX_STORAGE_ID_LEN`), so every spec that creates a volume
   fails here with INVALID_ARGUMENT, by design.
 - **shim** (`shim-r1`, `shim-r3`): csi-sanity talks to `coshim`, which
-  forwards every call to the controller and does the external-provisioner's
-  two jobs: it names each volume `pvc-<uuid>` (derived from the suite's
-  name) and writes the PV from the CreateVolume response, and deletes the
-  PV after DeleteVolume. The driver keeps a volume's placement in its PV,
-  so without one ControllerPublish, the snapshot and expand paths and
-  NodeStage's restage fail NOT_FOUND before testing anything.
+  forwards every call to the controller and does what Kubernetes would do
+  around it. As the external-provisioner, it names each volume `pvc-<uuid>`
+  (derived from the suite's name), writes the PV from the CreateVolume
+  response and deletes it after DeleteVolume: the driver keeps a volume's
+  placement in its PV, so without one ControllerPublish, the snapshot and
+  expand paths and NodeStage's restage fail NOT_FOUND before testing
+  anything. As the attacher, it writes an attached VolumeAttachment after
+  each ControllerPublish and deletes it after ControllerUnpublish: the node
+  reconcile derives each export's allowed hosts from it, and without one a
+  consumer was fenced off its own volume's legs mid-spec (a raid base
+  dropped and the leg went stale). Its attachments name their own attacher
+  (`coshim.sanity`), so the driver's external-attacher sidecar ignores them.
 
 `coshim` is test tooling only: it is not part of the driver, the image or
 the chart, and the driver does not know it exists.
@@ -48,6 +54,9 @@ the chart, and the driver does not know it exists.
   answers OK, where the spec wants ALREADY_EXISTS. Snapshot names embed
   the source volume, so a collision across sources is never seen;
   Kubernetes names snapshots `snapshot-<uid>` and never sends one.
+- shim-r3: cloning a replicated volume answers FAILED_PRECONDITION, by
+  design until the clone path supports replicated sources (snapshot and
+  restore does).
 - shim-r3: ControllerExpand of a replicated volume that was never staged
   answers UNAVAILABLE ("no replica sync record"): the expansion guard
   refuses without a record proving every leg holds the acknowledged

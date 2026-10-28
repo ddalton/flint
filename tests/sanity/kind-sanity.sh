@@ -223,7 +223,7 @@ run_pass() {
   done
   {
     echo "lvols: $(lvols)"
-    echo "coshim PVs: $(kubectl get pv -l app.kubernetes.io/managed-by=coshim --no-headers 2>/dev/null | wc -l)"
+    echo "coshim PVs: $(kubectl get pv -l app.kubernetes.io/managed-by=coshim --no-headers 2>/dev/null | wc -l), VolumeAttachments: $(kubectl get volumeattachment -l app.kubernetes.io/managed-by=coshim --no-headers 2>/dev/null | wc -l)"
     echo "host nvme: $(for c in /sys/class/nvme/nvme*; do [ -e "$c" ] || continue; printf '%s:%s:%s ' "${c##*/}" "$(cat "$c/transport")" "$(cat "$c/state")"; done)"
     echo "leftover in the mount/staging dirs: $(wc -l < "$out/rmpath.log")"
   } > "$out/census.txt"

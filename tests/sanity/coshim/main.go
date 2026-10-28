@@ -15,6 +15,12 @@
 //     through, so the driver's own refusal is what csi-sanity sees. On
 //     success the PV is written from the response.
 //   - DeleteVolume: on success the PV is deleted.
+//   - ControllerPublishVolume / ControllerUnpublishVolume: on success a
+//     VolumeAttachment for (PV, node) is written as attached, or deleted.
+//     The node reconcile derives each export's allowed hosts from it, so
+//     without one a consumer was fenced off its own volume's legs mid-spec
+//     (a raid base dropped, the leg went stale). The attachment names its
+//     own attacher, so the driver's external-attacher sidecar leaves it be.
 //
 // Every other call is forwarded byte for byte. With -map-names=false the
 // names are forwarded as they come; csi-sanity's maximum-length test is
@@ -67,8 +73,13 @@ var (
 )
 
 const (
-	createVolume = "/csi.v1.Controller/CreateVolume"
-	deleteVolume = "/csi.v1.Controller/DeleteVolume"
+	createVolume      = "/csi.v1.Controller/CreateVolume"
+	deleteVolume      = "/csi.v1.Controller/DeleteVolume"
+	controllerPublish = "/csi.v1.Controller/ControllerPublishVolume"
+	controllerUnpub   = "/csi.v1.Controller/ControllerUnpublishVolume"
+	// Not the driver's name: the external-attacher acts on attachments that
+	// name its driver, and would call ControllerPublish/Unpublish itself.
+	attacherName = "coshim.sanity"
 )
 
 // pvName is the provisioner-shaped name for a CO name: deterministic, so a
@@ -144,6 +155,26 @@ func forward(up *grpc.ClientConn, ss grpc.ServerStream) error {
 		if err := writePV(createReq, out.GetVolume()); err != nil {
 			return status.Errorf(codes.Internal, "coshim: volume %s was created but its PV was not: %v",
 				out.GetVolume().GetVolumeId(), err)
+		}
+	case controllerPublish:
+		in := &csi.ControllerPublishVolumeRequest{}
+		if err := proto.Unmarshal(req, in); err == nil {
+			if err := writeVA(in.VolumeId, in.NodeId); err != nil {
+				return status.Errorf(codes.Internal, "coshim: volume %s was published to %s but its VolumeAttachment was not: %v",
+					in.VolumeId, in.NodeId, err)
+			}
+		}
+	case controllerUnpub:
+		in := &csi.ControllerUnpublishVolumeRequest{}
+		if err := proto.Unmarshal(req, in); err == nil && in.VolumeId != "" {
+			sel := "coshim/volume=" + in.VolumeId
+			if in.NodeId != "" {
+				sel += ",coshim/node=" + in.NodeId
+			}
+			if err := run(nil, "delete", "volumeattachment", "-l", sel, "--ignore-not-found", "--wait=false"); err != nil {
+				return status.Errorf(codes.Internal, "coshim: volume %s was unpublished but its VolumeAttachment was not deleted: %v", in.VolumeId, err)
+			}
+			log.Printf("ControllerUnpublish %s from %q: VolumeAttachment deleted", in.VolumeId, in.NodeId)
 		}
 	case deleteVolume:
 		in := &csi.DeleteVolumeRequest{}
@@ -236,6 +267,45 @@ func writePV(req *csi.CreateVolumeRequest, vol *csi.Volume) error {
 		return err
 	}
 	log.Printf("CreateVolume %s: PV written (%d bytes, %v, %s)", vol.VolumeId, vol.CapacityBytes, modes, volumeMode)
+	return nil
+}
+
+// writeVA writes the attached VolumeAttachment the attach/detach controller
+// and external-attacher would leave for (volume, node), named as Kubernetes
+// names them. Labels carry the pair (node names fit a label value) so the
+// unpublish can find it.
+func writeVA(volumeID, nodeID string) error {
+	h := sha256.Sum256([]byte(volumeID + attacherName + nodeID))
+	name := fmt.Sprintf("csi-%x", h)
+	va := map[string]any{
+		"apiVersion": "storage.k8s.io/v1",
+		"kind":       "VolumeAttachment",
+		"metadata": map[string]any{
+			"name": name,
+			"labels": map[string]string{
+				"app.kubernetes.io/managed-by": "coshim",
+				"coshim/volume":                volumeID,
+				"coshim/node":                  nodeID,
+			},
+		},
+		"spec": map[string]any{
+			"attacher": attacherName,
+			"nodeName": nodeID,
+			"source":   map[string]string{"persistentVolumeName": volumeID},
+		},
+	}
+	body, err := json.Marshal(va)
+	if err != nil {
+		return err
+	}
+	if err := run(body, "apply", "-f", "-"); err != nil {
+		return err
+	}
+	if err := run(nil, "patch", "volumeattachment", name, "--subresource=status", "--type=merge",
+		"-p", `{"status":{"attached":true}}`); err != nil {
+		return err
+	}
+	log.Printf("ControllerPublish %s to %s: VolumeAttachment %s attached", volumeID, nodeID, name)
 	return nil
 }
 
