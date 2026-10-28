@@ -1271,16 +1271,7 @@ pub fn replicas_missing_from_raid(
         return None;
     }
 
-    let configured: Vec<&Value> = raid
-        .get("base_bdevs_list")
-        .and_then(|b| b.as_array())
-        .map(|bases| {
-            bases
-                .iter()
-                .filter(|b| b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false))
-                .collect()
-        })
-        .unwrap_or_default();
+    let configured = configured_bases(raid);
 
     // Callers hold whichever handle their path gave them (NodeStage, the
     // health monitor) — cross into the inner domain once, here.
@@ -1291,21 +1282,100 @@ pub fn replicas_missing_from_raid(
         .enumerate()
         .filter(|(_, rec)| rec.sync_state == SyncState::InSync)
         .filter(|(index, rec)| {
-            let remote_name = expected_remote_base_bdev(&sid, *index);
-            let live = rec.live_lvol_uuid();
-            !configured.iter().any(|base| {
-                let uuid = base.get("uuid").and_then(|u| u.as_str()).unwrap_or("");
-                let name = base.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                uuid == rec.lvol_uuid
-                    || uuid == live
-                    || name == rec.lvol_uuid
-                    || name == live
-                    || name == remote_name
-            })
+            !configured.iter().any(|base| base_backs_replica(base, &sid, *index, rec))
         })
         .map(|(_, rec)| rec.lvol_uuid.clone())
         .collect();
     Some(missing)
+}
+
+/// The configured entries of a raid's `base_bdevs_list`.
+fn configured_bases(raid: &Value) -> Vec<&Value> {
+    raid.get("base_bdevs_list")
+        .and_then(|b| b.as_array())
+        .map(|bases| {
+            bases
+                .iter()
+                .filter(|b| b.get("is_configured").and_then(|c| c.as_bool()).unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Does `base` (a `base_bdevs_list` entry) carry replica `index`? By
+/// identity or live uuid, by name equal to either (local base), or by
+/// the deterministic remote bdev name. See [`replicas_missing_from_raid`].
+fn base_backs_replica(
+    base: &Value,
+    sid: &crate::identity::StorageId,
+    index: usize,
+    rec: &ReplicaSyncRecord,
+) -> bool {
+    let uuid = base.get("uuid").and_then(|u| u.as_str()).unwrap_or("");
+    let name = base.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let live = rec.live_lvol_uuid();
+    uuid == rec.lvol_uuid
+        || uuid == live
+        || name == rec.lvol_uuid
+        || name == live
+        || name == expected_remote_base_bdev(sid, index)
+}
+
+/// What a NodeUnstage may record from the raid it is about to delete
+/// (design §5 "Source trust", the unstage capture).
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnstageCapture {
+    /// In-sync legs the raid does not hold as configured bases: they
+    /// miss writes the raid acknowledged. Marked stale in one write.
+    Mark(Vec<String>),
+    /// Nothing may be written; the reason is for the log.
+    Skip(String),
+}
+
+/// The unstage capture's verdict on `raid`, read after serving stopped
+/// and before `bdev_raid_delete`. A clean unstage drains every write
+/// first, so this base list is the volume's last observation of which
+/// legs hold every acked write — the one the monitor's tick can miss.
+///
+/// The caller has checked that the attached VolumeAttachment names this
+/// node. This checks the other half of "still the consumer": every
+/// configured base is a leg of the record's writer set (a subset, not
+/// equality — legs the raid lost are the point). A late unstage on a
+/// former consumer holds a raid missing exactly the healthy legs fenced
+/// off from it, and it must write nothing: so must any raid whose
+/// configured bases are not all writers, or that is not online.
+pub fn unstage_capture(raid: &Value, volume_id: &str, record: &VolumeSyncRecord) -> UnstageCapture {
+    let state = raid.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+    if state != "online" {
+        return UnstageCapture::Skip(format!("raid is {}, not online", state));
+    }
+    // No writer set (never assembled) leaves every base outside it.
+    let writers = record.writer_uuids();
+    let sid = crate::identity::StorageId::of_handle(volume_id);
+    for base in configured_bases(raid) {
+        let leg = record
+            .replicas
+            .iter()
+            .enumerate()
+            .find(|(index, rec)| base_backs_replica(base, &sid, *index, rec));
+        let name = base.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+        match leg {
+            None => {
+                return UnstageCapture::Skip(format!(
+                    "configured base {} is no replica of the record",
+                    name
+                ))
+            }
+            Some((_, rec)) if !writers.contains(&rec.lvol_uuid) => {
+                return UnstageCapture::Skip(format!(
+                    "configured base {} is replica {}, outside the writer set",
+                    name, rec.lvol_uuid
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    UnstageCapture::Mark(replicas_missing_from_raid(raid, volume_id, record).unwrap_or_default())
 }
 
 /// The PV that holds a volume's replica record. RWX/ROX volumes stage
@@ -2252,6 +2322,84 @@ mod tests {
         let record = three_replica_record();
         let raid = raid_json("configuring", vec![]);
         assert!(replicas_missing_from_raid(&raid, "vol1", &record).is_none());
+    }
+
+    // ── the unstage capture (design §5 "Source trust") ──────────────────
+
+    fn base_of(index: usize, uuid: &str) -> Value {
+        let sid = crate::identity::StorageId::of_handle("vol1");
+        let name = if index == 0 { uuid.to_string() } else { expected_remote_base_bdev(&sid, index) };
+        json!({"name": name, "uuid": uuid, "is_configured": true})
+    }
+
+    fn failed_slot() -> Value {
+        json!({"name": null, "uuid": "00000000-0000-0000-0000-000000000000", "is_configured": false})
+    }
+
+    fn assembled(writers: &[&str]) -> VolumeSyncRecord {
+        let mut r = three_replica_record();
+        let w: Vec<String> = writers.iter().map(|s| s.to_string()).collect();
+        r.set_writer_set(&w, "t0");
+        r
+    }
+
+    /// The consumer's raid lost b before the monitor's tick: the capture
+    /// marks it, and only it.
+    #[test]
+    fn capture_marks_the_legs_the_consumers_raid_lost() {
+        let record = assembled(&["uuid-a", "uuid-b", "uuid-c"]);
+        let raid = raid_json("online", vec![base_of(0, "uuid-a"), failed_slot(), base_of(2, "uuid-c")]);
+        assert_eq!(
+            unstage_capture(&raid, "vol1", &record),
+            UnstageCapture::Mark(vec!["uuid-b".to_string()])
+        );
+        let whole = raid_json("online", vec![base_of(0, "uuid-a"), base_of(1, "uuid-b"), base_of(2, "uuid-c")]);
+        assert_eq!(unstage_capture(&whole, "vol1", &record), UnstageCapture::Mark(vec![]));
+    }
+
+    /// A former consumer's late unstage: the fence flip marked its
+    /// co-located leg a stale (so a left the writer set), and its raid
+    /// lost exactly the healthy legs fenced off from it. Marking those
+    /// would demote the volume's only complete copies.
+    #[test]
+    fn capture_writes_nothing_for_a_former_consumers_raid() {
+        let mut record = assembled(&["uuid-a", "uuid-b", "uuid-c"]);
+        record.mark_stale("uuid-a", "fenced", "t1");
+        assert_eq!(record.writer_uuids(), ["uuid-b".to_string(), "uuid-c".to_string()]);
+        let raid = raid_json("online", vec![base_of(0, "uuid-a"), failed_slot(), failed_slot()]);
+        assert!(matches!(unstage_capture(&raid, "vol1", &record), UnstageCapture::Skip(_)));
+        // The same raid read without the gate would demote b and c.
+        assert_eq!(
+            replicas_missing_from_raid(&raid, "vol1", &record).unwrap(),
+            vec!["uuid-b".to_string(), "uuid-c".to_string()]
+        );
+    }
+
+    /// Within the writer set, not equal to it: legs the raid lost are the
+    /// point, and a configured base must still be a writer.
+    #[test]
+    fn capture_requires_every_configured_base_to_be_a_writer() {
+        let record = assembled(&["uuid-a", "uuid-c"]);
+        let raid = raid_json("online", vec![base_of(0, "uuid-a"), base_of(1, "uuid-b"), failed_slot()]);
+        assert!(matches!(unstage_capture(&raid, "vol1", &record), UnstageCapture::Skip(_)));
+        let foreign = raid_json(
+            "online",
+            vec![base_of(0, "uuid-a"), json!({"name": "stray", "uuid": "stray", "is_configured": true})],
+        );
+        let record = assembled(&["uuid-a", "uuid-b", "uuid-c"]);
+        assert!(matches!(unstage_capture(&foreign, "vol1", &record), UnstageCapture::Skip(_)));
+    }
+
+    #[test]
+    fn capture_writes_nothing_without_a_writer_set_or_an_online_raid() {
+        let raid = raid_json("online", vec![base_of(0, "uuid-a"), failed_slot(), failed_slot()]);
+        assert!(matches!(
+            unstage_capture(&raid, "vol1", &three_replica_record()),
+            UnstageCapture::Skip(_)
+        ));
+        let record = assembled(&["uuid-a", "uuid-b", "uuid-c"]);
+        let offline = raid_json("offline", vec![base_of(0, "uuid-a"), failed_slot(), failed_slot()]);
+        assert!(matches!(unstage_capture(&offline, "vol1", &record), UnstageCapture::Skip(_)));
     }
 
     #[test]

@@ -3831,10 +3831,13 @@ impl SpdkCsiDriver {
             }
         }
 
-        // 2. Raid bdev — frees the exclusive_write claims
+        // 2. Raid bdev — frees the exclusive_write claims. Serving stopped
+        // in step 1 (and NodeUnstage unmounted and disconnected before
+        // this), so the raid's base list is final: capture it first.
         let raid_name =
             crate::identity::raid_name(&crate::identity::StagedHandle::new(volume_id));
-        if self.get_raid_bdev(&raid_name).await?.is_some() {
+        if let Some(raid) = self.get_raid_bdev(&raid_name).await? {
+            self.capture_raid_membership_at_unstage(volume_id, &raid).await;
             let clear_sb = self.spdk_supports_clear_sb().await;
             self.delete_raid_bdev(&raid_name, clear_sb)
                 .await
@@ -3902,6 +3905,85 @@ impl SpdkCsiDriver {
         Ok(())
     }
 
+    /// The unstage capture (design §5 "Source trust"): mark the in-sync
+    /// legs that are not configured bases of the raid stale, in one
+    /// record write, before the raid and its base list are gone. Without
+    /// it a leg whose stale mark the monitor never wrote (a failure in
+    /// the tick's lag, or a lost write) is assembled in_sync at the next
+    /// stage while missing acked writes.
+    ///
+    /// Only the volume's consumer may write it: the attached
+    /// VolumeAttachment must name this node, and every configured base
+    /// must be a writer ([`replica_sync::unstage_capture`]). A late
+    /// unstage on a former consumer writes nothing. Best effort: a failed
+    /// lookup or write leaves the record as it was, never the unstage.
+    async fn capture_raid_membership_at_unstage(&self, volume_id: &str, raid: &serde_json::Value) {
+        use crate::replica_sync::{self, UnstageCapture};
+
+        let pv = crate::identity::pv_name_of_handle(volume_id);
+        match self.get_attached_node_checked(&pv).await {
+            Ok(Some(node)) if node == self.node_id => {}
+            Ok(other) => {
+                info!(
+                    volume_id, attached = ?other,
+                    "[UNSTAGE] Not the volume's consumer — the raid's base list is not recorded"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(volume_id, error = %e, "[UNSTAGE] VolumeAttachment lookup failed — the raid's base list is not recorded");
+                return;
+            }
+        }
+
+        let now = replica_sync::now_rfc3339();
+        let node = self.node_id.clone();
+        let mut marked: Vec<String> = Vec::new();
+        let mut skipped: Option<String> = None;
+        let result = replica_sync::update_sync_record(&self.kube_client, volume_id, |record| {
+            // The closure may run more than once on write conflicts.
+            marked.clear();
+            skipped = None;
+            match replica_sync::unstage_capture(raid, volume_id, record) {
+                UnstageCapture::Skip(why) => skipped = Some(why),
+                UnstageCapture::Mark(missing) => {
+                    for uuid in missing {
+                        let why = format!("not a configured base of the raid at unstage on {}", node);
+                        if record.mark_stale(&uuid, &why, &now) {
+                            marked.push(uuid);
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(_) if skipped.is_some() => info!(
+                volume_id, why = skipped.as_deref().unwrap_or(""),
+                "[UNSTAGE] The raid's base list is not recorded"
+            ),
+            Ok(_) => {
+                for uuid in &marked {
+                    warn!(volume_id, lvol_uuid = %uuid, "[UNSTAGE] Replica marked stale: not a configured base of the raid at unstage");
+                    replica_sync::emit_pv_event(
+                        &self.kube_client,
+                        &self.node_id,
+                        volume_id,
+                        "Warning",
+                        "ReplicaStale",
+                        &format!(
+                            "Replica {} of volume {} was not a configured base of the raid when it was unstaged on {} — it misses writes the raid acknowledged",
+                            uuid, volume_id, self.node_id
+                        ),
+                    )
+                    .await;
+                }
+            }
+            Err(e) => warn!(volume_id, error = %e, "[UNSTAGE] Failed to record the raid's base list"),
+        }
+    }
+
     /// Remove NVMe-oF target from a node
     pub async fn remove_nvmeof_target(&self, node_name: &str, nqn: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("🧹 [DRIVER] Removing NVMe-oF target from node: {} nqn: {}", node_name, nqn);
@@ -3933,12 +4015,22 @@ impl SpdkCsiDriver {
     /// any (controller-side helper; the node agent keeps an equivalent).
     /// Used to keep snapshot-restore copy reads off the data path (§11).
     pub async fn get_attached_node(&self, volume_id: &str) -> Option<String> {
+        self.get_attached_node_checked(volume_id).await.ok().flatten()
+    }
+
+    /// [`Self::get_attached_node`] with the error surfaced: Ok(None) means
+    /// verifiably unattached; Err means the lookup failed and nothing may
+    /// be concluded from it.
+    pub async fn get_attached_node_checked(&self, volume_id: &str) -> Result<Option<String>, String> {
         use k8s_openapi::api::storage::v1::VolumeAttachment;
         use kube::api::ListParams;
 
         let vas: Api<VolumeAttachment> = Api::all(self.kube_client.clone());
-        let list = vas.list(&ListParams::default()).await.ok()?;
-        list.items.into_iter().find_map(|va| {
+        let list = vas
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("VolumeAttachment list failed: {e}"))?;
+        Ok(list.items.into_iter().find_map(|va| {
             let source_pv = va.spec.source.persistent_volume_name.as_deref();
             let attached = va.status.as_ref().map(|s| s.attached).unwrap_or(false);
             if source_pv == Some(volume_id) && attached {
@@ -3946,7 +4038,7 @@ impl SpdkCsiDriver {
             } else {
                 None
             }
-        })
+        }))
     }
 
     /// Get list of all node names in the cluster

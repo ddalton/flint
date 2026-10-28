@@ -123,6 +123,34 @@ covered by the stability guarantee.
   read from the code, and it needs a create to land between a REMOVE's
   unlink and its drain.
 
+- **A clean unstage now records which replicas its raid had lost**
+  (2026-10-28; `spdk-csi-driver/src/driver.rs`, `replica_sync.rs`). The
+  raid-health monitor marks a replica stale on its one-minute tick, and
+  only while the raid exists. A replica that failed in the minute before a
+  clean unstage, or whose stale mark did not land, stayed in_sync in the
+  record, and the next stage assembled it as in sync while it was missing
+  writes the raid had acknowledged. NodeUnstage now reads the raid's base
+  list after serving stops and before it deletes the raid, and marks every
+  in-sync replica that is not a configured base stale, in one record
+  write. It writes only when this node is still the volume's consumer: the
+  attached VolumeAttachment names it, and every configured base belongs to
+  the record's writer set. A late unstage on a former consumer, whose raid
+  lost exactly the healthy legs fenced off from it, writes nothing. A
+  failed lookup or write leaves the record as it was and never fails the
+  unstage, and nothing changes on the data path. Design:
+  `spdk-csi-driver/docs/incremental-replica-rebuild.md` §5, "Source trust".
+  The gate matters. Without it, a former consumer's late capture would mark
+  stale the healthy legs fenced off from its raid, even after a clean move.
+  The new consumer marks the leg the old raid kept, so no in-sync leg would
+  remain.
+  Limits: this does not close a consumer leaving inside a failure window.
+  If the consumer crashes (no unstage runs), or its pod moves while the old
+  raid stays alive (the gate refuses that raid's late capture), the record
+  never learns which legs the old raid had lost. When the only leg holding
+  an acknowledged write is the one left behind, the new assembly takes the
+  others and the write can be lost outright, under any admission policy
+  (§6's survivor divergence).
+
 - **A rebuilt replica is no longer admitted holding a copy from a source
   that was already missing acknowledged writes** (2026-10-28;
   `spdk-csi-driver/src/catchup.rs`, `replica_sync.rs`). The catch-up picks
@@ -153,8 +181,8 @@ covered by the stability guarantee.
   Limits: this guards the catch-up's admission. A lagging leg whose stale
   mark never lands can still be assembled as in_sync at a restage: NodeUnstage
   writes nothing to the record, and the stage path's model treats a reachable
-  leg as current. Capturing the raid's membership at unstage is the
-  follow-up. And by design a complete standby whose source is up to date but
+  leg as current. The unstage capture above closes this for a clean
+  unstage. And by design a complete standby whose source is up to date but
   not attached at the next stage is demoted and re-copied from its floor.
   The design records this fix as the interim, conservative form of its
   per-epoch trust rule: `spdk-csi-driver/docs/incremental-replica-rebuild.md`
