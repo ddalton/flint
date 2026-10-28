@@ -621,8 +621,11 @@ trusted and the destination's base was trusted. Under this rule:
   would cost a raid lifetime of redundancy for everything else on the
   volume and would tie rebuild latency to the next clean unstage, which
   the performance envelope below forbids. The capture is what makes the
-  members' heads provably complete rather than conventionally so; it is
-  not a precondition of admission.
+  members' heads provably complete *since that assembly began*, rather
+  than conventionally so; a leg that lost its mark in a crash and was
+  re-admitted is captured configured at the next clean unstage while still
+  missing the pre-crash write, which is the same residual, not a new one.
+  The capture is not a precondition of admission.
 - **§3's exclusion, enforced.** A leg co-located with a zombie consumer is
   not configured in the authoritative raid after the fence flip, so its
   later epochs are untrusted and it is neither cut nor copied from.
