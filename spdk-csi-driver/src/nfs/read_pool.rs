@@ -47,36 +47,49 @@ const POOL_MAX: usize = 64;
 /// plus slack; an outsized read must not permanently inflate the pool.
 const POOL_BUF_CAP: usize = 2 * 1024 * 1024;
 
-static POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// Retained buffers. One process-wide instance, [`POOL`], serves every
+/// READ; it is a type so the tests can count a pool no other test's
+/// READs reach.
+struct Pool(Mutex<Vec<Vec<u8>>>);
 
-fn take(count: usize) -> Vec<u8> {
-    let mut buf = POOL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pop()
-        .unwrap_or_default();
-    buf.clear();
-    // On a pooled buffer with capacity this is a memset in resident
-    // memory: no mmap, no faults, no mmap_lock. On a cold one it is the
-    // allocation that used to happen every request.
-    buf.resize(count, 0);
-    buf
-}
+static POOL: Pool = Pool::new();
 
-fn give(mut buf: Vec<u8>) {
-    if buf.capacity() > POOL_BUF_CAP {
-        return;
+impl Pool {
+    const fn new() -> Self {
+        Pool(Mutex::new(Vec::new()))
     }
-    buf.clear();
-    let mut p = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    if p.len() < POOL_MAX {
-        p.push(buf);
+
+    fn take(&self, count: usize) -> Vec<u8> {
+        let mut buf = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop()
+            .unwrap_or_default();
+        buf.clear();
+        // On a pooled buffer with capacity this is a memset in resident
+        // memory: no mmap, no faults, no mmap_lock. On a cold one it is the
+        // allocation that used to happen every request.
+        buf.resize(count, 0);
+        buf
+    }
+
+    fn give(&self, mut buf: Vec<u8>) {
+        if buf.capacity() > POOL_BUF_CAP {
+            return;
+        }
+        buf.clear();
+        let mut p = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if p.len() < POOL_MAX {
+            p.push(buf);
+        }
     }
 }
 
 /// Owner handed to [`Bytes::from_owner`]: exposes the filled prefix and
 /// returns the allocation to the pool when the last `Bytes` drops.
 struct Pooled {
+    pool: &'static Pool,
     buf: Option<Vec<u8>>,
     len: usize,
 }
@@ -91,7 +104,7 @@ impl AsRef<[u8]> for Pooled {
 impl Drop for Pooled {
     fn drop(&mut self) {
         if let Some(b) = self.buf.take() {
-            give(b);
+            self.pool.give(b);
         }
     }
 }
@@ -161,11 +174,22 @@ pub fn read_at_pooled<F>(count: usize, read: F) -> std::io::Result<Bytes>
 where
     F: FnOnce(&mut [u8]) -> std::io::Result<usize>,
 {
-    let mut buf = take(count);
+    read_at_pooled_in(&POOL, count, read)
+}
+
+fn read_at_pooled_in<F>(pool: &'static Pool, count: usize, read: F) -> std::io::Result<Bytes>
+where
+    F: FnOnce(&mut [u8]) -> std::io::Result<usize>,
+{
+    let mut buf = pool.take(count);
     match read(&mut buf) {
-        Ok(n) => Ok(Bytes::from_owner(Pooled { buf: Some(buf), len: n })),
+        Ok(n) => Ok(Bytes::from_owner(Pooled {
+            pool,
+            buf: Some(buf),
+            len: n,
+        })),
         Err(e) => {
-            give(buf);
+            pool.give(buf);
             Err(e)
         }
     }
@@ -184,11 +208,15 @@ where
 /// `__pi_clear_page` (3.5% of system) plus kcompactd compaction churn
 /// in the write-path profile; a warm pooled buffer faults nothing.
 pub struct PooledMut {
+    pool: &'static Pool,
     buf: Option<Vec<u8>>,
 }
 
 pub fn take_mut(count: usize) -> PooledMut {
-    PooledMut { buf: Some(take(count)) }
+    PooledMut {
+        pool: &POOL,
+        buf: Some(POOL.take(count)),
+    }
 }
 
 impl std::ops::Deref for PooledMut {
@@ -210,14 +238,18 @@ impl PooledMut {
     pub fn freeze(mut self, len: usize) -> Bytes {
         let buf = self.buf.take().expect("freeze consumes the owner");
         debug_assert!(len <= buf.len());
-        Bytes::from_owner(Pooled { buf: Some(buf), len })
+        Bytes::from_owner(Pooled {
+            pool: self.pool,
+            buf: Some(buf),
+            len,
+        })
     }
 }
 
 impl Drop for PooledMut {
     fn drop(&mut self) {
         if let Some(b) = self.buf.take() {
-            give(b);
+            self.pool.give(b);
         }
     }
 }
@@ -226,39 +258,34 @@ impl Drop for PooledMut {
 mod tests {
     use super::*;
 
-    /// The pool is a process-wide static, so these tests would otherwise
-    /// interfere with each other under the default parallel runner —
-    /// one test's `clear()` lands inside another's count. Same reason
-    /// `tier::capture::test_exclusive()` exists.
-    static EXCLUSIVE: Mutex<()> = Mutex::new(());
-    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        EXCLUSIVE.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    // Each test counts a pool of its own. The process-wide POOL also
+    // serves every NFS READ that other tests in the binary make, so a
+    // count of it measured those tests too: a lock among these tests
+    // cannot stop a READ elsewhere from returning a buffer between a
+    // clear and an assert.
 
-    fn pool_len() -> usize {
-        POOL.lock().unwrap_or_else(|e| e.into_inner()).len()
+    fn pool_len(pool: &Pool) -> usize {
+        pool.0.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The point of the whole module: the allocation comes back.
     #[test]
     fn a_dropped_reply_returns_its_buffer_to_the_pool() {
-        let _x = exclusive();
-        POOL.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        let before = pool_len();
+        static P: Pool = Pool::new();
         {
-            let b = read_at_pooled(4096, |buf| {
+            let b = read_at_pooled_in(&P, 4096, |buf| {
                 buf[..4].copy_from_slice(b"data");
                 Ok(4)
             })
             .unwrap();
             assert_eq!(&b[..], b"data");
             assert_eq!(
-                pool_len(),
-                before,
+                pool_len(&P),
+                0,
                 "the buffer must still be OUT while the Bytes is alive"
             );
         }
-        assert_eq!(pool_len(), before + 1, "dropping the Bytes must return it");
+        assert_eq!(pool_len(&P), 1, "dropping the Bytes must return it");
     }
 
     /// A short read must expose only what was read — the rest of the
@@ -266,13 +293,18 @@ mod tests {
     /// that would leak one client's bytes to another.
     #[test]
     fn only_the_bytes_actually_read_are_visible() {
-        let _x = exclusive();
-        let _ = read_at_pooled(64, |buf| {
+        static P: Pool = Pool::new();
+        let _ = read_at_pooled_in(&P, 64, |buf| {
             buf.fill(b'X');
             Ok(64)
         })
         .unwrap();
-        let b = read_at_pooled(64, |buf| {
+        assert_eq!(
+            pool_len(&P),
+            1,
+            "the second read must reuse the first one's buffer"
+        );
+        let b = read_at_pooled_in(&P, 64, |buf| {
             buf[..3].copy_from_slice(b"abc");
             Ok(3)
         })
@@ -285,52 +317,76 @@ mod tests {
     /// request's contents into the region a short read leaves untouched.
     #[test]
     fn a_reused_buffer_is_zeroed_before_reuse() {
-        let _x = exclusive();
-        let b1 = read_at_pooled(32, |buf| {
+        static P: Pool = Pool::new();
+        let b1 = read_at_pooled_in(&P, 32, |buf| {
             buf.fill(0xAB);
             Ok(32)
         })
         .unwrap();
         drop(b1);
-        let seen = read_at_pooled(32, |buf| Ok(buf.iter().filter(|&&x| x == 0xAB).count()))
+        assert_eq!(pool_len(&P), 1, "the next read must reuse this buffer");
+        let seen = read_at_pooled_in(&P, 32, |buf| Ok(buf.iter().filter(|&&x| x == 0xAB).count()))
             .unwrap();
-        assert_eq!(seen.len(), 0, "handed back a zeroed buffer, so nothing to read");
+        assert_eq!(
+            seen.len(),
+            0,
+            "handed back a zeroed buffer, so nothing to read"
+        );
     }
 
     /// An error must not lose the allocation — otherwise a failing
     /// volume drains the pool and every later read allocates again.
     #[test]
     fn a_failed_read_still_returns_its_buffer() {
-        let _x = exclusive();
-        POOL.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        let r = read_at_pooled(128, |_| {
-            Err(std::io::Error::other("boom"))
-        });
+        static P: Pool = Pool::new();
+        let r = read_at_pooled_in(&P, 128, |_| Err(std::io::Error::other("boom")));
         assert!(r.is_err());
-        assert_eq!(pool_len(), 1, "the buffer must return on the error path too");
+        assert_eq!(
+            pool_len(&P),
+            1,
+            "the buffer must return on the error path too"
+        );
     }
 
     /// The pool is bounded: the blocking pool is not, and a buffer per
     /// thread would size the resident set by thread count.
     #[test]
     fn the_pool_does_not_grow_without_bound() {
-        let _x = exclusive();
-        POOL.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        static P: Pool = Pool::new();
         let mut held = Vec::new();
         for _ in 0..(POOL_MAX + 16) {
-            held.push(read_at_pooled(16, |b| Ok(b.len())).unwrap());
+            held.push(read_at_pooled_in(&P, 16, |b| Ok(b.len())).unwrap());
         }
         drop(held);
-        assert_eq!(pool_len(), POOL_MAX, "must cap at POOL_MAX");
+        assert_eq!(pool_len(&P), POOL_MAX, "must cap at POOL_MAX");
     }
 
     /// An outsized buffer is dropped rather than retained.
     #[test]
     fn an_outsized_buffer_is_not_retained() {
-        let _x = exclusive();
-        POOL.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        let b = read_at_pooled(POOL_BUF_CAP + 1, |buf| Ok(buf.len())).unwrap();
+        static P: Pool = Pool::new();
+        let b = read_at_pooled_in(&P, POOL_BUF_CAP + 1, |buf| Ok(buf.len())).unwrap();
         drop(b);
-        assert_eq!(pool_len(), 0, "a buffer above the cap must not inflate the pool");
+        assert_eq!(
+            pool_len(&P),
+            0,
+            "a buffer above the cap must not inflate the pool"
+        );
+    }
+
+    /// A frozen ingress buffer returns to the pool it came from.
+    #[test]
+    fn a_frozen_ingress_buffer_returns_to_its_pool() {
+        static P: Pool = Pool::new();
+        let mut m = PooledMut {
+            pool: &P,
+            buf: Some(P.take(16)),
+        };
+        m[..2].copy_from_slice(b"ok");
+        let b = m.freeze(2);
+        assert_eq!(&b[..], b"ok");
+        assert_eq!(pool_len(&P), 0, "out while the Bytes lives");
+        drop(b);
+        assert_eq!(pool_len(&P), 1, "back on the last drop");
     }
 }
