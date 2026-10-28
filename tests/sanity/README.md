@@ -78,3 +78,15 @@ the chart, and the driver does not know it exists.
   anything under the path is still mounted, and removes the rest.
 - csi-sanity v5.6.0 publishes no release binary; the script builds it with
   `go install`.
+- A kernel NVMe/TCP controller that RESETS never reconnects in kind. The
+  first connect runs in the node's network namespace (the csi-node pod is
+  hostNetwork, and kind nodes are containers sharing one kernel), but the
+  reconnect runs from a kernel worker in the HOST namespace, where nothing
+  listens on the node's 127.0.0.1:4420: "failed to connect socket: -111"
+  until `ctrl_loss_tmo`, then EIO and ext4 shuts down. Any fault test that
+  stalls a consumer's I/O past the 30 s `nvme_core io_timeout` (a raid takes
+  20-40 s to fail a partitioned leg) hits it. A real node does not: there
+  the reconnect succeeds. For such tests raise the timeout on the host before
+  the volume is staged (`echo 600 | sudo tee
+  /sys/module/nvme_core/parameters/io_timeout`, it applies to controllers
+  created after) and set it back after.
