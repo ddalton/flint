@@ -1250,18 +1250,65 @@ pub(crate) async fn reap_epochs_newer_than_base(
     let Some(base_seq) = epoch_seq(volume_id, base) else {
         return Err(format!("base {} is not an epoch of {}", base, volume_id).into());
     };
-    let mut newer: Vec<(u64, &String)> = present
+    reap_epochs_from_seq(rpc, node, lvs_name, volume_id, base_seq + 1, present, "the revert base")
+        .await
+}
+
+/// F75 through the §9-5 full build (2026-10-27): after the head is
+/// recreated empty, delete the replica's own epoch snapshots whose sequence
+/// is at or above the record's OLDEST RETAINED epoch. Those carry live
+/// names, and one cut during the failure-detection lag (the replica still
+/// read in_sync and reachable, so the scheduler cut it) holds the
+/// replica's unacked tail. Left in place, `align_head` takes its name as
+/// convergence while the head is correct, and a later revert —
+/// `select_base_epoch` matches by name and T_back is wall-clock, so it can
+/// pass over newer safe epochs — clones the head from the dirty snapshot;
+/// the base-inclusive copy never touches a cluster the source has not
+/// rewritten since, and the never-acked write survives into in_sync
+/// (flint-e4's catch-up model, formal/FlintCatchup.tla, FullBuildReaps).
+/// Older names are left alone: those are the §9-5 restorable orphans, and
+/// the epoch GC retires them. An empty record reaps nothing.
+pub(crate) async fn reap_retained_epochs_for_full_build(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    lvs_name: &str,
+    volume_id: &str,
+    record: &VolumeSyncRecord,
+    present: &HashSet<String>,
+) -> Result<(), RpcError> {
+    let Some(oldest_seq) = record.oldest_epoch(volume_id).and_then(|e| epoch_seq(volume_id, e))
+    else {
+        return Ok(());
+    };
+    reap_epochs_from_seq(rpc, node, lvs_name, volume_id, oldest_seq, present, "the full build")
+        .await
+}
+
+/// Delete this volume's epoch-named snapshots on `node` with sequence >=
+/// `min_seq`, newest first (leaf first, so each delete merges into nothing
+/// live), tolerating "missing" so a crash anywhere before the record write
+/// re-runs it.
+async fn reap_epochs_from_seq(
+    rpc: &dyn CatchupRpc,
+    node: &str,
+    lvs_name: &str,
+    volume_id: &str,
+    min_seq: u64,
+    present: &HashSet<String>,
+    why: &str,
+) -> Result<(), RpcError> {
+    let mut doomed: Vec<(u64, &String)> = present
         .iter()
         .filter_map(|n| epoch_seq(volume_id, n).map(|s| (s, n)))
-        .filter(|(s, _)| *s > base_seq)
+        .filter(|(s, _)| *s >= min_seq)
         .collect();
-    newer.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, name) in newer {
+    doomed.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, name) in doomed {
         let alias = format!("{}/{}", lvs_name, name);
         let del = json!({ "method": "bdev_lvol_delete", "params": { "name": alias } });
         match rpc.spdk_rpc(node, &del).await {
-            Ok(_) => info!(volume_id, node, epoch = %name,
-                "[CATCHUP] Reaped a pre-failure epoch newer than the revert base (F75)"),
+            Ok(_) => info!(volume_id, node, epoch = %name, why,
+                "[CATCHUP] Reaped a pre-failure epoch under a live name (F75)"),
             Err(e) if is_missing(&e.to_string()) => {}
             Err(e) => {
                 return Err(format!(
@@ -1279,11 +1326,15 @@ pub(crate) async fn reap_epochs_newer_than_base(
 /// re-create it as a fresh EMPTY thin lvol with the same name, sized to the
 /// source head. Safe for the same reason the §5 revert is: a stale
 /// replica's unique data is only its unacked tail (the survivors hold every
-/// acknowledged write), and a no-shared-history chain is too old to delta
-/// from. The old chain's snapshots are NOT ours to reap — deleting only the
-/// head leaves them as orphaned, restorable blobs (§9-5 obligation); the
-/// epoch GC retires the epoch-named ones in its own time. Idempotent across
-/// crashes via the stable lvol name, like `revert_head`.
+/// acknowledged write). Deleting only the head leaves the old chain's
+/// snapshots as orphaned, restorable blobs (§9-5 obligation), and the epoch
+/// GC retires the epoch-named ones in its own time — but only those BELOW
+/// the oldest retained epoch. The premise that every old epoch is below it
+/// ("a no-shared-history chain is too old to delta from") is false for a
+/// snapshot cut during the failure-detection lag: it carries a retained
+/// name and the unacked tail. The caller reaps those
+/// (`reap_retained_epochs_for_full_build`) before recording the revert.
+/// Idempotent across crashes via the stable lvol name, like `revert_head`.
 pub(crate) async fn revert_head_to_empty(
     rpc: &dyn CatchupRpc,
     node: &str,
@@ -2075,7 +2126,7 @@ async fn catchup_stale(
                     .into());
                 }
                 let size_mib = bytes.div_ceil(1024 * 1024);
-                revert_head_to_empty(
+                let uuid = revert_head_to_empty(
                     rpc,
                     &identity.node_name,
                     &head_alias,
@@ -2083,7 +2134,14 @@ async fn catchup_stale(
                     &identity.lvs_name,
                     size_mib,
                 )
-                .await?
+                .await?;
+                // F75 through the full build: before the record marks the
+                // head reverted, for the same reason as above.
+                reap_retained_epochs_for_full_build(
+                    rpc, &identity.node_name, &identity.lvs_name, volume_id, record, &present,
+                )
+                .await?;
+                uuid
             }
         };
         store.record_revert(volume_id, &rec.lvol_uuid, resume_marker, &new_uuid).await?;
@@ -4709,6 +4767,83 @@ mod tests {
             store.events.lock().unwrap().iter().map(|(r, _)| r.clone()).collect();
         assert_eq!(reasons.first().map(String::as_str), Some("EpochCutForRebuild"));
         assert!(store.record.lock().unwrap().latest_epoch("vol1").is_some());
+    }
+
+    #[tokio::test]
+    async fn full_build_reaps_retained_epoch_names_and_keeps_older_ones() {
+        // formal/FlintCatchup.tla FullBuildReaps (2026-10-27): b went stale
+        // at 10:06, so with t_back 120 s every retained epoch (4 @10:00 is
+        // not present on b; 5 @10:05 and 6 @10:25 are too recent) fails the
+        // base test and the catch-up full-builds. b still holds epoch 5 and
+        // epoch 6 — cut during the detection lag, carrying the unacked
+        // tail — plus epoch 2, below the oldest retained. After the revert
+        // to empty, 6 and 5 are reaped (newest first), 2 is untouched (a
+        // §9-5 restorable orphan, the GC's), and the align re-creates epoch
+        // 6 FRESH on b instead of taking the dirty one's name as converged.
+        let rpc = {
+            let mut rpc = FakeRpc::new("uuid-b-v2");
+            rpc.lvols.insert(
+                "node-b".to_string(),
+                vec![
+                    ("lvol-uuid-b".to_string(), "uuid-b".to_string()),
+                    (epoch("vol1", 2), "uuid-b-e2".to_string()),
+                    (epoch("vol1", 5), "uuid-b-e5".to_string()),
+                    (epoch("vol1", 6), "uuid-b-e6".to_string()),
+                ],
+            );
+            rpc
+        };
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 4), &epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        let record = {
+            let mut record = VolumeSyncRecord::initial(&replicas3());
+            let all: Vec<String> =
+                vec!["uuid-a".to_string(), "uuid-b".to_string(), "uuid-c".to_string()];
+            record.apply_epoch_cut(&epoch("vol1", 4), &all, "2026-06-11T10:00:00Z");
+            record.apply_epoch_cut(&epoch("vol1", 5), &all, "2026-06-11T10:05:00Z");
+            record.mark_stale("uuid-b", "leg failed", "2026-06-11T10:06:00Z");
+            let survivors: Vec<String> = vec!["uuid-a".to_string(), "uuid-c".to_string()];
+            record.apply_epoch_cut(&epoch("vol1", 6), &survivors, "2026-06-11T10:25:00Z");
+            record
+        };
+        let store = FakeStore::new(record);
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        // The full build ran: head recreated empty.
+        assert!(store.ops.lock().unwrap().contains(&"revert:empty:uuid-b-v2".to_string()));
+        // Deletes on b: the head first, then the retained-name epochs,
+        // newest first; never epoch 2.
+        let b_deletes: Vec<String> = rpc
+            .calls_of("bdev_lvol_delete")
+            .into_iter()
+            .filter(|(n, _)| n == "node-b")
+            .map(|(_, p)| p["params"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            b_deletes,
+            vec![
+                "lvs0/lvol-uuid-b".to_string(),
+                format!("lvs0/{}", epoch("vol1", 6)),
+                format!("lvs0/{}", epoch("vol1", 5)),
+            ]
+        );
+        assert!(!rpc.deleted.lock().unwrap().contains(&("node-b".to_string(), epoch("vol1", 2))));
+        // (The reap runs before the record's revert marker, the F75
+        // ordering; the fakes keep separate logs, so this test pins the
+        // reap itself.) The align re-created epoch 6 on b FRESH (no EEXIST).
+        assert!(rpc
+            .created
+            .lock()
+            .unwrap()
+            .contains(&("node-b".to_string(), epoch("vol1", 6))));
+        let rec = store.record.lock().unwrap().get("uuid-b").unwrap().clone();
+        assert_eq!(rec.sync_state, SyncState::Standby);
+        assert_eq!(rec.last_epoch.as_deref(), Some(epoch("vol1", 6).as_str()));
     }
 
     #[tokio::test]

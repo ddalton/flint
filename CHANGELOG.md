@@ -212,6 +212,22 @@ covered by the stability guarantee.
   the leftover as an ordinary epoch at its next cut, and the next stage
   admits at the following one. Hot rejoin's cut already refused the same
   way.
+- **A full rebuild clears the stale leg's own snapshots under live epoch
+  names, so a later catch-up cannot restart from a dirty one**
+  (2026-10-27; `spdk-csi-driver/src/catchup.rs`). A leg that is failing
+  can still be snapshotted during the detection lag, while it reads in
+  sync, and that snapshot carries a retained epoch name together with a
+  write that was never acknowledged. When the leg then needs a full
+  rebuild, the head was recreated empty but those snapshots were left in
+  place. The rebuild took the dirty snapshot's name as already done, and
+  a later catch-up after a second failure could pick it as its base, since
+  the base test is by name and age: the unacknowledged write then survived
+  into an in-sync leg and reads differed by leg (flint-e4's TLA+ model of
+  the catch-up, `formal/FlintCatchup.tla`). The full rebuild now deletes
+  the leg's epoch snapshots at or above the oldest retained epoch, newest
+  first, before it records the revert, as the delta catch-up already did
+  for snapshots newer than its base. Older ones stay for the epoch
+  cleanup.
 
 ## [1.61.2] - 2026-10-27
 
