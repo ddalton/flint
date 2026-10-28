@@ -57,10 +57,13 @@ the chart, and the driver does not know it exists.
 - shim-r3: cloning a replicated volume answers FAILED_PRECONDITION, by
   design until the clone path supports replicated sources (snapshot and
   restore does).
-- shim-r3: ControllerExpand of a replicated volume that was never staged
-  answers UNAVAILABLE ("no replica sync record"): the expansion guard
-  refuses without a record proving every leg holds the acknowledged
-  history, and a never-assembled volume has none yet.
+- shim-r3, two specs: ControllerExpand of a replicated volume that was
+  never staged answers UNAVAILABLE ("no replica sync record"): the
+  expansion guard refuses without a record proving every leg holds the
+  acknowledged history, and a never-assembled volume has none yet. Both
+  `ExpandVolume should work` and `NodeExpandVolume should work if
+  node-expand is called after node-publish` hit it: the second calls
+  ControllerExpand right after CreateVolume, before it stages.
 
 ## Traps the rig works around
 

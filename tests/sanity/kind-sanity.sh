@@ -157,7 +157,9 @@ helm upgrade --install flint-csi "$ROOT/flint-csi-driver-chart" \
 kubectl -n flint-system wait --for=condition=Ready pod -l app=flint-csi-node --timeout=300s
 kubectl -n flint-system wait --for=condition=Ready pod -l app=flint-csi-controller --timeout=180s
 for p in $(kubectl -n flint-system get pods -l app=flint-csi-node -o name); do
-  kubectl -n flint-system logs "$p" -c spdk-tgt | grep -q "Virtual disk ready: .*malloc-backed" ||
+  # Not `grep -q`: it exits at the first match, kubectl dies of SIGPIPE,
+  # and pipefail reads the found line as a failure.
+  kubectl -n flint-system logs "$p" -c spdk-tgt | grep "Virtual disk ready: .*malloc-backed" >/dev/null ||
     fail "$p: no malloc-backed disk in its spdk-tgt log"
 done
 bad=$(kubectl -n flint-system get pods -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' |
