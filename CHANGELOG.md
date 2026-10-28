@@ -131,6 +131,26 @@ covered by the stability guarantee.
   the larger bound on tla-mc. Each part is needed: without base inclusivity,
   the back-off, the MIN floor, or the forced re-revert, it loses the write.
   Hot rejoin has the same exposure and is fixed separately.
+  Limits: this guards the catch-up's admission. A lagging leg whose stale
+  mark never lands can still be assembled as in_sync at a restage: NodeUnstage
+  writes nothing to the record, and the stage path's model treats a reachable
+  leg as current. Capturing the raid's membership at unstage is the
+  follow-up. And by design a complete standby whose source is up to date but
+  not attached at the next stage is demoted and re-copied from its floor.
+  The design records this fix as the interim, conservative form of its
+  per-epoch trust rule: `spdk-csi-driver/docs/incremental-replica-rebuild.md`
+  §5, "Source trust".
+
+- **One stale replica whose catch-up always fails no longer starves the
+  others** (2026-10-28; `spdk-csi-driver/src/catchup.rs`). Each tick rebuilt
+  only the first stale leg in the record. When that leg's copy path to every
+  source was down while its node stayed Ready (so it is never re-placed),
+  its catch-up failed every tick and the stale legs behind it were never
+  rebuilt; the volume stayed one leg short. Seen on the kind tier with three
+  replicas. Every stale leg now gets an attempt each tick, in order, and a
+  failure moves on to the next. Model: formal/FlintCatchupNTick.tla
+  (flint-e4). The old rule starves a leg (a fair lasso, 134,749 states) and
+  the new one holds (394,430), on TLC and tla-mc alike.
 
 - **A catch-up no longer deletes a stale leg that a raid on its own node
   is serving** (2026-10-28; `spdk-csi-driver/src/catchup.rs`). When too few

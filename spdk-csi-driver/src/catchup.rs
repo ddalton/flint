@@ -3223,11 +3223,31 @@ pub async fn run_catchup_for_volume(
         }
     }
 
-    if let Some(rec) = record.replicas.iter().find(|r| {
-        r.sync_state == SyncState::Stale
-            && r.hot_rejoin.is_none()
-            && !r.maint_drain_live(&maint_now)
-    }) {
+    // Every eligible stale leg gets its turn each tick, in record order.
+    // Taking only the first one (until 2026-10-28) let a leg whose catch-up
+    // always fails starve every stale leg after it. Its copy path to every
+    // source can be down while its node stays Ready, so U11 never replaces
+    // it, and the volume sat one leg short forever
+    // (formal/FlintCatchupNTick.tla FirstMatch: a lasso; seen on kind with
+    // the first stale leg partitioned from the only source). Each leg reloads
+    // the record: the one before it may have cut an epoch, moved the pin or
+    // changed states.
+    let eligible = |r: &ReplicaSyncRecord| {
+        r.sync_state == SyncState::Stale && r.hot_rejoin.is_none() && !r.maint_drain_live(&maint_now)
+    };
+    let stale: Vec<String> = record
+        .replicas
+        .iter()
+        .filter(|r| eligible(r))
+        .map(|r| r.lvol_uuid.clone())
+        .collect();
+    for uuid in stale {
+        let Some(record) = store.load(volume_id).await? else {
+            return Ok(());
+        };
+        let Some(rec) = record.get(&uuid).filter(|r| eligible(r)) else {
+            continue;
+        };
         if let Err(e) = catchup_stale(
             rpc, store, volume_id, &record, rec, replicas, consumer_node, &raid_name, cfg,
         )
@@ -5834,6 +5854,44 @@ mod tests {
         assert_eq!(store.copy_sources.lock().unwrap().clone(), vec!["uuid-a".to_string()]);
         let b = store.record.lock().unwrap().get("uuid-b").unwrap().clone();
         assert_eq!(b.copied_from.len(), 1);
+    }
+
+    /// FlintCatchupNTick (2026-10-28): b's catch-up fails every tick (here
+    /// its revert's clone is refused; on kind it was the attach, b's node
+    /// partitioned from the only source). c, stale after b in record order
+    /// and rebuildable from a, used to wait forever behind it.
+    #[tokio::test]
+    async fn a_stale_leg_that_always_fails_does_not_starve_the_next_one() {
+        let mut rpc = bulk_world();
+        rpc.lvols.insert(
+            "node-c".to_string(),
+            vec![
+                ("lvol-uuid-c".to_string(), "uuid-c".to_string()),
+                (epoch("vol1", 3), "c3".to_string()),
+                (epoch("vol1", 4), "c4".to_string()),
+            ],
+        );
+        rpc.fail.insert(
+            ("node-b".to_string(), "bdev_lvol_clone".to_string()),
+            "lvol store busy".to_string(),
+        );
+        let mut record = stale_b_record();
+        record.mark_stale("uuid-c", "leg failed", "2026-06-11T10:20:00Z");
+        let store = FakeStore::new(record);
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        let rec = store.record.lock().unwrap().clone();
+        assert_eq!(rec.get("uuid-b").unwrap().sync_state, SyncState::Stale, "b still fails");
+        assert_eq!(
+            rec.get("uuid-c").unwrap().sync_state,
+            SyncState::Standby,
+            "c was rebuilt in the same tick"
+        );
+        let events = store.events.lock().unwrap().clone();
+        assert!(events.iter().any(|(r, _)| r == "ReplicaCatchupFailed"), "{:?}", events);
     }
 
     #[tokio::test]
