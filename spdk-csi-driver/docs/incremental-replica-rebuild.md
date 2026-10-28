@@ -637,6 +637,22 @@ consumer node stays unreachable gets no new trusted epochs until it is
 restaged, which is also when its record is next observed; modelled as a
 FlintCatchupT arm (flint-e4).
 
+**Performance envelope (a requirement, not an estimate).** The rule must
+not touch the data path or the rebuild's copy rate, and as designed it does
+not: raid1, the NVMe-oF exports and the lvols are unchanged; the copy is the
+same shallow copy of the same epoch snapshots; the rule only decides which
+epochs and sources are eligible. What it adds is control-plane only: one
+read-only `bdev_raid_get_bdevs` per cut on the consumer node, which the
+health monitor already issues every 60 s and which the scheduler should
+batch per consumer node rather than per volume; one list of leg uuids per
+retained epoch in the record (K × N uuids); and one record write per clean
+unstage. The one latency effect is on the chase, which copies an epoch only
+after its second observation, so a standby's lag bound grows by at most one
+`T_back` (the I/O timeout plus margin), never its throughput; a drained
+unstage capture removes even that wait for the final delta. Against the
+interim guards it copies less, not more: a demoted standby re-copies from
+its floor today, while under the rule its trusted copies stay.
+
 **Status.** Interim, shipped first: the *source tie* (each copy session
 records its source before copying; admission refuses unless every source is
 still `in_sync`, unchanged since the copy, and attached), the *base floor*
