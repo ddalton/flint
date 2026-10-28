@@ -12,6 +12,32 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **A tenant mount-Secret guard** (2026-10-28; `flint-s3-csi-chart`
+  `templates/tenant-secret-guard.yaml`, values `tenantSecretGuard`). A
+  ValidatingAdmissionPolicy for tenant namespaces that hand this driver
+  a credential through `nodePublishSecretRef` (`static`, `stsSecret`).
+  Anyone who can create a pod in a namespace can read any Secret there
+  through a volume or env var, and can claim any ServiceAccount there;
+  the `stsSecret` envelope stops only a pod under another ServiceAccount.
+  In a namespace that opts in (label `chert.us/mount-secret-guard:
+  enforce`):
+  - only the principals in its `chert.us/mount-deployers` annotation may
+    create a pod with an `s3.csi.chert.us` volume, add a debug container
+    to one, or create or change a mount Secret; no annotation means
+    nobody;
+  - every `nodePublishSecretRef` must name a `s3-mount-*` Secret
+    (`secretNamePrefix`);
+  - such a Secret reaches a pod only that way, never as a `secret` or
+    projected volume, another CSI driver's secret, or env/envFrom.
+
+  It matches no namespace until one opts in, and is evaluated in the API
+  server with `failurePolicy: Fail`. `s3csi/e2e/tenant-secret-guard.sh`
+  checks it with server dry-runs: 15/15 on kind (Kubernetes 1.34). It is
+  the admission guard (S1) of awc-docs #136; awc-docs #174 states the
+  consumer side.
+
 ### Changed
 
 - **The dashboard reads only what its backend emits** (2026-10-27;

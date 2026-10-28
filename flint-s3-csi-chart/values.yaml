@@ -491,6 +491,35 @@ workers:
     # never resolves and the failure reads as a network partition.
     allowDNS: true
 
+# ── Tenant mount-Secret guard ────────────────────────────────────────
+
+# A ValidatingAdmissionPolicy for TENANT namespaces that hand this
+# driver a credential through nodePublishSecretRef (identity.mode static
+# or stsSecret). Anyone who can create a pod in a namespace can read any
+# Secret there through a volume or env var, and claim any ServiceAccount
+# there. In a namespace that opts in, only the listed deployers may
+# create mounting pods or mount Secrets, and a mount Secret reaches a pod
+# only as this driver's nodePublishSecretRef. The rules are in
+# templates/tenant-secret-guard.yaml.
+#
+# Opt a namespace in (the platform, not the tenant, owns these):
+#   metadata:
+#     labels:      { chert.us/mount-secret-guard: enforce }
+#     annotations: { chert.us/mount-deployers: "system:serviceaccount:<ns>:<deployer>" }
+tenantSecretGuard:
+  # Installed by default; it matches no namespace until one opts in.
+  enabled: true
+  # The label a namespace sets to "enforce" to opt in.
+  namespaceLabel: chert.us/mount-secret-guard
+  # The namespace annotation listing, comma-separated, the usernames that
+  # may create mounting pods and mount Secrets there. Absent or empty in
+  # an opted-in namespace: nobody may (fail closed).
+  deployersAnnotation: chert.us/mount-deployers
+  # Mount Secrets are recognised by name, because admission can't read
+  # the labels of a Secret that a pod refers to. Every s3.csi.chert.us
+  # nodePublishSecretRef in an opted-in namespace must use this prefix.
+  secretNamePrefix: s3-mount-
+
 # ── The broker ───────────────────────────────────────────────────────
 
 # The STS-shaped identity exchange (§4). Off only for clusters where
