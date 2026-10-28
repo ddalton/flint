@@ -252,6 +252,9 @@ pub fn replacement_record(
         hot_rejoin_at: None,
         maint_drain: None,
         empty_head: true,
+        copied_from: Vec::new(),
+        base_floor: None,
+        must_revert: false,
     }
 }
 
@@ -815,6 +818,9 @@ mod tests {
             hot_rejoin_at: None,
             maint_drain: None,
             empty_head: true,
+            copied_from: Vec::new(),
+            base_floor: None,
+            must_revert: false,
         };
         let swapped = build_swapped_record(&record, "u2", new_rec, &new_replicas).unwrap();
         assert_eq!(swapped.replicas.len(), 2);
@@ -845,6 +851,9 @@ mod tests {
             hot_rejoin_at: None,
             maint_drain: None,
             empty_head: true,
+            copied_from: Vec::new(),
+            base_floor: None,
+            must_revert: false,
         };
         assert!(build_swapped_record(&record, "nope", new_rec, &old).is_none());
     }

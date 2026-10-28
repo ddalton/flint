@@ -104,6 +104,34 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A rebuilt replica is no longer admitted holding a copy from a source
+  that was already missing acknowledged writes** (2026-10-28;
+  `spdk-csi-driver/src/catchup.rs`, `replica_sync.rs`). The catch-up picks
+  its copy source from the sync record, preferring a leg off the consumer's
+  node. A leg whose data path to the consumer has just failed is still
+  record in_sync for the monitor's detection lag (up to a minute), or
+  indefinitely if its stale mark fails to land. Its epochs miss every write
+  acked since. A replica rebuilt and chased from it, then admitted with a
+  final delta that copies only from its mark on, went into the raid without
+  those writes. Reproduced live on kind with three replicas: after a 1 MiB
+  O_DIRECT write was acknowledged, every read of its range returned the old
+  data. The fix has three parts.
+  - Each copy session records its source, before the copy starts, in a new
+    `copied_from` list on the replica's sync record. Admission refuses the
+    replica unless every listed source is still in_sync, unchanged since
+    the copy, and attached (`ReplicaSourceTieBroken`).
+  - A refused or otherwise demoted standby must revert again (`must_revert`)
+    instead of resuming onto its copied head. Its revert marker stays, so
+    the forced-stale fallback still skips it.
+  - A new `base_floor` (the lowest base any revert of the stale episode used)
+    caps every later base. Above it the replica's own epochs are copies.
+  Model: formal/FlintCatchupN.tla (flint-e4, rev 7 md5 05918a21). The shipped
+  code loses an acked write under both failure premises, and TLC agrees.
+  The fix holds: 6,143,546 states on TLC and tla-mc, and 173.5M / 163.0M at
+  the larger bound on tla-mc. Each part is needed: without base inclusivity,
+  the back-off, the MIN floor, or the forced re-revert, it loses the write.
+  Hot rejoin has the same exposure and is fixed separately.
+
 - **A catch-up no longer deletes a stale leg that a raid on its own node
   is serving** (2026-10-28; `spdk-csi-driver/src/catchup.rs`). When too few
   in-sync legs attach, the forced-stale fallback serves a stale leg, and

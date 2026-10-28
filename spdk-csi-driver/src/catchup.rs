@@ -222,6 +222,15 @@ pub trait CatchupStore: Sync {
         base_epoch: &str,
         new_head_uuid: &str,
     ) -> Result<(), RpcError>;
+    /// Source-tie write-ahead (formal/FlintCatchupN.tla): `replica_uuid`'s
+    /// head is about to receive a copy from `source_uuid`. Durable BEFORE
+    /// the copy starts.
+    async fn record_copy_source(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        source_uuid: &str,
+    ) -> Result<(), RpcError>;
     /// Transition to standby (or advance an existing standby's mark).
     /// The retention pin set before the revert is NOT cleared here: it is
     /// held until phase-4 admission (§10-14 — retiring a standby chain's
@@ -392,15 +401,23 @@ impl CatchupStore for KubeStore {
             base_epoch.to_string(),
             new_head_uuid.to_string(),
         );
+        let vid = volume_id.to_string();
         replica_sync::update_sync_record(&self.client, volume_id, |r| {
-            if let Some(rec) = r.replicas.iter_mut().find(|rec| rec.lvol_uuid == uuid) {
-                rec.active_lvol_uuid = Some(new_head.clone());
-                rec.reverted_to = Some(base.clone());
-                rec.reason = Some(format!("catch-up: head reverted to {}", base));
-                // A revert supersedes any interrupted hot rejoin: the esnap
-                // head is gone, the chain restarts from a local base.
-                rec.hot_rejoin = None;
-            }
+            r.apply_revert(&vid, &uuid, &base, &new_head);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_copy_source(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        source_uuid: &str,
+    ) -> Result<(), RpcError> {
+        let (dst, src) = (replica_uuid.to_string(), source_uuid.to_string());
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.note_copy_source(&dst, &src);
         })
         .await?;
         Ok(())
@@ -754,6 +771,12 @@ impl StageConfig {
 /// An unknown or unparseable failure time degrades to the oldest present
 /// epoch (maximum back-off). None = no usable shared history: phase 5's
 /// thin-aware full build is required.
+///
+/// (c) Never newer than the stale episode's base floor
+/// ([`ReplicaSyncRecord::base_floor`]; a record that has a revert marker but
+/// no floor uses the marker). Above the floor the replica's own epochs are
+/// copies, possibly from a source that was already missing writes; a full
+/// build floor admits no base at all.
 pub fn select_base_epoch(
     volume_id: &str,
     record: &VolumeSyncRecord,
@@ -770,6 +793,17 @@ pub fn select_base_epoch(
                 - chrono::Duration::from_std(t_back)
                     .unwrap_or_else(|_| chrono::Duration::seconds(120))
         });
+    enum Floor {
+        None,
+        Seq(u64),
+        FullBuild,
+    }
+    let floor = match rec.base_floor.as_deref().or(rec.reverted_to.as_deref()) {
+        None => Floor::None,
+        // FULL_BUILD_MARKER, or a floor that does not parse: nothing is
+        // provably at or below it.
+        Some(f) => epoch_seq(volume_id, f).map(Floor::Seq).unwrap_or(Floor::FullBuild),
+    };
 
     let candidates: Vec<&str> = record
         .epochs
@@ -782,6 +816,11 @@ pub fn select_base_epoch(
                 .map(|t| t.with_timezone(&chrono::Utc) <= d)
                 .unwrap_or(false),
             None => true,
+        })
+        .filter(|e| match &floor {
+            Floor::None => true,
+            Floor::Seq(f) => epoch_seq(volume_id, &e.name).is_some_and(|s| s <= *f),
+            Floor::FullBuild => false,
         })
         .map(|e| e.name.as_str())
         .collect();
@@ -935,9 +974,14 @@ pub(crate) async fn lineage_chain(
 
 /// Pick the copy source: an in-sync replica, preferring one whose node is
 /// not the volume's consumer (keeps copy read load off the data path; also
-/// the smaller §3 hazard surface). Common epochs make any in-sync replica an
-/// equivalent source — the base-inclusive chain re-copy makes even
-/// switching sources between sessions safe.
+/// the smaller §3 hazard surface). Common epochs make any TRULY in-sync
+/// replica an equivalent source, and the base-inclusive chain re-copy makes
+/// switching sources between sessions safe. But "in_sync" is the RECORD's
+/// word: a leg in the monitor's detection lag, or whose stale mark failed
+/// to land, is record in_sync while already missing acked writes, and the
+/// non-consumer preference picks exactly such a leg after a partition from
+/// the consumer (formal/FlintCatchupN.tla; reproduced on kind 2026-10-28).
+/// Admission's source tie is what keeps such a copy out of the raid.
 pub fn pick_source<'a>(
     record: &VolumeSyncRecord,
     replicas: &'a [ReplicaInfo],
@@ -2199,10 +2243,13 @@ async fn catchup_stale(
     store.pin_retention(volume_id, &pinned).await?;
 
     let resume_marker = base.as_deref().unwrap_or(FULL_BUILD_BASE);
-    let live_uuid = if rec.reverted_to.as_deref() == Some(resume_marker) {
+    let live_uuid = if rec.reverted_to.as_deref() == Some(resume_marker) && !rec.must_revert {
         // Resume: the head is still write-virgin for this exact base (it
         // has only ever received copy writes) — re-copying the chain onto
-        // it converges without a re-revert.
+        // it converges without a re-revert. Not after a demotion
+        // (`must_revert`): a re-copy from a new source leaves the old
+        // source's clusters wherever the new one does not rewrite them, and
+        // only a revert discards them (FlintCatchupN3CTieDemoteAsCode).
         rec.live_lvol_uuid().to_string()
     } else {
         let new_uuid = match &base {
@@ -2322,6 +2369,10 @@ async fn catchup_stale(
     // grown it.
     align_dst_head_size(rpc, store, volume_id, record, src, &identity.node_name, &head_alias)
         .await?;
+
+    // Source tie, write-ahead: listed before any cluster lands, so a crash
+    // mid-copy and a resume from another source still check this one.
+    store.record_copy_source(volume_id, &rec.lvol_uuid, &src.lvol_uuid).await?;
 
     let dst_bdev = ensure_dst_attached(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
@@ -2459,6 +2510,8 @@ async fn chase_standby(
     {
         return Ok(());
     }
+    // Source tie, write-ahead (see catchup_stale).
+    store.record_copy_source(volume_id, &rec.lvol_uuid, &src.lvol_uuid).await?;
     let dst_bdev = ensure_dst_attached(
         rpc, volume_id, index, identity, &head_alias, &live_uuid, &src.node_name, raid_name,
     )
@@ -2686,6 +2739,38 @@ async fn admit_one_standby(
             behind, cfg.max_epochs_behind
         )
         .into());
+    }
+
+    // The source tie (formal/FlintCatchupN.tla), before anything is cut or
+    // copied. The final delta below copies only from the standby's mark on,
+    // so a write the head missed below the mark is never re-supplied. A
+    // head built from a source that was record in_sync while already
+    // missing acked writes (its detection lag, or a lost record write)
+    // would be admitted without them, and the next failure of the leg
+    // that held them loses them for good (FlintCatchupN3C). Every source
+    // must still vouch: in_sync, same head, never stale since the copy,
+    // and attached here. Otherwise demote: the next catch-up reverts the
+    // head again, to a base at or below the episode's floor.
+    if let Some(why) = record.source_tie_broken(replica_uuid, attached) {
+        warn!(volume_id, replica = %replica_uuid, %why,
+            "[ADMIT] standby's copy source no longer vouches — demoted for a re-revert");
+        store
+            .record_stale(volume_id, replica_uuid, &format!("source tie broken: {}", why))
+            .await?;
+        store
+            .emit(
+                volume_id,
+                "Warning",
+                "ReplicaSourceTieBroken",
+                &format!(
+                    "Standby {} on {} not admitted: {} — it may miss writes acked while \
+                     that source lagged; demoted, the next catch-up rebuilds it from its \
+                     base floor",
+                    replica_uuid, identity.node_name, why
+                ),
+            )
+            .await;
+        return Err(format!("source tie broken: {}", why).into());
     }
 
     // Coverage-probed source selection, BEFORE the final cut so a deferral
@@ -3634,6 +3719,9 @@ mod tests {
         record: Mutex<VolumeSyncRecord>,
         ops: Mutex<Vec<String>>,
         events: Mutex<Vec<(String, String)>>,
+        /// Source-tie write-aheads, in order (kept out of `ops`, whose exact
+        /// sequences the older flow tests pin).
+        copy_sources: Mutex<Vec<String>>,
     }
 
     impl FakeStore {
@@ -3642,6 +3730,7 @@ mod tests {
                 record: Mutex::new(record),
                 ops: Mutex::new(Vec::new()),
                 events: Mutex::new(Vec::new()),
+                copy_sources: Mutex::new(Vec::new()),
             }
         }
     }
@@ -3660,20 +3749,28 @@ mod tests {
 
         async fn record_revert(
             &self,
-            _volume_id: &str,
+            volume_id: &str,
             replica_uuid: &str,
             base_epoch: &str,
             new_head_uuid: &str,
         ) -> Result<(), RpcError> {
             let mut record = self.record.lock().unwrap();
-            if let Some(rec) = record.replicas.iter_mut().find(|r| r.lvol_uuid == replica_uuid) {
-                rec.active_lvol_uuid = Some(new_head_uuid.to_string());
-                rec.reverted_to = Some(base_epoch.to_string());
-            }
+            record.apply_revert(volume_id, replica_uuid, base_epoch, new_head_uuid);
             self.ops
                 .lock()
                 .unwrap()
                 .push(format!("revert:{}:{}", base_epoch, new_head_uuid));
+            Ok(())
+        }
+
+        async fn record_copy_source(
+            &self,
+            _volume_id: &str,
+            replica_uuid: &str,
+            source_uuid: &str,
+        ) -> Result<(), RpcError> {
+            self.record.lock().unwrap().note_copy_source(replica_uuid, source_uuid);
+            self.copy_sources.lock().unwrap().push(source_uuid.to_string());
             Ok(())
         }
 
@@ -5546,6 +5643,197 @@ mod tests {
 
     fn attached_ac() -> Vec<String> {
         vec!["uuid-a".to_string(), "uuid-c".to_string()]
+    }
+
+    // ---- the source tie and the base floor (FlintCatchupN, 2026-10-28) ---
+
+    /// standby_b_record, with the tie and floor a real catch-up from a
+    /// would have left: floor = its revert base (4), a listed as it was.
+    fn standby_b_built_from_a() -> VolumeSyncRecord {
+        let mut record = standby_b_record();
+        record.replicas[1].base_floor = Some(epoch("vol1", 4));
+        assert!(record.note_copy_source("uuid-b", "uuid-a"));
+        record
+    }
+
+    /// FlintCatchupN3C: a was record in_sync but already missing a write
+    /// acked on c (its detection lag), and b was built from a. The final
+    /// delta copies from b's mark on, below which that write sits, so b
+    /// would be admitted without it. The record has since caught up (a is
+    /// stale): the tie refuses, demotes b, and cuts nothing.
+    #[tokio::test]
+    async fn admission_demotes_a_standby_whose_copy_source_went_stale() {
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-c", "lvs0", "lvol-uuid-c",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        let mut record = standby_b_built_from_a();
+        record.mark_stale("uuid-a", "leg failed", "2026-06-11T10:40:00Z");
+        let store = FakeStore::new(record);
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c",
+            &["uuid-c".to_string()], &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty(), "no final cut");
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty(), "no final delta");
+        let b = store.record.lock().unwrap().get("uuid-b").unwrap().clone();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert!(b.must_revert);
+        assert_eq!(b.reverted_to.as_deref(), Some(epoch("vol1", 4).as_str()));
+        assert_eq!(b.base_floor.as_deref(), Some(epoch("vol1", 4).as_str()));
+        let reason = b.reason.clone().unwrap_or_default();
+        assert!(reason.contains("source tie broken") && reason.contains("uuid-a"), "{}", reason);
+        // The fake keeps (reason, type), not the message.
+        let events = store.events.lock().unwrap().clone();
+        assert!(events.iter().any(|(r, _)| r == "ReplicaSourceTieBroken"), "{:?}", events);
+    }
+
+    /// The other half of "vouches": a source still in_sync but not attached
+    /// to this assembly cannot vouch either.
+    #[tokio::test]
+    async fn admission_demotes_when_a_copy_source_is_not_attached() {
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-c", "lvs0", "lvol-uuid-c",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        let store = FakeStore::new(standby_b_built_from_a());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c",
+            &["uuid-c".to_string()], &stage_cfg(),
+        )
+        .await;
+
+        assert!(admitted.is_empty());
+        assert!(rpc.calls_of("bdev_lvol_snapshot").is_empty());
+        assert_eq!(
+            store.record.lock().unwrap().get("uuid-b").unwrap().sync_state,
+            SyncState::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_admits_when_every_copy_source_vouches() {
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 5), &epoch("vol1", 6)],
+        );
+        let store = FakeStore::new(standby_b_built_from_a());
+
+        let admitted = admit_standbys_at_stage(
+            &rpc, &store, "vol1", "raid_vol1", &replicas3(), "node-c", &attached_ac(),
+            &stage_cfg(),
+        )
+        .await;
+
+        assert_eq!(admitted.len(), 1);
+        let b = store.record.lock().unwrap().get("uuid-b").unwrap().clone();
+        assert_eq!(b.sync_state, SyncState::InSync);
+        assert!(b.copied_from.is_empty() && b.base_floor.is_none() && !b.must_revert);
+    }
+
+    #[test]
+    fn select_base_never_above_the_floor() {
+        let mut record = stale_b_record();
+        let present: HashSet<String> =
+            [epoch("vol1", 3), epoch("vol1", 4), epoch("vol1", 5)].into_iter().collect();
+        let pick = |record: &VolumeSyncRecord| {
+            select_base_epoch(
+                "vol1", record, record.get("uuid-b").unwrap(), &present,
+                Duration::from_secs(120),
+            )
+        };
+        // No floor: epoch 4 (select_base_backs_off_t_back).
+        assert_eq!(pick(&record), Some(epoch("vol1", 4)));
+        record.replicas[1].base_floor = Some(epoch("vol1", 3));
+        assert_eq!(pick(&record), Some(epoch("vol1", 3)));
+        record.replicas[1].base_floor = Some(FULL_BUILD_BASE.to_string());
+        assert_eq!(pick(&record), None, "a full-build floor admits no base");
+        // Belt: a revert marker without a floor bounds the base itself.
+        record.replicas[1].base_floor = None;
+        record.replicas[1].reverted_to = Some(epoch("vol1", 3));
+        assert_eq!(pick(&record), Some(epoch("vol1", 3)));
+    }
+
+    /// A demoted standby whose floor equals the base the selector picks used
+    /// to RESUME (reverted_to == base): the re-copy from a new source left
+    /// the bad source's clusters wherever the new one does not write
+    /// (FlintCatchupN3CTieDemoteAsCode). must_revert makes it revert.
+    #[tokio::test]
+    async fn a_demoted_standby_is_reverted_again_not_resumed() {
+        let rpc = bulk_world();
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v1".to_string());
+        record.replicas[1].reverted_to = Some(epoch("vol1", 4));
+        record.replicas[1].base_floor = Some(epoch("vol1", 4));
+        record.replicas[1].must_revert = true;
+        let store = FakeStore::new(record);
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        let ops = store.ops.lock().unwrap().clone();
+        assert!(
+            ops.contains(&format!("revert:{}:uuid-b-v2", epoch("vol1", 4))),
+            "ops: {:?}",
+            ops
+        );
+        assert!(rpc
+            .calls_of("bdev_lvol_delete")
+            .iter()
+            .any(|(n, p)| n == "node-b" && p["params"]["name"] == "lvs0/lvol-uuid-b"));
+        assert!(!store.record.lock().unwrap().get("uuid-b").unwrap().must_revert);
+    }
+
+    /// Write-ahead: a copy that fails midway has already put some of the
+    /// source's clusters on the head, so the source is listed before it
+    /// starts.
+    #[tokio::test]
+    async fn a_copy_that_fails_midway_still_lists_its_source() {
+        let rpc = bulk_world();
+        rpc.pending_copy_states.lock().unwrap().push("error:connection reset".to_string());
+        let store = FakeStore::new(stale_b_record());
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        assert!(!rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty(), "the copy started");
+        let b = store.record.lock().unwrap().get("uuid-b").unwrap().clone();
+        assert_eq!(b.sync_state, SyncState::Stale, "and failed");
+        let listed: Vec<&str> = b.copied_from.iter().map(|c| c.lvol_uuid.as_str()).collect();
+        assert_eq!(listed, vec!["uuid-a"]);
+        assert_eq!(b.base_floor.as_deref(), Some(epoch("vol1", 4).as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_chase_lists_its_source() {
+        let mut record = stale_b_record();
+        record.replicas[1].active_lvol_uuid = Some("uuid-b-v2".to_string());
+        record.replicas[1].reverted_to = Some(epoch("vol1", 4));
+        record.mark_standby("uuid-b", &epoch("vol1", 4), "caught up", "t");
+        let store = FakeStore::new(record);
+        let rpc = FakeRpc::new("uuid-b-v2");
+        install_chain(
+            &rpc, "node-a", "lvs0", "lvol-uuid-a",
+            &[&epoch("vol1", 3), &epoch("vol1", 4), &epoch("vol1", 5)],
+        );
+
+        run_catchup_for_volume(&rpc, &store, "vol1", &replicas3(), None, &cfg())
+            .await
+            .unwrap();
+
+        assert_eq!(store.copy_sources.lock().unwrap().clone(), vec!["uuid-a".to_string()]);
+        let b = store.record.lock().unwrap().get("uuid-b").unwrap().clone();
+        assert_eq!(b.copied_from.len(), 1);
     }
 
     #[tokio::test]

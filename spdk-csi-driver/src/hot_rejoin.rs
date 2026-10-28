@@ -3851,9 +3851,18 @@ mod tests {
             self.record.lock().unwrap().set_maint_drain(replica_uuid, deadline_rfc3339);
             Ok(())
         }
-        async fn record_revert(
+        async fn record_copy_source(
             &self,
             _v: &str,
+            replica_uuid: &str,
+            source_uuid: &str,
+        ) -> Result<(), RpcError> {
+            self.record.lock().unwrap().note_copy_source(replica_uuid, source_uuid);
+            Ok(())
+        }
+        async fn record_revert(
+            &self,
+            v: &str,
             replica_uuid: &str,
             base_epoch: &str,
             new_head_uuid: &str,
@@ -3863,11 +3872,7 @@ mod tests {
                 .unwrap()
                 .push(format!("revert:{}:{}", base_epoch, new_head_uuid));
             let mut r = self.record.lock().unwrap();
-            if let Some(rec) = r.replicas.iter_mut().find(|rec| rec.lvol_uuid == replica_uuid) {
-                rec.active_lvol_uuid = Some(new_head_uuid.to_string());
-                rec.reverted_to = Some(base_epoch.to_string());
-                rec.hot_rejoin = None;
-            }
+            r.apply_revert(v, replica_uuid, base_epoch, new_head_uuid);
             Ok(())
         }
         async fn record_standby(

@@ -168,6 +168,54 @@ pub struct ReplicaSyncRecord {
     /// Inv_NoVirginServing, worlds EmptyHeadRestore and EmptyHeadU11).
     #[serde(default, skip_serializing_if = "is_false")]
     pub empty_head: bool,
+    /// The source tie (formal/FlintCatchupN.tla, 2026-10-28): every leg this
+    /// head copied from since its last revert, written BEFORE each copy
+    /// starts (a crash mid-copy leaves that source's clusters on the head,
+    /// whichever source a resume uses next). Admission accepts the head only
+    /// if each listed source is still in_sync, attached, and never marked
+    /// stale since the copy (`since` and the live head uuid unchanged). A
+    /// source can be record in_sync while it already misses acked writes:
+    /// the monitor's detection lag, or a failed best-effort record write.
+    /// Copying from it then admitted a leg missing a write acked on the
+    /// others (FlintCatchupN3C: two failures, three legs). Cleared by a
+    /// revert, by in_sync, and by a demotion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_from: Vec<CopySource>,
+    /// The stale episode's base floor: the lowest base any revert of this
+    /// episode used, [`FULL_BUILD_MARKER`] below every epoch. A catch-up
+    /// base is never newer than it. Above the floor the head's own epochs
+    /// are COPIES (the revert reaped the rest, F75) and may hold a bad
+    /// source's content, which no later re-copy from a good source removes
+    /// unless that source happens to rewrite the same block
+    /// (FlintCatchupN3CTie without the floor). It must be the MIN over the
+    /// episode's reverts: a full build aligns a copy under a recorded epoch
+    /// name. Cleared when the leg reaches in_sync and when an in_sync leg
+    /// goes stale (a new episode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_floor: Option<String>,
+    /// A standby was demoted (its tie broke, or its chase cannot be
+    /// covered): its head holds copies the catch-up no longer trusts, so
+    /// the next session must revert it again rather than resume onto it.
+    /// `reverted_to` stays set, so [`ReplicaSyncRecord::head_not_built`]
+    /// keeps the head out of the forced-stale fallback. Cleared by the
+    /// revert.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub must_revert: bool,
+}
+
+/// One copy source in [`ReplicaSyncRecord::copied_from`], as the record
+/// knew it when the copy was set up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CopySource {
+    /// The source leg's identity uuid.
+    pub lvol_uuid: String,
+    /// Its live head uuid then (changes only through a revert, which needs
+    /// stale first: a belt beside `since`).
+    pub head_uuid: String,
+    /// Its `since` then: the time it last became in_sync. A source marked
+    /// stale since then has a different `since`, even if it is in_sync again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -317,6 +365,9 @@ impl VolumeSyncRecord {
                     hot_rejoin_at: None,
                     maint_drain: None,
                     empty_head: false,
+                    copied_from: Vec::new(),
+                    base_floor: None,
+                    must_revert: false,
                 })
                 .collect(),
         }
@@ -386,6 +437,9 @@ impl VolumeSyncRecord {
                         // appears through membership drift is stale pending
                         // fenced admission, and the fallback may still weigh it.
                         empty_head: false,
+                        copied_from: Vec::new(),
+                        base_floor: None,
+                        must_revert: false,
                     })
             })
             .collect();
@@ -410,6 +464,11 @@ impl VolumeSyncRecord {
 
     pub fn get(&self, lvol_uuid: &str) -> Option<&ReplicaSyncRecord> {
         self.replicas.iter().find(|r| r.lvol_uuid == lvol_uuid)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_mut_for_tests(&mut self, lvol_uuid: &str) -> &mut ReplicaSyncRecord {
+        self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid).expect("replica in record")
     }
 
     /// F36c: stamp the serving-assembly membership wholesale (sorted,
@@ -446,10 +505,37 @@ impl VolumeSyncRecord {
     /// Returns true only on a real transition.
     pub fn mark_stale(&mut self, lvol_uuid: &str, reason: &str, now_rfc3339: &str) -> bool {
         let transitioned = match self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) {
+            // A standby DEMOTED (FlintCatchupN's Demote): its head holds
+            // copies, and the tie or the chase no longer vouches for them.
+            // Force a re-revert, drop the list (the re-revert would), keep
+            // the floor, and keep `since`. Keeping `since` keeps the STANDBY
+            // stamp, later than the episode's stale time; that is safe
+            // because every base is at or below the floor (the MIN over this
+            // episode's reverts), the floor passed T_back against the
+            // original `since`, epochs are recorded in sequence, and T_back
+            // is the only time-based filter. So the later stamp never admits
+            // a base the original would refuse.
+            Some(rec) if rec.sync_state == SyncState::Standby => {
+                rec.sync_state = SyncState::Stale;
+                if rec.since.is_none() {
+                    rec.since = Some(now_rfc3339.to_string());
+                }
+                rec.reason = Some(reason.to_string());
+                rec.must_revert = true;
+                rec.copied_from.clear();
+                true
+            }
+            // In sync -> stale: a new stale episode. Its floor and list start
+            // empty. (Stale -> stale changes nothing at all: a list cleared
+            // mid-copy while `reverted_to` stays would let a resume onto
+            // that partial copy skip the source it came from.)
             Some(rec) if rec.sync_state != SyncState::Stale => {
                 rec.sync_state = SyncState::Stale;
                 rec.since = Some(now_rfc3339.to_string());
                 rec.reason = Some(reason.to_string());
+                rec.base_floor = None;
+                rec.copied_from.clear();
+                rec.must_revert = false;
                 true
             }
             _ => false,
@@ -547,6 +633,93 @@ impl VolumeSyncRecord {
         }
     }
 
+    /// Record a catch-up revert of `lvol_uuid`'s head to `base`
+    /// ([`FULL_BUILD_MARKER`] for a full build) under its new uuid, in one
+    /// write: the live-uuid override and the write-virgin marker, a cleared
+    /// source list and `must_revert` (this IS the revert), and the episode's
+    /// floor lowered to `base` (see [`ReplicaSyncRecord::base_floor`] for
+    /// why it is the MIN). A revert supersedes an interrupted hot rejoin:
+    /// the esnap head is gone. Returns true if anything changed.
+    pub fn apply_revert(
+        &mut self,
+        volume_id: &str,
+        lvol_uuid: &str,
+        base: &str,
+        new_head_uuid: &str,
+    ) -> bool {
+        let Some(rec) = self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) else {
+            return false;
+        };
+        let before = rec.clone();
+        rec.active_lvol_uuid = Some(new_head_uuid.to_string());
+        rec.reverted_to = Some(base.to_string());
+        rec.reason = Some(format!("catch-up: head reverted to {}", base));
+        rec.hot_rejoin = None;
+        rec.copied_from.clear();
+        rec.must_revert = false;
+        rec.base_floor = Some(lower_base(volume_id, rec.base_floor.as_deref(), base));
+        *rec != before
+    }
+
+    /// Write-ahead for the source tie: `dst_uuid`'s head is about to receive
+    /// a copy from `src_uuid`. Lists the source as the record knows it now
+    /// (its `since` and live head uuid), once. False when either leg is
+    /// unknown or the source is already listed as it is now.
+    pub fn note_copy_source(&mut self, dst_uuid: &str, src_uuid: &str) -> bool {
+        let Some(src) = self.replicas.iter().find(|r| r.lvol_uuid == src_uuid) else {
+            return false;
+        };
+        let entry = CopySource {
+            lvol_uuid: src.lvol_uuid.clone(),
+            head_uuid: src.live_lvol_uuid().to_string(),
+            since: src.since.clone(),
+        };
+        let Some(dst) = self.replicas.iter_mut().find(|r| r.lvol_uuid == dst_uuid) else {
+            return false;
+        };
+        if dst.copied_from.contains(&entry) {
+            return false;
+        }
+        dst.copied_from.push(entry);
+        true
+    }
+
+    /// The source tie at admission: why `dst_uuid`'s head may NOT be
+    /// admitted, or None if every source it copied from since its revert is
+    /// still in_sync, still the same head, never marked stale since the
+    /// copy, and among `attached` (the legs this assembly holds). One that
+    /// fails may have been in its detection lag when it served the copy,
+    /// so the head may miss acked writes the final delta cannot re-supply
+    /// (it copies only from the standby's mark on).
+    pub fn source_tie_broken(&self, dst_uuid: &str, attached: &[String]) -> Option<String> {
+        let dst = self.get(dst_uuid)?;
+        for src in &dst.copied_from {
+            let why = match self.get(&src.lvol_uuid) {
+                None => "is no longer a leg of the volume".to_string(),
+                Some(now) if now.sync_state != SyncState::InSync => {
+                    format!("is {}", now.sync_state.as_str())
+                }
+                Some(now) if now.since != src.since => format!(
+                    "was marked stale after the copy (in sync since {}, was {})",
+                    now.since.as_deref().unwrap_or("?"),
+                    src.since.as_deref().unwrap_or("?")
+                ),
+                Some(now) if now.live_lvol_uuid() != src.head_uuid => format!(
+                    "has a new head {} (was {})",
+                    now.live_lvol_uuid(),
+                    src.head_uuid
+                ),
+                Some(_) if !attached.iter().any(|a| *a == src.lvol_uuid) => {
+                    "is not attached to this assembly".to_string()
+                }
+                Some(_) => continue,
+            };
+            return Some(format!("copy source {} {}", src.lvol_uuid, why));
+        }
+        None
+    }
+
+
     /// Transition a replica to standby: caught up through `last_epoch` and
     /// chasing (§6). Stamps last_epoch unconditionally — the chase also uses
     /// this to advance an existing standby's high-water mark. Returns true
@@ -615,6 +788,13 @@ impl VolumeSyncRecord {
                 }
                 if rec.empty_head {
                     rec.empty_head = false;
+                    changed = true;
+                }
+                // The stale episode is over.
+                if !rec.copied_from.is_empty() || rec.base_floor.is_some() || rec.must_revert {
+                    rec.copied_from.clear();
+                    rec.base_floor = None;
+                    rec.must_revert = false;
                     changed = true;
                 }
                 // Hot-rejoin localization complete (or ordinary admission
@@ -996,6 +1176,20 @@ pub fn epoch_name(volume_id: &str, seq: u64) -> String {
 /// Parse the sequence number out of one of this volume's epoch names.
 /// None for anything else (other volumes' epochs, user snapshots) — callers
 /// use this as the "is it ours" filter, so it must stay strict.
+/// The lower of a base floor and a new revert base. [`FULL_BUILD_MARKER`]
+/// is below every epoch, and so is anything that does not parse as one of
+/// this volume's epochs (a floor that cannot be compared must not admit a
+/// newer base).
+pub fn lower_base(volume_id: &str, floor: Option<&str>, base: &str) -> String {
+    let Some(floor) = floor else { return base.to_string() };
+    match (epoch_seq(volume_id, floor), epoch_seq(volume_id, base)) {
+        (Some(f), Some(b)) if b < f => base.to_string(),
+        (Some(_), Some(_)) => floor.to_string(),
+        (None, _) => floor.to_string(),
+        (_, None) => base.to_string(),
+    }
+}
+
 pub fn epoch_seq(volume_id: &str, name: &str) -> Option<u64> {
     let rest = name.strip_prefix("epoch-")?.strip_prefix(volume_id)?;
     let digits = rest.strip_prefix('-')?;
@@ -1507,6 +1701,138 @@ mod tests {
             replica("node-b", "uuid-b"),
             replica("node-c", "uuid-c"),
         ])
+    }
+
+    // ── the source tie and the base floor (FlintCatchupN, 2026-10-28) ───
+
+    fn ep(seq: u64) -> String {
+        epoch_name("vol1", seq)
+    }
+
+    /// b stale at t1, reverted to epoch 4 (floor 4), copied from a, standby
+    /// at t2 through epoch 5.
+    fn b_standby_from_a() -> VolumeSyncRecord {
+        let mut r = three_replica_record();
+        r.mark_stale("uuid-b", "leg failed", "t1");
+        assert!(r.apply_revert("vol1", "uuid-b", &ep(4), "uuid-b-v2"));
+        assert!(r.note_copy_source("uuid-b", "uuid-a"));
+        r.mark_standby("uuid-b", &ep(5), "caught up", "t2");
+        r
+    }
+
+    #[test]
+    fn a_demoted_standby_keeps_its_since_and_floor_and_must_revert() {
+        let mut r = b_standby_from_a();
+        assert!(r.mark_stale("uuid-b", "source tie broken", "t3"));
+        let b = r.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        // Keeps `since` (the model's Demote). Not a safety property on its
+        // own: the floor is what bounds the next base (see mark_stale).
+        assert_eq!(b.since.as_deref(), Some("t2"));
+        assert!(b.must_revert, "the next catch-up must revert, not resume");
+        assert_eq!(b.reverted_to.as_deref(), Some(ep(4).as_str()));
+        assert!(b.head_not_built(), "a demoted head stays out of the forced-stale fallback");
+        assert_eq!(b.base_floor.as_deref(), Some(ep(4).as_str()));
+        assert!(b.copied_from.is_empty());
+    }
+
+    #[test]
+    fn stale_to_stale_changes_nothing() {
+        // A repeated monitor mark mid-copy must not clear the list while the
+        // revert marker stays: a resume would then skip that source.
+        let mut r = three_replica_record();
+        r.mark_stale("uuid-b", "leg failed", "t1");
+        r.apply_revert("vol1", "uuid-b", &ep(4), "uuid-b-v2");
+        r.note_copy_source("uuid-b", "uuid-a");
+        let before = r.get("uuid-b").unwrap().clone();
+        assert!(!r.mark_stale("uuid-b", "raid leg missing again", "t9"));
+        assert_eq!(r.get("uuid-b").unwrap(), &before);
+    }
+
+    #[test]
+    fn in_sync_ends_the_episode_and_a_new_one_starts_clean() {
+        let mut r = b_standby_from_a();
+        r.mark_in_sync("uuid-b", &ep(6), "admitted", "t3");
+        let b = r.get("uuid-b").unwrap();
+        assert!(b.copied_from.is_empty() && b.base_floor.is_none() && !b.must_revert);
+        r.mark_stale("uuid-b", "leg failed again", "t4");
+        let b = r.get("uuid-b").unwrap();
+        assert_eq!(b.since.as_deref(), Some("t4"), "a new episode stamps since");
+        assert!(b.base_floor.is_none() && b.copied_from.is_empty() && !b.must_revert);
+    }
+
+    #[test]
+    fn the_floor_is_the_min_over_the_episodes_reverts() {
+        let mut r = three_replica_record();
+        r.mark_stale("uuid-b", "leg failed", "t1");
+        let floor = |r: &VolumeSyncRecord| r.get("uuid-b").unwrap().base_floor.clone();
+        r.apply_revert("vol1", "uuid-b", &ep(5), "h1");
+        assert_eq!(floor(&r), Some(ep(5)));
+        r.apply_revert("vol1", "uuid-b", &ep(4), "h2");
+        assert_eq!(floor(&r), Some(ep(4)));
+        // A later revert to a NEWER base must not raise it: a full build in
+        // between can align a copy under that name.
+        r.apply_revert("vol1", "uuid-b", &ep(6), "h3");
+        assert_eq!(floor(&r), Some(ep(4)));
+        r.apply_revert("vol1", "uuid-b", FULL_BUILD_MARKER, "h4");
+        assert_eq!(floor(&r), Some(FULL_BUILD_MARKER.to_string()));
+        r.apply_revert("vol1", "uuid-b", &ep(3), "h5");
+        assert_eq!(floor(&r), Some(FULL_BUILD_MARKER.to_string()), "nothing is below a full build");
+        // The revert itself clears the list and the demotion flag.
+        r.note_copy_source("uuid-b", "uuid-a");
+        r.get_mut_for_tests("uuid-b").must_revert = true;
+        r.apply_revert("vol1", "uuid-b", &ep(3), "h6");
+        let b = r.get("uuid-b").unwrap();
+        assert!(b.copied_from.is_empty() && !b.must_revert);
+    }
+
+    #[test]
+    fn lower_base_orders_epochs_with_full_build_and_garbage_lowest() {
+        assert_eq!(lower_base("vol1", None, &ep(5)), ep(5));
+        assert_eq!(lower_base("vol1", Some(&ep(5)), &ep(4)), ep(4));
+        assert_eq!(lower_base("vol1", Some(&ep(4)), &ep(5)), ep(4));
+        assert_eq!(lower_base("vol1", Some(&ep(4)), FULL_BUILD_MARKER), FULL_BUILD_MARKER);
+        assert_eq!(lower_base("vol1", Some(FULL_BUILD_MARKER), &ep(2)), FULL_BUILD_MARKER);
+        assert_eq!(lower_base("vol1", Some("garbage"), &ep(2)), "garbage");
+        assert_eq!(lower_base("vol1", Some(&ep(2)), "epoch-other-vol-1"), "epoch-other-vol-1");
+    }
+
+    #[test]
+    fn the_tie_holds_only_while_every_source_vouches() {
+        let attached = vec!["uuid-a".to_string(), "uuid-c".to_string()];
+        let r = b_standby_from_a();
+        assert_eq!(r.source_tie_broken("uuid-b", &attached), None);
+
+        // Not attached to this assembly.
+        let only_c = vec!["uuid-c".to_string()];
+        let why = r.source_tie_broken("uuid-b", &only_c).unwrap();
+        assert!(why.contains("uuid-a") && why.contains("not attached"), "{}", why);
+
+        // Marked stale (the record caught up with its lag).
+        let mut s = r.clone();
+        s.mark_stale("uuid-a", "leg failed", "t5");
+        assert!(s.source_tie_broken("uuid-b", &attached).unwrap().contains("is stale"));
+
+        // Stale and back in sync since the copy: `since` moved.
+        s.mark_in_sync("uuid-a", &ep(6), "admitted", "t6");
+        let why = s.source_tie_broken("uuid-b", &attached).unwrap();
+        assert!(why.contains("marked stale after the copy"), "{}", why);
+
+        // A new head (only a revert does that).
+        let mut h = r.clone();
+        h.get_mut_for_tests("uuid-a").active_lvol_uuid = Some("uuid-a-v2".to_string());
+        assert!(h.source_tie_broken("uuid-b", &attached).unwrap().contains("new head"));
+    }
+
+    #[test]
+    fn a_source_is_listed_once_per_state_it_was_copied_in() {
+        let mut r = b_standby_from_a();
+        assert!(!r.note_copy_source("uuid-b", "uuid-a"), "same source, same state: listed once");
+        r.mark_stale("uuid-a", "leg failed", "t5");
+        r.mark_in_sync("uuid-a", &ep(6), "admitted", "t6");
+        assert!(r.note_copy_source("uuid-b", "uuid-a"), "a later copy from it is a new entry");
+        assert_eq!(r.get("uuid-b").unwrap().copied_from.len(), 2);
+        assert!(!r.note_copy_source("uuid-b", "uuid-zzz"), "unknown source");
     }
 
     // ── expansion belt (v1.21.0) ─────────────────────────────────────────
