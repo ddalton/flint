@@ -957,14 +957,18 @@ strict_run FlintReplication FlintReplicationEmptyHeadRestoreFixed.cfg "fallback 
 #
 # Two bounds, both complete in minutes: one failure / two writes / three
 # epochs / one retained, and the two-failure bound (one write, four epochs,
-# two retained) the F75 corners need.  The Probe runs carry the TLAPS
-# proof's strengthening invariants.  PinRetention is NOT a safety guard:
-# the lineage-coverage check is (NoPinRetention must HOLD).
+# two retained) the F75 corners need.  FlintCatchupProof.tla proves the
+# safety theorems for EVERY bound (TLAPS, 2026-10-28: Spec => []Inv under
+# the shipped guards, PinRetention free; record and the seven controls in
+# formal/results/2026-10-28-flintcatchup-tlaps/).  The Probe runs check that
+# proof's inductive invariant IndInv at both bounds, and NoPinRetention
+# checks it without the pin.  PinRetention is NOT a safety guard: the
+# lineage-coverage check is (NoPinRetention must HOLD).
 strict_run FlintCatchup FlintCatchup.cfg "catch-up strict (every §5 guard, both reaps, the strict final cut)"
 strict_run FlintCatchup FlintCatchupF75.cfg "catch-up strict, two-failure bound (the second-failure corners)"
-strict_run FlintCatchup FlintCatchupProbe.cfg "catch-up proof invariants (blob chain, S linear, base lemma, standby tracking)"
-strict_run FlintCatchup FlintCatchupProbeF75.cfg "catch-up proof invariants, two-failure bound"
-strict_run FlintCatchup FlintCatchupNoPinRetention.cfg "catch-up without the retention pin (the lineage-coverage check is the safety; the pin buys progress)"
+strict_run FlintCatchup FlintCatchupProbe.cfg "catch-up inductive invariant IndInv (FlintCatchupProof.tla) and the blob-chain probe"
+strict_run FlintCatchup FlintCatchupProbeF75.cfg "catch-up inductive invariant IndInv, two-failure bound"
+strict_run FlintCatchup FlintCatchupNoPinRetention.cfg "catch-up without the retention pin (the lineage-coverage check is the safety; the pin buys progress), IndInv included"
 mutation_run FlintCatchup FlintCatchupNoBackoff.cfg "catch-up mutation (Backoff=FALSE: a base holding a zombie or missing a write)" "Inv"
 mutation_run FlintCatchup FlintCatchupNoRevert.cfg "catch-up mutation (Revert=FALSE: D keeps its own tail)" "Inv"
 mutation_run FlintCatchup FlintCatchupNoBaseInclusive.cfg "catch-up mutation (BaseInclusive=FALSE: the base's own delta is skipped)" "Inv"
