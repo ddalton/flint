@@ -537,7 +537,7 @@ trap print_profile EXIT
 
 # ── SHARDING: which modules does THIS process check? ───────────────────
 #
-# The gate is 293 TLC runs.  On the 4-vCPU CI runner that does not fit in
+# The gate is 302 TLC runs.  On the 4-vCPU CI runner that does not fit in
 # a job, so the workflow splits it across a matrix and each process is
 # handed a group of modules in TLA_MODULES (space-separated).  Empty or
 # unset means the whole gate, which is what a developer running this by
@@ -976,6 +976,33 @@ mutation_run FlintCatchup FlintCatchupNoFinalDelta.cfg "catch-up mutation (Final
 mutation_run FlintCatchup FlintCatchupFinalCutLeftover.cfg "SHIPPED admission (FinalCutStrict=FALSE: the final cut adopts an aborted cut's leftover)" "Inv"
 mutation_run FlintCatchup FlintCatchupNoReapNewer.cfg "pre-F75 revert (ReapNewer=FALSE: a pre-failure leftover becomes a later base)" "Inv"
 mutation_run FlintCatchup FlintCatchupNoFullBuildReap.cfg "SHIPPED full build (FullBuildReaps=FALSE: F75 through the full build)" "Inv"
+
+# ── FlintLocalLeg.tla: a stale leg on the CONSUMER'S node (2026-10-28) ──────
+#
+# FlintReplication's consumer-node residual: a consumer that moves onto a
+# stale leg's node.  catchup_stale runs F36 (head_live_consumer: nvmf
+# exports with live controllers ONLY) -> revert (bdev_lvol_delete: v26.05
+# unregisters with no claim check, so a configured LOCAL base is hot-removed
+# from the live raid) -> clear_head_sb (any ONLINE raid on the node refuses)
+# -> copy.  A record-Stale leg the forced-stale fallback serves on the
+# consumer's own node is invisible to F36, and the refusal comes after the
+# revert: in the detection lag (the in_sync member faulted out, its record
+# not yet marked) the catch-up takes the raid's last base and the only copy
+# of a write acked since (ShippedLoss); and a Stale leg under the consumer
+# is never rebuilt while the pod stays (ShippedStuck).  The fix needs BOTH
+# halves: the membership check before the revert (F36 reads the replica
+# node's raid bases) and the precise refusal in clear_head_sb (only a raid
+# holding THIS head), which must never delete the online raid.  SPDK's
+# examine is a no-op on the live raid: consumer raids are superblock:false.
+mutation_run FlintLocalLeg FlintLocalLegShipped.cfg "SHIPPED local stale leg (F36 blind to a local raid base; clear_head_sb refuses only after the revert)" "Inv"
+mutation_run FlintLocalLeg FlintLocalLegShippedLoss.cfg "SHIPPED local stale leg, loss probe (the revert under the live raid destroys a last acked copy in the detection lag)" "Inv_NoCatchupLoss"
+liveness_mutation_run FlintLocalLeg FlintLocalLegShippedStuck.cfg "SHIPPED local stale leg, liveness (any online raid on the node refuses: never rebuilt while the pod stays)"
+mutation_run FlintLocalLeg FlintLocalLegPreciseOnly.cfg "precise clear_head_sb alone (after the revert, so no protection)" "Inv"
+liveness_mutation_run FlintLocalLeg FlintLocalLegF36Only.cfg "F36 sees local bases, blanket clear_head_sb kept (safe, still stuck)"
+strict_run FlintLocalLeg FlintLocalLegFixed.cfg "local stale leg fixed (membership check before the revert + precise clear_head_sb), 2 legs, liveness included"
+mutation_run FlintLocalLeg FlintLocalLegDeleteOnline.cfg "fixed but the precise path's phantom-delete loop deletes the online raid" "Inv"
+mutation_run FlintLocalLeg FlintLocalLegShipped3.cfg "SHIPPED local stale leg, 3 legs" "Inv"
+strict_run FlintLocalLeg FlintLocalLegFixed3.cfg "local stale leg fixed, 3 legs (fill-to-two with stale legs), liveness included"
 
 mutation_run FlintClaims FlintClaimsNoGrace.cfg "F50 mutation (MarkerGrace=FALSE: scrub under a live window, cold admission)" "Inv_NoColdAdmission"
 
