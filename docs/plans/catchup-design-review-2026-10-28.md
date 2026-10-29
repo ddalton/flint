@@ -276,7 +276,7 @@ What it changes in the recommendations above:
 | Ship the three-part fix | shipped: stage 1050134c, hot rejoin 395b442d, with the CHANGELOG caveats |
 | The unstage capture | shipped ef3a6f48, gated on the VolumeAttachment node and the writer set; a belt under the stamp |
 | The monitor gated on the VolumeAttachment node | not written; stays as a belt, and copies the stamp's clock into `since` so `T_back` covers the I/O timeout alone |
-| Mark the co-located leg stale at the fence flip | becomes the stage's decree: the previous consumer's own leg is excluded unless it is the record's only `in_sync` leg (a confirmed sole continuation is one case, a monitor mark landed during a held minority the other); the decree never strands |
+| Mark the co-located leg stale at the fence flip | becomes the stage's decree, written only by a stage whose read is conclusive without that leg (attached `in_sync` legs a majority of the newest stamp's size, or a confirmed sole continuation on an attached leg); otherwise the stage waits for it as F36c's last writer |
 | Trust belongs to the epoch | stays for the scheduler and the catch-up, since the record trails a majority drop by one poll; modelled as FlintCatchupT (rev 15, md5 8ac3cf00), not a FlintCatchupN arm |
 | The tie's demotion of an unattached source | the conjunct becomes "named in the newest valid stamp"; the demotion stands only for a source the raid dropped |
 | Base floor and forced re-revert | retire once per-epoch membership is in the record |
@@ -298,9 +298,13 @@ the decree as first written stranded a volume: two legs failed, the raid
 held at the third for the record, the monitor marked the two stale during
 the hold, the pod moved before the confirm, and the decree marked the
 third stale as well, leaving every acknowledged write on a leg the record
-no longer trusted; the decree now spares the record's last `in_sync` leg
-and the stage waits for it, since the decree chooses between sources and
-never strands.
+no longer trusted. Sparing the record's last `in_sync` leg closed that
+and not the next: with the record holding a leg `in_sync` that had missed
+a write, a vouch that counted the previous consumer's leg stale by decree
+served without it. The decree is now written only by a stage whose read
+is conclusive without that leg; otherwise the stage waits for it. F36c's
+180 s bound, after which the gate serves the reachable legs with the risk
+surfaced, is outside the model and stays the user's decision.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.

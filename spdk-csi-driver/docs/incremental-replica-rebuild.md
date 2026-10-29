@@ -28,8 +28,9 @@ cluster per leg, a carried raid1 patch of §7's size. Model and code asks
 are at the end of §12; the model comes first. Amended the same day from
 the peers' reads: a stamp read is conclusive only from a majority of the
 stamp's size, every stamp carries the last released view, and the stage's
-decree never strands the record's last `in_sync` leg (flint-e4, three
-model traces), and the raid1 hook has five traps (flint-91).
+decree is written only by a read conclusive without the previous
+consumer's leg (flint-e4, four model traces), and the raid1 hook has five
+traps (flint-91).
 
 **What changed in rev 7** (2026-10-29, after the per-epoch trust model
 `formal/FlintCatchupT.tla` reached a code-faithful revision and the unstage
@@ -2259,8 +2260,10 @@ The stage, after the fence flip and before `bdev_raid_create`:
    greatest (`seq`, `gen`); its `members` are the assembly's candidates.
    The read is **conclusive** only when the attached `in_sync` legs,
    members of that stamp or not, number a majority of its `size`, or
-   when the record vouches (a sole continuation on an attached leg, or
-   every unattached leg record-stale). Counting attached members only
+   when the record vouches (a confirmed sole continuation on an attached
+   leg, or every unattached leg record-stale, the previous consumer's leg
+   counted as the record holds it, never as step 4 would mark it).
+   Counting attached members only
    is also safe, and defers where the count would serve, as in the
    trace above. Two majorities of one size intersect, so
    a newer majority stamp would sit on an attached leg; a read from fewer
@@ -2273,46 +2276,75 @@ The stage, after the fence flip and before `bdev_raid_create`:
    record-before-ack gives there, unavailable rather than lost. Every
    attached leg not in the candidates is marked stale in the assembly
    write, with the reason.
-3. If the read is inconclusive, or no attached leg is in the list, the
-   freshest legs may be unreachable:
-   F36c's case, with the list as its writer set and the gate "at least
-   one member attached". Any one member suffices, because every
-   acknowledged write landed on every member of the stamp that names
-   them; F36c's defer and its serve-with-risk stand, and its premise,
-   that every acked write lives on every leg of the last assembly, is
-   now true by construction rather than by assumption. When no attached
-   leg is record-`in_sync` there is no list, and the writer set is the
-   record's `in_sync` set; the leg step 4 spares is waited for this way.
+3. If the read is inconclusive, the stage **defers**: the legs that would
+   make it conclusive are unattached, and one of them may carry a newer
+   stamp than any attached leg shows. F36c carries the wait. Its writer
+   set is the record's `in_sync` legs the read lacks, and its gate is
+   "the read concludes", not "at least one member attached": any one
+   member sufficed for a conclusive list, since every acknowledged write
+   landed on every member of the stamp that names them, but a member of
+   the record's set can be exactly the leg that lacks the write, leg 3 in
+   the second trace under step 4. F36c's premise, that every acked write
+   lives on every leg of the last assembly, is now true by construction
+   rather than by assumption, and its question is exact: the stamps say
+   which legs the stage cannot do without. Its bound is a product
+   decision the model does not cover. Today the gate serves the
+   reachable legs after `FLINT_F36C_DEFER_SECS` (180 s), or at once when
+   the missing leg's node is gone (`FLINT_F36C_NODE_GONE_SECS`, 360 s),
+   and stamps `AckedTailRisk` (freshness_gate.rs,
+   `GateDecision::ServeWithRisk`; drill 2.4's obligation that a lost
+   writer never manufactures an outage). Under the stamp that marker is
+   exact: writes acknowledged on the missing leg's newer generation, if
+   it has one, are lost once the served assembly stamps a higher `seq`,
+   because raid1 keeps no versions to merge them back. The node-gone case
+   stays, the loss there is the world's. The 180 s bound on a leg that is
+   coming back is the one place left where the design trades
+   acknowledged writes for availability; it should stay operator-visible
+   and be decided with the patch, the user's call. The model's HOLDs
+   cover the wait, not the bound's expiry.
 4. The previous consumer's own leg, when it cannot be attached (the old
-   raid still claims it), is excluded and marked stale by decree, the
-   enforcement §3 asked for and rev 6 listed as the third positive write,
-   **unless it is the record's only `in_sync` leg**. The decree chooses
-   between sources and never strands: it marks the leg stale only when
-   the record keeps another `in_sync` leg, which then holds everything
-   the excluded leg holds, and the excluded leg rejoins by catch-up. The
-   one exception covers both of its cases. A confirmed sole continuation
-   on that leg leaves it the record's only `in_sync` leg, because the
-   confirm's record write marks the others stale, and the minority rule
-   guarantees that write landed before anything was acknowledged on it.
-   The other case is flint-e4's third trace (FlintCatchupS rev 4, md5
-   `d32f4f23`, zombie move, bound D, `Inv_NoNewLoss` at depth 8): legs 1
-   and 2 fail, the raid holds at {3} for the record, the monitor's tick
-   marks 1 and 2 stale while the hold is up, the pod moves before the
-   confirm, and the decree as rev 8 first wrote it marked 3 stale too.
-   Every leg was then record-stale with every acknowledged write on leg
-   3: a strand, not a disk loss, and the system had no path back without
-   an operator. With the exception the stage defers for leg 3 under step
-   3 and serves on it when hygiene frees it, the record vouching for the
-   one-of-three read; the zombie's held writes on it were never
-   acknowledged and fall in the write-hole class. The strand's root is a
+   raid still claims it), is excluded and marked stale by decree **only
+   by a stage whose read is conclusive without it**: the attached
+   `in_sync` legs a majority of the newest stamp's `size`, or a confirmed
+   sole continuation on an attached leg. Step 2's vouch counts that leg
+   as the record holds it, never as this step would mark it. Otherwise
+   the stage defers under step 3 and waits for the leg as F36c's last
+   writer; when hygiene frees it, it attaches and the read concludes with
+   it. This is the enforcement §3 asked for and rev 6 listed as the third
+   positive write, gated on the one fact that makes it safe: the attached
+   evidence already decides, so the excluded leg holds nothing the
+   assembly's members lack, and it rejoins by catch-up. Two traces fixed
+   the gate (flint-e4, FlintCatchupS, zombie move, bound D). Rev 4 (md5
+   `d32f4f23`, `Inv_NoNewLoss` at depth 8): legs 1 and 2 fail, the raid
+   holds at {3} for the record, the monitor's tick marks 1 and 2 stale
+   while the hold is up, the pod moves before the confirm, and the decree
+   as rev 8 first wrote it marked 3 stale too; every leg record-stale
+   with every acknowledged write on leg 3, a strand rather than a disk
+   loss, and no path back without an operator. Sparing the leg when it is
+   the record's only `in_sync` one closed that and not the next. Rev 5
+   (depth 13): a write lands on legs 1 and 2 as leg 3 drops, generation 1
+   = {1, 2} releases and the write is acknowledged; leg 1 goes out, the
+   raid holds at {2}, the monitor marks 1 stale and not 3; the pod moves
+   with leg 2 the previous consumer's leg and the record holding {2, 3}
+   `in_sync`. Only leg 3 attaches, with generation 0. One of three is no
+   majority, but a vouch that counted leg 2 stale by decree concluded,
+   served on leg 3 and marked 2 stale, without the write. The record's
+   `in_sync` count cannot gate the decree, because the record trails and
+   misses marks by design; only stamps the stage can read, or a
+   confirmation the record made, can. FlintCatchupS rev 7 (md5
+   `6859c997`) carries the gate; its short sanity runs found no violation
+   to depth 16 on the zombie arm, 18 on the lost mark and 17 on the
+   crash, with the full batch c21 to follow. The rev 4 strand's root is a
    monitor mark that is never load-bearing under the stamp: had the
    confirm come it would have written the same marks, and since it never
    came nothing was acknowledged past the last released view, so leg 2
    was complete and could have served at once. A monitor that skips its
    marks while `bdev_raid_get_bdevs` reports a pending membership would
-   buy that availability; it is a follow-up, not part of this pass. This
-   step also closes rev 7's defer seam: a leg hygiene frees during the
-   defer is already stale, unless it is the one the stage waits for.
+   buy that availability; c21 carries it as an arm, and it is a
+   follow-up, not part of this pass. This step also closes the design's
+   rev 7 defer seam: a leg hygiene frees during the defer is either the
+   one the stage waits for, and the read concludes with it, or already
+   stale.
 5. `bdev_raid_create` with `seq` from the assembly write stamps the
    members, and the raid serves.
 
@@ -2324,11 +2356,11 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | the raid1 write hole (writes never acknowledged, landed on some legs) | unchanged and accepted; the model counts torn values as legal |
 | unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
 | health monitor | a belt, gated on the VolumeAttachment's node; it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
-| fence-flip mark on the co-located leg | the decree in step 4 above, which never empties the record's `in_sync` set |
+| fence-flip mark on the co-located leg | the decree in step 4 above, written only by a stage whose read concluded without that leg |
 | per-epoch membership (§5's rule) | stays for the scheduler and the catch-up: the record trails a majority drop by up to one poll, and a leg in that lag is still record-`in_sync` to `plan_cut` and `in_sync_sources`; the cut-time read from the live raid is what makes an epoch's membership exact |
 | the source tie | the "attached" conjunct becomes "named in the newest valid stamp at admission": a source whose node died after a clean unstage is still vouched for and its standby admitted; a source the raid dropped is not, and the demotion stands for that case only |
 | base floor, forced re-revert | as §5 says: redundant once per-epoch membership is in the record |
-| F36c | stays; gate loosened to any one member of the newest valid stamp; the defer seam closed by step 4 |
+| F36c | stays; its writer set becomes the record's `in_sync` legs the read lacks and its gate "the read concludes"; the defer seam closed by step 4; its 180 s bound is the open decision in step 3 |
 | assembly record write | a precondition of serving (rev 7); it allocates `seq` |
 | cleanliness | unchanged: the fence, the assembly write, step 4 |
 
@@ -2417,11 +2449,15 @@ flint-e4, before any code (the user's order: model first):
       same configuration.
 - [ ] A control with the released view off, so the second trace shows
       as a violation (in batch c17, FlintCatchupS md5 `5fc4271e`).
-- [ ] A control with the decree as rev 8 first wrote it, marking the
-      record's last `in_sync` leg stale, so the third trace's strand
-      shows as a violation beside the HOLD (batch c21, rev 5), and a
-      probe that the assembly on the spared leg is reachable after
-      hygiene frees it, so the HOLD is not a defer forever.
+- [ ] Controls for the decree in one batch (c21, FlintCatchupS rev 7,
+      md5 `6859c997`): as rev 8 first wrote it (the strand, expected at
+      depth 8), sparing the record's last `in_sync` leg (expected at
+      depth 13), and gated on the read (expected HOLD); `Inv_SoleOnly`,
+      that a confirmed sole continuation leaves its leg the record's only
+      `in_sync` one; the probe `Reach_ServeOnZ`, that an assembly after
+      the move serves on the previous consumer's leg once it attaches, so
+      the HOLD is not a defer forever; and the arm with the monitor
+      silent during a hold and the decree ungated.
 
 flint-91, once the model holds, scoped here and decided by the user:
 
@@ -2432,7 +2468,8 @@ flint-91, once the model holds, scoped here and decided by the user:
       stamp write fails is failed).
 - [ ] Driver: lvols one cluster larger; `bdev_raid_create` with `seq`
       from the assembly write; the stage's stamp read and steps 1 to 5;
-      the tie's conjunct; F36c's writer set and gate from the stamp.
+      the tie's conjunct; F36c's writer set and gate from the read, with its
+      bound decided.
 - [ ] Node agent: the one-second `get_bdevs` poll on held raids, the
       gated record write, the confirm; the monitor copying `clock` into
       `since`.
