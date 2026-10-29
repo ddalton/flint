@@ -769,7 +769,10 @@ needs exactly that failure: two pod moves inside one monitor window, the
 first zombie's leg never marked and joined to the next raid, its epoch
 complete but dirty, admitted by trust at depth 17. The write's own comment
 calls it record-before-writes; it should be one, and a stage whose
-assembly write fails should not serve (kubelet retries the stage).
+assembly write fails should not serve. That is a new refusal and ships
+with its retry caller (the CO's NodeStage retry). It closes the no-write
+trace only: the defer seam below reaches the same depth with the write
+landed, and belongs to the defer or to record-before-ack.
 
 **The defer seam (F36c).** F36c defers a degraded assembly for up to
 `FLINT_F36C_DEFER_SECS` (180 s) when a leg of the last serving assembly is
