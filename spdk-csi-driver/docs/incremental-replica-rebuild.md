@@ -1,8 +1,29 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
-**Status:** design / proposal — **revision 6**
-**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28
+**Status:** design / proposal — **revision 7**
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28; rev 7 with Claude (Fable 5.1), 2026-10-29
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
+
+**What changed in rev 7** (2026-10-29, after the per-epoch trust model
+`formal/FlintCatchupT.tla` reached a code-faithful revision and the unstage
+capture and the fail-closed fence shipped): §5 gains a subsection on what
+the trust rule rests on and what it leaves open. The rule makes a trusted
+epoch **complete** (it holds every acknowledged write); it does not make it
+**clean**, which rests on §3's fence and on the assembly's stale write.
+Two premises carry every HOLD, and the interim source tie needs neither:
+raid1 drops a base at its first failed write, and a fenced-off consumer
+cannot write a leg the authoritative raid configures. The model found two
+seams in the code as it stands: the assembly's stale write is load-bearing
+and best effort, and F36c's last-writer defer lets hygiene return a
+zombie's co-located leg to service unmarked. §5 then records the two
+closures modelled for §6's survivor divergence: a write quorum does not
+close it; record-before-ack (the failed base is marked stale before the
+ack of the first write it missed) closes it alone, at the cost of one mark
+in the ack path of a degraded write. That choice is the user's and is not
+taken here; under it the unstage capture becomes a belt and the tie's
+unattached-source demotion goes. Status: the capture (`ef3a6f48`) and the
+fail-closed fence (`044f2010`) shipped on 2026-10-28; the monitor gate and
+the fence-flip mark have not.
 
 **What changed in rev 6** (2026-10-28, after the three-replica model and a
 live reproduction): §5's correctness note bounded only the *destination's*
@@ -679,9 +700,176 @@ re-revert* after any demotion. That is a conservative encoding of the rule;
 its cost is that a complete standby loses its copy whenever a source is
 merely unattached at the next stage (`spdk-csi-driver/src/catchup.rs`,
 `replica_sync.rs`; FlintCatchupN arms Tie, TieDemoteAsCode,
-TieFloorFirstOnly). Per-epoch membership itself is being modelled
-(FlintCatchupN `PerEpochTrust`) ahead of code; once it lands, the three
-interim guards are redundant.
+TieFloorFirstOnly). Per-epoch membership itself is modelled ahead of code
+(`formal/FlintCatchupT.tla`, next subsection); once it lands, the floor and
+the forced re-revert are redundant and the tie reduces to the belt described
+there.
+
+### What the rule rests on, and what it leaves open (rev 7, 2026-10-29)
+
+`formal/FlintCatchupT.tla` (flint-e4; stage-only, recursion-free; on the
+branch `csi-rebuild-tlaps` until pushed) models the rule beside the shipped
+policy and the interim tie, with a knob for each thing the code does that
+the earlier models assumed away: catch-up never waits for a cut, the
+stage's assembly write marks the legs it excludes, the local-leg guard,
+F36c's last-writer defer, and crash-torn values counted as legal (raid1's
+write hole). Rev 13, md5 `2dbea4a0`, tla-mc; bound D = 3 replicas, 2
+failures, 1 write, 2 epochs; bound C = 3 epochs. No HOLD below is vacuous
+(probe run). Arms are code-faithful with the capture on unless noted.
+
+| Arm | Shipped | Tie | Trust |
+| --- | --- | --- | --- |
+| Full invariant, bound D | HOLD 6,301,545 | HOLD 10,275,876 | HOLD 34,814,740 |
+| Full invariant, bound C | **VIOLATED** d22 (2,083,303) | not run | no violation to d26 (70,298,735; stopped for memory, not a pass) |
+| Catch-up's claim (`Inv_AdmitNoLoss`), lost mark | HOLD 6.6M | HOLD 10.5M | HOLD 53.6M |
+| Catch-up's claim, consumer crash, torn values legal | HOLD 14,331,651 | HOLD 23,027,196 | no violation to d30 (103,013,286; 1 h cap) |
+| Zombie move, local-leg guard, assembly write | | HOLD 23,114,358 | HOLD 26,855,211 |
+| Zombie move, guard, **no** assembly write | | | **VIOLATED** d17 (3,842,866): a dirty epoch admitted |
+| Catch-up's claim, zombie writes a configured leg (no fence) | VIOLATED d15 | HOLD 11,659,490 | **VIOLATED** d15 (395,431) |
+| Trust without the drop premise | | | `TrustComplete` **VIOLATED** d12 (rev 3, 99,094); `Inv_AdmitNoLoss` HOLD 50.1M |
+| F36c defer on, zombie move | `Inv_MembersAgree` **VIOLATED** d4, every policy | | `Inv_AdmitNoLoss` **VIOLATED** d17 |
+| §6 residual, `Inv_NoNewLoss`, capture gated | **VIOLATED** d9, every policy, no copy or admission in the trace | | |
+
+Bound C is the first bound that separates the policies. The shipped loss
+is rev 6's failure-window trace with the capture on: the leg in its
+detection lag is already a bulk-copy source when the capture marks it.
+
+**Two premises, which the tie does not need.** Every trust HOLD rests on:
+
+1. *Drop at the first failed write.* raid1 removes a base when a write to
+   it fails (`raid1.c:52-70` → `bdev_raid.c:2440-2444`), so a configured
+   base has completed every acknowledged write. A write that hangs
+   without failing keeps the base configured until the I/O timeout, which
+   is what `T_back` covers. Without the premise the rule's completeness
+   claim fails at depth 12 while catch-up's own claim still holds. It is
+   stock behaviour that an SPDK bump could change silently: the phase-3/4
+   cluster suite must pin it beside the equalized-bases cornerstone (a
+   write that fails on one base leaves `bdev_raid_get_bdevs` without that
+   base by the time the write completes).
+2. *The fence.* A consumer fenced off a leg cannot write it once the
+   authoritative raid configures it. A zombie writing a configured member
+   is raid-level split brain under every policy; the tie's HOLD in that
+   arm says only that its claim is about admission. In code the fence
+   flip's probe failed open until `044f2010`; the zombie's co-located leg
+   stays out of the new raid through the lvol's claim and the assembly's
+   stale write (kind, 2026-10-28).
+
+The tie needs neither, because it trusts nothing it did not copy and
+refuses at admission; its price is the demotion described under *Status*
+above.
+
+**Completeness, not cleanliness.** The rule says a trusted epoch holds
+every acknowledged write. It does not say the epoch holds only writes the
+volume acknowledged: a zombie's writes on an excluded leg, or a crash-torn
+write, make a leg *dirty* without making it incomplete. Cleanliness rests
+on §3's fence and on the stage's assembly write marking stale every leg it
+excludes (`record_assembly_sync_state`). That write is load-bearing and
+best effort: a stage whose write fails serves anyway. The model's trace
+needs exactly that failure: two pod moves inside one monitor window, the
+first zombie's leg never marked and joined to the next raid, its epoch
+complete but dirty, admitted by trust at depth 17. The write's own comment
+calls it record-before-writes; it should be one, and a stage whose
+assembly write fails should not serve (kubelet retries the stage).
+
+**The defer seam (F36c).** F36c defers a degraded assembly for up to
+`FLINT_F36C_DEFER_SECS` (180 s) when a leg of the last serving assembly is
+transiently unavailable, so that the freshest leg can rejoin
+(`docs/f36c-assembly-freshness-gate.md`). Its premise, that every acked
+write lives on every leg of the last assembly, is the premise rev 6 found
+false at three replicas. And inside its wait, hygiene on the old consumer
+can free the zombie's co-located leg, which then attaches at the retry as
+an `in_sync` member carrying the zombie's writes: `Inv_MembersAgree` at
+depth 4 under every policy, and the junk reaches a trusted epoch by depth
+17. Rev 6's third positive write, marking the co-located leg stale at the
+fence flip, is the closure that leaves the ack path alone; the arm with
+that mark and the defer on has not been run (asked of flint-e4). Under
+record-before-ack, below, every `in_sync` leg holds every acked write at
+ack time, the defer has no case left, and it goes.
+
+**The residual's two closures (a decision for the user, not taken here).**
+§6's survivor divergence, a consumer that crashes or whose pod moves
+inside a failure window, violates `Inv_NoNewLoss` at depth 9 under every
+policy with the capture gated and no copy or admission in the trace: a
+write lands on one leg, the raid fails the other two before either stale
+mark lands, the write is acked, the consumer leaves, and the new assembly
+takes the two legs that missed it. Two closures were modelled, both on rev
+13, trust policy, bound D, capture on unless noted; "defer dropped" is
+F36c's last-writer defer off.
+
+| Arm | `Inv_NoNewLoss` | `Inv_MembersHold` | `Inv_RaidHolds` |
+| --- | --- | --- | --- |
+| (b) record-before-ack, defer dropped, zombie move | HOLD 88,624,143 | HOLD | HOLD |
+| (b), defer dropped, consumer crash | HOLD 108,524,676 | HOLD | HOLD |
+| (b), defer dropped, lost mark, **capture off** | HOLD 40,693,795 | HOLD | HOLD |
+| today, lost mark | HOLD 53,577,694 | **VIOLATED** d8 | |
+| today, consumer crash | HOLD 126,035,757 | **VIOLATED** d8 (write hole) | |
+| today, defer dropped, zombie move | **VIOLATED** d8 | **VIOLATED** d7 | |
+| (a) write and assembly quorum 2 of 3, no (b), defer dropped, zombie move | **VIOLATED** d18 | **VIOLATED** d7 | **VIOLATED** d18 |
+
+- **(a) A write quorum** (acknowledge only after two legs complete;
+  assemble only with two) does not close it: a lost mark lets catch-up
+  copy the gap onto a second leg, after which the quorums no longer
+  intersect. It also costs availability. With a quorum of one, an
+  acknowledgement on a single landing and a one-leg stage are both
+  reachable; with two, neither is (11,968,041 states). (a) is a
+  durability policy, "no acknowledgement on one copy", and would sit on
+  top of (b), not in its place.
+- **(b) Record-before-ack** closes it alone, provided the defer goes.
+  When raid1 fails a base, the completions of the writes degraded by that
+  failure are held until the base's stale mark is durable, then released.
+  Only the failure path pays: one mark per base failure, in the ack path
+  of the writes in flight at that moment; the healthy path and the copy
+  rate are untouched. It removes the cause behind every rev 6 finding,
+  the record lagging the raid, rather than a symptom. A degraded write
+  still acknowledges (`LiveAckB`, running on the final model rev); a mark
+  that can never land blocks it, and that is the cost: a leg failure
+  while the record is unreachable stalls the volume's writes where today
+  it serves degraded. The data path is spdk-tgt alone, so (b) is a
+  carried raid1 patch of the §7 kind (hold and release), with the mark
+  made durable in one of two places. In the sync record, written by the
+  node agent on the raid's signal, which puts the API server in the
+  degraded ack path. Or as a membership stamp on each surviving leg,
+  written by the raid itself before the release and read back at
+  assembly and capture, which keeps the ack path on the disks and the
+  record rebuildable from them, at the price of a reserved region per
+  lvol and a larger patch. Either shape satisfies the model, whose mark
+  is one durable store.
+
+What (b) would change in this section, should the user take it: the
+capture becomes a belt (the lost-mark arm holds with it off); the tie's
+"attached" conjunct and with it the unattached-source demotion go, since
+a record-`in_sync` leg is then complete at every acknowledgement; and
+`T_back` no longer needs to cover the monitor's tick, since `since` is
+stamped at the failure rather than at its detection (§9's
+`FLINT_CATCHUP_TBACK_SECS` note), though it still covers the I/O timeout.
+Whether per-epoch membership in the record still earns its cut-time read
+under (b), or the tie without its attached conjunct already holds every
+arm, is a model question not yet run (asked of flint-e4). Rev 7 takes no
+decision: (b) is the reviewer's and the modeller's recommendation, and it
+is a change to the data path's behaviour on failure, which the rev 6
+performance envelope reserved to the user.
+
+**The tie as a belt.** When the rule, or (b), lands, keep the tie's
+refusal at admission of a copy whose source was marked stale since the
+copy or changed its head: it is exact, costs one record read, and catches
+a source that fails inside a copy session. Drop the demotion of a standby
+whose source is merely unattached at the next stage.
+
+**Status, 2026-10-29.** Of the three positive writes: the unstage capture
+shipped (`ef3a6f48`, 2026-10-28; gated on the attached VolumeAttachment
+naming this node and every configured base being in the writer set); the
+fence flip fails closed (`044f2010`: a probe that errors counts as still
+connected); the monitor's gate on the VolumeAttachment node and the
+fence-flip mark on the co-located leg are not written. Hot rejoin: §7's
+rev 6 corrections hold in `FlintCatchupN3CHotFix` (195,931,627 states,
+depth 48, complete); the code is on flint-91's branch `hot-rejoin-7` in
+box tests. The trust model's rev 14/15 adds the cut's abort on a
+re-created head, the `apply_epoch_cut` mark race (reported to flint-91),
+and the trust-only rules (base at or below the target; a demoted standby
+re-reverts); a confirmation batch on the final rev follows, and the TLAPS
+proof of the rule (clean setting: capture, no crash, no zombie move, both
+premises; target `Inv_Catchup ∧ MembersHold`) is estimated at 2 to 4 days
+after it.
 
 ### Tunables and space overhead
 
@@ -808,7 +996,9 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   authoritative chain) before assembly — same machinery, small deltas. Until
   implemented, this is an accepted, documented divergence window (it exists in
   Flint today); filesystem journal replay reading mixed old/new metadata is the
-  workload it endangers.
+  workload it endangers. *Rev 7:* this window is §5's residual. A write
+  quorum does not close it; record-before-ack does, at a cost in the
+  degraded ack path (§5, "What the rule rests on").
 
 ### Cutover opportunities (when does "next assembly" happen?)
 
@@ -1030,9 +1220,10 @@ carried as one more `.patch` in `Dockerfile.spdk`.
 >    reaps nothing, so a stale leg's old epoch survives a full-build
 >    localization and a second rejoin can re-base on it.
 >
-> The code for these awaits the bound-C model run (FlintCatchupN3CHotFix);
-> until it lands, hot rejoin carries the exposure the stage path's interim
-> guards close.
+> The bound-C run holds (`FlintCatchupN3CHotFix`, 195,931,627 states,
+> depth 48, complete, 2026-10-28). The code is on flint-91's branch
+> `hot-rejoin-7` in box tests; until it lands, hot rejoin carries the
+> exposure the stage path's interim guards close.
 
 ### What we deliberately do not port
 
