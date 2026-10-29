@@ -1,8 +1,31 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
-**Status:** design / proposal — **revision 7**
-**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28; rev 7 with Claude (Fable 5.1), 2026-10-29
+**Status:** design / proposal — **revision 8**
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28; revs 7 and 8 with Claude (Fable 5.1), 2026-10-29
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
+
+**What changed in rev 8** (2026-10-29, the user's decision on §5's open
+question): record-before-ack is taken, in the on-disk shape, as §12. raid1
+writes a **membership stamp** on every surviving leg before it releases
+the completions of the writes a base failure degraded, so the disks carry
+the raid's membership history and the next assembly reads it before
+serving. One correction to rev 7's sketch: a stamp on the disks alone is
+not enough, because a fenced-off consumer can still stamp the leg on its
+own node. A stamp written on a **majority** of the assembly is one a
+zombie cannot forge; a continuation on a minority (two legs lost at once,
+or any loss on a two-replica volume) also waits for the sync record,
+whose write is gated on the VolumeAttachment's node, so a zombie never
+acknowledges. §6's survivor divergence closes for a crash and for a pod
+move. The unstage capture and the health monitor become belts, the
+monitor copies the stamp's clock into `since` so `T_back` covers the I/O
+timeout alone, the tie's "attached" conjunct becomes "listed in the
+newest valid stamp", F36c's gate becomes "at least one member of the
+newest valid stamp attached", and per-epoch membership stays for the
+scheduler and the catch-up, since the record still trails a majority
+drop by one poll. Costs: one stamp write per base failure in the ack
+path of the writes then in flight, nothing on the healthy path, one
+cluster per leg, a carried raid1 patch of §7's size. Model and code asks
+are at the end of §12; the model comes first.
 
 **What changed in rev 7** (2026-10-29, after the per-epoch trust model
 `formal/FlintCatchupT.tla` reached a code-faithful revision and the unstage
@@ -828,29 +851,17 @@ F36c's last-writer defer off.
   that can never land blocks it, and that is the cost: a leg failure
   while the record is unreachable stalls the volume's writes where today
   it serves degraded. The data path is spdk-tgt alone, so (b) is a
-  carried raid1 patch of the §7 kind (hold and release), with the mark
-  made durable in one of two places. In the sync record, written by the
-  node agent on the raid's signal, which puts the API server in the
-  degraded ack path. Or as a membership stamp on each surviving leg,
-  written by the raid itself before the release and read back at
-  assembly and capture, which keeps the ack path on the disks and the
-  record rebuildable from them, at the price of a reserved region per
-  lvol and a larger patch. Either shape satisfies the model, whose mark
-  is one durable store.
+  carried raid1 patch of the §7 kind (hold and release). Rev 8 takes the
+  on-disk shape, §12: the mark is a membership stamp the raid writes on
+  the surviving legs before it releases, and the sync record confirms
+  only a continuation on a minority of the assembly, because a stamp on
+  a single leg is one a zombie can write.
 
-What (b) would change in this section, should the user take it: the
-capture becomes a belt (the lost-mark arm holds with it off); the tie's
-"attached" conjunct and with it the unattached-source demotion go, since
-a record-`in_sync` leg is then complete at every acknowledgement; and
-`T_back` no longer needs to cover the monitor's tick, since `since` is
-stamped at the failure rather than at its detection (§9's
-`FLINT_CATCHUP_TBACK_SECS` note), though it still covers the I/O timeout.
-Whether per-epoch membership in the record still earns its cut-time read
-under (b), or the tie without its attached conjunct already holds every
-arm, is a model question not yet run (asked of flint-e4). Rev 7 takes no
-decision: (b) is the reviewer's and the modeller's recommendation, and it
-is a change to the data path's behaviour on failure, which the rev 6
-performance envelope reserved to the user.
+What (b) changes in this section is set out in §12 under "What it
+changes in §5 and §6". Rev 7's sketch of that list is superseded: it
+assumed the record itself is written before the ack, which is the shape
+rev 8 did not take, so the record still trails a majority drop, per-epoch
+membership stays, and F36c's defer stays with its gate loosened.
 
 **The tie as a belt.** When the rule, or (b), lands, keep the tie's
 refusal at admission of a copy whose source was marked stale since the
@@ -999,9 +1010,9 @@ or behind, no usable catch-up yet) → `standby` (caught up and chasing; prose:
   authoritative chain) before assembly — same machinery, small deltas. Until
   implemented, this is an accepted, documented divergence window (it exists in
   Flint today); filesystem journal replay reading mixed old/new metadata is the
-  workload it endangers. *Rev 7:* this window is §5's residual. A write
-  quorum does not close it; record-before-ack does, at a cost in the
-  degraded ack path (§5, "What the rule rests on").
+  workload it endangers. *Rev 8:* closed by §12's membership stamp for a
+  crash and for a pod move; what remains is the raid1 write hole on
+  writes never acknowledged, which §12 leaves as it is.
 
 ### Cutover opportunities (when does "next assembly" happen?)
 
@@ -2037,3 +2048,300 @@ independently, so the pin is local to the node serving the clone.
    clone-pinned copy. E2e (§9-8 set gains): snapshot cut while degraded →
    replica heals → restore sourced from the healed replica serves the
    snapshot's content.
+
+## 12. Record-before-ack: the membership stamp (rev 8, 2026-10-29)
+
+§5's rev 7 subsection left one decision open: how to close §6's survivor
+divergence, a consumer that crashes or whose pod moves inside a failure
+window. The model showed a write quorum does not close it and
+record-before-ack does. The user took record-before-ack in the on-disk
+shape. This section is the design pass for it, with one correction to the
+shape as rev 7 sketched it.
+
+### The guarantee, and the correction
+
+The invariant the raid must keep: **at every acknowledgement, the set of
+legs that completed the write is recorded durably somewhere the next
+assembly reads before it serves.** raid1 today acknowledges when every
+configured base has responded and one has succeeded
+(`raid1_write_bdev_io_completion`, `raid1.c`), then marks the failed base
+on the app thread (`raid_bdev_fail_base_bdev`), so the acknowledgement
+precedes every record of the failure. Stock SPDK's superblock does not
+help even where it is enabled: its update sits after
+`raid_bdev_remove_base_bdev_on_quiesced`, and the quiesce has already
+completed the in-flight I/O to the upper layer.
+
+The correction. A stamp on the disks alone does not meet the invariant,
+because the disks cannot tell who wrote the stamp. After a pod move the
+old consumer is fenced off every remote leg (§3), but the leg on its own
+node is attached directly (`FlintLocalLeg`) and stays writable to it. Its
+raid, failing the fenced legs, would stamp that local leg "sole member
+now", and the next stage could not distinguish that stamp from a
+legitimate continuation on one leg before the move. The two cases are
+the same bytes; what differs is whether the writer was still the
+volume's consumer, which only the control plane knows.
+
+So the stamp is paired with one rule: **a stamp is self-validating only
+when it names a majority of the assembly.** Placement puts the legs of a
+volume on distinct nodes (`driver.rs:566`), so a fenced-off consumer
+holds at most one leg, and with the §3 fence in force it cannot stamp a
+majority. A continuation on a minority (two legs lost at once on a
+three-replica volume, or any loss on a two-replica volume) additionally
+waits for the sync record, written by the node agent and gated on the
+VolumeAttachment naming its node, before the raid releases. A zombie's
+minority continuation therefore never acknowledges: its record write is
+refused, and its held writes time out. A legitimate one pays one record
+write. The common case, one leg lost of three, pays one stamp write on
+the disks and never touches the control plane.
+
+### The stamp
+
+One block-aligned record at the tail of every leg, in a region the raid
+excludes from the volume's LBA range:
+
+| Field | Content |
+| --- | --- |
+| `magic`, `version`, `crc` | self-describing; a block that fails the check is "no stamp" |
+| `volume` | the volume's uuid |
+| `seq` | the assembly sequence: allocated by the stage in the sync record's assembly write (§5's record-before-writes), one per assembly of the volume |
+| `gen` | the membership generation within the assembly: 0 at assembly, +1 per base lost |
+| `size` | the assembly's member count at `gen` 0, so a reader can judge majority |
+| `members` | the lvol uuids configured after this change |
+| `clock` | the consumer's wall clock at the change, for `since` |
+
+Order is lexicographic on (`seq`, `gen`). The region is one lvolstore
+cluster, so its allocation never shares a cluster with data; the lvol is
+created one cluster larger than the volume, and raid1 sizes the array
+from each base's `data_size` (`raid1_start`, `raid1.c`), which the patch
+reduces by the reserve where `data_size` is derived from `blockcnt` and
+`data_offset` (`bdev_raid.c`, `raid_bdev_configure_base_bdev`). The
+filesystem stays at LBA 0 (rev 5's restore invariant) and never sees the
+region.
+
+Written at three moments, always by the consumer's `spdk-tgt`:
+
+- **Assembly.** `bdev_raid_create` takes the stamp option with `seq`, and
+  writes (`seq`, 0, `size`, members) to every base before the raid comes
+  online. This is the on-disk twin of the assembly's record write and
+  happens after it.
+- **A base lost.** The barrier below: (`seq`, `gen`+1, survivors) on every
+  surviving configured base before any degraded completion is released.
+- **Resize.** The region moves with the tail: the new stamp is written at
+  the new tail, the old region is zeroed (so the LBAs it vacates read as
+  zeros, the thin-volume invariant), then the raid's size change is
+  notified (`raid_bdev_resize_base_bdev`). A crash between the two leaves
+  a base with no valid stamp at its tail; the reader treats that as "no
+  stamp" and the stage falls back to the record for that assembly, which
+  is today's behaviour.
+
+Read by the control plane through two small RPCs the patch adds beside
+the raid module, `bdev_flint_stamp_read` and `bdev_flint_stamp_write`,
+on any bdev: the consumer's attached remote legs and its local lvol at
+stage, the node's own lvols for the capture and the monitor.
+
+### The barrier: hold and release
+
+`raid_bdev_io_complete` (`bdev_raid.c`) is the one funnel every raid I/O
+completes through. The patch adds a per-raid *pending membership change*
+and, per channel, a queue of completions held while it is set:
+
+1. `raid1_write_bdev_io_completion` on a failed base write sets the
+   pending flag (an atomic on the raid) **before** it calls
+   `raid_bdev_io_complete_part`, so the write that saw the failure is
+   itself held, and so is every write that completes on any thread from
+   that instant.
+2. `_raid_bdev_fail_base_bdev`, on the app thread, writes the next stamp
+   to the surviving configured bases, with the multi-base write pattern
+   of `raid_bdev_write_superblock` and a different offset and payload.
+   This runs **before** the removal's quiesce: the quiesce waits for
+   in-flight I/O to complete, held completions never do, and the two
+   would deadlock. The stock sequence (quiesce, superblock, deconfigure,
+   unquiesce) follows unchanged once the stamp has landed.
+3. A stamp write that fails on a survivor fails that survivor as well:
+   the pending change is extended, a further stamp names the rest, and
+   the chain ends when a stamp has landed on every remaining base, or
+   when none remains, in which case the held writes complete as failed.
+   No acknowledgement without a durable stamp, ever.
+4. Release. If the survivors are a majority of `size`, the flag clears
+   and every channel flushes its queue (`spdk_for_each_channel`). If
+   not, the raid reports the change in `bdev_raid_get_bdevs`
+   (`pending_membership: {seq, gen, members}`) and keeps holding until
+   `bdev_raid_confirm_membership(name, seq, gen)` arrives. The node agent
+   polls `bdev_raid_get_bdevs` on its own raids at one second, writes the
+   record (the survivors' marks and the sole-continuation flag) only when
+   the attached VolumeAttachment names its node, then confirms. A refused
+   or failed record write confirms nothing; the held writes reach the
+   initiator's I/O timeout and fail, which is the correct outcome for a
+   zombie and the accepted one for a legitimate consumer cut off from
+   the API server while losing two legs at once.
+
+Reads are held too. Serving a read from a surviving base during the
+barrier would be safe, since reads change nothing on the disks, but the
+barrier lasts one write round trip and a single queue is simpler. Every
+in-flight write is in the barrier, not only the one that failed: a write
+submitted after the base failed but before the stamp landed would
+otherwise acknowledge on the survivors with the failed base still named
+a member on every disk.
+
+### Reading the stamps at assembly
+
+The stage, after the fence flip and before `bdev_raid_create`:
+
+1. Legs the record holds **stale** are excluded first, as today. Stamps
+   decide only among record-`in_sync` legs. A stale leg's tail may carry
+   a copied or reverted stamp that names it a member of some old
+   generation; it does not matter, because the record's state is the
+   control plane's decree and admission rewrites the stamp.
+2. Read the stamp of every attached `in_sync` leg. A stamp is **valid**
+   when its `members` are a majority of its `size`, or when the record
+   shows the sole continuation it describes. Among the valid stamps take
+   the greatest (`seq`, `gen`); its `members` are the assembly's
+   candidates. Every attached leg not in that list is marked stale in the
+   assembly write, with the reason.
+3. If no attached leg is in the list, the freshest legs are unreachable:
+   F36c's case, with the list as its writer set and the gate "at least
+   one member attached". Any one member suffices, because every
+   acknowledged write landed on every member of the stamp that names
+   them; F36c's defer and its serve-with-risk stand, and its premise,
+   that every acked write lives on every leg of the last assembly, is
+   now true by construction rather than by assumption.
+4. The previous consumer's own leg, when it cannot be attached (the old
+   raid still claims it), is excluded and marked stale by decree, the
+   enforcement §3 asked for and rev 6 listed as the third positive write.
+   It is waited for only when the record shows the previous assembly
+   continuing on it alone, which the minority rule guarantees the record
+   holds before any such write was acknowledged. In every other case the
+   attached members hold everything it holds, and it rejoins by catch-up.
+   This also closes rev 7's defer seam: a leg hygiene frees during the
+   defer is already stale.
+5. `bdev_raid_create` with `seq` from the assembly write stamps the
+   members, and the raid serves.
+
+### What it changes in §5 and §6
+
+| Mechanism | Under the stamp |
+| --- | --- |
+| §6 survivor divergence after a crash or a move | closed; a crash leaves the stamps, a move leaves them and the record for a minority continuation |
+| the raid1 write hole (writes never acknowledged, landed on some legs) | unchanged and accepted; the model counts torn values as legal |
+| unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
+| health monitor | a belt, gated on the VolumeAttachment's node; it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
+| fence-flip mark on the co-located leg | the decree in step 4 above |
+| per-epoch membership (§5's rule) | stays for the scheduler and the catch-up: the record trails a majority drop by up to one poll, and a leg in that lag is still record-`in_sync` to `plan_cut` and `in_sync_sources`; the cut-time read from the live raid is what makes an epoch's membership exact |
+| the source tie | the "attached" conjunct becomes "named in the newest valid stamp at admission": a source whose node died after a clean unstage is still vouched for and its standby admitted; a source the raid dropped is not, and the demotion stands for that case only |
+| base floor, forced re-revert | as §5 says: redundant once per-epoch membership is in the record |
+| F36c | stays; gate loosened to any one member of the newest valid stamp; the defer seam closed by step 4 |
+| assembly record write | a precondition of serving (rev 7); it allocates `seq` |
+| cleanliness | unchanged: the fence, the assembly write, step 4 |
+
+### Interactions, stated honestly
+
+- **Snapshots and copies carry stamps.** An epoch snapshot includes the
+  stamp cluster, and `bdev_lvol_start_shallow_copy` copies the source's
+  allocated clusters, so a rebuilt leg's tail holds the source's stamp
+  until admission rewrites it; a revert restores an old one. Both are
+  benign: membership is a list of uuids, a copied stamp names the
+  source's members and never the destination, and a reverted stamp names
+  an old generation on a leg the record holds stale, which step 1
+  excludes before any stamp is read.
+- **Restore.** A clone of a leg's snapshot is one cluster larger than its
+  volume and exposes the tail to the single-replica bare-lvol stage; the
+  filesystem at LBA 0 ignores capacity it did not format. Re-replication
+  (§10-13) writes a fresh assembly stamp.
+- **Capacity.** One cluster per leg, allocated on the first stamp;
+  CreateVolume sizes lvols at the request plus one cluster;
+  ControllerExpandVolume grows by the same rule.
+- **Fencing disabled** (`FLINT_NVMF_FENCING=disabled`) voids the majority
+  argument along with everything else §3 rests on; the stamp then
+  records history faithfully but cannot refuse a zombie.
+- **The SPDK bump.** The patch rides the carried series
+  (`scripts/spdk-patches.sh`, never hand-edited) beside §7's hot-rejoin
+  patch; the superblock code is its model and its regression suite is
+  the raid unit tests plus the kind drills below.
+- **What it does not do.** It does not version writes, so two members can
+  still disagree on a write that was never acknowledged; it does not make
+  the record exact for a majority drop, which is why §5's per-epoch rule
+  stays; and it does not help a volume whose fence is off.
+
+### Costs
+
+| Path | Cost |
+| --- | --- |
+| healthy writes and reads | none: no extra I/O, no extra hop |
+| one base lost, majority survives | the writes in flight at that instant wait one base-write round trip to each survivor (sub-millisecond on the network the data already crosses); nothing touches the control plane |
+| two bases lost at once, or one on a two-replica volume | the same, plus one sync-record write (tens of milliseconds; seconds under API-server contention); an unreachable API server fails those writes at the I/O timeout, by design |
+| rebuild copy rate | none: the copy is the same shallow copy of the same epochs |
+| space | one lvolstore cluster per leg |
+| control plane | N stamp reads per stage; one `bdev_raid_get_bdevs` per second per node holding raids (the monitor already issues it every 60 s); the confirm RPC on a minority continuation |
+
+### Alternatives considered
+
+- **The record shape** (rev 7's first option): the mark in the sync
+  record before every degraded acknowledgement. One mechanism, a smaller
+  patch (hold, a `get_bdevs` field, a confirm RPC, no on-disk format,
+  no reserve, no read RPC, no resize rule), and an exact record for
+  everyone, which would retire per-epoch membership's cut-time read as
+  well. Its price is the API server in the ack path of every degraded
+  write, a burst of record writes when a node holding many legs fails,
+  and a data-path dependency on the consumer's API connectivity. Rejected
+  by the user for the on-disk shape; it remains the fallback if the
+  patch proves larger than §7's.
+- **Stock raid superblock**: at LBA 0, which breaks rev 5's bare-lvol
+  restore; auto-assembled by examine, the §3 hazard class; and written
+  after the quiesce, so not in the ack path anyway. Three reasons, any
+  one sufficient.
+- **A mark on the consumer node's local disk**: fast and rebuildable, but
+  lost with the node, and the node's loss is the case.
+- **A write quorum** (rev 7's option (a)): does not close the residual
+  without record-before-ack underneath, and costs availability.
+- **The stamp without the majority rule**: the zombie hole above.
+
+### Model and code asks
+
+flint-e4, before any code (the user's order: model first):
+
+- [ ] `FlintCatchupT` arm for the stamp: per-leg (`seq`, `gen`,
+      `members`) store written before the release; the record lags it by
+      a poll for a majority drop and is written before the release for a
+      minority one, gated on the VolumeAttachment's node; the stage reads
+      the stamps as above, with step 4's decree. Expect `Inv_NoNewLoss`,
+      `Inv_MembersHold`, `Inv_RaidHolds` to HOLD on the zombie-move, crash
+      and lost-mark arms, with the defer on and the capture off.
+- [ ] The zombie continuing on its local leg: its minority stamp with no
+      record confirmation must never let it acknowledge, and a leg hygiene
+      frees during the defer must be stale.
+- [ ] The two-at-once loss (three to one) with the API server
+      unreachable: writes fail, nothing is lost.
+- [ ] Liveness: a majority drop's barrier ends; a minority drop's ends
+      when the record is writable.
+
+flint-91, once the model holds, scoped here and decided by the user:
+
+- [ ] The raid1 patch in the carried series: the reserve, the stamp
+      write, the barrier, the majority release, the `get_bdevs` field and
+      the two RPCs, with raid unit tests for the barrier (a completion is
+      never delivered before its stamp) and the chain (a survivor whose
+      stamp write fails is failed).
+- [ ] Driver: lvols one cluster larger; `bdev_raid_create` with `seq`
+      from the assembly write; the stage's stamp read and steps 1 to 5;
+      the tie's conjunct; F36c's writer set and gate from the stamp.
+- [ ] Node agent: the one-second `get_bdevs` poll on held raids, the
+      gated record write, the confirm; the monitor copying `clock` into
+      `since`.
+- [ ] Kind drills: cut one leg's path under a write stream and read the
+      survivors' stamps before the write's acknowledgement is observed;
+      cut two paths and confirm the write completes only after the record
+      shows the continuation; a fenced old consumer's writes never
+      acknowledge; crash the consumer inside a failure window and restage.
+- [ ] Pins: the two premises of §5's rev 7 subsection, and the barrier
+      ordering as a unit test that an SPDK bump cannot pass silently.
+
+### Delivery order
+
+1. The model arm and its controls (flint-e4).
+2. The raid1 patch with its unit tests, on the box.
+3. The driver and node-agent changes behind one flag, default off until
+   the kind drills pass.
+4. The kind drills and the pins.
+5. Then retire the interim guards in §5's order: the floor and the forced
+   re-revert once per-epoch membership is in the record, the tie's
+   demotion once admission reads stamps.
