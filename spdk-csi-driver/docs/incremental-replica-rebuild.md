@@ -29,8 +29,10 @@ are at the end of §12; the model comes first. Amended the same day from
 the peers' reads: a stamp read is conclusive only from a majority of the
 stamp's size, every stamp carries the last released view, and the stage's
 decree is written only by a read conclusive without the previous
-consumer's leg (flint-e4, four model traces), and the raid1 hook has five
-traps (flint-91). The user dropped F36c's transient serve-with-risk
+consumer's leg, and a torn leg, one whose newest stamp is an unconfirmed
+continuation, is cleaned at the stage whenever another member is attached
+(flint-e4, five model traces), and the raid1 hook has five traps
+(flint-91). The user dropped F36c's transient serve-with-risk
 bound under the stamp (2026-10-30, step 3): its timer is an alert, and
 serve-with-risk stays for node-gone and the operator's cut; step 2 gains
 the even-size vouch, so a two-replica volume does not wait for an absent
@@ -2291,7 +2293,34 @@ The stage, after the fence flip and before `bdev_raid_create`:
    the write. An inconclusive read defers under step 3, which is what
    record-before-ack gives there, unavailable rather than lost. Every
    attached leg not in the candidates is marked stale in the assembly
-   write, with the reason.
+   write, with the reason. A leg whose newest stamp is an unconfirmed
+   continuation is a **torn leg**: unacknowledged writes may have landed
+   on it after the last release, and only on such a leg, since a
+   continuation stamps before it writes and a failed stamp write fails
+   the survivor. It counts for the read, its released view being
+   evidence, but the assembly write marks it stale whenever another
+   member of the newest valid generation is attached, and catch-up
+   rebuilds it from its last trusted epoch, which predates the junk; it
+   serves only as the sole survivor, where its torn values are the write
+   hole. flint-e4's fifth trace (FlintCatchupS rev 9, two replicas,
+   zombie move, bound D, `Inv_AdmitNoLoss` at depth 18; the same shape
+   at three replicas near depth 19, predicted, not yet observed): the
+   fenced old consumer, holding leg 1 alone after the fence took leg 2,
+   lands a write there that is never acknowledged; hygiene frees leg 1
+   before the first stage attempt, so step 4 never runs; the stage
+   attaches both legs, conclusive, and serves with the junk on leg 1;
+   the first cut puts the junk inside a trusted epoch; leg 1 drops and
+   returns, is reverted to its own trusted epoch and admitted holding a
+   value no member ever held and nobody acknowledged. That is not the
+   write hole, which is the serving assembly's own in-flight write torn
+   across members with equal stamps, with nothing to tell the legs
+   apart. A fenced writer's junk is preventable: it lasts as long as
+   hygiene takes, it is served to an application that never submitted
+   it, and the held stamp on the leg is its evidence. The rule costs a
+   clean move nothing and cleans the crash-held case, a live consumer
+   crashing inside a minority hold, the same way. At two replicas the
+   read without the torn leg is one of two and needs the even-size
+   vouch, so the two rules interlock.
 3. If the read is inconclusive, the stage **defers**: the legs that would
    make it conclusive are unattached, and one of them may carry a newer
    stamp than any attached leg shows. F36c carries the wait. Its writer
@@ -2395,7 +2424,8 @@ The stage, after the fence flip and before `bdev_raid_create`:
    follow-up, not part of this pass. This step also closes the design's
    rev 7 defer seam: a leg hygiene frees during the defer is either the
    one the stage waits for, and the read concludes with it, or already
-   stale.
+   stale; a leg hygiene frees before the first attempt carries its held
+   stamp and is step 2's torn leg.
 5. `bdev_raid_create` with `seq` from the assembly write stamps the
    members, and the raid serves.
 
@@ -2404,7 +2434,7 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | Mechanism | Under the stamp |
 | --- | --- |
 | §6 survivor divergence after a crash or a move | closed; a crash leaves the stamps, a move leaves them and the record for a minority continuation |
-| the raid1 write hole (writes never acknowledged, landed on some legs) | unchanged and accepted; the model counts torn values as legal |
+| the raid1 write hole (writes never acknowledged, landed on some legs) | shrunk to the serving assembly's own in-flight writes and to a torn leg serving as the sole survivor; a torn leg beside another member is cleaned at the stage (step 2) |
 | unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
 | health monitor | a belt, gated on the VolumeAttachment's node; it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
 | fence-flip mark on the co-located leg | the decree in step 4 above, written only by a stage whose read concluded without that leg |
@@ -2413,7 +2443,7 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | base floor, forced re-revert | as §5 says: redundant once per-epoch membership is in the record |
 | F36c | stays; its writer set becomes the record's `in_sync` legs the read lacks and its gate "the read concludes"; the defer seam closed by step 4; its transient serve-with-risk bound dropped and its timer kept as an alert, serve-with-risk for node-gone and the operator's cut only (step 3) |
 | assembly record write | a precondition of serving (rev 7); it allocates `seq` |
-| cleanliness | unchanged: the fence, the assembly write, step 4 |
+| cleanliness | the fence, the assembly write, step 4, and step 2's torn-leg mark, which covers a leg hygiene freed before the first stage attempt |
 
 ### Interactions, stated honestly
 
@@ -2541,6 +2571,11 @@ flint-e4, before any code (the user's order: model first):
       vouch as a knob: expect the HOLDs to carry over, the control
       without the vouch to defer where the vouch serves, and a probe that
       the one-of-two stage serves with the absent leg record-`in_sync`.
+- [ ] The torn-leg rule as a knob on rev 9 (step 2): expect
+      `Inv_AdmitNoLoss` and `Inv_NoLateJunk2` to HOLD on the two- and
+      three-replica zombie arms with it, the control without it to show
+      the fifth trace, a probe that a torn leg was excluded, and a probe
+      that a torn leg served as the sole survivor, the hole's residue.
 
 flint-91, once the model holds, scoped here and decided by the user:
 
@@ -2552,6 +2587,9 @@ flint-91, once the model holds, scoped here and decided by the user:
 - [ ] Driver: lvols one cluster larger; `bdev_raid_create` with `seq`
       from the assembly write; the stage's stamp read and steps 1 to 5;
       the tie's conjunct; F36c's writer set and gate from the read.
+- [ ] Driver: the torn-leg mark in the assembly write (step 2), with its
+      reason, and the catch-up's revert of a torn leg to its last trusted
+      epoch before any copy.
 - [ ] Driver, the freshness gate under the stamp (step 3): the transient
       deadline becomes the `AssemblyWaiting` alert naming the legs and
       the cut; `ServeWithRisk` for node-gone and the operator's cut only;

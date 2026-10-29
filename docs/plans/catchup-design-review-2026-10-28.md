@@ -283,7 +283,7 @@ What it changes in the recommendations above:
 | The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
 | TLAPS proof of the trust rule, 2 to 4 days | after the model's confirmation batch, against the one pinned md5 |
 
-Three gaps were found by the model ahead of any code, all closed by
+Four gaps were found by the model ahead of any code, all closed by
 rules now in §12. First, a stamp read among the attached legs is conclusive
 only when those legs number a majority of the newest stamp's size, since
 two majorities of one size intersect; with one leg attached after three
@@ -310,7 +310,14 @@ it is unreachable at the stage) and dropped it: the timer is an alert,
 the node-gone serve and the operator's cut are the only serves with risk,
 and the model's HOLDs are the product's claim. Step 2 gained the
 even-size vouch with it, so a two-replica volume does not wait for an
-absent peer.
+absent peer. Fourth, a fenced old consumer's unacknowledged writes on its
+own leg, freed by hygiene before the first stage attempt, entered the new
+assembly as a member's content, survived the first cut inside a trusted
+epoch and came back through every later catch-up; a leg whose newest
+stamp is an unconfirmed continuation is now a torn leg, marked stale at
+the stage whenever another member is attached, and the write hole shrinks
+to the serving assembly's own in-flight writes and the sole-survivor
+serve.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.
