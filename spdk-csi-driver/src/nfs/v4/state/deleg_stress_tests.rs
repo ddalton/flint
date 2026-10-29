@@ -39,7 +39,7 @@ use std::time::Duration;
 
 const FILES: u64 = 8;
 const READERS: u64 = 4;
-const READER_ITERS: usize = 2500; // 4 × 2500 = 10k grant attempts
+const READER_ITERS: usize = 2500; // 4 × 2500 = at least 10k grant attempts
 const WRITERS: u64 = 2;
 const WRITER_ITERS: usize = 1000;
 
@@ -61,6 +61,23 @@ fn ident_of(file: u64) -> (u64, u64) {
 /// The two names of one inode.
 fn alias_fh(file: u64, alias: u64) -> Vec<u8> {
     vec![0xA0, file as u8, alias as u8]
+}
+
+/// Still Granted: not under recall, and not already returned.
+fn not_recalled(sm: &StateManager, sid: &StateId) -> bool {
+    sm.delegations
+        .snapshot(sid)
+        .is_some_and(|d| d.state == DelegState::Granted)
+}
+
+/// Counts one writer done when dropped, on unwind too: a panicking writer
+/// must not leave the readers running, or the scope never joins them.
+struct WriterDone(Arc<AtomicU64>);
+
+impl Drop for WriterDone {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
 }
 
 #[test]
@@ -91,6 +108,12 @@ fn readers_racing_writers_over_hardlink_pairs_hold_the_fence_invariants() {
     let writer_delays = Arc::new(AtomicU64::new(0));
     let writer_proceeds = Arc::new(AtomicU64::new(0));
     let returned_by_client = Arc::new(AtomicU64::new(0));
+    // Readers and writers must overlap in time, or neither coverage check
+    // below can see contention: writers start once a reader holds a grant,
+    // and readers run until every writer is done. Without both, a loaded
+    // run could let one side finish first (one nfs::v4::state run on the
+    // box: 0 writer DELAYs in 2000 opens, readers holding nothing).
+    let writers_done = Arc::new(AtomicU64::new(0));
 
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
@@ -151,11 +174,15 @@ fn readers_racing_writers_over_hardlink_pairs_hold_the_fence_invariants() {
             let sm = Arc::clone(&sm);
             let grants = Arc::clone(&grants);
             let by_alias = [Arc::clone(&grants_by_alias[0]), Arc::clone(&grants_by_alias[1])];
+            let writers_done = Arc::clone(&writers_done);
             workers.push(scope.spawn(move || {
                 let client = 1 + r;
                 let mut rng = 0x9E37_79B9_7F4A_7C15u64 ^ (r + 1);
                 let mut held: Vec<StateId> = Vec::new();
-                for i in 0..READER_ITERS {
+                for i in 0usize.. {
+                    if i >= READER_ITERS && writers_done.load(Ordering::Acquire) == WRITERS {
+                        break;
+                    }
                     let file = xorshift(&mut rng) % FILES;
                     let alias = xorshift(&mut rng) % 2;
                     let (dev, ino) = ident_of(file);
@@ -177,15 +204,26 @@ fn readers_racing_writers_over_hardlink_pairs_hold_the_fence_invariants() {
                         held.push(sid);
                     }
                     // Voluntary returns keep the holder set churning so
-                    // the same file is re-granted many times over.
+                    // the same file is re-granted many times over. A
+                    // delegation already under recall is the client
+                    // thread's to return: readers that took those too
+                    // returned nearly every recalled delegation first, and
+                    // under a loaded full run the client thread returned
+                    // none of them in 18,955 DELAYs, failing "the recall
+                    // path ran". A recall can still land between this check
+                    // and the return, so the voluntary-return race stays.
                     if i % 3 == 0 {
-                        if let Some(sid) = held.pop() {
+                        let pos = held.iter().rposition(|sid| not_recalled(&sm, sid));
+                        if let Some(pos) = pos {
+                            let sid = held.remove(pos);
                             let _ = sm.delegations.return_delegation(&sid);
                         }
                     }
                 }
                 for sid in held {
-                    let _ = sm.delegations.return_delegation(&sid);
+                    if not_recalled(&sm, &sid) {
+                        let _ = sm.delegations.return_delegation(&sid);
+                    }
                 }
             }));
         }
@@ -195,7 +233,18 @@ fn readers_racing_writers_over_hardlink_pairs_hold_the_fence_invariants() {
             let sm = Arc::clone(&sm);
             let delays = Arc::clone(&writer_delays);
             let proceeds = Arc::clone(&writer_proceeds);
+            let grants = Arc::clone(&grants);
+            let done = WriterDone(Arc::clone(&writers_done));
             workers.push(scope.spawn(move || {
+                let _done = done;
+                let started = std::time::Instant::now();
+                while grants.load(Ordering::Relaxed) == 0 {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(60),
+                        "no reader was granted anything in 60s"
+                    );
+                    std::thread::yield_now();
+                }
                 let client = 10 + w;
                 let mut rng = 0xD1B5_4A32_D192_ED03u64 ^ (w + 1);
                 for _ in 0..WRITER_ITERS {
