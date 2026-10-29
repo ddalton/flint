@@ -862,8 +862,8 @@ fence flip fails closed (`044f2010`: a probe that errors counts as still
 connected); the monitor's gate on the VolumeAttachment node and the
 fence-flip mark on the co-located leg are not written. Hot rejoin: §7's
 rev 6 corrections hold in `FlintCatchupN3CHotFix` (195,931,627 states,
-depth 48, complete); the code is on flint-91's branch `hot-rejoin-7` in
-box tests. The trust model's rev 14/15 adds the cut's abort on a
+depth 48, complete) and shipped in `395b442d` (2026-10-29). The trust
+model's rev 14/15 adds the cut's abort on a
 re-created head, the `apply_epoch_cut` mark race (reported to flint-91),
 and the trust-only rules (base at or below the target; a demoted standby
 re-reverts); a confirmation batch on the final rev follows, and the TLAPS
@@ -1221,9 +1221,12 @@ carried as one more `.patch` in `Dockerfile.spdk`.
 >    localization and a second rejoin can re-base on it.
 >
 > The bound-C run holds (`FlintCatchupN3CHotFix`, 195,931,627 states,
-> depth 48, complete, 2026-10-28). The code is on flint-91's branch
-> `hot-rejoin-7` in box tests; until it lands, hot rejoin carries the
-> exposure the stage path's interim guards close.
+> depth 48, complete, 2026-10-28), and the code shipped in `395b442d`
+> (2026-10-29; `hot_rejoin.rs`, `replica_sync.rs`): the window's source is
+> a configured base of the live raid, re-read under the quiesce; every
+> copy source is written ahead and the tie re-checked before the inline
+> promotion, the localization replay and `in_sync`; the pad's base follows
+> `select_base_epoch`; and localization reaps after the pad's revert.
 
 ### What we deliberately do not port
 
