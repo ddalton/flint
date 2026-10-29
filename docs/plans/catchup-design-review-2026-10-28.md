@@ -304,7 +304,8 @@ a write, a vouch that counted the previous consumer's leg stale by decree
 served without it. The decree is now written only by a stage whose read
 is conclusive without that leg; otherwise the stage waits for it. F36c's
 180 s bound, after which the gate serves the reachable legs with the risk
-surfaced, is outside the model and stays the user's decision.
+surfaced, is outside the model's HOLDs; the user kept the node-gone case
+and asked for an expiry arm to measure the bound before deciding it.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.

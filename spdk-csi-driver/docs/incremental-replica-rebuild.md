@@ -2297,11 +2297,12 @@ The stage, after the fence flip and before `bdev_raid_create`:
    exact: writes acknowledged on the missing leg's newer generation, if
    it has one, are lost once the served assembly stamps a higher `seq`,
    because raid1 keeps no versions to merge them back. The node-gone case
-   stays, the loss there is the world's. The 180 s bound on a leg that is
-   coming back is the one place left where the design trades
-   acknowledged writes for availability; it should stay operator-visible
-   and be decided with the patch, the user's call. The model's HOLDs
-   cover the wait, not the bound's expiry.
+   stays, the user's decision (2026-10-29): the loss there is the world's.
+   The 180 s bound on a leg that is coming back is the one place left
+   where the design trades acknowledged writes for availability; the
+   user asked for it measured first, as an expiry arm in the model (the
+   asks below), and it is decided with the patch. The model's HOLDs
+   cover the wait, not the bound's expiry; the expiry arm covers that.
 4. The previous consumer's own leg, when it cannot be attached (the old
    raid still claims it), is excluded and marked stale by decree **only
    by a stage whose read is conclusive without it**: the attached
@@ -2458,6 +2459,14 @@ flint-e4, before any code (the user's order: model first):
       the move serves on the previous consumer's leg once it attaches, so
       the HOLD is not a defer forever; and the arm with the monitor
       silent during a hold and the decree ungated.
+- [ ] The expiry arm (the user's ask, 2026-10-29): a `StageRisk` action
+      enabled when the read is inconclusive, serving the attachable
+      `in_sync` legs with an `AckedTailRisk` ghost, the model's
+      counterpart of the code's 180 s bound. Expect `Inv_NoNewLoss` to
+      fail in the rev 5 shape; that trace is the measurement of what the
+      bound costs. Expect `Inv_LossMarked` to HOLD, that no acknowledged
+      write is absent from every `in_sync` leg while the ghost is unset:
+      the bound never loses silently, its honest claim.
 
 flint-91, once the model holds, scoped here and decided by the user:
 
