@@ -283,14 +283,17 @@ What it changes in the recommendations above:
 | The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
 | TLAPS proof of the trust rule, 2 to 4 days | after the model's confirmation batch, against the one pinned md5 |
 
-One gap is open, raised by flint-e4 ahead of the run and sound on the
-argument alone. A stamp read among the attached legs is conclusive only
-when those legs include a majority of the newest stamp's size, since two
-majorities of one size intersect. With one leg attached after three
-failures, an older stamp looks newest and the stage would serve without an
-acknowledged write. §12's rule is now: defer unless the attached `in_sync`
-legs are a majority of the stamp's size or the record vouches, which is
-the outcome record-before-ack gives, unavailable rather than lost.
+Two gaps were found by the model ahead of any code, both closed by rules
+now in §12. First, a stamp read among the attached legs is conclusive
+only when those legs number a majority of the newest stamp's size, since
+two majorities of one size intersect; with one leg attached after three
+failures an older stamp looks newest, and the rule defers instead, which
+is the outcome record-before-ack gives, unavailable rather than lost.
+Second, a minority stamp the record never confirmed overwrote the only
+copies of the majority stamp before it, so a reader that skipped it as
+invalid fell back to an older stamp and served a leg missing an
+acknowledged write; every stamp now carries the last released generation
+and its members, and an unconfirmed stamp stands for that view.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
-thread's channels) are in §12 with it.
+thread's channels) are in §12 with them.

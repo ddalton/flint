@@ -2110,6 +2110,7 @@ excludes from the volume's LBA range:
 | `size` | the assembly's member count at `gen` 0, so a reader can judge majority |
 | `members` | the lvol uuids configured after this change |
 | `clock` | the consumer's wall clock at the change, for `since` |
+| `rgen`, `rmem` | the last **released** generation of this assembly and its members: the newest membership the raid acknowledged under, by majority or by the record's confirmation, copied forward into every stamp, so a stamp the raid never released still shows what was released before it |
 
 Order is lexicographic on (`seq`, `gen`). The region is one lvolstore
 cluster, so its allocation never shares a cluster with data; the lvol is
@@ -2152,9 +2153,10 @@ and, per channel, a queue of completions held while it is set:
    `raid_bdev_io_complete_part`, so the write that saw the failure is
    itself held, and so is every write that completes on any thread from
    that instant.
-2. `_raid_bdev_fail_base_bdev`, on the app thread, writes the next stamp
-   to the surviving configured bases, with the multi-base write pattern
-   of `raid_bdev_write_superblock` and a different offset and payload.
+2. `_raid_bdev_fail_base_bdev`, on the app thread, writes the next stamp,
+   carrying the last released generation as (`rgen`, `rmem`), to the
+   surviving configured bases, with the multi-base write pattern of
+   `raid_bdev_write_superblock` and a different offset and payload.
    This runs **before** the removal's quiesce: the quiesce waits for
    in-flight I/O to complete, held completions never do, and the two
    would deadlock. The stock sequence (quiesce, superblock, deconfigure,
@@ -2239,12 +2241,26 @@ The stage, after the fence flip and before `bdev_raid_create`:
    control plane's decree and admission rewrites the stamp.
 2. Read the stamp of every attached `in_sync` leg. A stamp is **valid**
    when its `members` are a majority of its `size`, or when the record
-   shows the sole continuation it describes. Among the valid stamps take
-   the greatest (`seq`, `gen`); its `members` are the assembly's
-   candidates. The read is **conclusive** only when the attached
-   `in_sync` legs include a majority of that stamp's `size`, or when the
-   record vouches (a sole continuation on an attached leg, or every
-   unattached leg record-stale). Two majorities of one size intersect, so
+   shows the sole continuation it describes. A stamp that is not valid
+   stands for the released generation it carries, (`seq`, `rgen`,
+   `size`, `rmem`), which is valid by construction. Skipping it instead
+   loses evidence, flint-e4's second trace (FlintCatchupS, bound D, lost
+   mark): leg 1 drops, generation 1 lands on legs 2 and 3 and releases,
+   a write is acknowledged on them; leg 2 drops, generation 2 lands on
+   leg 3 alone, a minority held for the record; the consumer unstages
+   cleanly before the record confirms. At the restage legs 1 and 3
+   attach. Skipped, leg 3's unconfirmed stamp leaves leg 1's generation
+   0 as the newest valid, two attached legs of three make it conclusive,
+   and leg 1 lacks the write. Read as its released view, leg 3 stands
+   for (1, 1, {2, 3}), the newest valid stamp, and leg 3 serves alone
+   with leg 1 marked stale. Among the valid stamps and views take the
+   greatest (`seq`, `gen`); its `members` are the assembly's candidates.
+   The read is **conclusive** only when the attached `in_sync` legs,
+   members of that stamp or not, number a majority of its `size`, or
+   when the record vouches (a sole continuation on an attached leg, or
+   every unattached leg record-stale). Counting attached members only
+   is also safe, and defers where the count would serve, as in the
+   trace above. Two majorities of one size intersect, so
    a newer majority stamp would sit on an attached leg; a read from fewer
    legs can miss one. flint-e4 found the gap before the model ran: a leg
    dropped at generation 1 while the other two stamp (`seq`, 1) and
@@ -2374,6 +2390,8 @@ flint-e4, before any code (the user's order: model first):
 - [ ] A control at three failures without step 2's majority-read rule,
       so the gap shows as a violation and the rule as the HOLD, in the
       same configuration.
+- [ ] A control with the released view off, so the second trace shows
+      as a violation (in batch c17, FlintCatchupS md5 `5fc4271e`).
 
 flint-91, once the model holds, scoped here and decided by the user:
 
