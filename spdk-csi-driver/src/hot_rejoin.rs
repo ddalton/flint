@@ -36,6 +36,7 @@
 //! dead-controller reaper (7b-0) can never condemn the esnap parent's
 //! controller while the source is merely restarting.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -44,7 +45,8 @@ use tracing::{debug, info, warn};
 
 use crate::catchup::{
     copy_chain_to, detach_controller, get_bdev, get_raids, in_sync_sources, list_lvol_names,
-    pick_source, revert_head, revert_head_to_empty, select_covering_source, CatchupConfig,
+    pick_source, reap_epochs_newer_than_base, reap_retained_epochs_for_full_build, revert_head,
+    revert_head_to_empty, select_base_epoch, select_covering_source_among, CatchupConfig,
     CatchupRpc, CatchupStore, CoveringSource, RpcError,
 };
 use crate::driver::SpdkCsiDriver;
@@ -53,7 +55,7 @@ use crate::identity::StorageId;
 use crate::minimal_models::ReplicaInfo;
 use crate::nvmeof_export::flint_host_nqn;
 use crate::replica_sync::{
-    epoch_name, epoch_seq, expected_remote_base_bdev, ReplicaSyncRecord, SyncState,
+    self, epoch_name, epoch_seq, expected_remote_base_bdev, ReplicaSyncRecord, SyncState,
     VolumeSyncRecord,
 };
 
@@ -116,6 +118,10 @@ pub struct HotRejoinConfig {
     /// (`raid_nfs-server-<id>`). Set per volume by the orchestrator tick;
     /// not an env knob.
     pub staged_domain: crate::identity::StagedDomain,
+    /// The §5 back-off the localization pad's base honours, with the
+    /// stale episode's floor (formal/FlintCatchupN.tla, HotFix "pad"):
+    /// catch-up's `t_back`, FLINT_CATCHUP_TBACK_SECS, default 120 s.
+    pub t_back: Duration,
 }
 
 impl Default for HotRejoinConfig {
@@ -129,6 +135,7 @@ impl Default for HotRejoinConfig {
             window_target: Duration::from_secs(2),
             inline_delta_max: 64 * 1024 * 1024,
             staged_domain: crate::identity::StagedDomain::User,
+            t_back: Duration::from_secs(120),
         }
     }
 }
@@ -159,6 +166,11 @@ impl HotRejoinConfig {
                 .map(|mib| mib * 1024 * 1024)
                 .unwrap_or(d.inline_delta_max),
             staged_domain: d.staged_domain,
+            t_back: std::env::var("FLINT_CATCHUP_TBACK_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(d.t_back),
         }
     }
 }
@@ -271,6 +283,12 @@ pub enum HotRejoinOutcome {
     /// back-off (nothing consumer-visible broke beyond one bounded
     /// quiesce).
     InlineAborted { reason: String },
+    /// The source tie broke (formal/FlintCatchupN.tla, HotRefuse): a copy
+    /// source of this leg is no longer an in-sync, unchanged, configured
+    /// member of the live raid. The leg was taken out of the raid if it was
+    /// in it, and demoted to stale with a forced re-revert; catch-up owns
+    /// it from here.
+    Refused { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -288,8 +306,13 @@ struct Topology<'a> {
     rec: &'a ReplicaSyncRecord,
     idx: usize,
     identity: &'a ReplicaInfo,
-    /// The E_f export host and backfill source.
+    /// The E_f export host and the inline window's copy source: an in-sync
+    /// configured base of the live raid (HotFix "win").
     src: &'a ReplicaInfo,
+    /// `src`'s replica index and record entry, for the in-window
+    /// membership re-check.
+    src_idx: usize,
+    src_rec: &'a ReplicaSyncRecord,
     /// Every in-sync replica (E_f must be cut on all of them to be a
     /// common epoch).
     survivors: Vec<Survivor<'a>>,
@@ -368,6 +391,12 @@ fn resolve<'a>(
         return Err("no in-sync survivor to cut E_f on");
     }
     let src = pick_source(record, replicas, Some(consumer)).ok_or("no in-sync source")?;
+    let (src_idx, src_rec) = record
+        .replicas
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.lvol_uuid == src.lvol_uuid)
+        .ok_or("the source has no record entry")?;
     let sid = StorageId::of_handle(volume_id);
     Ok(Topology {
         volume_id,
@@ -381,6 +410,8 @@ fn resolve<'a>(
         idx,
         identity,
         src,
+        src_idx,
+        src_rec,
         survivors,
     })
 }
@@ -410,18 +441,60 @@ pub async fn hot_rejoin_volume(
         // problems than a fast rejoin.
         return Ok(HotRejoinOutcome::NotEligible("no epoch history"));
     }
-    let topo = match resolve(volume_id, &record, replicas, consumer, cfg.staged_domain) {
+    let mut topo = match resolve(volume_id, &record, replicas, consumer, cfg.staged_domain) {
         Ok(t) => t,
         Err(why) => return Ok(HotRejoinOutcome::NotEligible(why)),
     };
 
     // The raid must be online on the consumer for a live add.
-    let raid_online = get_raids(rpc, consumer).await?.iter().any(|r| {
+    let raids = get_raids(rpc, consumer).await?;
+    let Some(raid) = raids.iter().find(|r| {
         r.get("name").and_then(|n| n.as_str()) == Some(topo.raid_name.as_str())
             && r.get("state").and_then(|s| s.as_str()) == Some("online")
-    });
-    if !raid_online {
+    }) else {
         return Ok(HotRejoinOutcome::NotEligible("raid not online on consumer"));
+    };
+
+    // HotFix "win" (formal/FlintCatchupN.tla): the window's source is a
+    // CONFIGURED base of the live raid, not pick_source's record answer. A
+    // leg can be record in_sync while it already misses acked writes (the
+    // monitor's detection lag, a stale mark that never landed); the raid
+    // that dropped it is the witness that knows. The window re-checks it
+    // under the quiesce.
+    let members = replica_sync::configured_replicas(raid, volume_id, &record);
+    let Some((src_idx, src_rec, src)) = pick_window_source(&record, replicas, consumer, &members)
+    else {
+        return Ok(HotRejoinOutcome::NotEligible(
+            "no in-sync replica is a configured base of the live raid",
+        ));
+    };
+    topo.src = src;
+    topo.src_idx = src_idx;
+    topo.src_rec = src_rec;
+
+    // HotFix "tie", before anything moves: a standby whose copy sources no
+    // longer vouch for its head (one went stale since the copy, has a new
+    // head, or is not a member of this raid) is not rejoined. It is demoted
+    // to stale with a forced re-revert, as the stage's admission does.
+    if topo.rec.sync_state == SyncState::Standby {
+        if let Some(why) = record.source_tie_broken(&topo.rec.lvol_uuid, &members) {
+            store
+                .record_stale(volume_id, &topo.rec.lvol_uuid, &format!("hot rejoin refused: {}", why))
+                .await?;
+            store
+                .emit(
+                    volume_id,
+                    "Warning",
+                    "ReplicaSourceTieBroken",
+                    &format!(
+                        "Hot rejoin of replica {} on {} refused: {} — demoted to stale for a \
+                         fresh catch-up",
+                        topo.rec.lvol_uuid, topo.identity.node_name, why
+                    ),
+                )
+                .await;
+            return Ok(HotRejoinOutcome::Refused { reason: why });
+        }
     }
 
     // Choose E_f: next epoch seq, stepping over any name already present on
@@ -502,6 +575,12 @@ pub async fn hot_rejoin_volume(
             "target replica changed state before the window opened",
         ));
     }
+    // HotFix "tie", write-ahead: the window source joins this head's copy
+    // sources before any of its data reaches the leg (the esnap head reads
+    // its E_f; the inline window copies from it).
+    store
+        .record_copy_source(volume_id, &topo.rec.lvol_uuid, &topo.src.lvol_uuid)
+        .await?;
 
     // 7b-4 inline path: any failure here unwinds node state inside
     // window_inline, clears the marker, and reports InlineAborted — the
@@ -528,6 +607,21 @@ pub async fn hot_rejoin_volume(
                         &live_uuid,
                     )
                     .await?;
+                // HotFix "tie" at the promotion: every source this head
+                // copied from must still vouch for it as an in-sync member
+                // of the live raid; otherwise out of the raid and demoted
+                // (HotRefuse). After the flip, so E_f stays a recorded
+                // epoch either way.
+                if let Some(why) =
+                    tie_broken_now(rpc, store, volume_id, &topo.raid_name, consumer, &topo.rec.lvol_uuid)
+                        .await?
+                {
+                    refuse_rejoin(
+                        rpc, store, volume_id, &topo.raid_name, consumer, &topo.rec.lvol_uuid, &why,
+                    )
+                    .await?;
+                    return Ok(HotRejoinOutcome::Refused { reason: why });
+                }
                 // No localization phase exists: the leg is independent the
                 // moment writes resume — promote in the same breath. A
                 // crash between the flip and here is decoded by the
@@ -671,15 +765,20 @@ pub async fn hot_rejoin_volume(
                         .find(|r| r.lvol_uuid == topo.rec.lvol_uuid)
                         .cloned();
                     match marked {
-                        Some(m) if m.hot_rejoin.is_some() => localize(
+                        Some(m) if m.hot_rejoin.is_some() => match localize(
                             rpc, store, &topo.sid, &rec2, &m, replicas, Some(consumer), cfg,
                         )
                         .await
-                        .map_err(|e| {
-                            warn!(volume_id, error = %e, "[HOT_REJOIN] Localization deferred (reconciler resumes it)");
-                            e
-                        })
-                        .is_ok(),
+                        {
+                            Ok(Localized::Done) => true,
+                            Ok(Localized::Refused(reason)) => {
+                                return Ok(HotRejoinOutcome::Refused { reason })
+                            }
+                            Err(e) => {
+                                warn!(volume_id, error = %e, "[HOT_REJOIN] Localization deferred (reconciler resumes it)");
+                                false
+                            }
+                        },
                         _ => true,
                     }
                 }
@@ -894,6 +993,10 @@ async fn window(
         }
         lap("quiesce", &mut t);
         fault_point("abort_after_quiesce");
+
+        // W1b, HotFix "win": with writes fenced, the source must still be
+        // a configured base of the live raid.
+        source_still_configured(rpc, topo).await?;
 
         // W2: E_f on every survivor — strict, all-or-abort, EEXIST refused
         // (an EEXIST snapshot was cut at some OTHER instant and is not the
@@ -1324,6 +1427,10 @@ async fn window_inline(
         }
         lap("quiesce", &mut t);
         fault_point("abort_after_quiesce");
+
+        // W1b, HotFix "win": with writes fenced, the source must still be
+        // a configured base of the live raid.
+        source_still_configured(rpc, topo).await?;
 
         // W2: strict E_f on every survivor (same all-or-abort as esnap).
         cut_ef_strict(rpc, &topo.survivors, ef).await?;
@@ -2073,12 +2180,14 @@ async fn resume_standby(
         let hr_cfg = HotRejoinConfig {
             poll_interval: cfg.poll_interval,
             staged_domain: cfg.staged_domain,
+            t_back: cfg.t_back,
             ..HotRejoinConfig::default()
         };
         return localize(
             rpc, store, volume_id, record, rec, replicas, consumer_node, &hr_cfg,
         )
-        .await;
+        .await
+        .map(|_| ());
     }
 
     // Leg gone. Localized already? Then it is an ordinary standby at E_f —
@@ -2155,15 +2264,16 @@ async fn localize(
     replicas: &[ReplicaInfo],
     consumer_node: Option<&str>,
     cfg: &HotRejoinConfig,
-) -> Result<(), RpcError> {
+) -> Result<Localized, RpcError> {
     let ef = rec.hot_rejoin.clone().expect("caller filters on marker");
     let Some((idx, identity)) = replicas
         .iter()
         .enumerate()
         .find(|(_, ri)| ri.lvol_uuid == rec.lvol_uuid)
     else {
-        return Ok(());
+        return Ok(Localized::Done);
     };
+    let raid_name = crate::identity::raid_name(&cfg.staged_domain.handle_for(volume_id));
     let dst_node = &identity.node_name;
     let dst_lvs = &identity.lvs_name;
     let head_name = head_lvol_name(volume_id, idx);
@@ -2197,6 +2307,15 @@ async fn localize(
             )
             .into());
         }
+        // HotFix "tie" at the promotion (HotRefuse otherwise).
+        let consumer = consumer_node.ok_or("no consumer node to read the raid's membership from")?;
+        if let Some(why) =
+            tie_broken_now(rpc, store, volume_id.as_str(), &raid_name, consumer, &rec.lvol_uuid).await?
+        {
+            refuse_rejoin(rpc, store, volume_id.as_str(), &raid_name, consumer, &rec.lvol_uuid, &why)
+                .await?;
+            return Ok(Localized::Refused(why));
+        }
         store.record_in_sync(volume_id.as_str(), &rec.lvol_uuid, &ef).await?;
         store
             .emit(
@@ -2211,7 +2330,7 @@ async fn localize(
             )
             .await;
         info!(volume_id = volume_id.as_str(), node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Inline admission promoted");
-        return Ok(());
+        return Ok(Localized::Done);
     }
     let head = get_bdev(rpc, dst_node, &head_alias)
         .await?
@@ -2238,39 +2357,23 @@ async fn localize(
             // E_f at the align. Straight to the re-root.
             info!(volume_id = volume_id.as_str(), ef = %ef, "[HOT_REJOIN] Local E_f already present — resume skips the backfill");
         } else {
-            // §5 base for the pad: prefer the pad's OWN chain top when it
-            // is an epoch of this volume (the B1 fix). The pre-window
-            // chase built that chain from a healthy source with the §3
-            // stale-time back-off already applied at its base, so its
-            // newest element is trustworthy — and as the youngest possible
-            // base it keeps the replay O(un-chased delta) and all but
-            // removes the source-retention race (B1, observed live: the
-            // resume based at the OLDEST local epoch and wanted source
-            // epochs GC had already reaped — recovery hung on GC drift for
-            // 133 s of exposure, and an outage past the GC horizon wedges
-            // the marker for good). Pads without an epoch-shaped chain
-            // (full-built, pre-Tier-2) fall back to the OLDEST recorded
-            // epoch still present here — over-copies, never under-copies;
-            // None → thin-aware full build. Computed before source
-            // selection: the coverage probe needs it.
-            let pad_chain_top: Option<String> = get_bdev(rpc, dst_node, &pad_alias)
-                .await?
-                .and_then(|b| {
-                    b.get("driver_specific")
-                        .and_then(|d| d.get("lvol"))
-                        .and_then(|l| l.get("base_snapshot"))
-                        .and_then(|s| s.as_str())
-                        .map(String::from)
-                })
-                .filter(|n| epoch_seq(volume_id.as_str(), n).map(|s| s < ef_seq).unwrap_or(false));
-            let base: Option<String> = pad_chain_top.or_else(|| {
-                record
-                    .epochs
-                    .iter()
-                    .map(|e| e.name.clone())
-                    .filter(|n| epoch_seq(volume_id.as_str(), n).map(|s| s < ef_seq).unwrap_or(false))
-                    .find(|n| present.contains(n))
-            });
+            // §5 base for the pad, HotFix "pad" (formal/FlintCatchupN.tla):
+            // the catch-up revert's rule, the back-off and the stale
+            // episode's floor, over this leg's own epochs below E_f. Not the
+            // pad's chain top: a STALE target was never chased, and its top
+            // may be an epoch cut while it already missed acked writes
+            // (FlintCatchupN3CHot). None → the thin-aware full build.
+            let present_epochs: HashSet<String> = present
+                .iter()
+                .filter(|n| epoch_seq(volume_id.as_str(), n).is_some())
+                .cloned()
+                .collect();
+            let below_ef: HashSet<String> = present_epochs
+                .iter()
+                .filter(|n| epoch_seq(volume_id.as_str(), n).is_some_and(|s| s < ef_seq))
+                .cloned()
+                .collect();
+            let base = select_base_epoch(volume_id.as_str(), record, rec, &below_ef, cfg.t_back);
 
             // The backfill source must actually COVER the replay: E_f (and the
             // base, when set) in its LIVE lineage. A survivor that localized
@@ -2284,25 +2387,74 @@ async fn localize(
             // fail the cycle: the dead E_f export fails the leg soon after,
             // and the leg-gone reconcile arm demotes it (never force-demote a
             // leg that may still be serving raid writes).
-            let src = match select_covering_source(
-                rpc, record, replicas, consumer_node, &ef, base.as_deref(),
-            )
-            .await?
-            {
-                CoveringSource::Covering(src) => src,
-                CoveringSource::NoneInSync => {
-                    return Err("no in-sync source for the backfill".into())
-                }
-                CoveringSource::NoneCovering => {
-                    return Err(format!(
-                        "{} is in no in-sync source lineage (base {}) — the committed window \
-                         cannot localize by replay; awaiting the leg-gone demote",
-                        ef,
-                        base.as_deref().unwrap_or("<full>"),
-                    )
-                    .into())
+            // HotFix "tie": the backfill source is an in-sync configured
+            // member of the live raid.
+            let consumer =
+                consumer_node.ok_or("no consumer node to read the raid's membership from")?;
+            let members =
+                live_members(rpc, consumer, &raid_name, volume_id.as_str(), record).await?;
+            let candidates: Vec<&ReplicaInfo> = in_sync_sources(record, replicas, consumer_node)
+                .into_iter()
+                .filter(|s| members.contains(&s.lvol_uuid))
+                .collect();
+            let mut base = base;
+            let src = loop {
+                match select_covering_source_among(
+                    rpc,
+                    record,
+                    candidates.clone(),
+                    &ef,
+                    base.as_deref(),
+                )
+                .await?
+                {
+                    CoveringSource::Covering(src) => break src,
+                    CoveringSource::NoneInSync => {
+                        return Err("no in-sync source for the backfill".into())
+                    }
+                    // No member lineage holds the base any more (retention
+                    // retired it there; B1's wedge). The full build needs
+                    // only E_f covered, as the catch-up falls back to it.
+                    CoveringSource::NoneCovering if base.is_some() => base = None,
+                    CoveringSource::NoneCovering => {
+                        return Err(format!(
+                            "{} is in no in-sync source lineage (base {}) — the committed \
+                             window cannot localize by replay; awaiting the leg-gone demote",
+                            ef,
+                            base.as_deref().unwrap_or("<full>"),
+                        )
+                        .into())
+                    }
                 }
             };
+
+            // The backfill source joins the head's copy sources before its
+            // data does, and the base is pinned against retention (as the
+            // catch-up pins its own) for the length of the replay.
+            store
+                .record_copy_source(volume_id.as_str(), &rec.lvol_uuid, &src.lvol_uuid)
+                .await?;
+            // A tie already broken refuses now, before the replay's work
+            // (HotLocalize needs it; HotRefuse otherwise). The check before
+            // in_sync below still catches one that breaks during the replay.
+            if let Some(why) =
+                tie_broken_now(rpc, store, volume_id.as_str(), &raid_name, consumer, &rec.lvol_uuid)
+                    .await?
+            {
+                refuse_rejoin(
+                    rpc, store, volume_id.as_str(), &raid_name, consumer, &rec.lvol_uuid, &why,
+                )
+                .await?;
+                return Ok(Localized::Refused(why));
+            }
+            let pinned = match &base {
+                Some(b) => b.clone(),
+                None => record
+                    .oldest_epoch(volume_id.as_str())
+                    .ok_or("no recorded epoch to anchor the pad's full build")?
+                    .to_string(),
+            };
+            store.pin_retention(volume_id.as_str(), &pinned).await?;
 
             // Revert the pad onto the base (or empty) — the landing pad must be
             // write-virgin for the replay. Its lvol name is the stable replica
@@ -2310,8 +2462,17 @@ async fn localize(
             let pad_uuid = match &base {
                 Some(b) => {
                     let base_alias = format!("{}/{}", dst_lvs, b);
-                    revert_head(rpc, dst_node, &pad_alias, &identity.lvol_name, &base_alias)
-                        .await?
+                    let uuid =
+                        revert_head(rpc, dst_node, &pad_alias, &identity.lvol_name, &base_alias)
+                            .await?;
+                    // HotFix "reap": this leg's epochs newer than the base are
+                    // copies a later revert could re-base on (F75); the
+                    // catch-up's revert reaps them too.
+                    reap_epochs_newer_than_base(
+                        rpc, dst_node, dst_lvs, volume_id.as_str(), b, &present_epochs,
+                    )
+                    .await?;
+                    uuid
                 }
                 None => {
                     let src_ef_alias = format!("{}/{}", src.lvs_name, ef);
@@ -2325,7 +2486,7 @@ async fn localize(
                     if bytes == 0 {
                         return Err("cannot size the landing pad: E_f reports no size".into());
                     }
-                    revert_head_to_empty(
+                    let uuid = revert_head_to_empty(
                         rpc,
                         dst_node,
                         &pad_alias,
@@ -2333,7 +2494,13 @@ async fn localize(
                         dst_lvs,
                         bytes.div_ceil(1024 * 1024),
                     )
-                    .await?
+                    .await?;
+                    // HotFix "reap", the full build: every retained epoch name.
+                    reap_retained_epochs_for_full_build(
+                        rpc, dst_node, dst_lvs, volume_id.as_str(), record, &present_epochs,
+                    )
+                    .await?;
+                    uuid
                 }
             };
 
@@ -2435,6 +2602,18 @@ async fn localize(
         }
     }
 
+    // HotFix "tie" before in_sync: every source this head copied from (the
+    // chase's, the window's, the backfill's) must still vouch for it as an
+    // in-sync member of the live raid; otherwise HotRefuse.
+    let consumer = consumer_node.ok_or("no consumer node to read the raid's membership from")?;
+    if let Some(why) =
+        tie_broken_now(rpc, store, volume_id.as_str(), &raid_name, consumer, &rec.lvol_uuid).await?
+    {
+        refuse_rejoin(rpc, store, volume_id.as_str(), &raid_name, consumer, &rec.lvol_uuid, &why)
+            .await?;
+        return Ok(Localized::Refused(why));
+    }
+
     // The head's chain reaches the local E_f and the leg has taken every
     // raid write since the add: fully in sync. mark_in_sync clears the
     // marker atomically with the state change.
@@ -2462,6 +2641,143 @@ async fn localize(
         )
         .await;
     info!(volume_id = volume_id.as_str(), node = %rec.node_name, ef = %ef, "[HOT_REJOIN] Localization complete");
+    Ok(Localized::Done)
+}
+
+/// How a localization ended.
+enum Localized {
+    /// The leg is in sync.
+    Done,
+    /// HotRefuse: the leg was taken out of the raid and demoted.
+    Refused(String),
+}
+
+/// HotFix "win": the window's source, in `pick_source`'s preference order
+/// (off the consumer's node first) but only among `members`, the live
+/// raid's configured bases. With its replica index and record entry.
+fn pick_window_source<'a>(
+    record: &'a VolumeSyncRecord,
+    replicas: &'a [ReplicaInfo],
+    consumer: &str,
+    members: &[String],
+) -> Option<(usize, &'a ReplicaSyncRecord, &'a ReplicaInfo)> {
+    in_sync_sources(record, replicas, Some(consumer))
+        .into_iter()
+        .filter(|s| members.contains(&s.lvol_uuid))
+        .find_map(|s| {
+            record
+                .replicas
+                .iter()
+                .enumerate()
+                .find(|(_, r)| r.lvol_uuid == s.lvol_uuid)
+                .map(|(i, r)| (i, r, s))
+        })
+}
+
+/// HotFix "win" under the quiesce: the window's source must still be a
+/// configured base of the live raid. An unreadable raid fails the window.
+async fn source_still_configured(rpc: &dyn CatchupRpc, topo: &Topology<'_>) -> Result<(), RpcError> {
+    let raids = get_raids(rpc, topo.consumer)
+        .await
+        .map_err(|e| format!("raid membership under the quiesce: {}", e))?;
+    let held = raids
+        .iter()
+        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(topo.raid_name.as_str()))
+        .is_some_and(|raid| {
+            replica_sync::raid_holds_replica(raid, topo.volume_id, topo.src_idx, topo.src_rec)
+        });
+    if held {
+        Ok(())
+    } else {
+        Err(format!(
+            "window source {} on {} is no longer a configured base of {}",
+            topo.src.lvol_uuid, topo.src.node_name, topo.raid_name
+        )
+        .into())
+    }
+}
+
+/// The live raid's members on `consumer`, as record replica uuids. Fails
+/// closed: an unreadable raid list, or no such raid, is an error, never an
+/// empty membership.
+async fn live_members(
+    rpc: &dyn CatchupRpc,
+    consumer: &str,
+    raid_name: &str,
+    volume_id: &str,
+    record: &VolumeSyncRecord,
+) -> Result<Vec<String>, RpcError> {
+    let raids = get_raids(rpc, consumer).await?;
+    let raid = raids
+        .iter()
+        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(raid_name))
+        .ok_or_else(|| format!("raid {} is not on {}", raid_name, consumer))?;
+    Ok(replica_sync::configured_replicas(raid, volume_id, record))
+}
+
+/// HotFix "tie" now, on a fresh record and the live raid's membership: why
+/// `target`'s copy sources no longer vouch for its head, or None.
+async fn tie_broken_now(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    raid_name: &str,
+    consumer: &str,
+    target: &str,
+) -> Result<Option<String>, RpcError> {
+    let record = store.load(volume_id).await?.ok_or("the sync record vanished")?;
+    let members = live_members(rpc, consumer, raid_name, volume_id, &record).await?;
+    Ok(record.source_tie_broken(target, &members))
+}
+
+/// HotRefuse (formal/FlintCatchupN.tla): the tie broke with the leg in the
+/// live raid. Take it out of the raid, then demote it. Out first: a failed
+/// removal fails the cycle and the next one retries, rather than leave a
+/// leg the record calls stale while the raid still writes it.
+async fn refuse_rejoin(
+    rpc: &dyn CatchupRpc,
+    store: &dyn CatchupStore,
+    volume_id: &str,
+    raid_name: &str,
+    consumer: &str,
+    target: &str,
+    why: &str,
+) -> Result<(), RpcError> {
+    let record = store.load(volume_id).await?.ok_or("the sync record vanished")?;
+    let (idx, rec) = record
+        .replicas
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.lvol_uuid == target)
+        .ok_or_else(|| format!("replica {} has no record entry", target))?;
+    let raids = get_raids(rpc, consumer).await?;
+    if let Some(base) = raids
+        .iter()
+        .find(|r| r.get("name").and_then(|n| n.as_str()) == Some(raid_name))
+        .and_then(|raid| replica_sync::raid_base_of_replica(raid, volume_id, idx, rec))
+    {
+        rpc.spdk_rpc(
+            consumer,
+            &json!({ "method": "bdev_raid_remove_base_bdev", "params": { "name": base } }),
+        )
+        .await
+        .map_err(|e| format!("removing {} from {}: {}", base, raid_name, e))?;
+    }
+    store
+        .record_hot_rejoin_refused(volume_id, target, &format!("hot rejoin refused: {}", why))
+        .await?;
+    store
+        .emit(
+            volume_id,
+            "Warning",
+            "ReplicaSourceTieBroken",
+            &format!(
+                "Hot-rejoined replica {} was taken out of raid {} and demoted to stale: {} — \
+                 catch-up rebuilds it",
+                target, raid_name, why
+            ),
+        )
+        .await;
     Ok(())
 }
 
@@ -2955,6 +3271,9 @@ async fn hot_rejoin_tick(
                         }
                         Ok(HotRejoinOutcome::NotEligible(reason)) => {
                             tracing::debug!(volume_id, reason, "[HOT_REJOIN] Not eligible after claim");
+                        }
+                        Ok(HotRejoinOutcome::Refused { reason }) => {
+                            warn!(volume_id, reason, "[HOT_REJOIN] Refused: the source tie broke — the leg is demoted to stale for catch-up");
                         }
                         Ok(HotRejoinOutcome::InlineAborted { reason }) => {
                             // Node state is already unwound and the marker
@@ -3475,6 +3794,28 @@ mod tests {
                     );
                     json!({ "result": uuid })
                 }
+                // The full build's empty head (revert_head_to_empty): a thin
+                // lvol with no parent, sized in MiB, EEXIST on a taken name.
+                "bdev_lvol_create" => {
+                    let lvs = params["lvs_name"].as_str().unwrap().to_string();
+                    let name = params["lvol_name"].as_str().unwrap().to_string();
+                    let alias = format!("{}/{}", lvs, name);
+                    if w.bdevs.contains_key(&(node_s.clone(), alias.clone())) {
+                        return Err(format!(
+                            "SPDK RPC error: Code=-17 Msg=lvol with name {} already exists",
+                            name
+                        )
+                        .into());
+                    }
+                    let mib = params["size_in_mib"].as_u64().unwrap_or(0);
+                    let uuid = w.next_uuid();
+                    w.bdevs.insert(
+                        (node_s.clone(), alias.clone()),
+                        json!({ "name": alias, "uuid": uuid, "num_blocks": mib * 256, "block_size": 4096,
+                                "driver_specific": { "lvol": {} } }),
+                    );
+                    json!({ "result": uuid })
+                }
                 "bdev_lvol_delete" => {
                     let name = params["name"].as_str().unwrap().to_string();
                     // Blobstore fidelity (lib/blob/blobstore.c): a snapshot
@@ -3973,6 +4314,26 @@ mod tests {
                 .clear_hot_rejoin(replica_uuid, reason, demote_to_stale, NOW);
             Ok(())
         }
+        async fn record_stale(
+            &self,
+            _v: &str,
+            replica_uuid: &str,
+            reason: &str,
+        ) -> Result<(), RpcError> {
+            self.ops.lock().unwrap().push(format!("stale:{}", replica_uuid));
+            self.record.lock().unwrap().mark_stale(replica_uuid, reason, NOW);
+            Ok(())
+        }
+        async fn record_hot_rejoin_refused(
+            &self,
+            _v: &str,
+            replica_uuid: &str,
+            reason: &str,
+        ) -> Result<(), RpcError> {
+            self.ops.lock().unwrap().push(format!("hr_refused:{}", replica_uuid));
+            self.record.lock().unwrap().refuse_hot_rejoin(replica_uuid, reason, NOW);
+            Ok(())
+        }
     }
 
     // -- Fixtures ------------------------------------------------------------
@@ -4006,8 +4367,10 @@ mod tests {
     /// Record: replica a in_sync, replica b stale; epochs 1..=2 recorded.
     fn stale_b_record() -> VolumeSyncRecord {
         let mut r = VolumeSyncRecord::initial(&replicas2());
-        r.apply_epoch_cut(&epoch_name(VOL, 1), &["uuid-a".into(), "uuid-b".into()], NOW);
-        r.apply_epoch_cut(&epoch_name(VOL, 2), &["uuid-a".into(), "uuid-b".into()], NOW);
+        // Cut a day before the failure: past T_back, so the pad's own copy
+        // of epoch-1 is a base (cut at the failure, none is: the full build).
+        r.apply_epoch_cut(&epoch_name(VOL, 1), &["uuid-a".into(), "uuid-b".into()], EARLIER);
+        r.apply_epoch_cut(&epoch_name(VOL, 2), &["uuid-a".into(), "uuid-b".into()], EARLIER);
         r.mark_stale("uuid-b", "leg failed", NOW);
         r
     }
@@ -4024,6 +4387,7 @@ mod tests {
             // opt in explicitly.
             inline_delta_max: 0,
             staged_domain: crate::identity::StagedDomain::User,
+            t_back: Duration::from_secs(120),
         }
     }
 
@@ -5694,8 +6058,9 @@ mod tests {
         let mut record = VolumeSyncRecord::initial(&replicas3());
         let all: Vec<String> =
             vec!["uuid-a".into(), "uuid-b".into(), "uuid-c".into()];
-        record.apply_epoch_cut(&epoch_name(VOL, 1), &all, NOW);
-        record.apply_epoch_cut(&epoch_name(VOL, 2), &all, NOW);
+        // A day before the failure, as in stale_b_record.
+        record.apply_epoch_cut(&epoch_name(VOL, 1), &all, EARLIER);
+        record.apply_epoch_cut(&epoch_name(VOL, 2), &all, EARLIER);
         record.mark_stale("uuid-b", "leg failed", NOW);
         record.mark_hot_rejoin_intent("uuid-b", &epoch_name(VOL, 3), "t");
         record.mark_hot_rejoined(
@@ -5776,23 +6141,30 @@ mod tests {
         );
     }
 
+    /// A day before NOW: epochs cut long before the leg went stale, as the
+    /// scheduler's cadence makes them, so the §5 back-off admits them.
+    const EARLIER: &str = "2026-06-30T00:00:00Z";
+
+    /// HotFix "pad" (formal/FlintCatchupN.tla): the pad's base follows the
+    /// catch-up revert's rule, the back-off and the stale episode's floor,
+    /// not the pad's chain top. Here the top is e2 but the floor is e1: e2
+    /// is a copy above the floor and may hold a bad source's content. The
+    /// revert reaps the leg's e2 too (HotFix "reap"), as §5's does.
     #[tokio::test]
-    async fn localize_resume_bases_at_the_pads_chain_top_not_the_oldest_epoch() {
-        // B1 (2026-07-02): the resume based its replay at the OLDEST local
-        // epoch and demanded source history GC had already reaped — every
-        // source's chain is rooted at e2 (e1 retired), so an e1 base can
-        // never be covered and the marker wedges until GC drift. The pad's
-        // own chain top (e2, chase-built) is the correct base: covered,
-        // minimal, trustworthy.
+    async fn the_pads_base_honours_the_floor_not_its_chain_top() {
         let rpc = FakeRpc::new();
+        let e1 = epoch_name(VOL, 1);
         let e2 = epoch_name(VOL, 2);
         let e3 = epoch_name(VOL, 3);
-        let record = marked_world3(&rpc, &[&e2, &e3], &[&e2, &e3]);
-        // Dest still holds e1 AND e2; the pad's chain tops out at e2.
+        let mut record = marked_world3(&rpc, &[&e1, &e2, &e3], &[&e1, &e2, &e3]);
         rpc.seed_lvol("node-b", "lvs_node-b", &e2, "uuid-ep2b");
         rpc.seed_lvol_with_parent(
             "node-b", "lvs_node-b", &format!("vol_{}_replica_1", VOL), "uuid-b", Some(&e2),
         );
+        for e in record.epochs.iter_mut() {
+            e.recorded_at = EARLIER.into();
+        }
+        record.replicas[1].base_floor = Some(e1.clone());
         let store = FakeStore::new(record.clone());
 
         reconcile_marked(
@@ -5800,24 +6172,191 @@ mod tests {
         )
         .await;
 
-        // The revert cloned the pad from e2 — the chain top, not e1.
         let clones = rpc.calls_of("bdev_lvol_clone");
         assert!(
             clones.iter().any(|(n, p)| n == "node-b"
-                && p["snapshot_name"].as_str() == Some(format!("lvs_node-b/{}", e2).as_str())),
-            "pad must revert onto its chain top e2; clones: {:?}",
+                && p["snapshot_name"].as_str() == Some(format!("lvs_node-b/{}", e1).as_str())),
+            "the pad must revert onto the floor e1; clones: {:?}",
             clones
         );
-        assert!(!rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty());
+        assert!(
+            !clones.iter().any(|(_, p)| p["snapshot_name"].as_str()
+                == Some(format!("lvs_node-b/{}", e2).as_str())),
+            "never onto the chain top e2"
+        );
+        let deletes = rpc.calls_of("bdev_lvol_delete");
+        assert!(
+            deletes.iter().any(|(n, p)| n == "node-b"
+                && p["name"].as_str() == Some(format!("lvs_node-b/{}", e2).as_str())),
+            "the revert reaps the leg's e2 above the base; deletes: {:?}",
+            deletes
+        );
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::InSync, "events: {:?}", store.events());
+        assert!(b.hot_rejoin.is_none());
+    }
+
+    /// B1 (2026-07-02) under the new rule: the base the back-off and the
+    /// floor allow (e1) is in no member's lineage any more (every source is
+    /// rooted at e2). A based replay can never be covered; the full build
+    /// needs only E_f, so localization falls back to it instead of wedging
+    /// on a retired base.
+    #[tokio::test]
+    async fn an_uncovered_pad_base_falls_back_to_the_full_build() {
+        let rpc = FakeRpc::new();
+        let e1 = epoch_name(VOL, 1);
+        let e2 = epoch_name(VOL, 2);
+        let e3 = epoch_name(VOL, 3);
+        let mut record = marked_world3(&rpc, &[&e2, &e3], &[&e2, &e3]);
+        rpc.seed_lvol("node-b", "lvs_node-b", &e2, "uuid-ep2b");
+        rpc.seed_lvol_with_parent(
+            "node-b", "lvs_node-b", &format!("vol_{}_replica_1", VOL), "uuid-b", Some(&e2),
+        );
+        for e in record.epochs.iter_mut() {
+            e.recorded_at = EARLIER.into();
+        }
+        record.replicas[1].base_floor = Some(e1.clone());
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas3(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        assert!(
+            !rpc.calls_of("bdev_lvol_clone").iter().any(|(n, _)| n == "node-b"),
+            "no based revert of the pad: e1 is covered nowhere"
+        );
+        assert!(!rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty(), "the full build replayed");
         assert!(
             !store.events().contains(&"HotRejoinReconcileFailed".to_string()),
-            "an e1 base would have failed every source: {:?}",
+            "an uncovered base must not wedge the marker: {:?}",
             store.events()
         );
         let rec = store.record();
         let b = rec.get("uuid-b").unwrap();
         assert_eq!(b.sync_state, SyncState::InSync);
-        assert!(b.hot_rejoin.is_none(), "marker cleared by the localization");
+        assert!(b.hot_rejoin.is_none());
+    }
+
+    /// HotFix "tie" at localization (HotRefuse): the window's source went
+    /// stale after the copy, so it no longer vouches for this head. The leg
+    /// is taken out of the live raid and demoted (stale, must revert), and
+    /// nothing is replayed onto the pad.
+    #[tokio::test]
+    async fn a_broken_tie_at_localization_takes_the_leg_out_and_demotes_it() {
+        let rpc = FakeRpc::new();
+        let e1 = epoch_name(VOL, 1);
+        let e2 = epoch_name(VOL, 2);
+        let e3 = epoch_name(VOL, 3);
+        let mut record = marked_world3(&rpc, &[&e1, &e2, &e3], &[&e1, &e2, &e3]);
+        record.note_copy_source("uuid-b", "uuid-a");
+        record.mark_stale("uuid-a", "leg failed", NOW);
+        let store = FakeStore::new(record.clone());
+
+        reconcile_marked(
+            &rpc, &store, VOL, &record, &replicas3(), Some("consumer"), &catchup_cfg(),
+        )
+        .await;
+
+        let removes = rpc.calls_of("bdev_raid_remove_base_bdev");
+        assert_eq!(
+            removes,
+            vec![(
+                "consumer".to_string(),
+                json!({ "name": expected_remote_base_bdev(&sid(VOL), 1) })
+            )],
+            "the leg leaves the live raid"
+        );
+        assert!(rpc.calls_of("bdev_lvol_start_shallow_copy").is_empty(), "no replay");
+        assert!(store.events().contains(&"ReplicaSourceTieBroken".to_string()));
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert!(b.must_revert, "its head holds copies nobody vouches for");
+        assert!(b.copied_from.is_empty());
+        assert!(b.hot_rejoin.is_none(), "the marker goes with the refusal");
+    }
+
+    /// HotFix "tie" before the window: a standby whose copy source went
+    /// stale after the copy (its `since` moved) is not rejoined. It is
+    /// demoted to stale with a forced re-revert, and no quiesce opens.
+    #[tokio::test]
+    async fn a_standby_whose_copy_source_went_stale_is_refused_before_the_window() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let mut record = standby_b_record();
+        record.replicas[1].copied_from.push(crate::replica_sync::CopySource {
+            lvol_uuid: "uuid-a".into(),
+            head_uuid: "uuid-a".into(),
+            since: Some("1999-01-01T00:00:00Z".into()),
+        });
+        let store = FakeStore::new(record);
+
+        let out = hot_rejoin_volume(&rpc, &store, VOL, &replicas2(), "consumer", &cfg())
+            .await
+            .unwrap();
+        match out {
+            HotRejoinOutcome::Refused { reason } => assert!(reason.contains("uuid-a"), "{reason}"),
+            other => panic!("expected Refused, got {:?}", other),
+        }
+        assert!(rpc.calls_of("bdev_raid_quiesce").is_empty(), "no window opened");
+        let rec = store.record();
+        let b = rec.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Stale);
+        assert!(b.must_revert);
+        assert!(b.copied_from.is_empty());
+        assert!(b.hot_rejoin.is_none());
+    }
+
+    /// HotFix "win": node-a is record in_sync and off the consumer, so the
+    /// record alone picks it, but the live raid has dropped it. The window's
+    /// source is node-c, the configured member; with no member, none.
+    #[test]
+    fn the_window_source_is_a_configured_member_not_the_records_first_choice() {
+        let replicas = replicas3();
+        let mut record = VolumeSyncRecord::initial(&replicas);
+        record.mark_stale("uuid-b", "leg failed", NOW);
+        assert_eq!(
+            pick_source(&record, &replicas, Some("consumer")).map(|s| s.lvol_uuid.as_str()),
+            Some("uuid-a")
+        );
+        let (idx, rec, src) =
+            pick_window_source(&record, &replicas, "consumer", &["uuid-c".to_string()])
+                .expect("a member source");
+        assert_eq!((idx, rec.lvol_uuid.as_str(), src.node_name.as_str()), (2, "uuid-c", "node-c"));
+        assert!(pick_window_source(&record, &replicas, "consumer", &[]).is_none());
+    }
+
+    /// HotFix "win" under the quiesce: the window re-reads the raid, and a
+    /// source that left it (SPDK nulls the slot), or a raid it cannot read,
+    /// fails the window.
+    #[tokio::test]
+    async fn the_window_source_must_still_be_configured_under_the_quiesce() {
+        let rpc = FakeRpc::new();
+        staged_world(&rpc);
+        let record = stale_b_record();
+        let replicas = replicas2();
+        let topo =
+            resolve(VOL, &record, &replicas, "consumer", crate::identity::StagedDomain::User)
+                .unwrap();
+        source_still_configured(&rpc, &topo).await.expect("node-a is a configured base");
+
+        rpc.fail("consumer", "bdev_raid_get_bdevs", "Code=-1 Msg=boom");
+        let err = source_still_configured(&rpc, &topo).await.unwrap_err();
+        assert!(err.to_string().contains("raid membership under the quiesce"), "{err}");
+
+        {
+            let mut w = rpc.world.lock().unwrap();
+            for r in w.raids.get_mut("consumer").unwrap().iter_mut() {
+                for slot in r["base_bdevs_list"].as_array_mut().unwrap() {
+                    *slot = json!({ "name": Value::Null, "uuid": Value::Null, "is_configured": false });
+                }
+            }
+        }
+        let err = source_still_configured(&rpc, &topo).await.unwrap_err();
+        assert!(err.to_string().contains("no longer a configured base"), "{err}");
     }
 
     #[tokio::test]

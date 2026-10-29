@@ -104,6 +104,30 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A hot rejoin no longer puts back a replica that is missing acknowledged
+  writes** (2026-10-29; `spdk-csi-driver/src/hot_rejoin.rs`). Hot rejoin
+  adds a caught-up replica back into the live raid without a restage. It
+  took its copy source from the sync record, and based the replica's
+  localization on the newest snapshot it held. A replica can be in sync in
+  the record while it already misses acknowledged writes, in the health
+  monitor's detection lag or when its stale mark never landed. A rejoin
+  could then copy from it, or rebase on a copy made from it, and put the
+  replica back without those writes. This is the hot-rejoin counterpart of
+  the catch-up loss fixed below. Now the window copies only from a
+  replica the live raid holds as a configured member, rechecked once
+  writes are paused. Every copy source is recorded, and a rejoin whose
+  sources no longer vouch for the replica is refused: the replica is
+  taken out of the raid if it is in it, and demoted for a fresh catch-up.
+  Localization picks its base by catch-up's rules (the lookback and the
+  stale episode's floor), falls back to a full build when no source still
+  holds that base, and removes the replica's newer snapshots as catch-up
+  does. Model: formal/FlintCatchupN.tla (flint-e4). The shipped hot rejoin loses
+  an acknowledged write; with these four changes it holds (195,931,627
+  states at three replicas), and dropping any one of them loses it again.
+  Like the catch-up fix, it assumes the record learns of a replica's
+  failure before the next restart: the unstage capture covers a clean
+  unstage, not a consumer crash.
+
 - **A replica fence no longer passes on a check that failed** (2026-10-28;
   `spdk-csi-driver/src/nvmeof_export.rs`). Staging a volume on a new node
   fences the previous consumer off each replica's export, then waits until

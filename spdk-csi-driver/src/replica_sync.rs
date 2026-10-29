@@ -966,6 +966,41 @@ impl VolumeSyncRecord {
         changed
     }
 
+    /// The hot rejoin's source tie broke while the leg was in the live raid
+    /// (formal/FlintCatchupN.tla, HotRefuse); the caller has taken it out of
+    /// the raid. The leg goes stale and must revert again: its head holds
+    /// copies no in-sync member of the raid vouches for. The tie list and
+    /// the marker go with it. Unlike [`Self::mark_stale`] this demotes from
+    /// Stale too, because the intent turns a standby target stale without
+    /// the forced re-revert. Like a demotion it keeps `since`, the floor and
+    /// `reverted_to`, and the leg leaves the writer set. Returns true if
+    /// anything changed.
+    pub fn refuse_hot_rejoin(&mut self, lvol_uuid: &str, reason: &str, now_rfc3339: &str) -> bool {
+        let Some(rec) = self.replicas.iter_mut().find(|r| r.lvol_uuid == lvol_uuid) else {
+            return false;
+        };
+        let before = rec.clone();
+        rec.sync_state = SyncState::Stale;
+        if rec.since.is_none() {
+            rec.since = Some(now_rfc3339.to_string());
+        }
+        rec.reason = Some(reason.to_string());
+        rec.must_revert = true;
+        rec.copied_from.clear();
+        rec.hot_rejoin = None;
+        rec.hot_rejoin_at = None;
+        let mut changed = *rec != before;
+        if let Some(ws) = &mut self.writer_set {
+            let n = ws.lvol_uuids.len();
+            ws.lvol_uuids.retain(|u| u != lvol_uuid);
+            if ws.lvol_uuids.len() != n {
+                ws.since = now_rfc3339.to_string();
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Lower the retention pin to `epoch` (§5 retention pinning). A pin only
     /// ever moves toward older epochs here — an existing older (or
     /// unparseable, i.e. pin-everything) pin is kept. Returns true if the
@@ -1319,6 +1354,44 @@ fn base_backs_replica(
         || name == rec.lvol_uuid
         || name == live
         || name == expected_remote_base_bdev(sid, index)
+}
+
+/// The configured base of `raid` that carries record replica `index`
+/// (`rec`), by its base name, if the raid holds it.
+pub fn raid_base_of_replica(
+    raid: &Value,
+    volume_id: &str,
+    index: usize,
+    rec: &ReplicaSyncRecord,
+) -> Option<String> {
+    let sid = crate::identity::StorageId::of_handle(volume_id);
+    configured_bases(raid)
+        .into_iter()
+        .find(|base| base_backs_replica(base, &sid, index, rec))
+        .and_then(|base| base.get("name").and_then(|n| n.as_str()).map(String::from))
+}
+
+/// Does `raid` hold record replica `index` (`rec`) as a configured base?
+pub fn raid_holds_replica(
+    raid: &Value,
+    volume_id: &str,
+    index: usize,
+    rec: &ReplicaSyncRecord,
+) -> bool {
+    raid_base_of_replica(raid, volume_id, index, rec).is_some()
+}
+
+/// The record replicas `raid` holds as configured bases, by identity uuid:
+/// the live raid's membership as the hot rejoin's source and tie checks
+/// read it (formal/FlintCatchupN.tla, `members`).
+pub fn configured_replicas(raid: &Value, volume_id: &str, record: &VolumeSyncRecord) -> Vec<String> {
+    record
+        .replicas
+        .iter()
+        .enumerate()
+        .filter(|(index, rec)| raid_holds_replica(raid, volume_id, *index, rec))
+        .map(|(_, rec)| rec.lvol_uuid.clone())
+        .collect()
 }
 
 /// What a NodeUnstage may record from the raid it is about to delete
@@ -2345,6 +2418,56 @@ mod tests {
 
     /// The consumer's raid lost b before the monitor's tick: the capture
     /// marks it, and only it.
+    /// The live raid's membership as the hot rejoin reads it: by base, a
+    /// failed slot holds nothing, and the base name comes back for removal.
+    #[test]
+    fn configured_replicas_and_their_base_names() {
+        let record = assembled(&["uuid-a", "uuid-b", "uuid-c"]);
+        let raid = raid_json("online", vec![base_of(0, "uuid-a"), failed_slot(), base_of(2, "uuid-c")]);
+        assert_eq!(
+            configured_replicas(&raid, "vol1", &record),
+            vec!["uuid-a".to_string(), "uuid-c".to_string()]
+        );
+        let (b, c) = (record.get("uuid-b").unwrap(), record.get("uuid-c").unwrap());
+        assert!(raid_holds_replica(&raid, "vol1", 2, c));
+        assert!(!raid_holds_replica(&raid, "vol1", 1, b));
+        assert_eq!(
+            raid_base_of_replica(&raid, "vol1", 2, c),
+            base_of(2, "uuid-c")["name"].as_str().map(String::from)
+        );
+        assert_eq!(raid_base_of_replica(&raid, "vol1", 1, b), None);
+    }
+
+    /// HotRefuse, from stale with a marker (the inline window's intent turns
+    /// a standby stale without the forced re-revert) and from standby with
+    /// a marker (after the flip): stale, must revert again, the tie list and
+    /// the marker gone, `since` and the floor kept, out of the writer set.
+    #[test]
+    fn a_refused_hot_rejoin_demotes_from_stale_and_from_standby() {
+        for flipped in [false, true] {
+            let mut r = assembled(&["uuid-a", "uuid-b", "uuid-c"]);
+            r.mark_stale("uuid-b", "leg failed", "t1");
+            r.replicas[1].base_floor = Some("e1".into());
+            r.mark_standby("uuid-b", "e2", "chased", "t2");
+            assert!(r.mark_hot_rejoin_intent("uuid-b", "e3", "t3"));
+            r.note_copy_source("uuid-b", "uuid-a");
+            if flipped {
+                r.mark_hot_rejoined("uuid-b", "e3", &["uuid-a".into(), "uuid-c".into()], "uuid-head", "t4");
+            }
+            r.set_writer_set(&["uuid-a".into(), "uuid-b".into(), "uuid-c".into()], "t4");
+            let since = r.get("uuid-b").unwrap().since.clone();
+
+            assert!(r.refuse_hot_rejoin("uuid-b", "tie broke", "t5"));
+            let b = r.get("uuid-b").unwrap();
+            assert_eq!(b.sync_state, SyncState::Stale, "flipped={flipped}");
+            assert!(b.must_revert, "flipped={flipped}");
+            assert!(b.copied_from.is_empty() && b.hot_rejoin.is_none(), "flipped={flipped}");
+            assert_eq!(b.since, since, "flipped={flipped}");
+            assert_eq!(b.base_floor.as_deref(), Some("e1"), "flipped={flipped}");
+            assert!(!r.writer_uuids().contains(&"uuid-b".to_string()), "flipped={flipped}");
+        }
+    }
+
     #[test]
     fn capture_marks_the_legs_the_consumers_raid_lost() {
         let record = assembled(&["uuid-a", "uuid-b", "uuid-c"]);

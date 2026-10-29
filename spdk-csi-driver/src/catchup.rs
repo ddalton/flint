@@ -367,6 +367,19 @@ pub trait CatchupStore: Sync {
         )
         .into())
     }
+    /// The hot rejoin's source tie broke with the leg in the live raid; the
+    /// caller took it out. Demote it ([`VolumeSyncRecord::refuse_hot_rejoin`]).
+    async fn record_hot_rejoin_refused(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        reason: &str,
+    ) -> Result<(), RpcError> {
+        Err(format!(
+            "record_hot_rejoin_refused({volume_id}, {replica_uuid}, {reason}): not implemented by this store"
+        )
+        .into())
+    }
 }
 
 /// Kube-backed store used in production.
@@ -610,6 +623,21 @@ impl CatchupStore for KubeStore {
         let now = replica_sync::now_rfc3339();
         replica_sync::update_sync_record(&self.client, volume_id, |r| {
             r.clear_hot_rejoin(&uuid, &reason, demote_to_stale, &now);
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn record_hot_rejoin_refused(
+        &self,
+        volume_id: &str,
+        replica_uuid: &str,
+        reason: &str,
+    ) -> Result<(), RpcError> {
+        let (uuid, reason) = (replica_uuid.to_string(), reason.to_string());
+        let now = replica_sync::now_rfc3339();
+        replica_sync::update_sync_record(&self.client, volume_id, |r| {
+            r.refuse_hot_rejoin(&uuid, &reason, &now);
         })
         .await?;
         Ok(())
@@ -1046,6 +1074,18 @@ pub(crate) async fn select_covering_source<'a>(
     base: Option<&str>,
 ) -> Result<CoveringSource<'a>, RpcError> {
     let candidates = in_sync_sources(record, replicas, consumer_node);
+    select_covering_source_among(rpc, record, candidates, target, base).await
+}
+
+/// [`select_covering_source`] over the caller's candidates, in preference
+/// order (the hot rejoin passes only the live raid's configured members).
+pub(crate) async fn select_covering_source_among<'a>(
+    rpc: &dyn CatchupRpc,
+    record: &VolumeSyncRecord,
+    candidates: Vec<&'a ReplicaInfo>,
+    target: &str,
+    base: Option<&str>,
+) -> Result<CoveringSource<'a>, RpcError> {
     if candidates.is_empty() {
         return Ok(CoveringSource::NoneInSync);
     }
