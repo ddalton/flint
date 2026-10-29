@@ -129,13 +129,13 @@ should say so.
 
 Model changes to ask for:
 
-- [ ] Let `Stage` and `StageAdmit` admit any Reachable in-sync leg, as the
+- [x] Let `Stage` and `StageAdmit` admit any Reachable in-sync leg, as the
       code does. Keep the oracle version as a control.
-- [ ] Add `Inv_MembersHold`: every configured member holds every acked write
+- [x] Add `Inv_MembersHold`: every configured member holds every acked write
       with no write in flight. Expect it to fail by design in the
       survivor-divergence case; the point is to see which observation
       premise makes it hold.
-- [ ] A per-consumer reachability, or a Restage action that resets `path`
+- [x] A per-consumer reachability, or a Restage action that resets `path`
       for reachable legs, so a consumer move is distinguishable from a leg's
       return.
 
@@ -221,9 +221,9 @@ either way.
 
 flint-e4:
 
-- [ ] The three model changes above, on FlintCatchupN rev 7, with the
+- [x] The three model changes above, on FlintCatchupN rev 7, with the
       shipped and tie arms as controls.
-- [ ] A `PerEpochTrust` arm: `recorded` carries the configured set per
+- [x] A `PerEpochTrust` arm: `recorded` carries the configured set per
       epoch, `Sources` and `BaseCandidates` apply the rule, no tie, no
       floor, no `mustRev`. Expect HOLD under both premises and under the
       lost-mark arm.
@@ -231,10 +231,66 @@ flint-e4:
 
 flint-91:
 
-- [ ] Ship the stage fix as it stands; add the lost-mark caveat to the
+- [x] Ship the stage fix as it stands; add the lost-mark caveat to the
       CHANGELOG entry.
-- [ ] The unstage capture first: the smallest change, and it closes the
+- [x] The unstage capture first: the smallest change, and it closes the
       most.
 - [ ] Then the per-epoch membership in the sync record's epoch entries, and
       the rule in `select_base_epoch` and `in_sync_sources`, behind the
       model's arm.
+
+## Update, 2026-10-29: the decision after this review
+
+The user took record-before-ack in the on-disk shape. The design pass is
+§12 of `spdk-csi-driver/docs/incremental-replica-rebuild.md`, rev 8
+(1fe6b956, amended the same day). raid1 writes a membership stamp (seq,
+gen, size, members, clock) at the tail of every surviving leg before it
+releases the completions a base failure degraded, and the stage reads the
+stamps before `bdev_raid_create`. A stamp naming a majority of the
+assembly is one a zombie cannot forge, because placement puts one leg per
+node and the fence holds the rest. A continuation on a minority (two legs
+lost at once, or any loss on a two-replica volume) also waits for the sync
+record, gated on the VolumeAttachment's node, so a zombie never
+acknowledges. The model arm comes first (FlintCatchupS, flint-e4); the
+raid1 patch after it holds.
+
+What the model found between this review and the decision (FlintCatchupT,
+code-faithful, bound D unless noted):
+
+| Finding | Verdict | Consequence |
+| --- | --- | --- |
+| Shipped policy with the unstage capture, bound C | VIOLATED at depth 22 | the failure-window loss stands with the capture; bound D never separated the policies |
+| Per-epoch trust, full invariant | HOLD, 34.8M states at bound D; clean to depth 26 at bound C, not a full pass | the rule holds where the shipped policy fails |
+| Trust without "raid1 drops a base at its first failed write" | VIOLATED at depth 12 | premise 1 of every trust HOLD; to be pinned by a cluster test |
+| A zombie writing a leg the raid configures | VIOLATED at depth 15 | premise 2, the fence; its fail-open probe shipped fixed in 044f2010 |
+| Zombie move with the assembly's stale write never landing | VIOLATED at depth 17 | that write is load-bearing and best effort in code; it should be a precondition of serving |
+| F36c's last-writer defer on, zombie move | `Inv_MembersAgree` VIOLATED at depth 4, every policy | the defer seam: hygiene frees the co-located leg back into `in_sync` |
+| A consumer leaving inside a failure window (the residual above) | `Inv_NoNewLoss` VIOLATED at depth 9, every policy, no admission in the trace | not closable by any admission rule |
+| A write quorum of two alone | VIOLATED at depth 18 | a lost mark spreads the gap onto a second leg; costs availability |
+| Record-before-ack with the defer dropped | HOLD: 88.6M states zombie move, 108.5M crash, 40.7M lost mark with the capture off | closes the residual on its own |
+
+What it changes in the recommendations above:
+
+| Recommendation in this review | Status on 2026-10-29 |
+| --- | --- |
+| Ship the three-part fix | shipped: stage 1050134c, hot rejoin 395b442d, with the CHANGELOG caveats |
+| The unstage capture | shipped ef3a6f48, gated on the VolumeAttachment node and the writer set; a belt under the stamp |
+| The monitor gated on the VolumeAttachment node | not written; stays as a belt, and copies the stamp's clock into `since` so `T_back` covers the I/O timeout alone |
+| Mark the co-located leg stale at the fence flip | becomes the stage's decree: the previous consumer's own leg is excluded unless the record shows a sole continuation on it |
+| Trust belongs to the epoch | stays for the scheduler and the catch-up, since the record trails a majority drop by one poll; modelled as FlintCatchupT (rev 15, md5 8ac3cf00), not a FlintCatchupN arm |
+| The tie's demotion of an unattached source | the conjunct becomes "named in the newest valid stamp"; the demotion stands only for a source the raid dropped |
+| Base floor and forced re-revert | retire once per-epoch membership is in the record |
+| The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
+| TLAPS proof of the trust rule, 2 to 4 days | after the model's confirmation batch, against the one pinned md5 |
+
+One gap is open, raised by flint-e4 ahead of the run and sound on the
+argument alone. A stamp read among the attached legs is conclusive only
+when those legs include a majority of the newest stamp's size, since two
+majorities of one size intersect. With one leg attached after three
+failures, an older stamp looks newest and the stage would serve without an
+acknowledged write. §12's rule is now: defer unless the attached `in_sync`
+legs are a majority of the stamp's size or the record vouches, which is
+the outcome record-before-ack gives, unavailable rather than lost.
+flint-91's five raid1 traps for the completion hold (split I/O, the
+processed channel, process reads, a reset aborting a stamp write, the app
+thread's channels) are in §12 with it.

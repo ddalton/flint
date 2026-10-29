@@ -25,7 +25,9 @@ scheduler and the catch-up, since the record still trails a majority
 drop by one poll. Costs: one stamp write per base failure in the ack
 path of the writes then in flight, nothing on the healthy path, one
 cluster per leg, a carried raid1 patch of §7's size. Model and code asks
-are at the end of §12; the model comes first.
+are at the end of §12; the model comes first. Amended the same day from
+the peers' reads: a stamp read is conclusive only from a majority of the
+stamp's size (flint-e4), and the raid1 hook has five traps (flint-91).
 
 **What changed in rev 7** (2026-10-29, after the per-epoch trust model
 `formal/FlintCatchupT.tla` reached a code-faithful revision and the unstage
@@ -2183,6 +2185,49 @@ submitted after the base failed but before the stamp landed would
 otherwise acknowledge on the survivors with the failed base still named
 a member on every disk.
 
+**Five traps in the hook** (flint-91, from `bdev_raid.c` and `raid1.c` at
+v26.05):
+
+- *Split I/O.* `raid_bdev_io_complete` runs once per part of a split
+  write; when the higher part completes it re-submits the lower part,
+  resetting the submitted count and the status. The hold gates only the
+  final branch, after the split block, and the degraded flag lives in a
+  per-I/O field the re-submit does not reset; otherwise a write whose
+  failed leg was in the first part acknowledges unheld.
+- *The processed channel.* `ch_processed` is allocated per raid channel
+  and never registered as an I/O channel; writes into a rebuild's
+  processed region and a split's second part run on it, and
+  `spdk_for_each_channel` never visits it. The queue keys on the parent
+  channel (`spdk_io_channel_get_ctx` of the bdev_io's channel), so the
+  release reaches every held completion.
+- *Process I/O.* Rebuild writes complete through the process path and
+  set nothing, which is right since they acknowledge nothing; rebuild
+  reads pass through `raid_bdev_io_complete`, so the hold keys on the
+  per-I/O flag only the write completion sets, never on "every
+  completion". Held writes inside the next window's range stall that
+  window's `spdk_bdev_quiesce_range` until the stamp lands: progress, not
+  deadlock, as long as the stamp never waits on the process. §7's leased
+  quiesce (patch 0006) behaves the same way, and a stamp that cannot land
+  fails closed and lets the lease time out and unwind.
+- *Reset.* The raid's reset does not wait for held writes, and
+  `raid_bdev_submit_reset_request` resets every base, so a survivor's
+  reset can abort a stamp write in flight. The stamp path fails closed:
+  an aborted stamp write is retried, bounded; while no stamp has landed
+  the hold stays and the raid stays degraded; nothing is released without
+  a stamp.
+- *The app thread.* The stamp is issued from the app thread, which needs
+  its own channels on the configured bases (`spdk_bdev_get_io_channel` on
+  their descriptors), as the superblock write path has.
+
+Overlap with the carried series: of the twelve patches in
+`spdk-csi-driver/spdk-patches/`, only 0006 (skip-rebuild on add, the
+leased quiesce) touches `module/bdev/raid`. It changes
+`raid_bdev_deconfigure_base_bdev`, `raid_bdev_configure_cb`,
+`raid_bdev_configure_base_bdev_cont`, `raid_bdev_add_base_bdev`, the RPC
+file and the headers, none of the functions above, so the stamp patch
+rebases beside it with textual overlap only in `bdev_raid.h`'s
+`raid_base_bdev_info` and in `bdev_raid_rpc.c`.
+
 ### Reading the stamps at assembly
 
 The stage, after the fence flip and before `bdev_raid_create`:
@@ -2196,9 +2241,22 @@ The stage, after the fence flip and before `bdev_raid_create`:
    when its `members` are a majority of its `size`, or when the record
    shows the sole continuation it describes. Among the valid stamps take
    the greatest (`seq`, `gen`); its `members` are the assembly's
-   candidates. Every attached leg not in that list is marked stale in the
-   assembly write, with the reason.
-3. If no attached leg is in the list, the freshest legs are unreachable:
+   candidates. The read is **conclusive** only when the attached
+   `in_sync` legs include a majority of that stamp's `size`, or when the
+   record vouches (a sole continuation on an attached leg, or every
+   unattached leg record-stale). Two majorities of one size intersect, so
+   a newer majority stamp would sit on an attached leg; a read from fewer
+   legs can miss one. flint-e4 found the gap before the model ran: a leg
+   dropped at generation 1 while the other two stamp (`seq`, 1) and
+   acknowledge a write, the consumer crashes inside the poll, both
+   survivors go out and the dropped leg alone returns; its (`seq`, 0)
+   stamp is the newest it can show, and the stage would serve without
+   the write. An inconclusive read defers under step 3, which is what
+   record-before-ack gives there, unavailable rather than lost. Every
+   attached leg not in the candidates is marked stale in the assembly
+   write, with the reason.
+3. If the read is inconclusive, or no attached leg is in the list, the
+   freshest legs may be unreachable:
    F36c's case, with the list as its writer set and the gate "at least
    one member attached". Any one member suffices, because every
    acknowledged write landed on every member of the stamp that names
@@ -2313,6 +2371,9 @@ flint-e4, before any code (the user's order: model first):
       unreachable: writes fail, nothing is lost.
 - [ ] Liveness: a majority drop's barrier ends; a minority drop's ends
       when the record is writable.
+- [ ] A control at three failures without step 2's majority-read rule,
+      so the gap shows as a violation and the rule as the HOLD, in the
+      same configuration.
 
 flint-91, once the model holds, scoped here and decided by the user:
 
