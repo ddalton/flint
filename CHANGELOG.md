@@ -535,6 +535,16 @@ covered by the stability guarantee.
   for snapshots newer than its base. Older ones stay for the epoch
   cleanup.
 
+### Security
+
+- **The CSI driver's build no longer pulls a vulnerable `pulldown-cmark`**
+  (2026-10-29; `spdk-csi-driver/Cargo.lock`). `tonic-prost-build`, which
+  generates the gRPC bindings when the driver is built, brought in
+  `pulldown-cmark` 0.13.4 (RUSTSEC-2026-0414, rated High) through
+  `prost-build`. It is now 0.13.5. The crate runs only in the build
+  script, so no shipped binary contained it. Lockfile change only; no flint
+  code changed (issue #42).
+
 ## [1.61.2] - 2026-10-27
 
 A security patch release. Every image that talks to S3 or STS shipped
