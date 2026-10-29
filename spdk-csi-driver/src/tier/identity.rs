@@ -68,7 +68,10 @@ pub enum Event {
 /// Empty off Linux (the tier runs on Linux), and empty when the open
 /// fails: the event then applies unpinned, as before pins existed.
 #[derive(Debug, Clone, Default)]
-pub struct InodePin(Option<Arc<std::fs::File>>);
+pub struct InodePin(
+    // Never read: holding the descriptor is the pin.
+    #[allow(dead_code)] Option<Arc<std::fs::File>>,
+);
 
 impl InodePin {
     /// Pin the regular file at `path`, never following a final
