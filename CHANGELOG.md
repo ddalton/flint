@@ -128,6 +128,22 @@ covered by the stability guarantee.
   failure before the next restart: the unstage capture covers a clean
   unstage, not a consumer crash.
 
+- **An NFS read delegation is no longer granted over a live write open**
+  (2026-10-29; `spdk-csi-driver/src/nfs/v4/state/stateid.rs`). Applies only
+  with delegations on (`FLINT_NFS_DELEGATIONS=1`; they are off by default).
+  Before granting a read delegation the server checks that no client has
+  the file open for writing, finding the file's opens through an index of
+  its handles. When one client closed the last open on a handle while
+  another opened the same handle for writing, the close could drop the
+  handle from that index after the new open had registered. The writer's
+  open was then invisible to the check, and a read delegation could be
+  granted while it wrote, letting the holder cache data that was changing
+  underneath it. A second interleaving lost the handle the same way: an
+  open could find the handle half-removed and take it for indexed. The
+  close now checks for remaining opens and updates the index under the
+  lock an open takes, and an open always restores its handle in the
+  index.
+
 - **A replica fence no longer passes on a check that failed** (2026-10-28;
   `spdk-csi-driver/src/nvmeof_export.rs`). Staging a volume on a new node
   fences the previous consumer off each replica's export, then waits until

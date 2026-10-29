@@ -485,6 +485,11 @@ impl StateIdManager {
                     if !owners.iter().any(|(c, o)| *c == client_id && *o == owner) {
                         owners.push((client_id, owner));
                     }
+                    drop(owners);
+                    // RE-INDEX, as the fresh path below does: a close that
+                    // dropped this fh after the index at the top must not
+                    // leave this live open unindexed.
+                    self.index_ident(&key.2, ident);
                     return stateid;
                 }
 
@@ -559,7 +564,7 @@ impl StateIdManager {
                 // the interleaving
                 //
                 //   A: index_ident(fh)                 (we are indexed)
-                //   B: close → opens_by_fh empty → unindex_ident(fh)
+                //   B: close → opens_by_fh empty → drop_fh_if_unopened(fh)
                 //   A: insert into opens_by_fh          (we are live)
                 //
                 // leaves a LIVE write open whose fh is absent from
@@ -1219,56 +1224,70 @@ impl StateIdManager {
     /// (file replaced under a path handle) migrates between ident
     /// buckets. Never holds one ident-map guard while acquiring the
     /// other map's same entry twice; callers must not hold either map.
+    ///
+    /// The two maps are not updated as one, so `idents_by_fh` naming the
+    /// fh does not mean `fhs_by_ident` lists it: an index racing a
+    /// `drop_fh_if_unopened` can land between that drop's two removals,
+    /// leaving the first map set and the second without the fh. So this
+    /// always puts the fh in its `fhs_by_ident` bucket, even when
+    /// `idents_by_fh` already agrees. `record_open`'s re-index, after its
+    /// open is in `opens_by_fh`, then leaves both maps right: no drop of
+    /// the fh can be running (it holds the entry the open went through)
+    /// or start (it would see the open).
     fn index_ident(&self, fh: &[u8], ident: Option<(u64, u64)>) {
         let Some(ident) = ident else { return };
         use dashmap::mapref::entry::Entry;
         match self.idents_by_fh.entry(fh.to_vec()) {
             Entry::Occupied(mut occ) => {
                 let old = *occ.get();
-                if old == ident {
-                    return;
-                }
-                occ.insert(ident);
-                drop(occ);
-                if let Some(mut v) = self.fhs_by_ident.get_mut(&old) {
-                    v.retain(|f| f != fh);
-                    let empty = v.is_empty();
-                    drop(v);
-                    if empty {
-                        self.fhs_by_ident.remove_if(&old, |_, v| v.is_empty());
+                if old != ident {
+                    occ.insert(ident);
+                    drop(occ);
+                    if let Some(mut v) = self.fhs_by_ident.get_mut(&old) {
+                        v.retain(|f| f != fh);
+                        let empty = v.is_empty();
+                        drop(v);
+                        if empty {
+                            self.fhs_by_ident.remove_if(&old, |_, v| v.is_empty());
+                        }
                     }
-                }
-                let mut v = self.fhs_by_ident.entry(ident).or_insert_with(Vec::new);
-                if !v.iter().any(|f| f == fh) {
-                    v.push(fh.to_vec());
                 }
             }
             Entry::Vacant(vac) => {
                 vac.insert(ident);
-                let mut v = self.fhs_by_ident.entry(ident).or_insert_with(Vec::new);
-                if !v.iter().any(|f| f == fh) {
-                    v.push(fh.to_vec());
-                }
             }
+        }
+        let mut v = self.fhs_by_ident.entry(ident).or_insert_with(Vec::new);
+        if !v.iter().any(|f| f == fh) {
+            v.push(fh.to_vec());
         }
     }
 
-    /// Drop fh from the identity indices (last open on it closed).
+    /// The last open on `fh` closed: drop its `opens_by_fh` entry and
+    /// its identity indices together, holding the entry. A concurrent
+    /// `record_open` adds its owner through the same entry, so it either
+    /// lands first (the entry is not empty, nothing is dropped) or waits
+    /// until both are gone and its re-index starts from scratch.
+    /// Dropping the identity index for a LIVE open is the unsafe
+    /// direction: the grant predicate reads `fhs_by_ident` and would
+    /// miss it. A STALE entry, by contrast, costs one wasted lookup and
+    /// can only make the predicate more conservative.
     ///
-    /// Refuses if the fh has opens again: a concurrent `record_open`
-    /// may have re-populated it between the caller's removal and this
-    /// call, and dropping the identity index for a LIVE open is the
-    /// unsafe direction — the grant predicate reads `fhs_by_ident` and
-    /// would miss it. A STALE entry, by contrast, costs one wasted
-    /// lookup and can only make the predicate more conservative.
+    /// The unlocked form (remove the empty entry, re-check
+    /// `opens_by_fh`, then unindex) left a window between the re-check
+    /// and the removal: an open registered in it found the fh still
+    /// indexed, so its re-index did nothing, and then lost the index
+    /// (the deleg stress rig, with readers and writers overlapping,
+    /// granted a delegation over a live write open).
     ///
-    /// This narrows the window rather than closing it: the durable fix
-    /// is a write-open COUNT keyed on (dev,ino), maintained by
-    /// `record_open`/`close_open`, so the predicate is one atomic read
-    /// with no multi-map interval at all. Left for the delegation
-    /// workstream, which owns this invariant.
-    fn unindex_ident(&self, fh: &[u8]) {
-        if self.opens_by_fh.contains_key(fh) {
+    /// Lock order: `opens_by_fh` → `idents_by_fh` → `fhs_by_ident`.
+    /// Nothing acquires `opens_by_fh` while holding either index.
+    fn drop_fh_if_unopened(&self, fh: &[u8]) {
+        use dashmap::mapref::entry::Entry;
+        let Entry::Occupied(occ) = self.opens_by_fh.entry(fh.to_vec()) else {
+            return;
+        };
+        if !occ.get().is_empty() {
             return;
         }
         if let Some((_, ident)) = self.idents_by_fh.remove(fh) {
@@ -1281,6 +1300,7 @@ impl StateIdManager {
                 }
             }
         }
+        occ.remove();
     }
 
     /// Does ANY client hold a write-capable open on this inode, on any
@@ -1402,16 +1422,15 @@ impl StateIdManager {
             owners.retain(|(cid, own)| *cid != client_id || own != owner);
             let now_empty = owners.is_empty();
             drop(owners);
-            // CHECK-THEN-ACT, and the guard is gone. `remove_if`
-            // evaluates the predicate under the shard lock, so a
-            // concurrent `record_open` that re-populated this fh in the
-            // gap WINS instead of having its entry deleted wholesale.
-            // Deleting it was a false NEGATIVE for
-            // `file_has_write_open`, which is the unsafe direction: the
-            // delegation grant predicate would miss a live write open
-            // and rule 5 would be violated with no error anywhere.
-            if now_empty && self.opens_by_fh.remove_if(fh, |_, v| v.is_empty()).is_some() {
-                self.unindex_ident(fh);
+            // The guard is gone: a concurrent `record_open` may have
+            // re-populated this fh since. drop_fh_if_unopened re-checks
+            // under the entry's lock. Deleting a live open's entry or
+            // index is a false NEGATIVE for `file_has_write_open`, the
+            // unsafe direction: the delegation grant predicate would
+            // miss a live write open and rule 5 would be violated with
+            // no error anywhere.
+            if now_empty {
+                self.drop_fh_if_unopened(fh);
             }
         }
         self.remove_master(other);
@@ -1521,8 +1540,8 @@ impl StateIdManager {
                 entry.retain(|(cid, _)| *cid != client_id);
                 let now_empty = entry.is_empty();
                 drop(entry);
-                if now_empty && self.opens_by_fh.remove_if(&fh, |_, v| v.is_empty()).is_some() {
-                    self.unindex_ident(&fh);
+                if now_empty {
+                    self.drop_fh_if_unopened(&fh);
                 }
             }
         }
@@ -2267,5 +2286,69 @@ mod tests {
         assert!(mgr.file_has_write_open(7, 700));
         mgr.remove_client_stateids(1);
         assert!(!mgr.file_has_write_open(7, 700));
+    }
+
+    /// A close of the last open on an fh drops the fh from the identity
+    /// index; a write open registered on that fh at the same moment must
+    /// keep it, or `file_has_write_open` misses a live writer and a
+    /// delegation is granted over it. Four clients churn open/close on
+    /// one fh while two others open it for write and look for their own
+    /// open until they close it.
+    #[test]
+    fn a_racing_close_never_unindexes_a_live_write_open() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AOrd};
+        use std::sync::Arc;
+        let mgr = Arc::new(StateIdManager::new(crate::state_backend::memory_backend()));
+        let ident = Some((9, 900));
+        let fh = b"/pgdata/shared".to_vec();
+        let stop = Arc::new(AtomicBool::new(false));
+        let misses = Arc::new(AtomicU64::new(0));
+        let churners: Vec<_> = (10..14u64)
+            .map(|client| {
+                let (mgr, stop, fh) = (mgr.clone(), stop.clone(), fh.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(AOrd::Relaxed) {
+                        let sid =
+                            mgr.record_open(client, b"w".to_vec(), fh.clone(), 2, 0, None, ident);
+                        mgr.close_open_state(&sid.other);
+                    }
+                })
+            })
+            .collect();
+        let checkers: Vec<_> = (20..22u64)
+            .map(|client| {
+                let (mgr, misses, fh) = (mgr.clone(), misses.clone(), fh.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..20_000 {
+                        let sid =
+                            mgr.record_open(client, b"c".to_vec(), fh.clone(), 2, 0, None, ident);
+                        for _ in 0..4 {
+                            if !mgr.file_has_write_open(9, 900) {
+                                misses.fetch_add(1, AOrd::Relaxed);
+                            }
+                            std::thread::yield_now();
+                        }
+                        mgr.close_open_state(&sid.other);
+                    }
+                })
+            })
+            .collect();
+        for h in checkers {
+            h.join().unwrap();
+        }
+        stop.store(true, AOrd::Relaxed);
+        for h in churners {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            misses.load(AOrd::Relaxed),
+            0,
+            "a live write open was missing from the identity index"
+        );
+        assert!(!mgr.file_has_write_open(9, 900), "everything closed");
+        assert!(
+            mgr.opens_by_fh.is_empty() && mgr.fhs_by_ident.is_empty(),
+            "indices drain"
+        );
     }
 }
