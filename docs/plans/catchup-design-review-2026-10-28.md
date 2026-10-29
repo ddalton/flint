@@ -276,15 +276,15 @@ What it changes in the recommendations above:
 | Ship the three-part fix | shipped: stage 1050134c, hot rejoin 395b442d, with the CHANGELOG caveats |
 | The unstage capture | shipped ef3a6f48, gated on the VolumeAttachment node and the writer set; a belt under the stamp |
 | The monitor gated on the VolumeAttachment node | not written; stays as a belt, and copies the stamp's clock into `since` so `T_back` covers the I/O timeout alone |
-| Mark the co-located leg stale at the fence flip | becomes the stage's decree: the previous consumer's own leg is excluded unless the record shows a sole continuation on it |
+| Mark the co-located leg stale at the fence flip | becomes the stage's decree: the previous consumer's own leg is excluded unless it is the record's only `in_sync` leg (a confirmed sole continuation is one case, a monitor mark landed during a held minority the other); the decree never strands |
 | Trust belongs to the epoch | stays for the scheduler and the catch-up, since the record trails a majority drop by one poll; modelled as FlintCatchupT (rev 15, md5 8ac3cf00), not a FlintCatchupN arm |
 | The tie's demotion of an unattached source | the conjunct becomes "named in the newest valid stamp"; the demotion stands only for a source the raid dropped |
 | Base floor and forced re-revert | retire once per-epoch membership is in the record |
 | The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
 | TLAPS proof of the trust rule, 2 to 4 days | after the model's confirmation batch, against the one pinned md5 |
 
-Two gaps were found by the model ahead of any code, both closed by rules
-now in §12. First, a stamp read among the attached legs is conclusive
+Three gaps were found by the model ahead of any code, all closed by
+rules now in §12. First, a stamp read among the attached legs is conclusive
 only when those legs number a majority of the newest stamp's size, since
 two majorities of one size intersect; with one leg attached after three
 failures an older stamp looks newest, and the rule defers instead, which
@@ -293,7 +293,14 @@ Second, a minority stamp the record never confirmed overwrote the only
 copies of the majority stamp before it, so a reader that skipped it as
 invalid fell back to an older stamp and served a leg missing an
 acknowledged write; every stamp now carries the last released generation
-and its members, and an unconfirmed stamp stands for that view.
+and its members, and an unconfirmed stamp stands for that view. Third,
+the decree as first written stranded a volume: two legs failed, the raid
+held at the third for the record, the monitor marked the two stale during
+the hold, the pod moved before the confirm, and the decree marked the
+third stale as well, leaving every acknowledged write on a leg the record
+no longer trusted; the decree now spares the record's last `in_sync` leg
+and the stage waits for it, since the decree chooses between sources and
+never strands.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.

@@ -27,7 +27,9 @@ path of the writes then in flight, nothing on the healthy path, one
 cluster per leg, a carried raid1 patch of §7's size. Model and code asks
 are at the end of §12; the model comes first. Amended the same day from
 the peers' reads: a stamp read is conclusive only from a majority of the
-stamp's size (flint-e4), and the raid1 hook has five traps (flint-91).
+stamp's size, every stamp carries the last released view, and the stage's
+decree never strands the record's last `in_sync` leg (flint-e4, three
+model traces), and the raid1 hook has five traps (flint-91).
 
 **What changed in rev 7** (2026-10-29, after the per-epoch trust model
 `formal/FlintCatchupT.tla` reached a code-faithful revision and the unstage
@@ -2278,16 +2280,39 @@ The stage, after the fence flip and before `bdev_raid_create`:
    acknowledged write landed on every member of the stamp that names
    them; F36c's defer and its serve-with-risk stand, and its premise,
    that every acked write lives on every leg of the last assembly, is
-   now true by construction rather than by assumption.
+   now true by construction rather than by assumption. When no attached
+   leg is record-`in_sync` there is no list, and the writer set is the
+   record's `in_sync` set; the leg step 4 spares is waited for this way.
 4. The previous consumer's own leg, when it cannot be attached (the old
    raid still claims it), is excluded and marked stale by decree, the
-   enforcement §3 asked for and rev 6 listed as the third positive write.
-   It is waited for only when the record shows the previous assembly
-   continuing on it alone, which the minority rule guarantees the record
-   holds before any such write was acknowledged. In every other case the
-   attached members hold everything it holds, and it rejoins by catch-up.
-   This also closes rev 7's defer seam: a leg hygiene frees during the
-   defer is already stale.
+   enforcement §3 asked for and rev 6 listed as the third positive write,
+   **unless it is the record's only `in_sync` leg**. The decree chooses
+   between sources and never strands: it marks the leg stale only when
+   the record keeps another `in_sync` leg, which then holds everything
+   the excluded leg holds, and the excluded leg rejoins by catch-up. The
+   one exception covers both of its cases. A confirmed sole continuation
+   on that leg leaves it the record's only `in_sync` leg, because the
+   confirm's record write marks the others stale, and the minority rule
+   guarantees that write landed before anything was acknowledged on it.
+   The other case is flint-e4's third trace (FlintCatchupS rev 4, md5
+   `d32f4f23`, zombie move, bound D, `Inv_NoNewLoss` at depth 8): legs 1
+   and 2 fail, the raid holds at {3} for the record, the monitor's tick
+   marks 1 and 2 stale while the hold is up, the pod moves before the
+   confirm, and the decree as rev 8 first wrote it marked 3 stale too.
+   Every leg was then record-stale with every acknowledged write on leg
+   3: a strand, not a disk loss, and the system had no path back without
+   an operator. With the exception the stage defers for leg 3 under step
+   3 and serves on it when hygiene frees it, the record vouching for the
+   one-of-three read; the zombie's held writes on it were never
+   acknowledged and fall in the write-hole class. The strand's root is a
+   monitor mark that is never load-bearing under the stamp: had the
+   confirm come it would have written the same marks, and since it never
+   came nothing was acknowledged past the last released view, so leg 2
+   was complete and could have served at once. A monitor that skips its
+   marks while `bdev_raid_get_bdevs` reports a pending membership would
+   buy that availability; it is a follow-up, not part of this pass. This
+   step also closes rev 7's defer seam: a leg hygiene frees during the
+   defer is already stale, unless it is the one the stage waits for.
 5. `bdev_raid_create` with `seq` from the assembly write stamps the
    members, and the raid serves.
 
@@ -2299,7 +2324,7 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | the raid1 write hole (writes never acknowledged, landed on some legs) | unchanged and accepted; the model counts torn values as legal |
 | unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
 | health monitor | a belt, gated on the VolumeAttachment's node; it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
-| fence-flip mark on the co-located leg | the decree in step 4 above |
+| fence-flip mark on the co-located leg | the decree in step 4 above, which never empties the record's `in_sync` set |
 | per-epoch membership (§5's rule) | stays for the scheduler and the catch-up: the record trails a majority drop by up to one poll, and a leg in that lag is still record-`in_sync` to `plan_cut` and `in_sync_sources`; the cut-time read from the live raid is what makes an epoch's membership exact |
 | the source tie | the "attached" conjunct becomes "named in the newest valid stamp at admission": a source whose node died after a clean unstage is still vouched for and its standby admitted; a source the raid dropped is not, and the demotion stands for that case only |
 | base floor, forced re-revert | as §5 says: redundant once per-epoch membership is in the record |
@@ -2392,6 +2417,11 @@ flint-e4, before any code (the user's order: model first):
       same configuration.
 - [ ] A control with the released view off, so the second trace shows
       as a violation (in batch c17, FlintCatchupS md5 `5fc4271e`).
+- [ ] A control with the decree as rev 8 first wrote it, marking the
+      record's last `in_sync` leg stale, so the third trace's strand
+      shows as a violation beside the HOLD (batch c21, rev 5), and a
+      probe that the assembly on the spared leg is reachable after
+      hygiene frees it, so the HOLD is not a defer forever.
 
 flint-91, once the model holds, scoped here and decided by the user:
 
