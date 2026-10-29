@@ -104,6 +104,19 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A replica that falls behind while an epoch is being recorded keeps its
+  catch-up mark** (2026-10-29; `spdk-csi-driver/src/replica_sync.rs`). The
+  epoch scheduler snapshots every in-sync replica, then records the new
+  epoch on each replica it snapshotted. A replica could fail, be reverted,
+  copied up to the previous epoch and made a standby while that cut was
+  still in flight; the record write then moved its catch-up mark to the new
+  epoch. Catch-up starts the standby's remaining copies from that mark, so
+  they could skip writes acknowledged before the new epoch, and the replica
+  could be readmitted without them. The record now advances the mark only
+  on replicas that are still in sync when it is written. Model:
+  formal/FlintCatchupT.tla (flint-e4), where the shipped behaviour loses an
+  acknowledged write and the fix does not, within the bounds checked.
+
 - **A hot rejoin no longer puts back a replica that is missing acknowledged
   writes** (2026-10-29; `spdk-csi-driver/src/hot_rejoin.rs`). Hot rejoin
   adds a caught-up replica back into the live raid without a restage. It

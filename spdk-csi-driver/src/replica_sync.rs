@@ -1145,8 +1145,14 @@ impl VolumeSyncRecord {
 
     /// Record a common epoch after its snapshot was cut on every in-sync
     /// replica: append the entry, advance current_epoch, and stamp
-    /// last_epoch on exactly the replicas that were cut (a stale replica's
-    /// last_epoch stays frozen at the last epoch it participated in).
+    /// last_epoch on the replicas that were cut AND are still in_sync when
+    /// the record is written. A stale replica's last_epoch stays frozen at
+    /// the last epoch it participated in. A replica planned in_sync can
+    /// leave in_sync before the cut is recorded: marked stale, reverted,
+    /// copied and made a standby at the previous epoch while the snapshots
+    /// were taken. For a standby, last_epoch is the mark the chase and the
+    /// final delta start from, so stamping the new epoch over it would skip
+    /// the previous one (formal/FlintCatchupT.tla, CutStampsAll).
     /// Idempotent — the resourceVersion-guarded writer may re-apply.
     pub fn apply_epoch_cut(&mut self, epoch: &str, cut_lvol_uuids: &[String], now_rfc3339: &str) {
         if !self.epochs.iter().any(|e| e.name == epoch) {
@@ -1157,7 +1163,9 @@ impl VolumeSyncRecord {
         }
         self.current_epoch = Some(epoch.to_string());
         for rec in &mut self.replicas {
-            if cut_lvol_uuids.iter().any(|u| *u == rec.lvol_uuid) {
+            if rec.sync_state == SyncState::InSync
+                && cut_lvol_uuids.iter().any(|u| *u == rec.lvol_uuid)
+            {
                 rec.last_epoch = Some(epoch.to_string());
             }
         }
@@ -2605,6 +2613,54 @@ mod tests {
         record.apply_epoch_cut("epoch-vol1-2", &cut, "t3");
         assert_eq!(record.latest_epoch_seq("vol1"), 2);
         assert_eq!(record.epochs.len(), 2);
+    }
+
+    /// A cut planned while a replica was in sync, recorded after it became
+    /// a standby, leaves the standby's mark where catch-up put it.
+    #[test]
+    fn a_cut_recorded_after_a_leg_became_standby_keeps_its_mark() {
+        let mut record = three_replica_record();
+        let all = vec![
+            "uuid-a".to_string(),
+            "uuid-b".to_string(),
+            "uuid-c".to_string(),
+        ];
+        record.apply_epoch_cut("epoch-vol1-1", &all, "t1");
+        record.mark_stale("uuid-b", "leg failed", "t2");
+        record.mark_standby("uuid-b", "epoch-vol1-1", "chased", "t3");
+
+        record.apply_epoch_cut("epoch-vol1-2", &all, "t4");
+        assert_eq!(record.current_epoch.as_deref(), Some("epoch-vol1-2"));
+        assert_eq!(
+            record.get("uuid-a").unwrap().last_epoch.as_deref(),
+            Some("epoch-vol1-2")
+        );
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Standby);
+        assert_eq!(b.last_epoch.as_deref(), Some("epoch-vol1-1"));
+    }
+
+    /// The same for a replica that went stale after the cut was planned:
+    /// its last_epoch stays frozen.
+    #[test]
+    fn a_cut_recorded_after_a_leg_went_stale_leaves_it_frozen() {
+        let mut record = three_replica_record();
+        let all = vec![
+            "uuid-a".to_string(),
+            "uuid-b".to_string(),
+            "uuid-c".to_string(),
+        ];
+        record.apply_epoch_cut("epoch-vol1-1", &all, "t1");
+        record.mark_stale("uuid-c", "leg failed", "t2");
+
+        record.apply_epoch_cut("epoch-vol1-2", &all, "t3");
+        assert_eq!(
+            record.get("uuid-b").unwrap().last_epoch.as_deref(),
+            Some("epoch-vol1-2")
+        );
+        let c = record.get("uuid-c").unwrap();
+        assert_eq!(c.sync_state, SyncState::Stale);
+        assert_eq!(c.last_epoch.as_deref(), Some("epoch-vol1-1"));
     }
 
     #[test]

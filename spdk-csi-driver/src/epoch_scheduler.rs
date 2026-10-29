@@ -628,6 +628,38 @@ mod tests {
             .with_timezone(&chrono::Utc)
     }
 
+    /// The race at the scheduler (formal/FlintCatchupT.tla, CutStampsAll):
+    /// the cut is planned on all three replicas while they are in sync, and
+    /// b fails and is chased to the previous epoch before the cut is
+    /// recorded. b's mark must stay at the previous epoch, or its chase and
+    /// final delta start at the new one and skip the previous one's writes.
+    #[test]
+    fn a_leg_made_standby_while_the_cut_ran_keeps_its_mark() {
+        let all: Vec<String> = vec!["uuid-a".into(), "uuid-b".into(), "uuid-c".into()];
+        let mut record = record3();
+        let prev = epoch_name("vol1", 3);
+        record.apply_epoch_cut(&prev, &all, "2026-06-11T11:50:00Z");
+        let plan =
+            plan_cut("vol1", &record, &replicas3(), true, now(), &cfg()).expect("a cut is due");
+        let planned: Vec<String> = plan.targets.iter().map(|t| t.lvol_uuid.clone()).collect();
+        assert_eq!(planned, all, "planned while all three were in sync");
+
+        record.mark_stale("uuid-b", "leg failed", "2026-06-11T12:00:01Z");
+        record.mark_standby("uuid-b", &prev, "chased", "2026-06-11T12:00:05Z");
+
+        record.apply_epoch_cut(&plan.epoch, &planned, "2026-06-11T12:00:09Z");
+        assert_eq!(record.current_epoch.as_deref(), Some(plan.epoch.as_str()));
+        for leg in ["uuid-a", "uuid-c"] {
+            assert_eq!(
+                record.get(leg).unwrap().last_epoch.as_deref(),
+                Some(plan.epoch.as_str())
+            );
+        }
+        let b = record.get("uuid-b").unwrap();
+        assert_eq!(b.sync_state, SyncState::Standby);
+        assert_eq!(b.last_epoch.as_deref(), Some(prev.as_str()));
+    }
+
     struct FakeNodeRpc {
         calls: Mutex<Vec<(String, Value)>>,
         /// (node, method) → error message to return
