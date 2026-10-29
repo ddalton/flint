@@ -768,10 +768,16 @@ mod tests {
 
         // requeue puts a failed drain's marks back (same discipline:
         // a parallel drain may take the entry between the requeue and
-        // the read).
+        // the read). The memo is cleared each attempt, as for k2: a
+        // parallel drain that takes the mark also confirms it durable,
+        // and requeue skips a durable file, so without the clear one
+        // such drain wedges every later attempt. test_exclusive does
+        // not stop it: the NFS dispatcher drains the global queue after
+        // each op once capture is on, in tests that never take the lock.
         let k3 = (0xD0B1_u64, 0x3_u64);
         let mut done = false;
         for _ in 0..50 {
+            clear_durable(k3.0, k3.1);
             requeue(vec![PendingMark { dev: k3.0, ino: k3.1, path: None, seq: 0 }]);
             if queued().contains_key(&k3) && has_pending() && is_queued(k3.0, k3.1) {
                 done = true;
