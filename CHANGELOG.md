@@ -141,6 +141,17 @@ covered by the stability guarantee.
   failure before the next restart: the unstage capture covers a clean
   unstage, not a consumer crash.
 
+- **Racing NFS opens and closes of one file keep its open list exact**
+  (2026-10-29; `spdk-csi-driver/src/nfs/v4/state/stateid.rs`). The server
+  keeps, per file handle, a list of who has the file open, which the check
+  before a read delegation consults. When one client opened and closed the
+  same file at the same moment through the same open owner, the list could
+  keep an entry with no open behind it, never removed for the life of the
+  server, or lose the entry of an open that was still live. With
+  delegations on (`FLINT_NFS_DELEGATIONS=1`), the second could let a read
+  delegation be granted while that open wrote. An open's list entry now
+  changes under the same lock as the open itself.
+
 - **An NFS read delegation is no longer granted over a live write open**
   (2026-10-29; `spdk-csi-driver/src/nfs/v4/state/stateid.rs`). Applies only
   with delegations on (`FLINT_NFS_DELEGATIONS=1`; they are off by default).

@@ -541,6 +541,18 @@ impl StateIdManager {
                 let stateid = self.allocate(StateType::Open, client_id, Some(fh.clone()));
                 self.stamp_open(&stateid.other, &owner, share_access, share_deny);
                 self.open_state_keys.insert(stateid.other, key.clone());
+                // The owner goes into `opens_by_fh` BEFORE the open state is
+                // inserted, while this vacant entry still holds the shard.
+                // Once it is released, a concurrent OPEN of the same key
+                // bumps this open and may CLOSE it at once, and that close
+                // strips the owner from `opens_by_fh`. Pushed after, the
+                // owner outlived its open: an entry no close ever removes
+                // (f31's "by-fh index must drain").
+                let mut owners = self.opens_by_fh.entry(fh.clone()).or_insert_with(Vec::new);
+                if !owners.iter().any(|(c, o)| *c == client_id && *o == owner) {
+                    owners.push((client_id, owner));
+                }
+                drop(owners);
                 vac.insert(OpenState {
                     stateid_other: stateid.other,
                     seqid: stateid.seqid,
@@ -548,11 +560,6 @@ impl StateIdManager {
                     share_deny,
                     verifier,
                 });
-                let mut owners = self.opens_by_fh.entry(fh.clone()).or_insert_with(Vec::new);
-                if !owners.iter().any(|(c, o)| *c == client_id && *o == owner) {
-                    owners.push((client_id, owner));
-                }
-                drop(owners);
                 // RE-INDEX, after the open is visible in `opens_by_fh`.
                 //
                 // The index at the top of this function covers the early
@@ -1356,9 +1363,9 @@ impl StateIdManager {
         // Atomic check-and-remove: the predicate runs under the shard
         // lock, so it cannot interleave with a concurrent merge bump or
         // a fresh insert that re-used this key for a successor stateid.
-        let removed = self.open_states.remove_if(&key, |_, v| {
-            v.stateid_other == *other
-                && (stateid.seqid == 0 || stateid.seqid == v.seqid)
+        // The owner leaves `opens_by_fh` under the same guard.
+        let removed = self.remove_open_under_entry(&key, |v| {
+            v.stateid_other == *other && (stateid.seqid == 0 || stateid.seqid == v.seqid)
         });
 
         if removed.is_none() {
@@ -1382,7 +1389,7 @@ impl StateIdManager {
             };
         }
 
-        self.finish_close(other, &key);
+        self.finish_close(other, &key, removed == Some(true));
         CloseOutcome::Closed
     }
 
@@ -1394,12 +1401,10 @@ impl StateIdManager {
         self.push_tombstone(*other);
         let key = self.open_state_keys.get(other).map(|e| e.value().clone());
         if let Some(key) = key {
-            if self
-                .open_states
-                .remove_if(&key, |_, v| v.stateid_other == *other)
-                .is_some()
+            if let Some(now_empty) =
+                self.remove_open_under_entry(&key, |v| v.stateid_other == *other)
             {
-                self.finish_close(other, &key);
+                self.finish_close(other, &key, now_empty);
                 return;
             }
             // Open entry gone or superseded — still retire the master
@@ -1410,30 +1415,59 @@ impl StateIdManager {
         self.push_tombstone(*other);
     }
 
-    /// Shared teardown after the open_states entry for (`other`, `key`)
-    /// has been removed: tombstone FIRST (a concurrent duplicate close
-    /// that lost the `remove_if` race consults it immediately), then
-    /// reverse index, by-fh index, master record, persistence.
-    fn finish_close(&self, other: &[u8; 12], key: &(u64, Vec<u8>, Vec<u8>)) {
+    /// Shared teardown after `remove_open_under_entry` removed the open
+    /// state for (`other`, `key`) and its owner: tombstone FIRST (a
+    /// concurrent duplicate close that lost the removal race consults it
+    /// immediately), then the reverse index, the fh's identity index when
+    /// its owner list emptied, the master record, persistence.
+    fn finish_close(&self, other: &[u8; 12], key: &(u64, Vec<u8>, Vec<u8>), fh_now_empty: bool) {
         self.push_tombstone(*other);
         self.open_state_keys.remove_if(other, |_, k| k == key);
-        let (client_id, ref owner, ref fh) = *key;
-        if let Some(mut owners) = self.opens_by_fh.get_mut(fh) {
-            owners.retain(|(cid, own)| *cid != client_id || own != owner);
-            let now_empty = owners.is_empty();
-            drop(owners);
-            // The guard is gone: a concurrent `record_open` may have
-            // re-populated this fh since. drop_fh_if_unopened re-checks
-            // under the entry's lock. Deleting a live open's entry or
-            // index is a false NEGATIVE for `file_has_write_open`, the
-            // unsafe direction: the delegation grant predicate would
-            // miss a live write open and rule 5 would be violated with
-            // no error anywhere.
-            if now_empty {
-                self.drop_fh_if_unopened(fh);
-            }
+        // The guard is gone: a concurrent `record_open` may have
+        // re-populated this fh since. drop_fh_if_unopened re-checks under
+        // the entry's lock. Deleting a live open's entry or index is a
+        // false NEGATIVE for `file_has_write_open`, the unsafe direction:
+        // the delegation grant predicate would miss a live write open and
+        // rule 5 would be violated with no error anywhere.
+        if fh_now_empty {
+            self.drop_fh_if_unopened(&key.2);
         }
         self.remove_master(other);
+    }
+
+    /// Remove the open state at `key` if `pred` holds, and strip its owner
+    /// from `opens_by_fh` while the entry still holds the shard. Returns
+    /// whether the fh's owner list is now empty, or None if nothing was
+    /// removed.
+    ///
+    /// The strip must sit under the entry. A close that removed the open
+    /// state and stripped afterwards left a window in which an OPEN of the
+    /// same key found the entry vacant and the owner still listed, skipped
+    /// its push (owners are deduplicated), and then lost the owner to the
+    /// strip: a live open that `file_has_write_open` could not see. Lock
+    /// order is the documented one, open_states then opens_by_fh.
+    fn remove_open_under_entry(
+        &self,
+        key: &(u64, Vec<u8>, Vec<u8>),
+        pred: impl FnOnce(&OpenState) -> bool,
+    ) -> Option<bool> {
+        use dashmap::mapref::entry::Entry;
+        let Entry::Occupied(occ) = self.open_states.entry(key.clone()) else {
+            return None;
+        };
+        if !pred(occ.get()) {
+            return None;
+        }
+        let (client_id, ref owner, ref fh) = *key;
+        let now_empty = match self.opens_by_fh.get_mut(fh) {
+            Some(mut owners) => {
+                owners.retain(|(cid, own)| *cid != client_id || own != owner);
+                owners.is_empty()
+            }
+            None => false,
+        };
+        occ.remove();
+        Some(now_empty)
     }
 
     /// Remove the master `states` record + client index + persistence.
@@ -1529,20 +1563,11 @@ impl StateIdManager {
             .filter(|e| e.key().0 == client_id)
             .map(|e| e.key().clone())
             .collect();
+        // Each open leaves with its owner under its entry, as at CLOSE
+        // (remove_open_under_entry); an fh left with no owners drops out.
         for key in &to_drop {
-            self.open_states.remove(key);
-        }
-        // Strip the client out of the by-fh index. If the resulting
-        // entry is empty, drop the fh key too.
-        let touched_fhs: Vec<Vec<u8>> = to_drop.iter().map(|k| k.2.clone()).collect();
-        for fh in touched_fhs {
-            if let Some(mut entry) = self.opens_by_fh.get_mut(&fh) {
-                entry.retain(|(cid, _)| *cid != client_id);
-                let now_empty = entry.is_empty();
-                drop(entry);
-                if now_empty {
-                    self.drop_fh_if_unopened(&fh);
-                }
+            if self.remove_open_under_entry(key, |_| true) == Some(true) {
+                self.drop_fh_if_unopened(&key.2);
             }
         }
     }
@@ -2350,5 +2375,72 @@ mod tests {
             mgr.opens_by_fh.is_empty() && mgr.fhs_by_ident.is_empty(),
             "indices drain"
         );
+    }
+
+    /// OPENs and CLOSEs of ONE key (client, owner, fh) race: a second OPEN
+    /// finds the first's open live, bumps it and may close it at once. The
+    /// owner entry in `opens_by_fh` must track the key's open exactly: never
+    /// an entry with no open behind it after everything closes (f31), and
+    /// never a live open whose owner entry is missing, which
+    /// `file_has_write_open` could not see. A sampler counts a live open as
+    /// missing its owner only if the same stateid is still there after the
+    /// owner check: stateids are never reused, so that open was live
+    /// throughout.
+    #[test]
+    fn racing_opens_of_one_key_keep_the_owner_index_exact() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AOrd};
+        use std::sync::Arc;
+        let mgr = Arc::new(StateIdManager::new(crate::state_backend::memory_backend()));
+        let fh = b"/pgdata/one".to_vec();
+        let key = (1u64, b"uid-999".to_vec(), fh.clone());
+        let stop = Arc::new(AtomicBool::new(false));
+        let missing = Arc::new(AtomicU64::new(0));
+        let sampler = {
+            let (mgr, stop, missing, key) =
+                (mgr.clone(), stop.clone(), missing.clone(), key.clone());
+            std::thread::spawn(move || {
+                while !stop.load(AOrd::Relaxed) {
+                    let Some(before) = mgr.open_states.get(&key).map(|e| e.stateid_other) else {
+                        continue;
+                    };
+                    let indexed = mgr
+                        .opens_by_fh
+                        .get(&key.2)
+                        .is_some_and(|v| v.iter().any(|(c, o)| *c == key.0 && *o == key.1));
+                    let after = mgr.open_states.get(&key).map(|e| e.stateid_other);
+                    if !indexed && after == Some(before) {
+                        missing.fetch_add(1, AOrd::Relaxed);
+                    }
+                }
+            })
+        };
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let (mgr, fh) = (mgr.clone(), fh.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..20_000 {
+                        let sid =
+                            mgr.record_open(1, b"uid-999".to_vec(), fh.clone(), 2, 0, None, None);
+                        let _ = mgr.close_open(&sid);
+                    }
+                })
+            })
+            .collect();
+        for h in workers {
+            h.join().unwrap();
+        }
+        stop.store(true, AOrd::Relaxed);
+        sampler.join().unwrap();
+        assert_eq!(
+            missing.load(AOrd::Relaxed),
+            0,
+            "a live open was missing from opens_by_fh"
+        );
+        let leftover: Vec<[u8; 12]> = mgr.open_state_keys.iter().map(|e| *e.key()).collect();
+        for other in leftover {
+            mgr.close_open_state(&other);
+        }
+        assert!(mgr.open_states.is_empty(), "open_states drain");
+        assert!(mgr.opens_by_fh.is_empty(), "an owner outlived its open");
     }
 }
