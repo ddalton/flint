@@ -14,6 +14,14 @@ set**, not epoch rank — review showed rev 1's epoch rank ties in the
 exact run-3 scenario and would never fire (see "Why epoch rank alone
 cannot fire" below).
 
+> **Under the membership stamp (decided 2026-10-30, not yet built):** the
+> gate's question becomes exact, since the stage's stamp read says which
+> legs it cannot do without, and the transient serve-with-risk bound is
+> dropped: the 180 s timer becomes an alert (`AssemblyWaiting`, naming the
+> legs and the cut), and `ServeWithRisk` stays for node-gone and the
+> operator's cut only. Design and reasons: `incremental-replica-rebuild.md`
+> §12, step 3.
+
 ## The finding (runz drill 3.6 run 3, 2026-07-21)
 
 After a server-node kill, the resurrect assembled the r2 volume from

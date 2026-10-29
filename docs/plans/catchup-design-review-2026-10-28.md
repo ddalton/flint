@@ -303,9 +303,14 @@ and not the next: with the record holding a leg `in_sync` that had missed
 a write, a vouch that counted the previous consumer's leg stale by decree
 served without it. The decree is now written only by a stage whose read
 is conclusive without that leg; otherwise the stage waits for it. F36c's
-180 s bound, after which the gate serves the reachable legs with the risk
-surfaced, is outside the model's HOLDs; the user kept the node-gone case
-and asked for an expiry arm to measure the bound before deciding it.
+180 s bound, after which the gate served the reachable legs with the risk
+surfaced, was outside the model's HOLDs. The user had it measured (the
+expiry arm loses an acknowledged write at depth 12 when the leg holding
+it is unreachable at the stage) and dropped it: the timer is an alert,
+the node-gone serve and the operator's cut are the only serves with risk,
+and the model's HOLDs are the product's claim. Step 2 gained the
+even-size vouch with it, so a two-replica volume does not wait for an
+absent peer.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.
