@@ -104,6 +104,20 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A node a volume has moved away from no longer marks the new consumer's
+  replicas stale** (2026-10-30; `spdk-csi-driver/src/node_agent.rs`). Each
+  node's raid-health monitor marks the replicas missing from its online
+  raid as stale, and sets the PV's degraded or healthy annotation from
+  that raid. A node whose unstage never ran keeps its raid after the
+  volume moves, and the new consumer's export fence takes that raid's
+  remote replicas away. Its monitor then marked them stale every minute,
+  though they were the replicas the new consumer was serving from, and
+  its annotation fought the consumer's. The monitor now records only for
+  a raid on the node that the volume's VolumeAttachment names; for an RWX
+  volume that is the NFS server's node. If the VolumeAttachment lookup
+  fails it records as before, since holding back a real stale mark is the
+  direction that can lose writes.
+
 - **A replica that falls behind while an epoch is being recorded keeps its
   catch-up mark** (2026-10-29; `spdk-csi-driver/src/replica_sync.rs`). The
   epoch scheduler snapshots every in-sync replica, then records the new

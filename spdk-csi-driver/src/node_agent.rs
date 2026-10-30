@@ -4677,10 +4677,37 @@ impl NodeAgent {
             .and_then(|r| r.as_array())
             .cloned()
             .unwrap_or_default();
+        if raids.is_empty() {
+            return Ok(());
+        }
+        // One VolumeAttachment list per tick, not one per raid.
+        let attached_here = self.volumes_attached_here().await;
+        if let Err(e) = &attached_here {
+            warn!(error = %e,
+                "[MONITOR] VolumeAttachment lookup failed — reading every local raid as the consumer's this tick");
+        }
 
         for raid in raids {
             let Some(raid_name) = raid.get("name").and_then(|n| n.as_str()) else { continue };
             let Some(volume_id) = crate::identity::parse_raid_name(raid_name) else { continue };
+            // Only the consumer's raid speaks for the volume's replicas,
+            // and the VolumeAttachment names the consumer. A raid left on a
+            // node the volume has moved away from (a zombie whose unstage
+            // never ran) has lost its remote legs to the new consumer's
+            // export fence: marking them stale would demote the legs the
+            // consumer serves from, and its degraded/healthy reading would
+            // fight the consumer's over the PV annotation. An RWX backing
+            // raid's consumer is the NFS server's attachment of the backing
+            // PV, not the clients' of the user PV. A failed lookup reads as
+            // ours, as before: skipping would also hold back the consumer's
+            // own stale marks, the direction that loses writes.
+            if let Ok(attached) = &attached_here {
+                if !attached.contains(&crate::identity::pv_name_of_handle(volume_id)) {
+                    warn!(volume_id, node = %self.node_name,
+                        "[MONITOR] Raid on a node the volume is not attached to — not the consumer's, recording nothing for it");
+                    continue;
+                }
+            }
             // RWX volumes stage under the synthetic "nfs-server-<vol>"
             // handle; PV reads/patches must target the user PV.
             let pv_name = crate::identity::storage_id_of_handle(volume_id);
@@ -6119,6 +6146,24 @@ impl NodeAgent {
         }))
     }
 
+    /// PV names (VolumeAttachment sources) attached to THIS node, from one
+    /// list. Err means the lookup FAILED: the set is unknown, not empty.
+    async fn volumes_attached_here(&self) -> Result<std::collections::HashSet<String>, String> {
+        use k8s_openapi::api::storage::v1::VolumeAttachment;
+        let vas: Api<VolumeAttachment> = Api::all(self.driver.kube_client.clone());
+        let list = vas
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| format!("VolumeAttachment list failed: {e}"))?;
+        Ok(list
+            .items
+            .into_iter()
+            .filter(|va| va.spec.node_name == self.node_name)
+            .filter(|va| va.status.as_ref().map(|s| s.attached).unwrap_or(false))
+            .filter_map(|va| va.spec.source.persistent_volume_name)
+            .collect())
+    }
+
     /// Contract R3: node-local ublk-stop guard — the F37 kernel opener probe
     /// ("never reap blind") applied to EVERY stop path. A missing /dev node
     /// reads Free deliberately: SPDK-side cleanup of a DEAD device must
@@ -6699,5 +6744,226 @@ mod rehydrate_tests {
             "ublk_start_disk 0 (b): Code=-17 Msg=File exists [recover: \
              Code=-1 Msg=Operation not permitted]"
         ));
+    }
+}
+
+#[cfg(test)]
+mod monitor_gate_tests {
+    // The raid-health monitor records only for the consumer's raid, the one
+    // on the node its VolumeAttachment names. Driven end to end through
+    // monitor_raid_health: a fake SPDK socket serves the raid, a fake API
+    // server serves the PV and the attachments and keeps every PV write.
+    use super::NodeAgent;
+    use crate::replica_sync::{
+        SyncState, VolumeSyncRecord, REPLICAS_ATTRIBUTE, REPLICA_COUNT_ATTRIBUTE,
+        SYNC_STATE_ANNOTATION,
+    };
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    const ME: &str = "node-a";
+
+    /// SPDK answering every call with `raids` (the monitor's one call is
+    /// bdev_raid_get_bdevs).
+    fn fake_spdk(dir: &std::path::Path, raids: Value) -> String {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let sock = dir.join("spdk.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let raids = raids.clone();
+                tokio::spawn(async move {
+                    let (r, mut w) = stream.into_split();
+                    let mut line = String::new();
+                    // The client's connect probe closes without a request.
+                    if BufReader::new(r).read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let id = serde_json::from_str::<Value>(&line).unwrap()["id"].clone();
+                    let reply = json!({"jsonrpc": "2.0", "id": id, "result": raids});
+                    let _ = w.write_all(format!("{reply}\n").as_bytes()).await;
+                });
+            }
+        });
+        sock.to_string_lossy().into_owned()
+    }
+
+    fn status(code: u16) -> Value {
+        json!({"kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+               "message": "fake", "reason": "fake", "code": code})
+    }
+
+    /// An API server holding `pvs`; the attachment list is `vas`, or a 500
+    /// when None. Every PV PATCH body lands in the returned log.
+    fn fake_api(
+        pvs: Vec<Value>,
+        vas: Option<Vec<Value>>,
+    ) -> (kube::Client, Arc<Mutex<Vec<Value>>>) {
+        use http_body_util::BodyExt;
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let log = writes.clone();
+        let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let (pvs, vas, log) = (pvs.clone(), vas.clone(), log.clone());
+            async move {
+                let (method, path) = (req.method().to_string(), req.uri().path().to_string());
+                let body = req.into_body().collect().await.unwrap().to_bytes();
+                let pv = path
+                    .strip_prefix("/api/v1/persistentvolumes/")
+                    .and_then(|name| pvs.iter().find(|p| p["metadata"]["name"] == name).cloned());
+                let (code, out) = match (method.as_str(), path.as_str(), pv) {
+                    ("GET", "/apis/storage.k8s.io/v1/volumeattachments", _) => match vas {
+                        Some(items) => {
+                            let list = json!({"apiVersion": "storage.k8s.io/v1",
+                                "kind": "VolumeAttachmentList", "metadata": {}, "items": items});
+                            (200, list)
+                        }
+                        None => (500, status(500)),
+                    },
+                    ("GET", _, Some(pv)) => (200, pv),
+                    ("PATCH", _, Some(pv)) => {
+                        log.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
+                        (200, pv)
+                    }
+                    ("POST", p, _) if p.ends_with("/events") => {
+                        (201, serde_json::from_slice(&body).unwrap())
+                    }
+                    _ => (404, status(404)),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(code)
+                        .header("content-type", "application/json")
+                        .body(http_body_util::Full::new(bytes::Bytes::from(out.to_string())))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(svc, "default"), writes)
+    }
+
+    fn replica(node: &str, uuid: &str) -> Value {
+        json!({"node_name": node, "node_uid": "", "disk_pci_address": "", "lvol_uuid": uuid,
+               "lvol_name": format!("lvol-{uuid}"), "lvs_name": "lvs", "nqn": null,
+               "target_ip": null, "target_port": null, "health": "online"})
+    }
+
+    /// A three-replica user PV with no sync record yet: every leg seeds
+    /// in_sync.
+    fn pv(name: &str) -> Value {
+        let replicas =
+            json!([replica("node-a", "u-a"), replica("node-b", "u-b"), replica("node-c", "u-c")]);
+        json!({"apiVersion": "v1", "kind": "PersistentVolume",
+               "metadata": {"name": name, "resourceVersion": "7"},
+               "spec": {"accessModes": ["ReadWriteOnce"], "csi": {
+                   "driver": "disk.csi.chert.us", "volumeHandle": name,
+                   "volumeAttributes": {REPLICA_COUNT_ATTRIBUTE: "3",
+                                        REPLICAS_ATTRIBUTE: replicas.to_string()}}}})
+    }
+
+    /// Online on node-a's local leg alone, the two remote legs gone: a
+    /// consumer's raid after two leg failures, or a zombie's after the new
+    /// consumer's export fence shut it out.
+    fn raid(handle: &str) -> Value {
+        json!([{"name": format!("raid_{handle}"), "state": "online", "num_base_bdevs": 3,
+                "base_bdevs_list": [
+                    {"name": "u-a", "uuid": "u-a", "is_configured": true},
+                    {"name": null, "uuid": null, "is_configured": false},
+                    {"name": null, "uuid": null, "is_configured": false}]}])
+    }
+
+    fn va(pv: &str, node: &str, attached: bool) -> Value {
+        json!({"apiVersion": "storage.k8s.io/v1", "kind": "VolumeAttachment",
+               "metadata": {"name": format!("csi-{pv}-{node}")},
+               "spec": {"attacher": "disk.csi.chert.us", "nodeName": node,
+                        "source": {"persistentVolumeName": pv}},
+               "status": {"attached": attached}})
+    }
+
+    /// One monitor tick on node-a; every PV write it made.
+    async fn tick(raids: Value, pvs: Vec<Value>, vas: Option<Vec<Value>>) -> Vec<Value> {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = fake_spdk(dir.path(), raids);
+        let (client, writes) = fake_api(pvs, vas);
+        let driver = crate::driver::SpdkCsiDriver::new(
+            client,
+            "default".into(),
+            ME.into(),
+            String::new(),
+            "tcp".into(),
+            4420,
+        );
+        let agent = NodeAgent::new(ME.into(), sock, Arc::new(driver));
+        agent.monitor_raid_health().await.expect("the tick runs");
+        let writes = writes.lock().unwrap().clone();
+        writes
+    }
+
+    /// The sync record a PV write carries, if it is a record write.
+    fn record_of(write: &Value) -> Option<VolumeSyncRecord> {
+        let s = write["metadata"]["annotations"][SYNC_STATE_ANNOTATION].as_str()?;
+        Some(VolumeSyncRecord::from_annotation(s).unwrap())
+    }
+
+    fn state(rec: &VolumeSyncRecord, uuid: &str) -> SyncState {
+        rec.get(uuid).unwrap().sync_state
+    }
+
+    #[tokio::test]
+    async fn the_consumers_raid_marks_its_missing_legs_stale() {
+        // The positive control: attached here, the two missing legs are
+        // recorded stale and the PV is annotated degraded.
+        let vas = vec![va("pvc-1", ME, true)];
+        let writes = tick(raid("pvc-1"), vec![pv("pvc-1")], Some(vas)).await;
+        let rec = writes.iter().find_map(record_of).expect("a sync record write");
+        assert_eq!(state(&rec, "u-a"), SyncState::InSync);
+        assert_eq!(state(&rec, "u-b"), SyncState::Stale);
+        assert_eq!(state(&rec, "u-c"), SyncState::Stale);
+        let health =
+            |w: &Value| !w["metadata"]["annotations"]["disk.chert.us/replica-health"].is_null();
+        assert!(writes.iter().any(health), "{writes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_raid_on_a_node_the_volume_has_left_records_nothing() {
+        // The zombie: the volume is attached to node-b now, and the legs
+        // this raid lost are the ones node-b serves from.
+        let vas = vec![va("pvc-1", "node-b", true)];
+        let writes = tick(raid("pvc-1"), vec![pv("pvc-1")], Some(vas)).await;
+        assert!(writes.is_empty(), "{writes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_raid_whose_volume_is_attached_nowhere_records_nothing() {
+        // The attachment here no longer reads attached: nobody's raid.
+        let vas = vec![va("pvc-1", ME, false)];
+        let writes = tick(raid("pvc-1"), vec![pv("pvc-1")], Some(vas)).await;
+        assert!(writes.is_empty(), "{writes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_attachment_lookup_still_records() {
+        // A lookup that failed reads as ours: holding back the consumer's
+        // stale marks is the direction that loses writes.
+        let writes = tick(raid("pvc-1"), vec![pv("pvc-1")], None).await;
+        let rec = writes.iter().find_map(record_of).expect("a sync record write");
+        assert_eq!(state(&rec, "u-b"), SyncState::Stale);
+    }
+
+    #[tokio::test]
+    async fn an_rwx_backing_raid_follows_the_nfs_servers_attachment() {
+        // The backing raid serves on the NFS server's node; the user PV's
+        // attachments are its NFS clients. A client's attachment here does
+        // not make this node's backing raid the consumer's...
+        let handle = crate::identity::backing_handle("pvc-1");
+        let backing = crate::identity::backing_pv_name("pvc-1");
+        let client_here = vec![va("pvc-1", ME, true), va(&backing, "node-b", true)];
+        let writes = tick(raid(&handle), vec![pv("pvc-1")], Some(client_here)).await;
+        assert!(writes.is_empty(), "{writes:?}");
+        // ...the server's attachment of the backing PV does, and the record
+        // it writes is the user PV's.
+        let server_here = vec![va("pvc-1", "node-b", true), va(&backing, ME, true)];
+        let writes = tick(raid(&handle), vec![pv("pvc-1")], Some(server_here)).await;
+        let rec = writes.iter().find_map(record_of).expect("a sync record write");
+        assert_eq!(state(&rec, "u-b"), SyncState::Stale);
     }
 }
