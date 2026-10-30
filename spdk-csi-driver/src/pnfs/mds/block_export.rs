@@ -25,7 +25,9 @@
 
 use std::sync::Arc;
 
-use crate::nvmeof_export::{ensure_export, get_subsystem, ExportSpec, SpdkRpcTransport};
+use crate::nvmeof_export::{
+    ensure_export, get_subsystem, ExportSpec, FenceNotConfirmed, SpdkRpcTransport,
+};
 use serde_json::json;
 
 /// The node whose spdk-tgt this MDS drives, from the pod's own
@@ -278,6 +280,15 @@ enum ConvergeMode {
     /// otherwise an attach arriving between two passes could be refused
     /// by a lease nothing was wrong with.
     Reconcile,
+}
+
+/// How far a converge got. Every step is all-or-error except the host
+/// fence's confirmation that fenced-out hosts are gone, reported apart
+/// because the reservation preempt can stand in for it
+/// ([`FenceNotConfirmed`]).
+enum Converged {
+    Fully,
+    FenceUnconfirmed(String),
 }
 
 /// What one assembly attempt did.
@@ -3070,6 +3081,17 @@ impl BlockExportReconciler {
     }
 
     async fn ensure_locked(&self, volume: &str, mode: ConvergeMode) -> Result<(), String> {
+        match self.converge_locked(volume, mode).await? {
+            Converged::Fully => Ok(()),
+            Converged::FenceUnconfirmed(e) => Err(e),
+        }
+    }
+
+    /// `ensure_locked`, with the host fence's unconfirmed disconnect
+    /// reported apart from every other failure. Only `fence_preempt`
+    /// may go on past it; everything else converges through
+    /// `ensure_locked`, which fails on it as before.
+    async fn converge_locked(&self, volume: &str, mode: ConvergeMode) -> Result<Converged, String> {
         let size_bytes = match mode {
             ConvergeMode::Provision(n) => Some(n),
             _ => None,
@@ -3351,9 +3373,13 @@ impl BlockExportReconciler {
             ptpl_file: Some(&ptpl),
             cntlid_band: band,
         };
-        ensure_export(self.rpc.as_ref(), &spec)
-            .await
-            .map_err(|e| format!("ensure_export {}: {}", nqn, e))
+        match ensure_export(self.rpc.as_ref(), &spec).await {
+            Ok(()) => Ok(Converged::Fully),
+            Err(e) if e.downcast_ref::<FenceNotConfirmed>().is_some() => {
+                Ok(Converged::FenceUnconfirmed(format!("ensure_export {}: {}", nqn, e)))
+            }
+            Err(e) => Err(format!("ensure_export {}: {}", nqn, e)),
+        }
     }
 
     /// The PRIMARY fence (§5, RFC 9561 §2.2): connect to the volume's
@@ -3372,8 +3398,23 @@ impl BlockExportReconciler {
         // allow-list to connect (`desired_hosts` always includes it),
         // and reconverging is the idempotent way to get it there for
         // volumes provisioned before the fence lane existed.
-        // Converge first so the fence lane's host NQN is on the
-        // allow-list. NOTE the asymmetry this opens once seats can move:
+        //
+        // One converge failure does NOT stop the fence: the host fence
+        // admitted and removed its hosts but could not confirm that a
+        // fenced-out Flint host's controller is gone. Until the preempt
+        // below lands there is no reservation, so that controller writes
+        // freely; after it, every non-registrant gets RESERVATION
+        // CONFLICT at the target, per command, and the victim's own
+        // registration is gone. Refusing to preempt over a lingering
+        // controller would leave it the full write access the fence
+        // exists to take away. The
+        // namespace and listener steps did not run; the nsid read and
+        // the session below fail closed on their own if either is
+        // missing. Every other converge error still stops the fence.
+        // `fence_release` keeps failing on it: releasing EA-RO is what
+        // would hand that controller its writes back.
+        //
+        // NOTE the asymmetry the converge opens once seats can move:
         // the converge reaches the LOCAL tgt while `resolve` below dials
         // whatever the record names. They are the same target today, and
         // when they stop being, a deposed target's converge is refused
@@ -3381,7 +3422,18 @@ impl BlockExportReconciler {
         // one — fail-closed, and the remote arm belongs to the same work
         // that brings assembly.
         tracing::debug!("fence_preempt {}: converging export", volume);
-        self.ensure_locked(volume, ConvergeMode::Reconcile).await?;
+        let unconfirmed = match self.converge_locked(volume, ConvergeMode::Reconcile).await? {
+            Converged::Fully => None,
+            Converged::FenceUnconfirmed(e) => {
+                tracing::warn!(
+                    "fence_preempt {}: host fence not confirmed ({}) — preempting anyway; \
+                     the reservation is what shuts a lingering controller out",
+                    volume,
+                    e
+                );
+                Some(e)
+            }
+        };
         tracing::debug!("fence_preempt {}: converged, resolving nsid", volume);
         let nqn = crate::identity::block_volume_export_nqn(volume);
         // The namespace id, read from the live subsystem rather than
@@ -3424,7 +3476,7 @@ impl BlockExportReconciler {
         let out = ep
             .fence_preempt(crate::identity::BLOCK_MDS_PR_KEY, victim_key)
             .await?;
-        Ok(format!(
+        let mut summary = format!(
             "victim={victim_key:#x} preempted={} (registered={} acquired={}) \
              composer={} epoch={} resv: {}",
             out.preempted,
@@ -3433,7 +3485,11 @@ impl BlockExportReconciler {
             seat.composer,
             seat.epoch,
             out.after.summary()
-        ))
+        );
+        if let Some(e) = unconfirmed {
+            summary.push_str(&format!("; host fence unconfirmed: {e}"));
+        }
+        Ok(summary)
     }
 
     /// The fence's inverse (the UnfenceBlockClient release arm): drop
@@ -3975,6 +4031,10 @@ pub(crate) mod tests {
         /// a real target, which is exactly what the two-target rig
         /// found on its first run.
         pub(crate) claims: Mutex<std::collections::HashMap<String, String>>,
+        /// Host NQNs with a live controller on every subsystem: the
+        /// controller of a fenced-out host that has not gone away, which
+        /// the host fence must report as unconfirmed.
+        pub(crate) controllers: Mutex<Vec<String>>,
     }
 
     /// The fake lvolstore's cluster size (SPDK's default is 4 MiB).
@@ -4007,6 +4067,7 @@ pub(crate) mod tests {
                 failures: Mutex::new(Default::default()),
                 leg_sizes: Mutex::new(Default::default()),
                 claims: Mutex::new(Default::default()),
+                controllers: Mutex::new(Vec::new()),
             }
         }
 
@@ -4647,7 +4708,16 @@ pub(crate) mod tests {
                     self.subsystems.lock().unwrap().remove(nqn);
                     Ok(json!({ "result": true }))
                 }
-                "nvmf_subsystem_get_controllers" => Ok(json!({ "result": [] })),
+                "nvmf_subsystem_get_controllers" => {
+                    let hosts = self.controllers.lock().unwrap();
+                    Ok(json!({
+                        "result": hosts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, h)| json!({ "cntlid": i + 1, "hostnqn": h }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
                 // The construction guard's ublk probe: a tgt built
                 // without ublk answers exactly this, and the guard
                 // treats it as "no ublk ⇒ no ublk consumer".
@@ -5121,6 +5191,97 @@ pub(crate) mod tests {
 
         let again = r.fence_release("pvc-r").await.expect("replay");
         assert!(again.contains("released=false"), "got: {again}");
+    }
+
+    /// A fenced-out host whose controller has not gone away fails the
+    /// host fence's confirmation, and that controller is precisely what
+    /// the reservation shuts out: the preempt must go on past THIS
+    /// converge failure, land, and say the host fence was unconfirmed.
+    /// Before the typed error it stopped here, leaving the lingering
+    /// controller, and the victim, with no reservation in their way.
+    #[tokio::test]
+    async fn a_lingering_fenced_controller_does_not_stop_the_preempt() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let tgt = Arc::new(FakeTgt::new());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            crate::state_backend::memory_backend(),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-l", Some(1024 * 1024)).await.expect("provision");
+        tgt.controllers.lock().unwrap().push(crate::nvmeof_export::flint_host_nqn("node-gone"));
+
+        let summary = r.fence_preempt("pvc-l", 42).await.expect("the preempt goes on");
+        assert!(summary.contains("preempted=true"), "got: {summary}");
+        assert!(summary.contains("host fence unconfirmed"), "got: {summary}");
+        let st = nvme.state.lock().unwrap();
+        assert!(!st.registrants.iter().any(|(k, _, _)| *k == 42), "victim key gone");
+        assert!(
+            st.registrants.iter().any(|(k, _, h)| *k == crate::identity::BLOCK_MDS_PR_KEY && *h),
+            "MDS key holds the reservation"
+        );
+    }
+
+    /// The release is the other direction: dropping EA-RO hands every
+    /// non-registrant its writes back, the lingering controller among
+    /// them. It must keep failing on the unconfirmed host fence.
+    #[tokio::test]
+    async fn a_lingering_fenced_controller_still_stops_the_release() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let tgt = Arc::new(FakeTgt::new());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            crate::state_backend::memory_backend(),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-k", Some(1024 * 1024)).await.expect("provision");
+        r.fence_preempt("pvc-k", 42).await.expect("fence");
+        tgt.controllers.lock().unwrap().push(crate::nvmeof_export::flint_host_nqn("node-gone"));
+
+        let e = r.fence_release("pvc-k").await.expect_err("release over a lingering controller");
+        assert!(e.contains("not confirmed"), "got: {e}");
+        let st = nvme.state.lock().unwrap();
+        assert!(
+            st.registrants.iter().any(|(k, _, h)| *k == crate::identity::BLOCK_MDS_PR_KEY && *h),
+            "the reservation still stands"
+        );
+    }
+
+    /// Only the host fence's own failure is passed over. Any other
+    /// converge error, here the served lvol unreadable, still stops the
+    /// fence before it dials anything.
+    #[tokio::test]
+    async fn any_other_converge_failure_still_stops_the_preempt() {
+        let nvme = crate::pnfs::mds::resv_fence::tests::FakeNvmeTarget::spawn().await;
+        nvme.state.lock().unwrap().registrants.push((42, [0xcc; 16], false));
+
+        let tgt = Arc::new(FakeTgt::new());
+        let r = BlockExportReconciler::new(
+            Arc::clone(&tgt) as Arc<dyn SpdkRpcTransport + Send + Sync>,
+            crate::state_backend::memory_backend(),
+            "lvs_test".into(),
+            nvme.addr.ip().to_string(),
+            nvme.addr.port(),
+            "/var/tmp".into(),
+        );
+        r.ensure("pvc-o", Some(1024 * 1024)).await.expect("provision");
+        tgt.fail("bdev_get_bdevs", "Code=-19 Msg=No such device");
+
+        let e = r.fence_preempt("pvc-o", 42).await.expect_err("a converge error stops the fence");
+        assert!(!e.contains("not confirmed"), "the wrong failure stopped it: {e}");
+        let st = nvme.state.lock().unwrap();
+        assert!(st.registrants.iter().any(|(k, _, _)| *k == 42), "victim untouched");
+        assert!(!st.registrants.iter().any(|(_, _, h)| *h), "no reservation taken");
     }
 
     /// THE ACCEPTANCE TEST for `FlintCompositionStaticTraddr.cfg`.

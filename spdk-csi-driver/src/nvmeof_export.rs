@@ -18,6 +18,25 @@ use serde_json::{json, Value};
 
 pub type RpcError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The host fence converged its allow-list but could not confirm that
+/// every Flint host outside it is disconnected: a controller of one is
+/// still live, or the probe could not tell. Typed apart from every other
+/// export error so that a caller holding a stronger exclusion — the
+/// pNFS reservation preempt, which shuts out every non-registrant at the
+/// target per command — can go on past exactly this failure and no
+/// other. `ensure_export` returns it before the namespace and listener
+/// steps, so a caller that goes on must not assume those converged.
+#[derive(Debug)]
+pub struct FenceNotConfirmed(pub String);
+
+impl std::fmt::Display for FenceNotConfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FenceNotConfirmed {}
+
 /// Transport over which SPDK JSON-RPCs are issued; implemented for the local
 /// unix-socket path (node agent) and the node-agent HTTP proxy (driver).
 #[async_trait]
@@ -682,11 +701,10 @@ async fn converge_hosts(
             Err(e) => format!("a failed controller probe ({})", e),
         };
     }
-    Err(format!(
+    Err(Box::new(FenceNotConfirmed(format!(
         "Fence on {} not confirmed after 10s (removed {:?}): {}",
         nqn, removed, seen
-    )
-    .into())
+    ))))
 }
 
 /// A host the fence must keep out: a Flint host not in `allowed`.
@@ -1308,6 +1326,12 @@ mod tests {
 
     const DRAIN_NQN: &str = "nqn.2024-11.com.flint:volume:pvc-fence_1";
 
+    /// The fence's own failure, typed: the pNFS preempt goes on past
+    /// this kind and no other, so the kind is part of the contract.
+    fn not_confirmed(r: &Result<(), RpcError>) -> bool {
+        r.as_ref().is_err_and(|e| e.downcast_ref::<FenceNotConfirmed>().is_some())
+    }
+
     fn fence_subsystem(allow_any_host: bool, hosts: &[String]) -> Value {
         json!({
             "nqn": DRAIN_NQN,
@@ -1336,7 +1360,7 @@ mod tests {
         let rpc = DrainRpc::new(vec![Err("Code=-32603 Msg=Internal error")]);
         let t0 = tokio::time::Instant::now();
         let r = converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[old])), &[new]).await;
-        assert!(r.is_err(), "a failed probe confirmed the fence");
+        assert!(not_confirmed(&r), "a failed probe confirmed the fence: {r:?}");
         assert_eq!(rpc.polls(), 20, "the bound is 20 probes");
         assert!(t0.elapsed() >= Duration::from_millis(9_500), "{:?}", t0.elapsed());
     }
@@ -1347,7 +1371,7 @@ mod tests {
         let (old, new) = (flint_host_nqn("node-x"), flint_host_nqn("node-y"));
         let rpc = DrainRpc::new(vec![Ok(json!({ "jsonrpc": "2.0" }))]);
         let r = converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(false, &[old])), &[new]).await;
-        assert!(r.is_err(), "a reply without a controller list confirmed the fence");
+        assert!(not_confirmed(&r), "a reply without a controller list confirmed the fence: {r:?}");
     }
 
     /// A Flint host that connected while the subsystem admitted any host
@@ -1360,7 +1384,7 @@ mod tests {
         let (old, new) = (flint_host_nqn("node-x"), flint_host_nqn("node-y"));
         let rpc = DrainRpc::new(vec![controllers_of(&[&old])]);
         let r = converge_hosts(&rpc, DRAIN_NQN, Some(&fence_subsystem(true, &[])), &[new]).await;
-        assert!(r.is_err(), "a stray Flint controller survived the fence");
+        assert!(not_confirmed(&r), "a stray Flint controller survived the fence: {r:?}");
     }
 
     /// The ordinary flip: the removed host's controller is gone by the

@@ -182,7 +182,12 @@ covered by the stability guarantee.
   admitted list. Otherwise the attach fails after the existing 10 s bound,
   and the replica is left out of the raid and marked stale. Exports
   created with fencing disabled (`FLINT_NVMF_FENCING=disabled`) remain
-  unfenced.
+  unfenced. The pNFS block layout's fence of a client (2026-10-30;
+  `pnfs/mds/block_export.rs`) goes on past this one failure to its
+  reservation preempt, because the preempt is what shuts the lingering
+  controller out: stopping before it had left that controller, and the
+  fenced client, free to write. Any other export failure still stops the
+  fence, and releasing a fence still fails on it.
 
 - **A file created while another's removal was still being recorded is
   no longer dropped from the tier** (2026-10-28;
