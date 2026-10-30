@@ -321,3 +321,17 @@ at the fence.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.
+
+Resize (2026-10-30, two windows from flint-e4 at the user's word): the
+raid follows an lvol's growth at once, so the stamp's move is made by
+whoever holds the leg, the raid on the growth event or the driver
+through the RPCs when no raid holds it: the stamp copied to the new tail
+with the old tail recorded, the old region zeroed, the record cleared;
+an interrupted move is finished at assembly before the raid comes
+online, and the reserve comes off in `raid1_resize` as in configure, or
+the first grow exposes the new tail. A leg absent during a grow is
+either marked, which the expand's belt refuses outright, or a lost-mark
+leg whose stamp the barrier made older at its loss; the leg-size guard,
+stock raid1's refusal of a shorter base and catch-up's F56 grow keep it
+from serving until it is grown and re-stamped. The model has fixed-size
+legs; no verdict row covers the resize rule.

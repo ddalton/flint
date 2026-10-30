@@ -2138,13 +2138,61 @@ Written at three moments, always by the consumer's `spdk-tgt`:
   happens after it.
 - **A base lost.** The barrier below: (`seq`, `gen`+1, survivors) on every
   surviving configured base before any degraded completion is released.
-- **Resize.** The region moves with the tail: the new stamp is written at
-  the new tail, the old region is zeroed (so the LBAs it vacates read as
-  zeros, the thin-volume invariant), then the raid's size change is
-  notified (`raid_bdev_resize_base_bdev`). A crash between the two leaves
-  a base with no valid stamp at its tail; the reader treats that as "no
-  stamp" and the stage falls back to the record for that assembly, which
-  is today's behaviour.
+- **Resize.** The region moves with the tail, and the raid follows the
+  lvol at once: `bdev_lvol_resize` changes the base's block count,
+  `raid_bdev_resize_base_bdev` is told, and `raid1_resize` sizes the
+  array as the smallest present base's `blockcnt` less `data_offset`,
+  skipping absent bases. The move is made by whoever holds the leg:
+  the raid, on the growth event, when the leg is a configured base;
+  the driver, through the two RPCs below, after a grow of a leg under
+  no raid. Either copies the current stamp to the new tail with the
+  old tail's LBA recorded in it (`prev`), accepts the new size, zeroes
+  the old region (so the LBAs it vacates read as zeros, the thin-volume
+  invariant) and clears `prev`; each step is idempotent, and
+  `bdev_raid_create` with the stamp option, and a base's add, finish an
+  interrupted move before the base serves: a tail stamp with `prev` set
+  has its old region zeroed and `prev` cleared. The reserve comes off
+  in `raid1_resize` as it does in `raid_bdev_configure_base_bdev`, or
+  the first grow puts the new tail inside the volume's LBA range.
+
+**The resize's two windows and the short leg** (flint-e4, 2026-10-30, at
+the user's word). A crash after the grow and before the copy leaves no
+valid stamp at the new tail; the reader treats that as "no stamp" and
+the stage falls back to the record for that assembly, today's
+behaviour. A crash after the copy and before the zeroing leaves a valid
+stamp at the new tail and the old stamp's bytes, one cluster (128 KiB,
+`LVS_CLUSTER_SZ`) of volume and lvol uuids, `seq`, `gen` and a clock,
+inside the volume's LBA range on that leg. No user data is at risk,
+because the filesystem is grown by NodeExpandVolume only after
+ControllerExpandVolume succeeds, which is only after every leg's grow,
+and a partial fan-out is re-driven by the resizer's retry
+(`ExpandReplicaFanoutIncomplete`, `expand.rs`); the thin-volume
+invariant, though, would rest on that ordering alone, which is why the
+assembly finishes the move itself rather than trusting the next retry.
+A leg absent during a grow: a leg the record holds stale or standby
+never sees one, because the expand's belt refuses the whole fan-out
+while any leg lags (`replicas_not_in_sync`, v1.21.0; the drill of
+2026-07-27 showed no partial fan-out behind it), so only a lost-mark
+leg, this section's subject, can be absent during a grow. Its own grow
+fails on its node and is re-driven; meanwhile the raid grows on the
+present legs, whose stamps the barrier wrote at the leg's loss with
+`gen`+1 and without it, so the short leg's stamp at its old tail is
+older by the rule and reads stale, whatever its size. Where no barrier
+ran, a grow with the raid unassembled, the short leg's stamp may tie
+and count in the read, which is correct, since it holds the
+acknowledged history and only lacks room; three existing guards then
+keep it from serving or bounding the array: the driver's leg-size
+guard drops a shorter leg before the create (`leg_size_guard.rs`, the
+largest cohort kept and the PV's capacity the floor, at the stage, at
+standby admission and at the node agent's construction boundary),
+stock raid1 refuses a shorter base rejoining a grown array (a base's
+`data_size` survives its removal, and `raid_bdev_configure_base_bdev`
+fails the add when offset and size exceed its capacity, which §7's
+hot-rejoin path must expect), and catch-up grows a short standby head
+to its source before attaching it (`align_dst_head_size`, F56) and ends
+with admission's stamp at the new tail. None of this is in the model:
+FlintCatchupS has fixed-size legs (`Blocks = {b1}`), no verdict row
+covers the resize rule, and the raid unit tests asked below check it.
 
 Read by the control plane through two small RPCs the patch adds beside
 the raid module, `bdev_flint_stamp_read` and `bdev_flint_stamp_write`,
@@ -2229,6 +2277,15 @@ v26.05):
 - *The app thread.* The stamp is issued from the app thread, which needs
   its own channels on the configured bases (`spdk_bdev_get_io_channel` on
   their descriptors), as the superblock write path has.
+
+A sixth, from the resize (2026-10-30): `raid1_resize` sizes the array
+from `blockcnt` less `data_offset` over the present bases, not from
+`data_size`, so the reserve comes off there as well; and
+`raid_bdev_free_base_bdev_resource` clears `data_offset` but not
+`data_size`, so a base absent through a grow is refused on rejoin by
+`raid_bdev_configure_base_bdev` with "size exceeds capacity", which the
+patch keeps and §7's hot-rejoin path must treat as a short leg for
+catch-up to grow, not as a fault of the base.
 
 Overlap with the carried series: of the twelve patches in
 `spdk-csi-driver/spdk-patches/`, only 0006 (skip-rebuild on add, the
@@ -2618,6 +2675,12 @@ flint-91, once the model holds, scoped here and decided by the user:
       cut two paths and confirm the write completes only after the record
       shows the continuation; a fenced old consumer's writes never
       acknowledge; crash the consumer inside a failure window and restage.
+- [ ] The resize move in the raid patch: the reserve off in
+      `raid1_resize`; the stamp copied to the new tail with `prev`, the
+      old region zeroed, the move finished at `bdev_raid_create` and at
+      a base's add when `prev` is set; the driver's move through the
+      RPCs for a leg under no raid; raid unit tests for a crash at each
+      window and for a shorter base's add.
 - [ ] Pins: the two premises of §5's rev 7 subsection, and the barrier
       ordering as a unit test that an SPDK bump cannot pass silently.
 
