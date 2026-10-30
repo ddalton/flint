@@ -222,6 +222,21 @@ impl SpdkNative {
     ) -> Result<Value> {
         tracing::trace!("[SPDK_NATIVE] call_rpc('{}') incoming params: {:?}", method, params);
 
+        // P4: bdev_nvme_set_options is refused once any controller exists,
+        // and a restarted target is re-attached by whichever path gets there
+        // first (the data-path repair, the reconcile's remote re-attach), not
+        // only by the agent's discovery, which re-applies the options.
+        // On the 1.61.3 gate cluster (2026-10-30) a raid host ran without
+        // them after four spdk-tgt kills, and a blackholed leg then hung the
+        // raid instead of faulting out of it. So the attach applies them
+        // itself when it is the target's first controller.
+        if method == "bdev_nvme_attach_controller" {
+            self.ensure_dead_target_options(
+                crate::nvme_recovery::DeadTargetTimeouts::from_env().set_options_params(),
+            )
+            .await;
+        }
+
         // Handle empty parameters like official SPDK CGO bridge
         // "Force Go client to skip 'params' parameter in JSON-RPC call"
         let normalized_params = match &params {
@@ -572,6 +587,37 @@ impl SpdkNative {
         Ok(())
     }
     
+    /// Apply `options` (`bdev_nvme_set_options`) when the target has no NVMe
+    /// controller yet, the only time SPDK accepts them. Best effort: a
+    /// concurrent attach that got there first, or a target that cannot list
+    /// its controllers, leaves the attach to proceed as it did before. Both
+    /// RPCs go to the bounded exchange directly: through `call_rpc` they
+    /// would re-enter this guard's caller.
+    async fn ensure_dead_target_options(&self, options: Option<Value>) {
+        let Some(options) = options else { return };
+        let list = "bdev_nvme_get_controllers";
+        let first = matches!(
+            self.call_rpc_bounded(list, None, rpc_deadline(list)).await,
+            Ok(Value::Array(c)) if c.is_empty()
+        );
+        if !first {
+            return;
+        }
+        let set = "bdev_nvme_set_options";
+        match self.call_rpc_bounded(set, Some(options), rpc_deadline(set)).await {
+            Ok(_) => tracing::info!(
+                "[SPDK_RPC] Dead-target timeouts applied before this target's first controller attach"
+            ),
+            Err(e) if e.to_string().contains("not permitted") => tracing::debug!(
+                "[SPDK_RPC] bdev_nvme_set_options refused: a concurrent attach got there first"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "[SPDK_RPC] bdev_nvme_set_options before the first attach failed; the attach proceeds"
+            ),
+        }
+    }
+
     /// Generic RPC call for any method
     pub async fn call_method(&self, method: &str, params: Option<Value>) -> Result<Value> {
         self.call_rpc(method, params).await
@@ -804,6 +850,127 @@ mod tests {
         accept_task.abort();
         let _ = std::fs::remove_file(&sock);
     }
+
+    /// A fake spdk-tgt: answers one newline-delimited JSON-RPC request per
+    /// connection and records each method with its params, in order.
+    /// `controllers` is bdev_nvme_get_controllers' answer (None: an error);
+    /// `refuse_options` answers bdev_nvme_set_options as SPDK does once a
+    /// controller exists.
+    async fn fake_tgt(
+        name: &str,
+        controllers: Option<Value>,
+        refuse_options: bool,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, Option<Value>)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let dir = std::env::temp_dir().join(format!("flint-spdk-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("spdk.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                let (rd, mut wr) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(rd).read_line(&mut line).await.unwrap_or(0) == 0 {
+                    continue; // the constructor's connect probe sends nothing
+                }
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let method = req["method"].as_str().unwrap().to_string();
+                seen.lock().unwrap().push((method.clone(), req.get("params").cloned()));
+                let reply = match method.as_str() {
+                    "bdev_nvme_get_controllers" => match &controllers {
+                        Some(c) => json!({"jsonrpc": "2.0", "id": req["id"], "result": c}),
+                        None => json!({"jsonrpc": "2.0", "id": req["id"],
+                                       "error": {"code": -32601, "message": "Method not found"}}),
+                    },
+                    "bdev_nvme_set_options" if refuse_options => {
+                        json!({"jsonrpc": "2.0", "id": req["id"],
+                        "error": {"code": -1, "message": "RPC not permitted with nvme controllers already attached"}})
+                    }
+                    "bdev_nvme_attach_controller" => {
+                        json!({"jsonrpc": "2.0", "id": req["id"], "result": ["nvme0n1"]})
+                    }
+                    _ => json!({"jsonrpc": "2.0", "id": req["id"], "result": true}),
+                };
+                let _ = wr.write_all(format!("{reply}\n").as_bytes()).await;
+            }
+        });
+        (sock.to_string_lossy().to_string(), calls, task)
+    }
+
+    fn methods(calls: &std::sync::Mutex<Vec<(String, Option<Value>)>>) -> Vec<String> {
+        calls.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
+    }
+
+    fn attach_params() -> Value {
+        json!({"name": "nvme_leg", "trtype": "TCP", "adrfam": "IPv4", "traddr": "10.0.0.2",
+               "trsvcid": "4420", "subnqn": "nqn.2024-11.com.flint:volume:pvc-x_1"})
+    }
+
+    #[tokio::test]
+    async fn the_first_attach_on_a_target_applies_the_dead_target_timeouts() {
+        let (sock, calls, task) = fake_tgt("first", Some(json!([])), false).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await.unwrap();
+        assert_eq!(
+            methods(&calls),
+            ["bdev_nvme_get_controllers", "bdev_nvme_set_options", "bdev_nvme_attach_controller"]
+        );
+        let opts = calls.lock().unwrap()[1].1.clone().unwrap();
+        assert_eq!(
+            opts,
+            crate::nvme_recovery::DeadTargetTimeouts::from_env().set_options_params().unwrap()
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_attach_beside_existing_controllers_sends_no_options() {
+        let (sock, calls, task) =
+            fake_tgt("beside", Some(json!([{"name": "nvme_other"}])), false).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await.unwrap();
+        assert_eq!(methods(&calls), ["bdev_nvme_get_controllers", "bdev_nvme_attach_controller"]);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_set_options_does_not_stop_the_attach() {
+        let (sock, calls, task) = fake_tgt("refused", Some(json!([])), true).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        let attached = spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await;
+        assert_eq!(attached.unwrap(), json!(["nvme0n1"]));
+        assert_eq!(
+            methods(&calls),
+            ["bdev_nvme_get_controllers", "bdev_nvme_set_options", "bdev_nvme_attach_controller"]
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn an_unlistable_target_still_attaches_without_options() {
+        let (sock, calls, task) = fake_tgt("unlistable", None, false).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await.unwrap();
+        assert_eq!(methods(&calls), ["bdev_nvme_get_controllers", "bdev_nvme_attach_controller"]);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn other_methods_are_not_guarded() {
+        let (sock, calls, task) = fake_tgt("other", Some(json!([])), false).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        spdk.call_method("bdev_get_bdevs", None).await.unwrap();
+        spdk.call_method("bdev_nvme_detach_controller", Some(json!({"name": "nvme_leg"})))
+            .await
+            .unwrap();
+        assert_eq!(methods(&calls), ["bdev_get_bdevs", "bdev_nvme_detach_controller"]);
+        task.abort();
+    }
 }
-
-

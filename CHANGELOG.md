@@ -104,6 +104,26 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A replica that stops answering faults out of its raid after spdk-tgt
+  restarts, instead of hanging the volume's I/O** (2026-10-30;
+  `spdk-csi-driver/src/spdk_native.rs`). Flint bounds how long SPDK waits
+  on a silent replica (`bdev_nvme_set_options`: a TCP retransmission
+  timeout and a 30 s command timeout with reset), so a replica on a dead
+  or partitioned node fails out of the raid within about a minute and the
+  volume runs degraded. SPDK accepts those options only before its first
+  NVMe controller is attached. After spdk-tgt restarted, the node agent
+  re-applied them from its disk discovery, but the data-path repair or the
+  reconcile's remote re-attach could attach a replica's controller first,
+  and the options were then refused until the next restart. A
+  replica that went silent in that state never faulted out: on the 1.61.3
+  release-gate cluster, after four spdk-tgt kills on one node, a replica
+  cut off from it stayed in the raid for over ten minutes with the
+  application's I/O stuck, where the same cut before those restarts
+  faulted the replica out in 49 s. The attach now applies the options
+  itself when it is the target's first controller, whichever path makes
+  it. A target already running without them keeps that state until its
+  next restart.
+
 - **A node a volume has moved away from no longer marks the new consumer's
   replicas stale** (2026-10-30; `spdk-csi-driver/src/node_agent.rs`). Each
   node's raid-health monitor marks the replicas missing from its online
