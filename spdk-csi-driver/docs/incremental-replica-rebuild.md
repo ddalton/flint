@@ -2295,14 +2295,23 @@ The stage, after the fence flip and before `bdev_raid_create`:
    attached leg not in the candidates is marked stale in the assembly
    write, with the reason. A leg whose newest stamp is an unconfirmed
    continuation is a **torn leg**: unacknowledged writes may have landed
-   on it after the last release, and only on such a leg, since a
-   continuation stamps before it writes and a failed stamp write fails
-   the survivor. It counts for the read, its released view being
-   evidence, but the assembly write marks it stale whenever another
-   member of the newest valid generation is attached, and catch-up
-   rebuilds it from its last trusted epoch, which predates the junk; it
-   serves only as the sole survivor, where its torn values are the write
-   hole. flint-e4's fifth trace (FlintCatchupS rev 9, two replicas,
+   on it after the last release, and once the fence is found only on
+   such a leg, since a continuation stamps before it writes and a failed
+   stamp write fails the survivor. The writes in flight when the fence
+   is found land before the stamp, on the fenced assembly's members with
+   equal stamps, and nothing on disk tells them from a crash's: they are
+   the write hole, bounded by what was in flight, and closing them would
+   need the fenced writer to learn of the fence before writing, a race.
+   A torn leg counts for the read, its released view being evidence, but
+   the assembly write marks it stale whenever a clean member of the
+   newest valid generation is attached, and catch-up rebuilds it from
+   its last trusted epoch, which predates the junk. It never serves
+   alone on a vouch: its junk is everything the fenced writer landed
+   while it ran, minutes on a partitioned node, not an in-flight set, so
+   the stage waits for a clean member and serves a torn leg alone only
+   at node-gone or by the operator's cut, under step 3's serve-with-risk,
+   with the marker naming the leg and its stamp's clock. flint-e4's fifth
+   trace (FlintCatchupS rev 9, two replicas,
    zombie move, bound D, `Inv_AdmitNoLoss` at depth 18; the same shape
    at three replicas near depth 19, predicted, not yet observed): the
    fenced old consumer, holding leg 1 alone after the fence took leg 2,
@@ -2434,7 +2443,7 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | Mechanism | Under the stamp |
 | --- | --- |
 | §6 survivor divergence after a crash or a move | closed; a crash leaves the stamps, a move leaves them and the record for a minority continuation |
-| the raid1 write hole (writes never acknowledged, landed on some legs) | shrunk to the serving assembly's own in-flight writes and to a torn leg serving as the sole survivor; a torn leg beside another member is cleaned at the stage (step 2) |
+| the raid1 write hole (writes never acknowledged, landed on some legs) | shrunk to the writes in flight at a crash or at the fence; a torn leg beside a clean member is cleaned at the stage, and alone it waits or serves marked (step 2) |
 | unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
 | health monitor | a belt, gated on the VolumeAttachment's node; it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
 | fence-flip mark on the co-located leg | the decree in step 4 above, written only by a stage whose read concluded without that leg |
@@ -2571,11 +2580,17 @@ flint-e4, before any code (the user's order: model first):
       vouch as a knob: expect the HOLDs to carry over, the control
       without the vouch to defer where the vouch serves, and a probe that
       the one-of-two stage serves with the absent leg record-`in_sync`.
-- [ ] The torn-leg rule as a knob on rev 9 (step 2): expect
-      `Inv_AdmitNoLoss` and `Inv_NoLateJunk2` to HOLD on the two- and
-      three-replica zombie arms with it, the control without it to show
-      the fifth trace, a probe that a torn leg was excluded, and a probe
-      that a torn leg served as the sole survivor, the hole's residue.
+- [ ] The torn-leg rule (step 2) as knobs on FlintCatchupS rev 10 (md5
+      `2a9567c7`, batch c24): the exclusion beside a clean member, the
+      pre-stamp writes counted as the hole, and the torn leg never
+      serving alone on a vouch (serving only under the expiry action,
+      with the risk ghost set). Expect `Inv_AdmitNoLoss`, `Inv_NoNewLoss`
+      and `Inv_NoLateJunk2` to HOLD on the two- and three-replica zombie
+      arms with all three, the exclusion alone to fail on the pre-stamp
+      write, the control without the exclusion to show the fifth trace,
+      the control without the sole-survivor rule to serve a torn leg
+      alone at depth 5, and a marked form, that a torn leg serves alone
+      only with the ghost set.
 
 flint-91, once the model holds, scoped here and decided by the user:
 

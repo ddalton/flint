@@ -315,9 +315,9 @@ own leg, freed by hygiene before the first stage attempt, entered the new
 assembly as a member's content, survived the first cut inside a trusted
 epoch and came back through every later catch-up; a leg whose newest
 stamp is an unconfirmed continuation is now a torn leg, marked stale at
-the stage whenever another member is attached, and the write hole shrinks
-to the serving assembly's own in-flight writes and the sole-survivor
-serve.
+the stage whenever a clean member is attached, never serving alone on a
+vouch, and the write hole shrinks to the writes in flight at a crash or
+at the fence.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.
