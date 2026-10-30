@@ -308,6 +308,36 @@ agent_spdk_rpc() { # <node> <json-body> — SPDK RPC via the node agent HTTP pro
     -H 'Content-Type: application/json' -d "$2" 2>/dev/null
 }
 
+# A failed drill keeps its evidence, so it can be examined after the harness
+# and the cluster are gone: everything the next drill would overwrite
+# (container logs reach back one restart; raid, export and controller state;
+# the PV's sync record rides in volumes.yaml). Best effort; never fails.
+collect_failure_evidence() { # <dir> <t0-epoch>
+  local d=$1 since n p c m body
+  since=$(rfc3339 "$2"); mkdir -p "$d"
+  kubectl get nodes -o wide > "$d/nodes.txt" 2>&1
+  kubectl get pods -A -o wide > "$d/pods.txt" 2>&1
+  kubectl get events -A --sort-by=.lastTimestamp > "$d/events.txt" 2>&1
+  kubectl get pv,pvc,volumeattachment -A -o yaml > "$d/volumes.yaml" 2>&1
+  p=$(controller_pod)
+  [ -n "$p" ] && kubectl logs -n "$DRIVER_NS" "$p" --all-containers --timestamps --since-time="$since" > "$d/controller.log" 2>&1
+  for n in $(worker_nodes); do
+    p=$(csi_node_pod "$n"); [ -n "$p" ] || continue
+    for c in flint-csi-driver spdk-tgt; do
+      kubectl logs -n "$DRIVER_NS" "$p" -c "$c" --timestamps > "$d/$n-$c.log" 2>&1
+      kubectl logs -n "$DRIVER_NS" "$p" -c "$c" --timestamps --previous > "$d/$n-$c.previous.log" 2>/dev/null \
+        || rm -f "$d/$n-$c.previous.log"
+    done
+    for m in bdev_raid_get_bdevs bdev_get_bdevs bdev_lvol_get_lvols nvmf_get_subsystems bdev_nvme_get_controllers; do
+      case $m in
+        bdev_raid_get_bdevs) body='{"method":"bdev_raid_get_bdevs","params":{"category":"all"}}' ;;
+        *) body="{\"method\":\"$m\"}" ;;
+      esac
+      agent_spdk_rpc "$n" "$body" > "$d/$n-$m.json" 2>&1
+    done
+  done
+}
+
 flint_ublk_disks() { # <node> — "id<TAB>bdev" lines of ublk disks SPDK serves
   agent_spdk_rpc "$1" '{"method":"ublk_get_disks"}' \
     | jq -r '.result[]? | "\(.id // .ublk_id)\t\(.bdev_name)"' 2>/dev/null

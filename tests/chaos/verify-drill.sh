@@ -49,7 +49,7 @@ fi
 
 # 2. DB verdict ---------------------------------------------------------------
 step "2/7 db verdict"
-if QUICK=${QUICK:-0} ./verify-db.sh "$T0" > "$ART/db-verdict.txt" 2>&1; then
+if QUICK=${QUICK:-0} EVIDENCE_DIR="$ART/db" ./verify-db.sh "$T0" > "$ART/db-verdict.txt" 2>&1; then
   DB=PASS; ok "db PASS"
 else
   DB=FAIL; FAILED="$FAILED db"; note "db FAIL — see $ART/db-verdict.txt"
@@ -199,6 +199,10 @@ STALL=$(max_stall_since "$T0")
 ok "max ledger stall ${STALL:-?}s"
 
 [ -z "$FAILED" ] && VERDICT=PASS || VERDICT=FAIL
+if [ "$VERDICT" = FAIL ]; then
+  collect_failure_evidence "$ART/evidence" "$T0"
+  note "failure evidence kept in $ART/evidence (and $ART/db)"
+fi
 csv_append "$(rfc3339 "$T0"),$PHASE,$DRILL,$T_READY,${STALL:-},$RESTART_DELTA,${PRE_NODE:-},${POST_NODE:-},$VA_OK,$NVME_OK,$MOUNTS_OK,$DB,$LOG_OK,$VERDICT,\"${NOTES}${FAILED:+ failed:$FAILED}\""
 
 printf '\n%s: drill %s/%s — ready=%ss stall=%ss %s\n' "$VERDICT" "$PHASE" "$DRILL" "$T_READY" "${STALL:-?}" "${FAILED:+(failed:$FAILED)}"

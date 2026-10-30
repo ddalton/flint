@@ -60,6 +60,23 @@ drill() {  # <label> <command...>
   log "done $label -> $v | $(tail -1 "$RESULTS" | cut -c1-180)"
   [ "$v" = PASS ] || fail "drill $label verdict $v"
 }
+lost_writes_in_last_drill() {  # the newest drill's db check found acked writes still absent on a by-value re-query
+  local art; art=$(ls -td "$ARTIFACTS"/*/ 2>/dev/null | head -1)
+  grep -q 'LOST ACKED WRITES' "${art}db-verdict.txt" 2>/dev/null
+}
+rwo_drill() {  # <label> <command...>: a drill on the RWO harness. A lost acked write keeps its
+  # evidence: the legs are compared before anything else touches the volume, and the drills
+  # after it get a fresh harness (the compare stops the workload).
+  drill "$@"
+  lost_writes_in_last_drill || return 0
+  local pv; pv=$(kubectl -n flint-chaos get pvc data-pg-0 -o jsonpath='{.spec.volumeName}')
+  log "lost acked writes in $1: comparing the legs of $pv before anything else touches it"
+  ( cd "$HERE" && ./leg-compare.sh "$pv" "$OUT/leg-compare-$1" ) >> "$OUT/drills.log" 2>&1
+  log "leg compare $1: $(tail -1 "$OUT/leg-compare-$1/diff.txt" 2>/dev/null) ($OUT/leg-compare-$1)"
+  log "RWO: a fresh harness for the drills after $1"
+  ( cd "$HERE" && SC=flint-r3 MODE=RWO ./deploy-harness.sh down && SC=flint-r3 MODE=RWO ./deploy-harness.sh up \
+      && ./baseline.sh capture ) >> "$OUT/drills.log" 2>&1 || fail "RWO harness redeploy after $1"
+}
 controllers() {  # node ctrl traddr fio cl rd, for every flint kernel controller
   for p in $(kubectl -n $NS get pods -l app=flint-csi-node -o name); do
     n=$(kubectl -n $NS get "$p" -o jsonpath='{.spec.nodeName}')
@@ -92,17 +109,17 @@ log "RWO: harness up (flint-r3)"
 if ( cd "$HERE" && SC=flint-r3 MODE=RWO ./deploy-harness.sh up ) >> "$OUT/drills.log" 2>&1; then
   ( cd "$HERE" && ./baseline.sh capture ) >> "$OUT/drills.log" 2>&1
   policy_ok rwo
-  drill 2.2a         ./drills/phase2.sh 2.2a
-  drill 1.9          env PHASE_LABEL=1r3 ./drills/phase1.sh 1.9
-  drill 1.9-again    env PHASE_LABEL=1r3 ./drills/phase1.sh 1.9
-  drill 2.7          ./drills/phase2.sh 2.7
+  rwo_drill 2.2a         ./drills/phase2.sh 2.2a
+  rwo_drill 1.9          env PHASE_LABEL=1r3 ./drills/phase1.sh 1.9
+  rwo_drill 1.9-again    env PHASE_LABEL=1r3 ./drills/phase1.sh 1.9
+  rwo_drill 2.7          ./drills/phase2.sh 2.7
   pv=$(kubectl -n flint-chaos get pvc data-pg-0 -o jsonpath='{.spec.volumeName}')
   s=""
   for i in $(seq 1 30); do
     s=$(kubectl get pv "$pv" -o jsonpath='{.metadata.annotations.disk\.chert\.us/replica-sync-state}' | jq -c '[.replicas[].sync_state]' 2>/dev/null)
     [ "$s" = '["in_sync","in_sync","in_sync"]' ] && break; sleep 10
   done
-  [ "$s" = '["in_sync","in_sync","in_sync"]' ] && drill 2.11 ./drills/phase2.sh 2.11 || fail "legs not in_sync 5 min after 2.7: $s"
+  [ "$s" = '["in_sync","in_sync","in_sync"]' ] && rwo_drill 2.11 ./drills/phase2.sh 2.11 || fail "legs not in_sync 5 min after 2.7: $s"
 else
   fail "RWO harness up (drills.log)"
 fi

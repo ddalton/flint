@@ -37,20 +37,53 @@ if [ "$PG_UP" != "1" ]; then
   # not total; isready already failed the drill.
   note "ledger check SKIPPED (pg unreachable — loss unknown, not counted)"
 elif [ -n "$LP" ]; then
-  # comm needs LEXICOGRAPHIC order — sort -n desynchronizes its merge the
+  # The ACKED set is read FIRST and the table AFTER it, never in parallel.
+  # The load keeps inserting, so a table snapshot taken before the newest
+  # acks (or a truncated psql/exec stream, which the old pipeline could not
+  # see) reads exactly the newest rows as lost: the 1.61.3 gate's 2.2a
+  # (2026-10-30) failed on seqs 615-619, and drill 1.9 found all 1151 acked
+  # rows present three minutes later on the same harness. A seq missing from
+  # the full read is then asked for by value; only a seq still absent is a
+  # lost write. Either read failing is "loss unknown", never a pass.
+  # comm needs LEXICOGRAPHIC order -- sort -n desynchronizes its merge the
   # moment the two lists are not near-identical (an oracle-pod restart
   # makes acked.log a mid-stream subset), fabricating sparse "missing"
   # seqs that a direct heap probe disproves (phase-2u false FAILs).
-  MISSING=$(comm -23 \
-    <($TMO 120 kubectl exec -n "$NS" "$LP" -- sh -c 'cut -d" " -f1 /acked/acked.log 2>/dev/null' | sort) \
-    <($TMO 120 kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc \
-        'SELECT seq FROM ledger' | sort))
-  if [ -z "$MISSING" ]; then
-    ACKED=$(kubectl exec -n "$NS" "$LP" -- sh -c 'wc -l < /acked/acked.log 2>/dev/null' | tr -d ' ')
-    ok "ledger: all ${ACKED:-0} acked writes present"
+  ED=${EVIDENCE_DIR:-$(mktemp -d)}; mkdir -p "$ED"
+  if ! $TMO 120 kubectl exec -n "$NS" "$LP" -- sh -c 'cat /acked/acked.log' > "$ED/acked.log" 2>"$ED/acked.err"; then
+    FAILED="$FAILED ledger-unread"; note "ledger UNREAD: acked.log not readable (loss unknown; $ED/acked.err)"
+  elif ! $TMO 120 kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -v ON_ERROR_STOP=1 -Atqc \
+      'SELECT seq FROM ledger' > "$ED/ledger-seqs.txt" 2>"$ED/ledger.err"; then
+    FAILED="$FAILED ledger-unread"; note "ledger UNREAD: the table query failed (loss unknown; $ED/ledger.err)"
   else
-    FAILED="$FAILED ledger"
-    note "LOST ACKED WRITES: $(echo "$MISSING" | head -5 | tr '\n' ' ')($(echo "$MISSING" | wc -l | tr -d ' ') total)"
+    MISSING=$(comm -23 <(cut -d" " -f1 "$ED/acked.log" | sort) <(sort "$ED/ledger-seqs.txt"))
+    ACKED=$(grep -c . "$ED/acked.log")
+    if [ -z "$MISSING" ]; then
+      ok "ledger: all ${ACKED:-0} acked writes present"
+    else
+      echo "$MISSING" > "$ED/missing-first-read.txt"
+      LIST=$(echo "$MISSING" | head -2000 | paste -sd, -)
+      if ! $TMO 60 kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -v ON_ERROR_STOP=1 -Atqc \
+          "SELECT seq FROM ledger WHERE seq IN ($LIST)" > "$ED/missing-requery.txt" 2>>"$ED/ledger.err"; then
+        FAILED="$FAILED ledger-unread"
+        note "ledger UNREAD: $(echo "$MISSING" | wc -l | tr -d ' ') seqs absent from the full read and the re-query failed (loss unknown)"
+      else
+        STILL=$(comm -23 <(echo "$MISSING" | sort) <(sort "$ED/missing-requery.txt"))
+        if [ -z "$STILL" ]; then
+          ok "ledger: all ${ACKED:-0} acked writes present ($(echo "$MISSING" | wc -l | tr -d ' ') absent from the full read were found by value: a read artifact, not a loss)"
+        else
+          echo "$STILL" > "$ED/lost.txt"
+          FAILED="$FAILED ledger"
+          note "LOST ACKED WRITES: $(echo "$STILL" | head -5 | tr '\n' ' ')($(echo "$STILL" | wc -l | tr -d ' ') total, absent on a by-value re-query; $ED)"
+          # the ledger's own view of the neighbourhood: ctid + xmin of the rows
+          # around each lost seq (which heap pages hold them, which xacts wrote them)
+          LO=$(echo "$STILL" | sort -n | head -1); HI=$(echo "$STILL" | sort -n | tail -1)
+          $TMO 60 kubectl exec -n "$NS" $PG -c postgres -- psql -U postgres -d bench -Atqc \
+            "SELECT seq, ctid, xmin, ts FROM ledger WHERE seq BETWEEN $((LO - 50)) AND $((HI + 50)) ORDER BY seq" \
+            > "$ED/ledger-around-lost.txt" 2>&1
+        fi
+      fi
+    fi
   fi
 else
   FAILED="$FAILED no-load-pod"
@@ -84,6 +117,19 @@ fi
 # 23:11:12Z, wiping the 23:05:38 F52 PANIC that had been read live minutes
 # earlier — and the drill duly recorded db=PASS on a run that had panicked.
 PGPAT='PANIC|checksum verification failed|invalid page|could not read block'
+# Keep postgres's own record of the window (a FAIL is examined after the
+# harness is gone), and say whether it ran crash recovery in place: the
+# postmaster reinitializes without a container restart, and the pattern
+# scan below does not look for recovery.
+if [ -n "${EVIDENCE_DIR:-}" ]; then
+  kubectl logs -n "$NS" $PG -c postgres --timestamps --since-time="$(rfc3339 "$T0")" > "$EVIDENCE_DIR/pg.log" 2>&1
+  kubectl logs -n "$NS" $PG -c postgres --timestamps --previous > "$EVIDENCE_DIR/pg-previous.log" 2>/dev/null \
+    || rm -f "$EVIDENCE_DIR/pg-previous.log"
+  [ -n "${LP:-}" ] && kubectl logs -n "$NS" "$LP" --timestamps --since-time="$(rfc3339 "$T0")" > "$EVIDENCE_DIR/pg-load.log" 2>&1
+fi
+RECOV=$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null \
+  | grep -cE 'terminating any other active server processes|database system was interrupted|redo starts at|was terminated by signal')
+[ "${RECOV:-0}" -eq 0 ] || note "postgres ran crash recovery in place since T0 ($RECOV lines; not a verdict by itself)"
 BAD=$(kubectl logs -n "$NS" $PG -c postgres --since-time="$(rfc3339 "$T0")" 2>/dev/null | grep -cE "$PGPAT")
 PREV=$(kubectl logs -n "$NS" $PG -c postgres --previous 2>/dev/null | grep -cE "$PGPAT")
 # A restarted container is itself a caveat: --previous only reaches back ONE
