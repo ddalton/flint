@@ -261,8 +261,8 @@ code-faithful, bound D unless noted):
 | --- | --- | --- |
 | Shipped policy with the unstage capture, bound C | VIOLATED at depth 22 | the failure-window loss stands with the capture; bound D never separated the policies |
 | Per-epoch trust, full invariant | HOLD, 34.8M states at bound D; clean to depth 26 at bound C, not a full pass | the rule holds where the shipped policy fails |
-| Trust without "raid1 drops a base at its first failed write" | VIOLATED at depth 12 | premise 1 of every trust HOLD; to be pinned by a cluster test |
-| A zombie writing a leg the raid configures | VIOLATED at depth 15 | premise 2, the fence; its fail-open probe shipped fixed in 044f2010 |
+| Trust without "raid1 drops a base at its first failed write" | VIOLATED at depth 12 | premise 1 of every trust HOLD; observed once on gate1613 (2026-10-30: a black-holed leg dropped after 49 s, the two configured legs holding every acked write; kill arm void, scripts uncommitted), still to be pinned by a committed cluster test; after an spdk-tgt restart the dead-target options can be refused and the leg never faults (liveness, fix on `p4-first-attach`, not pushed) |
+| A zombie writing a leg the raid configures | VIOLATED at depth 15 | premise 2, the fence; its fail-open probe shipped fixed in 044f2010; held live on gate1613 (2026-10-30): a real zombie's writes reached neither leg of the new raid, its own leg took all 16,384 after the move, and the monitor gate eb7c28fd recorded nothing for it |
 | Zombie move with the assembly's stale write never landing | VIOLATED at depth 17 | that write is load-bearing and best effort in code; it should be a precondition of serving |
 | F36c's last-writer defer on, zombie move | `Inv_MembersAgree` VIOLATED at depth 4, every policy | the defer seam: hygiene frees the co-located leg back into `in_sync` |
 | A consumer leaving inside a failure window (the residual above) | `Inv_NoNewLoss` VIOLATED at depth 9, every policy, no admission in the trace | not closable by any admission rule |
@@ -275,13 +275,13 @@ What it changes in the recommendations above:
 | --- | --- |
 | Ship the three-part fix | shipped: stage 1050134c, hot rejoin 395b442d, with the CHANGELOG caveats |
 | The unstage capture | shipped ef3a6f48, gated on the VolumeAttachment node and the writer set; a belt under the stamp |
-| The monitor gated on the VolumeAttachment node | not written; stays as a belt, and copies the stamp's clock into `since` so `T_back` covers the I/O timeout alone |
+| The monitor gated on the VolumeAttachment node | shipped eb7c28fd (2026-10-30): a node records for a raid only when it holds an attached VolumeAttachment for the raid's PV, and still records when the lookup itself fails, the direction that cannot hold back the consumer's own marks; live on gate1613 the zombie's monitor recorded nothing; stays as a belt, and copies the stamp's clock into `since` once the stamp exists so `T_back` covers the I/O timeout alone |
 | Mark the co-located leg stale at the fence flip | becomes the stage's decree, written only by a stage whose read is conclusive without that leg (attached `in_sync` legs a majority of the newest stamp's size, or a confirmed sole continuation on an attached leg); otherwise the stage waits for it as F36c's last writer |
 | Trust belongs to the epoch | stays for the scheduler and the catch-up, since the record trails a majority drop by one poll; modelled as FlintCatchupT (rev 15, md5 8ac3cf00), not a FlintCatchupN arm |
 | The tie's demotion of an unattached source | the conjunct becomes "named in the newest valid stamp"; the demotion stands only for a source the raid dropped |
 | Base floor and forced re-revert | retire once per-epoch membership is in the record |
 | The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
-| TLAPS proof of the trust rule, 2 to 4 days | after the model's confirmation batch, against the one pinned md5 |
+| TLAPS proof of the trust rule | pass 7 proved all 7,673 obligations on a seeded cache (2026-10-29); the fresh-cache record and its 13 controls held for a quiet box now that batch c21 has closed (2026-10-31), to rerun alone; the confirmation batch c15 closed 2026-10-30 (67 arms on `8ac3cf00`, most with the pre-fix cut, see §5's status) |
 
 Four gaps were found by the model ahead of any code, all closed by
 rules now in §12. First, a stamp read among the attached legs is conclusive
@@ -335,3 +335,41 @@ leg whose stamp the barrier made older at its loss; the leg-size guard,
 stock raid1's refusal of a shorter base and catch-up's F56 grow keep it
 from serving until it is grown and re-stamped. The model has fixed-size
 legs; no verdict row covers the resize rule.
+
+Verdicts (2026-10-30, one pinned FlintCatchupS md5 per batch; the table
+at the end of §12): at two replicas the full rule set holds over the
+full state space on the zombie move (rev 11 `46c89207`, 29,120,225
+states, depth 39), with and without a late capture, and each rule has a
+control that fails without it in the same configuration; the lost-mark
+and crash arms hold at two replicas as well. At three replicas the gated
+decree (rev 7 `6859c997`) is clean to depth 23 on the lost mark and to
+depth 22 on the crash, bounded at the box's hour; its zombie arm
+fails at depth 17 on the pre-stamp write, the write hole, which rev 7
+could not count as legal and rev 10 does. Under the full rule set (rev
+12 `8e54566d`, the user's 192-core run, c27) three replicas are a full
+pass on the lost mark and the crash (1,774,204,193 and 2,325,892,812
+states) and the zombie arm is checked to depth 27 without a violation,
+bounded, not a full pass. c21 closed on 2026-10-31 with every remaining
+rev 7 three-replica arm bounded at the box's hour (depths 20 to 24: three
+failures allowed, the member-only read, the acknowledgement stamp, the
+record unwritable, the late capture), its zombie arms at the depth 17
+hole, and its liveness arm at no verdict, so the barrier's termination is
+claimed by no run; the monitor-skips arm neither confirms nor refutes the
+strand's alternative fix, since the hole masks it. The expiry
+action loses an acknowledged write at depth 12, the measurement that
+decided the bound. Two of c21's controls ran in the wrong configuration
+and are not cited. One claim was sharpened by a permitted trace: a
+zombie never acknowledges on an unconfirmed continuation, but a sole
+continuation the record confirmed before the move goes on acknowledging
+on its leg, which the next stage waits for, so nothing acknowledged
+there is left behind. The fourth gap's trace was reclassed by the later
+knobs: the write that finds the fence lands before the stamp and is the
+write hole, legal and bounded; the torn-leg rule covers the writes a
+fenced writer lands after its stamp, which the controls without it serve
+(beside a clean leg at depth 17, alone on the vouch at depth 7). §5's
+two rev 7 asks were answered by c16 (FlintCatchupT rev 15 `8ac3cf00`,
+TieNA `780c1009`, every arm a full pass): the fence-flip mark closes the
+defer seam's catch-up claim under trust only and leaves §6's residual,
+which needs record-before-ack; the tie's attached conjunct is killed by
+no arm, with or without record-before-ack, so nothing credits it.
+Nothing in §12 is built.

@@ -1,42 +1,45 @@
 # Incremental replica rebuild (snapshot-epoch delta resync)
 
 **Status:** design / proposal — **revision 8**
-**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28; revs 7 and 8 with Claude (Fable 5.1), 2026-10-29
+**Author:** rev 1 drafted with Claude (Opus 4.8); revs 2–5 revised with Claude (Fable 5), 2026-06-10/12; rev 6 with Claude (Fable 5.1), 2026-10-28; revs 7 and 8 with Claude (Fable 5.1), 2026-10-29/30
 **Scope:** Flint CSI multi-replica volumes (SPDK `bdev_raid` RAID1 over lvols)
 
 **What changed in rev 8** (2026-10-29, the user's decision on §5's open
-question): record-before-ack is taken, in the on-disk shape, as §12. raid1
-writes a **membership stamp** on every surviving leg before it releases
-the completions of the writes a base failure degraded, so the disks carry
-the raid's membership history and the next assembly reads it before
-serving. One correction to rev 7's sketch: a stamp on the disks alone is
-not enough, because a fenced-off consumer can still stamp the leg on its
-own node. A stamp written on a **majority** of the assembly is one a
-zombie cannot forge; a continuation on a minority (two legs lost at once,
-or any loss on a two-replica volume) also waits for the sync record,
-whose write is gated on the VolumeAttachment's node, so a zombie never
-acknowledges. §6's survivor divergence closes for a crash and for a pod
-move. The unstage capture and the health monitor become belts, the
-monitor copies the stamp's clock into `since` so `T_back` covers the I/O
-timeout alone, the tie's "attached" conjunct becomes "listed in the
-newest valid stamp", F36c's gate becomes "at least one member of the
-newest valid stamp attached", and per-epoch membership stays for the
-scheduler and the catch-up, since the record still trails a majority
-drop by one poll. Costs: one stamp write per base failure in the ack
-path of the writes then in flight, nothing on the healthy path, one
-cluster per leg, a carried raid1 patch of §7's size. Model and code asks
-are at the end of §12; the model comes first. Amended the same day from
-the peers' reads: a stamp read is conclusive only from a majority of the
-stamp's size, every stamp carries the last released view, and the stage's
-decree is written only by a read conclusive without the previous
-consumer's leg, and a torn leg, one whose newest stamp is an unconfirmed
-continuation, is cleaned at the stage whenever another member is attached
-(flint-e4, five model traces), and the raid1 hook has five traps
-(flint-91). The user dropped F36c's transient serve-with-risk
-bound under the stamp (2026-10-30, step 3): its timer is an alert, and
-serve-with-risk stays for node-gone and the operator's cut; step 2 gains
-the even-size vouch, so a two-replica volume does not wait for an absent
-peer.
+question; amended through 2026-10-30): record-before-ack is taken, in the
+on-disk shape, as §12. raid1 writes a **membership stamp** on every
+surviving leg before it releases the completions of the writes a base
+failure degraded, so the disks carry the raid's membership history and
+the next assembly reads it before serving. One correction to rev 7's
+sketch: a stamp on the disks alone is not enough, because a fenced-off
+consumer can still stamp the leg on its own node. A stamp written on a
+**majority** of the assembly is one a zombie cannot forge; a continuation
+on a minority (two legs lost at once, or any loss on a two-replica
+volume) also waits for the sync record, whose write is gated on the
+VolumeAttachment's node, so a zombie never acknowledges on an
+unconfirmed continuation (one the record confirmed before the move keeps
+its leg, and the next stage waits for that leg). §6's survivor
+divergence closes for a crash and for a pod move. The unstage capture
+and the health monitor become belts, the monitor copies the stamp's
+clock into `since` so `T_back` covers the I/O timeout alone, the tie's
+"attached" conjunct becomes "listed in the newest valid stamp", and
+per-epoch membership stays for the scheduler and the catch-up, since the
+record still trails a majority drop by one poll. Costs: one stamp write
+per base failure in the ack path of the writes then in flight, nothing
+on the healthy path, one cluster per leg, a carried raid1 patch of §7's
+size. The model ran ahead of the code (FlintCatchupS, flint-e4) and its
+traces fixed the stage's read, §12 step 2 to 4: a read is conclusive
+only from a majority of the stamp's size, or at an even size by the
+record's vouch; every stamp carries the last released view; the decree
+on the previous consumer's leg is written only by a read conclusive
+without it; a torn leg, one whose newest stamp is an unconfirmed
+continuation, is cleaned at the stage beside a clean member and never
+serves alone on a vouch; and the writes in flight when a fenced writer
+finds the fence are the write hole, not a stamp gap. The user dropped
+F36c's transient serve-with-risk bound under the stamp (2026-10-30,
+step 3): its timer is an alert, and serve-with-risk stays for node-gone
+and the operator's cut. The raid1 hook has five traps (flint-91). The
+verdicts, one pinned model md5 per batch, are the table at the end of
+§12; nothing in §12 is built.
 
 **What changed in rev 7** (2026-10-29, after the per-epoch trust model
 `formal/FlintCatchupT.tla` reached a code-faithful revision and the unstage
@@ -56,8 +59,9 @@ ack of the first write it missed) closes it alone, at the cost of one mark
 in the ack path of a degraded write. That choice is the user's and is not
 taken here; under it the unstage capture becomes a belt and the tie's
 unattached-source demotion goes. Status: the capture (`ef3a6f48`) and the
-fail-closed fence (`044f2010`) shipped on 2026-10-28; the monitor gate and
-the fence-flip mark have not.
+fail-closed fence (`044f2010`) shipped on 2026-10-28 and the monitor gate
+(`eb7c28fd`) on 2026-10-30; the fence-flip mark has not, and §12 makes it
+the stage's decree.
 
 **What changed in rev 6** (2026-10-28, after the three-replica model and a
 live reproduction): §5's correctness note bounded only the *destination's*
@@ -737,7 +741,13 @@ merely unattached at the next stage (`spdk-csi-driver/src/catchup.rs`,
 TieFloorFirstOnly). Per-epoch membership itself is modelled ahead of code
 (`formal/FlintCatchupT.tla`, next subsection); once it lands, the floor and
 the forced re-revert are redundant and the tie reduces to the belt described
-there.
+there. One piece of the rule is already exact in code: a cut stamps a
+leg's mark only when the leg is still `in_sync` when the cut is recorded
+(`3cc7ccbe`, 2026-10-29). FlintCatchupT rev 14's `CutStampsAll` arm
+showed the shipped stamping, which marked every planned leg when the
+record write landed, moving a standby's mark past an epoch its chase
+never copied, so a leg was admitted without an acknowledged write
+(`Inv_Catchup` at depth 23); with the fix the arm is clean to depth 35.
 
 ### What the rule rests on, and what it leaves open (rev 7, 2026-10-29)
 
@@ -792,6 +802,48 @@ The tie needs neither, because it trusts nothing it did not copy and
 refuses at admission; its price is the demotion described under *Status*
 above.
 
+**Both premises observed live** (flint-91, 2026-10-30). Each held once on a
+three-node cluster (gate1613, 3 × i4i.2xlarge, us-east-2, 21:27–21:56Z;
+spdk-tgt 1.7.3 as shipped, digest `9e31bea6…`; flint-driver 1.61.3-rc1
+built from `eb7c28fd`). Premise 1, on the real failure path: a QD1
+O_DIRECT writer ran on a raw three-replica volume while one leg's NVMe-oF
+port was cut from the consumer by iptables. Under a 90 s cut the raid
+dropped the leg after 49 s; scanned at the drop, the leg held sequence
+0..77,946 with no gap while acknowledgements went on to 543,423, and the
+two configured legs held every acknowledged write, so no write reached the
+dropped leg after the one it missed. Under a 21 s cut the leg stayed
+configured and all three legs were complete. Two arms report nothing: the
+spdk-tgt kill arm never killed the target (a script bug), and the
+rejoined leg's region after the 90 s cut was not scanned (an export bug).
+Premise 2, a real zombie: kubelet stopped on node A with its writer
+running, the pod was force-deleted, and the volume moved to node B after
+the six-minute force-detach. B wrote all 16,384 blocks once while the
+zombie kept overwriting; both legs of B's raid hold 16,384 of 16,384 of
+B's records and none of the zombie's. The control fired: the zombie's raid
+lost both remote legs and kept its own local one, on which it went on
+acknowledging and landed all 16,384 blocks after B's pass. The monitor
+gate (`eb7c28fd`) was live: the zombie's monitor logged "recording nothing
+for it" six times, B's and C's legs stayed `in_sync`, and A's leg was
+marked stale by B's stage. The run's scripts are not committed
+(`bench/results/2026-10-30-ec2-1613/chaos/run-1613.sh`, functions `p1` and
+`p2`, and `p2man.sh`), so this is one observation each, not the pin the
+code ask in §12 names.
+
+One finding beside premise 1, liveness and not safety. After an spdk-tgt
+restart on a raid host the driver's repair attaches controllers before it
+sets the dead-target options (`bdev_nvme_set_options`), which SPDK then
+refuses, since `spdk_bdev_nvme_set_opts` returns `EPERM` once any
+controller is attached ("RPC not permitted with nvme controllers already
+attached", `module/bdev/nvme/bdev_nvme_rpc.c`, v27.01-pre; the I/O timeout
+and its action are among the refused fields); a black-holed leg under
+that host never faults, the raid hangs, and the first failed write never
+comes. Seen live: more than ten
+minutes with no drop on a node whose target had restarted four times,
+against 49 s before them. The premise's completeness claim is intact,
+since a write that hangs is never acknowledged; what goes is the I/O
+timeout `T_back` assumes and the volume's availability. The fix is on
+flint-91's branch `p4-first-attach`, not pushed.
+
 **Completeness, not cleanliness.** The rule says a trusted epoch holds
 every acknowledged write. It does not say the epoch holds only writes the
 volume acknowledged: a zombie's writes on an excluded leg, or a crash-torn
@@ -818,10 +870,18 @@ can free the zombie's co-located leg, which then attaches at the retry as
 an `in_sync` member carrying the zombie's writes: `Inv_MembersAgree` at
 depth 4 under every policy, and the junk reaches a trusted epoch by depth
 17. Rev 6's third positive write, marking the co-located leg stale at the
-fence flip, is the closure that leaves the ack path alone; the arm with
-that mark and the defer on has not been run (asked of flint-e4). Under
-record-before-ack, below, every `in_sync` leg holds every acked write at
-ack time, the defer has no case left, and it goes.
+fence flip, was the candidate closure that leaves the ack path alone.
+Run (batch c16, FlintCatchupT rev 15 `8ac3cf00`, 2026-10-30, bound D,
+every arm a full pass, the defer on, no record-before-ack, the cut's
+mark fix in), it closes the seam's catch-up claim and nothing more:
+under trust `Inv_AdmitNoLoss` holds over the full space with the mark
+(226,393,635 states, depth 48) and fails at depth 17 without it, the
+control killed; under the tie it holds with or without the mark
+(46,886,451 and 28,953,576 states), so there the mark earns no credit;
+and `Inv_NoNewLoss` fails within eight steps with the mark and nine
+without, under both policies, which is §6's residual below and needs
+record-before-ack. Under record-before-ack every `in_sync` leg holds
+every acked write at ack time, the defer has no case left, and it goes.
 
 **The residual's two closures (a decision for the user, not taken here).**
 §6's survivor divergence, a consumer that crashes or whose pod moves
@@ -858,7 +918,8 @@ F36c's last-writer defer off.
   of the writes in flight at that moment; the healthy path and the copy
   rate are untouched. It removes the cause behind every rev 6 finding,
   the record lagging the raid, rather than a symptom. A degraded write
-  still acknowledges (`LiveAckB`, running on the final model rev); a mark
+  still acknowledges (`LiveAckB`, a full pass on rev 15, 23,212,330
+  states, depth 39; c15); a mark
   that can never land blocks it, and that is the cost: a leg failure
   while the record is unreachable stalls the volume's writes where today
   it serves degraded. The data path is spdk-tgt alone, so (b) is a
@@ -878,7 +939,20 @@ membership stays, and F36c's defer stays with its gate loosened.
 refusal at admission of a copy whose source was marked stale since the
 copy or changed its head: it is exact, costs one record read, and catches
 a source that fails inside a copy session. Drop the demotion of a standby
-whose source is merely unattached at the next stage.
+whose source is merely unattached at the next stage. Whether the
+attached conjunct earns its place was measured (c16, the tie admitting
+on stale-since-copy alone, `FlintCatchupTTieNA` `780c1009`, beside the
+full tie on rev 15 `8ac3cf00`, every arm a full pass): no arm kills it.
+Without record-before-ack, catch-up's claim holds on the zombie move,
+the lost mark and the crash with the conjunct dropped (17,934,639,
+7,256,009 and 16,183,287 states) as with it (18,538,320, 7,363,457 and
+16,480,908); under record-before-ack with the defer dropped,
+`Inv_NoNewLoss`, `Inv_MembersHold` and `Inv_RaidHolds` hold on all
+three shapes with it dropped (13,264,413, 6,918,623 and 15,109,620) and
+with it kept (13,662,813, 6,975,995 and 15,348,672). The rows credit
+the conjunct with nothing and show only that dropping it breaks nothing
+at bound D; the full-tie HOLDs are not evidence that it is
+load-bearing.
 
 **Status, 2026-10-29.** Of the three positive writes: the unstage capture
 shipped (`ef3a6f48`, 2026-10-28; gated on the attached VolumeAttachment
@@ -891,10 +965,27 @@ depth 48, complete) and shipped in `395b442d` (2026-10-29). The trust
 model's rev 14/15 adds the cut's abort on a
 re-created head, the `apply_epoch_cut` mark race (reported to flint-91),
 and the trust-only rules (base at or below the target; a demoted standby
-re-reverts); a confirmation batch on the final rev follows, and the TLAPS
-proof of the rule (clean setting: capture, no crash, no zombie move, both
-premises; target `Inv_Catchup ∧ MembersHold`) is estimated at 2 to 4 days
-after it.
+re-reverts). The confirmation batch on the final rev closed on 2026-10-30
+(c15, 67 arms on `8ac3cf00`, tla-mc 0.1.2 then 0.2.1 at the user's word:
+50 gave the verdict their arm wanted, a HOLD over the full space or a
+control's violation; 16 informational; one with no verdict at its hour,
+the ghost-lineage check, no violation to depth 21 over 93,978,850
+states, bounded). Its cut setting is to be read with it: 58 arms model
+the cut as shipped before the mark fix (`CutStampsAll` true), 53 of
+them at two epochs, where no arm finds the race; the race's two traces
+need a third epoch (the trust policy at depth 28, 70,721,422 states,
+and the capture's bound C arm at 28: a leg goes standby between a cut's
+snapshots and its record, the record stamps the epoch on it anyway, and
+the leg is caught up past it). The nine arms with the fix hold where
+they finish (the shipped and tie policies over the full space,
+36,264,885 and 43,181,628 states at depth 43; trust bounded, no
+violation to depth 28), and the fixed cut is a premise of the proof.
+The TLAPS proof of the rule (clean setting: capture, no crash, no
+zombie move, both premises, the fixed cut; target `Inv_Catchup ∧
+MembersHold`) has all 7,673 obligations proved on a seeded cache (pass
+7, 2026-10-29); the fresh-cache record run that asserts every input's
+md5, with its thirteen controls, is held for a quiet box now that batch
+c21 has closed (2026-10-31), to rerun alone.
 
 ### Tunables and space overhead
 
@@ -2100,10 +2191,21 @@ majority. A continuation on a minority (two legs lost at once on a
 three-replica volume, or any loss on a two-replica volume) additionally
 waits for the sync record, written by the node agent and gated on the
 VolumeAttachment naming its node, before the raid releases. A zombie's
-minority continuation therefore never acknowledges: its record write is
-refused, and its held writes time out. A legitimate one pays one record
-write. The common case, one leg lost of three, pays one stamp write on
-the disks and never touches the control plane.
+unconfirmed minority continuation therefore never acknowledges: its
+record write is refused, and its held writes time out. A legitimate one
+pays one record write. The common case, one leg lost of three, pays one
+stamp write on the disks and never touches the control plane. One
+continuation a zombie can keep is the one the record confirmed while it
+was still the consumer: a raid already reduced to that single leg sees
+no further failure at the move, since the fence takes nothing it still
+holds, and it goes on acknowledging on that leg. That is safe because
+the record names the leg as the only `in_sync` one, the next stage
+cannot conclude without it and waits for hygiene to free it, and the
+assembly that follows carries every write acknowledged there; with the
+node gone, only the operator's cut from a stale leg serves without
+them, marked (step 3). The model reaches it (c21, `Reach_ZombieAck`, a
+permitted trace), and rev 8's first wording, that a zombie never
+acknowledges, was too strong by exactly this case.
 
 ### The stamp
 
@@ -2367,23 +2469,34 @@ The stage, after the fence flip and before `bdev_raid_create`:
    while it ran, minutes on a partitioned node, not an in-flight set, so
    the stage waits for a clean member and serves a torn leg alone only
    at node-gone or by the operator's cut, under step 3's serve-with-risk,
-   with the marker naming the leg and its stamp's clock. flint-e4's fifth
-   trace (FlintCatchupS rev 9, two replicas,
-   zombie move, bound D, `Inv_AdmitNoLoss` at depth 18; the same shape
-   at three replicas near depth 19, predicted, not yet observed): the
-   fenced old consumer, holding leg 1 alone after the fence took leg 2,
-   lands a write there that is never acknowledged; hygiene frees leg 1
-   before the first stage attempt, so step 4 never runs; the stage
-   attaches both legs, conclusive, and serves with the junk on leg 1;
-   the first cut puts the junk inside a trusted epoch; leg 1 drops and
-   returns, is reverted to its own trusted epoch and admitted holding a
-   value no member ever held and nobody acknowledged. That is not the
-   write hole, which is the serving assembly's own in-flight write torn
-   across members with equal stamps, with nothing to tell the legs
-   apart. A fenced writer's junk is preventable: it lasts as long as
-   hygiene takes, it is served to an application that never submitted
-   it, and the held stamp on the leg is its evidence. The rule costs a
-   clean move nothing and cleans the crash-held case, a live consumer
+   with the marker naming the leg and its stamp's clock. The trace that
+   drew the rule, flint-e4's fifth (FlintCatchupS rev 9, two replicas,
+   zombie move, bound D, `Inv_AdmitNoLoss` at depth 18): the fenced old
+   consumer lands a write on leg 1 as the fence takes leg 2, before any
+   stamp; hygiene frees leg 1 before the first stage attempt, so step 4
+   never runs; the stage attaches both legs, conclusive, and serves with
+   the junk on leg 1; the first cut puts the junk inside a trusted epoch;
+   leg 1 drops and returns, is reverted to its own trusted epoch and
+   admitted holding a value no member ever held and nobody acknowledged.
+   As first read that was a gap. As classed since, the write that finds
+   the fence lands before the stamp and is the hole above, legal and
+   bounded; the three-replica form of the same trace is batch c21's
+   under rev 7 (depth 17, 29,309,763 states), which that revision had no
+   way to count as legal and rev 10 does. What the torn-leg rule
+   prevents is the other form, the writes a fenced writer lands after
+   its stamp: not an in-flight set but everything it writes while it
+   runs, preventable, served to an application that never submitted it,
+   with the held stamp on the leg as its evidence. The model shows that
+   form served when the exclusion is off (c24, depth 17, beside a clean
+   leg) and when the never-alone rule is off (c26, depth 7, alone on the
+   vouch), and never served unmarked with both on: the full space at two
+   replicas, and at three replicas to depth 27 on the zombie move (c26
+   to depth 18 on the box, c27 to depth 27 on the 192-core box, bounded;
+   the shapes without a fenced writer, the lost mark and the crash, are
+   a full pass at three replicas under the same invariants, c27), with
+   the expiry off (c26; under the expiry a torn leg is served alone and
+   marked, step 3, a full pass at two replicas in the same batch). The rule costs
+   a clean move nothing and cleans the crash-held case, a live consumer
    crashing inside a minority hold, the same way. At two replicas the
    read without the torn leg is one of two and needs the even-size
    vouch, so the two rules interlock.
@@ -2420,7 +2533,15 @@ The stage, after the fence flip and before `bdev_raid_create`:
    outranks: permanent, and marked (`Inv_NoNewLoss` at depth 12). No
    mark or tick is needed, only that the leg holding the write is
    unreachable at the stage, by a zombie's claim or a dead node; a crash
-   instead attaches leg 3 and the read concludes on it. The shipped gate
+   instead attaches leg 3 and the read concludes on it. The cost is a
+   three-replica effect: at two replicas the expiry loses no
+   acknowledged write over the full space (c25), because an
+   acknowledgement there needs both legs or a confirmed continuation
+   whose confirm marks the other leg stale, so every record-`in_sync`
+   leg holds every acknowledged write and the expiry serves only such
+   legs; its serve of a torn leg is marked (c26); at three replicas it
+   may lose a write held only on an unreachable leg, and that loss is
+   marked (c22, bounded). The shipped gate
    makes the same serve at once and silently, since any attached writer
    satisfies it. **Decision: the transient bound is dropped and its
    timer kept as an alert; the node-gone serve stays.** A stage whose
@@ -2453,7 +2574,16 @@ The stage, after the fence flip and before `bdev_raid_create`:
    by a stage whose read is conclusive without it**: the attached
    `in_sync` legs a majority of the newest stamp's `size`, or a confirmed
    sole continuation on an attached leg. Step 2's vouch counts that leg
-   as the record holds it, never as this step would mark it. Otherwise
+   as the record holds it, never as this step would mark it. When the
+   even-size vouch concludes the read and the stage assembles, the
+   assembly write already marks the absent leg stale, as it marks every
+   `in_sync` leg it excludes; what the vouch's decree adds is that mark
+   on the defer path, when a read concludes but the stage still cannot
+   assemble. It is not needed for safety: at two replicas the vouch by
+   the read alone keeps every acknowledged write over the full space
+   (c23, the completeness invariants; the junk invariants ran with the
+   decree form only), and the two forms' counts differ only because a
+   decree changes the record. Otherwise
    the stage defers under step 3 and waits for the leg as F36c's last
    writer; when hygiene frees it, it attaches and the read concludes with
    it. This is the enforcement §3 asked for and rev 6 listed as the third
@@ -2478,9 +2608,9 @@ The stage, after the fence flip and before `bdev_raid_create`:
    `in_sync` count cannot gate the decree, because the record trails and
    misses marks by design; only stamps the stage can read, or a
    confirmation the record made, can. FlintCatchupS rev 7 (md5
-   `6859c997`) carries the gate; its short sanity runs found no violation
-   to depth 16 on the zombie arm, 18 on the lost mark and 17 on the
-   crash, with the full batch c21 to follow. The rev 4 strand's root is a
+   `6859c997`) carries the gate; batch c21's verdicts on it, beside the
+   two decree controls, are in the table at the end of this section. The
+   rev 4 strand's root is a
    monitor mark that is never load-bearing under the stamp: had the
    confirm come it would have written the same marks, and since it never
    came nothing was acknowledged past the last released view, so leg 2
@@ -2502,7 +2632,7 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | §6 survivor divergence after a crash or a move | closed; a crash leaves the stamps, a move leaves them and the record for a minority continuation |
 | the raid1 write hole (writes never acknowledged, landed on some legs) | shrunk to the writes in flight at a crash or at the fence; a torn leg beside a clean member is cleaned at the stage, and alone it waits or serves marked (step 2) |
 | unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
-| health monitor | a belt, gated on the VolumeAttachment's node; it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
+| health monitor | a belt, gated on the VolumeAttachment's node (the gate shipped as `eb7c28fd`, 2026-10-30; a failed lookup still records); it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
 | fence-flip mark on the co-located leg | the decree in step 4 above, written only by a stage whose read concluded without that leg |
 | per-epoch membership (§5's rule) | stays for the scheduler and the catch-up: the record trails a majority drop by up to one poll, and a leg in that lag is still record-`in_sync` to `plan_cut` and `in_sync_sources`; the cut-time read from the live raid is what makes an epoch's membership exact |
 | the source tie | the "attached" conjunct becomes "named in the newest valid stamp at admission": a source whose node died after a clean unstage is still vouched for and its standby admitted; a source the raid dropped is not, and the demotion stands for that case only |
@@ -2591,63 +2721,165 @@ The stage, after the fence flip and before `bdev_raid_create`:
   without record-before-ack underneath, and costs availability.
 - **The stamp without the majority rule**: the zombie hole above.
 
-### Model and code asks
+### Model verdicts (2026-10-30)
 
-flint-e4, before any code (the user's order: model first):
+FlintCatchupS (flint-e4; `formal/`, on the branch `csi-rebuild-tlaps`
+until pushed) is FlintCatchupT rev 15 with the stamp read as above and
+one knob per rule of this section, so a control is the same model with
+one rule off. Every batch ran under one pinned model md5 that the run
+asserts, on tla-mc 0.1.2 until the user moved the box to 0.2.1 at
+16:54Z on 2026-10-30 (TLC is the reference; 0.2.1 was validated against
+both on the gate that day with the same verdicts and counts; c22, c24
+and c26 ran on 0.1.2 throughout, a row of c21, c23 or c25 finished on
+0.2.1 says so in its verdict cell, and c27 ran on 0.2.1), and a verdict
+is cited with its batch's md5 and nothing else:
+c21 = rev 7 `6859c997` (the stamp, the released view and the gated
+decree; rev 1's batch c17 was stopped and superseded by it); c22 = rev 8 `ab167ffe` (the expiry
+action); c23 = rev 9 `c41c6986` (the even-size vouch); c24 = rev 10
+`2a9567c7` (the torn leg, the pre-stamp write counted as the hole); c25
+= rev 11 `46c89207` (the torn leg never alone); c26 = rev 12 `8e54566d`
+(the torn junk as a data invariant); c27 = rev 12 again, the user's
+full-space run at three replicas on a 192-core spot box (2026-10-30,
+m7i.48xlarge, 160 workers, 180 GB fingerprint and queue caps, tla-mc
+0.2.1; the batch was cut short at the user's word after its three
+safety arms, so its expiry, sole-continuation, barrier and four-replica
+arms did not run and nothing is claimed for them). Three replicas and two
+failures (§5's bound D) unless the row says two replicas. The rules
+column names what is on beyond the stamp itself: *count* is step 2's
+majority read over attached `in_sync` legs, *view* the released
+generation every stamp carries, *decree* step 4's gate, *vouch* step 2's
+even-size vouch, *torn* the torn leg's exclusion beside a clean member,
+*hole* the pre-stamp write counted as the write hole, *never alone* the
+torn leg refusing to serve alone on a vouch, *expiry* the serve-with-risk
+action. **HOLD** means the full state space was exhausted; a run cut by
+its time cap is "clean to depth N", not a HOLD; and a violated run's
+state count says where the trace was found, nothing about the space. The
+*hole class* is step 2's write hole, writes in flight when a crash or the
+fence lands them on some legs under equal stamps; every other loss the
+model found was a stamp gap, and each got a rule. Two of c21's controls,
+the majority read off on the lost-mark and crash arms, reached no
+verdict (depth 21 and 19), because the model's last healthy member never
+fails and nothing fails after the unstage, so those shapes cannot reach
+the gap; a control in the wrong configuration rules out nothing, and
+they are not cited. A control not killed within its cap rules out
+nothing either (c24's three-replica control without the torn leg's
+exclusion), and the rule is then cited by the control that was killed,
+at two replicas. A probe that is unreachable with a rule off because
+the knob's wiring forbids the step, rather than because the design does,
+is left out as well (c23's vouch probe with the vouch off, c25's torn
+probe without the expiry, and c25's torn-marked HOLD under the full rule
+set, whose invariant restates the guard it checks); what carries weight
+is their partners, the situation shown to arise, the control that fails
+without the rule, and a HOLD on the data beside it.
 
-- [ ] `FlintCatchupT` arm for the stamp: per-leg (`seq`, `gen`,
-      `members`) store written before the release; the record lags it by
-      a poll for a majority drop and is written before the release for a
-      minority one, gated on the VolumeAttachment's node; the stage reads
-      the stamps as above, with step 4's decree. Expect `Inv_NoNewLoss`,
-      `Inv_MembersHold`, `Inv_RaidHolds` to HOLD on the zombie-move, crash
-      and lost-mark arms, with the defer on and the capture off.
-- [ ] The zombie continuing on its local leg: its minority stamp with no
-      record confirmation must never let it acknowledge, and a leg hygiene
-      frees during the defer must be stale.
-- [ ] The two-at-once loss (three to one) with the API server
-      unreachable: writes fail, nothing is lost.
-- [ ] Liveness: a majority drop's barrier ends; a minority drop's ends
-      when the record is writable.
-- [ ] A control at three failures without step 2's majority-read rule,
-      so the gap shows as a violation and the rule as the HOLD, in the
-      same configuration.
-- [ ] A control with the released view off, so the second trace shows
-      as a violation (in batch c17, FlintCatchupS md5 `5fc4271e`).
-- [ ] Controls for the decree in one batch (c21, FlintCatchupS rev 7,
-      md5 `6859c997`): as rev 8 first wrote it (the strand, expected at
-      depth 8), sparing the record's last `in_sync` leg (expected at
-      depth 13), and gated on the read (expected HOLD); `Inv_SoleOnly`,
-      that a confirmed sole continuation leaves its leg the record's only
-      `in_sync` one; the probe `Reach_ServeOnZ`, that an assembly after
-      the move serves on the previous consumer's leg once it attaches, so
-      the HOLD is not a defer forever; and the arm with the monitor
-      silent during a hold and the decree ungated.
-- [x] The expiry arm (the user's ask, 2026-10-29): a `StageRisk` action
-      enabled when the read is inconclusive, serving the attachable
-      `in_sync` legs with an `AckedTailRisk` ghost, the model's
-      counterpart of the code's 180 s bound (FlintCatchupS rev 8, md5
-      `ab167ffe`). `Inv_NoNewLoss` fails at depth 12 in a sanity run, the
-      measurement in step 3; `Inv_LossMarked`, that no acknowledged write
-      is absent from every `in_sync` leg while the ghost is unset, had no
-      violation to depth 15 there. Batch c22 runs both on the zombie,
-      lost-mark and crash arms; after the decision the arm documents the
-      operator's cut.
-- [ ] FlintCatchupS at size 2, and 4 if cheap, with step 2's even-size
-      vouch as a knob: expect the HOLDs to carry over, the control
-      without the vouch to defer where the vouch serves, and a probe that
-      the one-of-two stage serves with the absent leg record-`in_sync`.
-- [ ] The torn-leg rule (step 2) as knobs on FlintCatchupS rev 10 (md5
-      `2a9567c7`, batch c24): the exclusion beside a clean member, the
-      pre-stamp writes counted as the hole, and the torn leg never
-      serving alone on a vouch (serving only under the expiry action,
-      with the risk ghost set). Expect `Inv_AdmitNoLoss`, `Inv_NoNewLoss`
-      and `Inv_NoLateJunk2` to HOLD on the two- and three-replica zombie
-      arms with all three, the exclusion alone to fail on the pre-stamp
-      write, the control without the exclusion to show the fifth trace,
-      the control without the sole-survivor rule to serve a torn leg
-      alone at depth 5, and a marked form, that a torn leg serves alone
-      only with the ghost set.
+| Batch | Arm | Rules | Invariant | Verdict | What it shows |
+| --- | --- | --- | --- | --- | --- |
+| c21 | lost mark, crash, zombie move, with the stamp off (FlintCatchupT rev 15, capture off; control) | none | `Inv_MembersHold` | VIOLATED at depth 8 on all three | the stamp is load-bearing: without it, rev 7's residual in every shape |
+| c21 | lost mark, crash, zombie move, with the released view off (control) | count, decree | `Inv_MembersHold` | VIOLATED at depth 13 on all three | the second gap: an unconfirmed minority stamp erases the majority stamp before it |
+| c21 | vacuity probes (FlintCatchupSReach `7d5d053b`) | count, view, decree | reachability | all reached: the barrier at depth 2, a majority release at 4, a sole confirm at 5, a stale leg excluded at step 1 at 4, three assemblies at 4, on the lost-mark shape; a zombie's stamp at 2 and a confirmed sole continuation acknowledging on its leg after the move at 7 on the zombie shape | every rule is exercised; the HOLDs are not vacuous |
+| c21 | zombie move | count, view, decree | `Inv_NoNewLoss` with admission | VIOLATED at depth 17 (29,309,763 states) | the hole class: the three-replica pre-stamp write, step 2; rev 7 cannot count it legal, rev 10 does (c24, c25) |
+| c21 | lost mark; crash | count, view, decree | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds` | lost mark: clean to depth 23 (106,466,304 states, bounded, 2 GB caps); crash: clean to depth 22 (100,322,249 states, bounded at the box's hour, tla-mc 0.2.1) | §6's divergence closed for a crash and a lost mark, to the cap at three replicas |
+| c21 | the decree as rev 8 first wrote it (control) | count, view, decree on every move | `Inv_NoNewLoss` | VIOLATED at depth 8 (34,827 states) | the third gap's first trace, the strand |
+| c21 | the decree sparing the record's last `in_sync` leg, ungated on the read (control) | count, view, decree spare-last | `Inv_NoNewLoss` | VIOLATED at depth 13 (1,724,093 states) | the third gap's second trace: the vouch counted the previous consumer's leg stale by decree |
+| c21 | zombie move with the majority read off, three failures allowed (control) | view, decree | `Inv_NoNewLoss` | VIOLATED at depth 12, with two failures | the first gap: one leg of three attached shows an older stamp as newest; its partner is the zombie arm above with the read on, whose shallowest violation is the depth 17 hole, so with the rule on there is no violation of any kind through depth 16 and the gap's two-failure trace lies inside that space |
+| c21 | zombie move; lost mark; crash, three failures allowed, the majority read on | count, view, decree | the three above | zombie move: VIOLATED at depth 17, the hole class, the same 18-state trace as the two-failure arm up to the order of two snapshots, the third failure unused; lost mark: clean to depth 23 (152,014,024 states); crash: clean to depth 21 (93,412,376 states); both bounded at the box's hour, 2 GB caps, tla-mc 0.2.1 | the third failure adds no trace within the cap: the zombie arm finds rev 7's hole and nothing new, and the lost mark and crash reach the two-failure arms' depths; bounded, not a full pass (the full three-replica passes are c27's, at two failures) |
+| c21 | `Inv_AckStamped` at three replicas (every acknowledgement with every member stamped) | count, view, decree | `Inv_AckStamped` | clean to depth 23 (106,466,304 states), bounded at the box's hour, 2 GB caps, tla-mc 0.2.1 | the barrier claim itself, to the cap: no acknowledgement found with a member unstamped; bounded, not a full pass |
+| c21 | zombie move, `Inv_ZombieNoAck` (a zombie never acknowledges, as rev 8 first claimed) | count, view, decree | `Inv_ZombieNoAck` | VIOLATED at depth 7 (at two replicas at depth 5, c23, where one failure leaves a single survivor) | permitted by design, the claim sharpened: a sole continuation the record confirmed before the move keeps acknowledging on its leg, and the next stage waits for that leg (the correction above) |
+| c21 | `Inv_SoleOnly` | count, view, decree | a confirmed sole continuation leaves its leg the record's only `in_sync` one | clean to depth 21 (bounded); a full pass at two replicas (c23, below) | step 4's one clause subsumes sparing the last leg |
+| c21 | `Reach_ServeOnZ` | count, view, decree | reachability | reached at depth 7 | an assembly after the move serves on the previous consumer's leg once it attaches: the HOLD is a wait, not a defer forever |
+| c21 | two legs lost at once with the record unwritable | count, view, decree | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | clean to depth 24 (120,460,751 states), bounded at the box's hour, 2 GB caps, tla-mc 0.2.1 | the held writes fail and nothing is lost, to the cap; bounded, not a full pass |
+| c21 | the member-only read (stricter than the count) | member, view, decree | the three above | zombie move: VIOLATED at depth 17, the hole class, as the count's arm; lost mark: clean to depth 23 (106,261,050 states, bounded at the box's hour); crash: clean to depth 22 (99,941,057 states, bounded) (tla-mc 0.2.1) | as safe as the count where it reaches: the same hole, the same bounded depth; it defers where the count serves |
+| c21 | the monitor silent during a hold, the decree ungated | count, view, monitor skips | `Inv_NoNewLoss` | VIOLATED at depth 17, the hole class by another path: the zombie's pre-stamp junk on its own leg is copied to a returning leg by that leg's catch-up and served after a second move; the ungated decree's depth 13 violation is gone (none at depth 16 or less) (tla-mc 0.2.1, two workers) | the strand's root: the skipped marks remove the strand's own trace, but rev 7's hole masks everything past depth 16, so whether the skip closes the third gap on its own is not shown either way; the test is a rev 10 or later arm with the pre-stamp write legal (a follow-up, step 4) |
+| c21 | zombie move, the capture late (SZLate2) | count, view, decree | `Inv_NoLateJunk2` | clean to depth 20 (100,707,189 states), bounded at the box's hour, 2 GB caps, tla-mc 0.2.1, two workers; under rev 3 clean to depth 21 (185,940,255 states, 1 h cap), whose depth 20 trace was the hole | the capture's timing: no late junk served within the cap; bounded, not a full pass |
+| c21 | liveness | count, view, decree | `Prop_BarrierEnds`: a majority drop's barrier ends; a minority's ends when the record is writable | no verdict: cut at the cap (depth 20, 26,300,370 states) before the liveness check could conclude, so the run claims nothing; its control with the record unwritable fails as expected, a lasso at depth 9 (tla-mc 0.2.1, two workers) | that the barrier is not a hang is shown by no run: a capped liveness check decides nothing, and the control shows only that the property can fail; it needs a full pass, at two replicas or on a larger box |
+| c22 | zombie move with the expiry on (the code's 180 s bound) | count, view, decree, expiry | `Inv_NoNewLoss` | VIOLATED at depth 12 (854,198 states) | the bound's cost, step 3: the write on the unreachable leg is lost, permanent and marked |
+| c22 | lost mark; crash, with the expiry on | count, view, decree, expiry | `Inv_NoNewLoss` | clean to depth 19 (16,512,065 states; 25,857,285 states), bounded | no loss found under the bound when the leg holding the write is attachable, to the cap |
+| c22 | zombie move, lost mark, crash, with the expiry on | count, view, decree, expiry | `Inv_LossMarked` (no acknowledged write absent from every `in_sync` leg while the risk ghost is unset) | zombie move: clean to depth 20 (112,224,732 states, bounded); lost mark: clean to depth 22 (70,484,362 states, bounded, 2 GB caps); crash: clean to depth 22 (106,316,435 states, bounded, 2 GB caps) | the bound never loses silently: a dead node or a person accepted it |
+| c22 | identity with rev 7, its own run (three replicas, lost mark, one failure) | count, view, decree | the three of c21 | 7,286,102 states, depth 36, under both `6859c997` and `ab167ffe` | rev 8 with the expiry off is rev 7; the control as rev 8 first wrote the decree fails at depth 8 under rev 8 as well (33,493 states) |
+| c22 | `Reach_Risk` | count, view, decree, expiry | reachability | reached at depth 4 | the expiry's serve is exercised |
+| c23 | two replicas, lost mark; crash | count, view, decree, vouch | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds` | HOLD, 4,730,836 states, depth 37; HOLD, 5,410,162 states, depth 35, the same counts under either form of the vouch, by the read or by the decree, since without a zombie there is no decree | a two-replica stage serves on one leg with the peer absent, record-`in_sync` and no continuation confirmed on it |
+| c23 | two replicas, zombie move, with the vouch on; with it off | count, view, decree, vouch | `Inv_NoNewLoss` with admission | VIOLATED at depth 16 with the vouch; at depth 18 without it (1,905,835 states, tla-mc 0.2.1), the same class, the monitor's mark rather than the decree making the leg stale | the pre-stamp write, hole class, which rev 9 cannot count as legal; the vouch neither causes nor cures it; counted legal from c24 |
+| c23 | two replicas, zombie move, the completeness invariants | count, view, decree, vouch | `Inv_AckedHeld`, `Inv_MembersHold`, `Inv_RaidHolds` (no acknowledged write lost; admission's cleanliness half left out) | HOLD, 50,779,768 states, depth 39 | acknowledged data is never lost at two replicas under rev 9; what rev 9 lacks is the hole's accounting and the torn leg's cleaning |
+| c23 | two replicas, lost mark; crash, the vouch off | count, view, decree | the three above | HOLD, 4,341,608 states, depth 37; HOLD, 4,907,607 states, depth 35 | safe without the vouch; the vouch's larger space is the serves it adds |
+| c23 | identity at three replicas, one failure, with and without the vouch | count, view, decree; the same with vouch | the three above | 7,286,102 states, depth 36, both (tla-mc 0.2.1) | at an odd stamp size the vouch's condition is the majority count, arithmetic, not a run; at three replicas the vouch can act only on a stamp of size two, which takes two failures: with one failure no state differs (this row), with two the vouch is on in c27's three-replica arms |
+| c23 | two replicas, zombie move, the vouch off, the completeness invariants | count, view, decree | `Inv_AckedHeld`, `Inv_MembersHold`, `Inv_RaidHolds` | HOLD, 38,019,676 states (tla-mc 0.2.1) | acknowledged data is never lost without the vouch either; the vouch's larger space is the serves it adds |
+| c23 | two replicas, zombie move; lost mark, `Inv_SoleOnly` | count, view, decree, vouch | `Inv_SoleOnly` | HOLD, 50,779,768 states; HOLD, 4,730,836 states | step 4's one clause holds over the full space at two replicas |
+| c23 | two replicas, lost mark, `Inv_AckStamped` (every acknowledgement happens with every member stamped with the raid's membership) | count, view, decree, vouch | `Inv_AckStamped` | HOLD, 4,730,836 states, depth 37 (tla-mc 0.2.1) | the barrier claim re-checked at two replicas under the vouch, the one place a single-leg assembly serves: a vouch-served stage never acknowledges ahead of its stamp |
+| c23 | two replicas, zombie move, the vouch by the read only, the completeness invariants | count, view, decree, vouch (read form) | `Inv_AckedHeld`, `Inv_MembersHold`, `Inv_RaidHolds` | HOLD, 44,074,902 states, depth 39 (full-space rerun on tla-mc 0.2.1, 2 workers, 2 GB caps; the first run on 0.1.2 stopped bounded at depth 25) | the one arm that separates "the vouch concludes the read" from "the vouch also writes the decree", judged by verdict, not count (a decree changes the record, so the two spaces differ): the decree half of the vouch adds only the mark on the defer path and is not needed for safety at two replicas, step 4 |
+| c23 | `Reach_VouchSpot` with the vouch off, on the lost mark, the zombie move, the crash | count, view, decree | reachability | reached: lost mark at depth 3, zombie move at 1, crash at 3 | the one-of-two situation arises without the vouch, and no stage serves there: the vouch answers a real wait |
+| c23 | `Reach_Vouch` with the vouch on | count, view, decree, vouch | reachability | reached: lost mark at depth 4, zombie move at 2, crash at 4 | the one-of-two serve is exercised |
+| c24 | two replicas, zombie move | count, view, decree, vouch, torn, hole | `Inv_NoNewLoss` with admission, `Inv_MembersHold`, `Inv_RaidHolds` | HOLD, 33,637,829 states, depth 39 | the post-stamp junk cleaned and the pre-stamp write counted as the hole: nothing else is lost |
+| c24 | the same, the capture late | the same | `Inv_NoLateJunk2` | HOLD, 33,637,829 states, depth 39 | no junk admitted after the first cut; the capture's timing changes nothing under the stamp |
+| c24 | two replicas, zombie move, the pre-stamp write counted as loss (control) | count, view, decree, vouch, torn | `Inv_NoNewLoss` | VIOLATED at depth 16 | the write that discovers the fence lands before the stamp: the hole, bounded by what was in flight |
+| c24 | two replicas, zombie move, the exclusion off (control) | count, view, decree, vouch, hole | `Inv_NoNewLoss` | VIOLATED at depth 17 | the exclusion is load-bearing: a torn leg assembled beside a clean leg serves its post-stamp junk |
+| c24 | two replicas, lost mark | count, view, decree, vouch, torn, hole | the three above | HOLD, 4,452,875 states, depth 36 | |
+| c24 | two replicas, a crash inside a minority hold (the crash-held torn leg) | the same | the three above | HOLD, 6,424,612 states, depth 35 | the crash-held case is cleaned the same way |
+| c24 | two replicas, zombie move, the vouch off | count, view, decree, torn, hole | the three above | HOLD, 22,983,727 states, depth 38 | safe without the vouch too; the smaller space is the wait the vouch removes |
+| c24 | two replicas, zombie move, the capture late, the exclusion alone | count, view, decree, vouch, torn | `Inv_NoLateJunk2` | clean to depth 24 (14,789,186 states, bounded) | no junk admitted after the first cut, with the pre-stamp write still counted as loss; the full-knob form is a full pass in c26 |
+| c24 | identity, every knob since rev 8 off | count, view, decree | the three of c21 | 7,286,102 states, rev 8's count | the knobs add nothing when off |
+| c24 | three replicas, zombie move; and the control without the exclusion | count, view, decree, vouch, torn, hole; the same less torn | the three above | clean to depth 17 (18,609,637 states, bounded), the depth of rev 7's pre-stamp violation; the control was not killed within its cap (22,577,098 states, depth 17) | the three-replica torn leg, bounded; the unkilled control rules out nothing, and the killed control is the two-replica one at depth 17 |
+| c24 | probes `Reach_JunkNoStamp`, `Reach_TornMarked`, `Reach_TornServed` | count, view, decree, vouch, torn, hole | reachability | depth 3, 4, 5; a torn leg marked after a crash at 6 and at three replicas at 4 | junk with no held stamp exists (the hole); a torn leg is marked, in every shape; under rev 10 a torn leg served alone on the vouch, the reason for rev 11 |
+| c25 | two replicas, zombie move | count, view, decree, vouch, torn, hole, never alone | `Inv_NoNewLoss` with admission, `Inv_MembersHold`, `Inv_RaidHolds` | HOLD, 29,120,225 states, depth 39 (state storage capped at 1 GB after a memory guard cut the first run; the cap moves states, not the result) | the product's claim at two replicas: a stage waits or serves clean, never serves junk alone |
+| c25 | the same, the capture late | the same | the same | HOLD, 29,120,225 states | |
+| c25 | two replicas, zombie move, never alone off (control) | count, view, decree, vouch, torn, hole | `Inv_TornMarked` (a torn leg serves alone only with the risk ghost set) | VIOLATED at depth 5 | without the rule an ordinary stage serves a torn leg alone on the vouch |
+| c25 | `Reach_TornServed` with the expiry | all with expiry | reachability | reached at depth 5, the ghost set | a torn leg is served alone only by the expiry action, node-gone or the operator's cut, and it is marked; the form without the expiry is unreachable by the knob's wiring and is not cited |
+| c25 | two replicas, zombie move, with the expiry | all with expiry | `Inv_LossMarked` | HOLD, 31,631,037 states, depth 39 (the run also checked the torn-marked invariant, by construction, not cited) | every loss under the cut is marked |
+| c26 | two replicas, zombie move, the capture late | all | `Inv_TornJunkMarked` (while the risk ghost is unset, no member of the live assembly holds a value a fenced writer wrote after its stamp; the write that finds the fence, the hole, is left out on purpose, and a confirmed continuation's acknowledgements are acked data, not junk), with `Inv_NoNewLoss` and `Inv_NoLateJunk2` in the same run | HOLD, 29,140,655 states, depth 39 (20,430 above rev 11's count for the same knobs: the cumulative ghost tells apart states rev 11 merged, nothing in behaviour) | the never-alone rule's data consequence, measured: no torn junk is ever served unmarked |
+| c26 | two replicas, zombie move, the never-alone rule off (control) | all less never alone | `Inv_TornJunkMarked` | VIOLATED at depth 7 | without the rule a torn leg serves alone on the vouch with its post-stamp junk, unmarked (leg 1 fails, the move, leg 1 out, the zombie stamps and then writes on leg 2, hygiene frees it, the vouch serves it alone): the row that separates the rule from its absence |
+| c26 | two replicas, zombie move, the exclusion off (control) | all less torn | `Inv_TornJunkMarked` | VIOLATED at depth 5 | the torn leg assembled beside a clean leg serves its junk |
+| c26 | two replicas, zombie move, with the expiry | all with expiry | `Inv_TornJunkMarked` | HOLD, 31,651,787 states, depth 39 | a torn leg's junk reaches a member only with the risk marker set: under the expiry it is served alone and marked, step 3, as a data invariant |
+| c26 | identity, every knob since rev 8 off | count, view, decree | the three of c21 | 7,286,102 states, rev 8's count | the knobs add nothing when off |
+| c26 | three replicas, zombie move | all | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_TornJunkMarked` | clean to depth 18 (31,810,913 states, bounded) | one level past the depth at which rev 7 found the pre-stamp write; the three-replica claim is bounded, not a full pass |
+| c25 | two replicas, lost mark; crash | all | the three above | HOLD, 3,627,109 states, depth 35; HOLD, 5,326,386 states, depth 35 | the full rule set on the shapes without a zombie |
+| c25 | two replicas, zombie move, the vouch off | all less vouch | the three above | HOLD, 20,481,527 states, depth 38 | safe without the vouch under the full rule set; the smaller space is the wait the vouch removes |
+| c25 | two replicas, zombie move, with the expiry on | all with expiry | `Inv_NoNewLoss` | HOLD, 31,631,037 states, depth 39 (tla-mc 0.2.1) | the expiry costs no acknowledged write at two replicas: an acknowledgement needs both legs or a confirmed continuation that marks the other stale, so every record-`in_sync` leg holds every acknowledged write; c22's cost is a three-replica effect |
+| c25 | identity, every knob since rev 8 off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 (tla-mc 0.2.1), rev 8's count | the knobs add nothing when off |
+| c25 | three replicas, zombie move | all | the three above | clean to depth 19 (54,626,909 states, bounded; tla-mc 0.2.1, 2 GB caps) | the three-replica claim under rev 11 is bounded, not a full pass |
+| c27 | identity on the 192-core box, every knob since rev 8 off | count, view, decree | the three of c21 | 7,286,102 states, depth 36, the box's count | the model and the checker agree across machines |
+| c27 | three replicas, lost mark, two failures | all | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_NoLateJunk2`, `Inv_TornJunkMarked` | HOLD, 1,774,204,193 states, depth 45 (160 workers, 629 s) | the full rule set over the whole three-replica space on the lost mark |
+| c27 | three replicas, crash, two failures | all | the five above | HOLD, 2,325,892,812 states, depth 46 (190 workers, 824 s) | the same on the crash |
+| c27 | three replicas, zombie move, two failures | all | the five above | no violation to depth 27 (2,429,420,385 distinct states, bounded: cut at the user's word at 1,186 s with the space still growing by half per level and the queue spilled to disk) | the three-replica zombie space is too large to exhaust; checked ten levels past the deepest three-replica trace the model has found (depth 17, c21), bounded, not a full pass |
+
+What the table claims. At two replicas every arm under the full rule set
+is a full pass, and each safety rule has a control that fails without it
+in the same configuration, so the HOLD is attributable; the vouch's
+control shows the wait it removes, not a loss. The never-alone rule
+needed its own data invariant to be attributable: the acked-data HOLDs
+of c24 and c25 do not need it, so the torn-junk invariant of rev 12 is
+what separates it from its absence, holding over the full space with
+the rule and failing at depth 7 without it (c26). At three replicas
+the full rule set holds over the whole state space for the lost mark
+and the crash (c27: 1,774,204,193 states to depth 45 and 2,325,892,812
+to depth 46, rev 12's five invariants in one run, two failures
+allowed); with a zombie the space is too large to exhaust and is
+checked to depth 27 without a violation (c27, 2,429,420,385 states, cut
+at the user's word while still growing), ten levels past the deepest
+three-replica trace the model has found (rev 7's pre-stamp hole at
+depth 17, c21; the box's bounded zombie arms reached depths 17, 19 and
+18 under revs 10, 11 and 12, c24, c25, c26). Batch c21 closed on
+2026-10-31 with every remaining rev 7 three-replica arm bounded at the
+box's hour (depths 20 to 24), three failures allowed adding no trace
+within that cap, and its liveness arm at no verdict, so the barrier's
+termination is claimed by no run. No three-replica control
+was killed within its cap (c24) and c27 ran none, so the attribution of
+each rule rests on the two-replica controls; the three-replica rows
+show the rules holding together, not which rule carries which HOLD. The
+hole is legal by definition in the rows that
+count it so, and its bound (in flight at the fence or at a crash) is a
+property of the raid, not of the model. The stamp's TLAPS proof (the
+record run of FlintCatchupS, flint-e4) waits for a quiet box. The model
+files are local to flint-e4's branch until the user says push. Nothing
+in this section is built.
+
+Open with flint-e4:
+
+- [ ] c27's arms the cut left unrun (the expiry form, the two
+      sole-continuation arms, the barrier at three replicas, four
+      replicas), at the user's word.
+- [ ] The TLAPS record run on a quiet box; then the branch pushed by PR at
+      the user's word.
+
+### Code asks
 
 flint-91, once the model holds, scoped here and decided by the user:
 
@@ -2681,8 +2913,12 @@ flint-91, once the model holds, scoped here and decided by the user:
       a base's add when `prev` is set; the driver's move through the
       RPCs for a leg under no raid; raid unit tests for a crash at each
       window and for a shorter base's add.
-- [ ] Pins: the two premises of §5's rev 7 subsection, and the barrier
-      ordering as a unit test that an SPDK bump cannot pass silently.
+- [ ] Pins: the two premises of §5's rev 7 subsection (both observed once
+      on gate1613, 2026-10-30, from uncommitted scripts; the pin is the
+      committed cluster test that runs them at every spdk-tgt bump, with
+      the kill arm restored and the rejoined leg's region scanned), and
+      the barrier ordering as a unit test that an SPDK bump cannot pass
+      silently.
 
 ### Delivery order
 
