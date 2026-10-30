@@ -8,7 +8,7 @@ Run it after a tla-mc upgrade, before trusting the new version's verdicts on
 flint's models.
 
 ```sh
-cargo install tla-mc --version 0.1.1 --locked     # the version flint was last checked with (2026-10-07)
+cargo install tla-mc --version 0.2.1 --locked     # the version flint was last checked with (2026-10-30)
 export FLINT_ROOT=$PWD                             # the flint checkout
 
 # 1. every gate entry through tla-mc's interpreter (15 s each; ONLY=file limits it to listed cfgs)
@@ -26,8 +26,12 @@ the first file listed that has an entry wins. On a big machine, shard the sweep:
 `SHARD=k/n TMPDIR=<own dir per shard> sweep.py ...` (each shard needs its own TMPDIR),
 `tlc_side.py` takes `$FLINT_ROOT`, `$TLC_JAR` and `$TLC_WORKERS`, and give the few
 long entries all the cores afterwards rather than leaving them on 8 or 4 workers.
-The last full run (tla-mc 0.1.1, 2026-10-07: 443 of 446 decided, all agreeing) is in
-tla-mc's `results/validation-2026-10-07/`. The recorded inputs: `gate-sweep-2026-09-29.jsonl`
+The last full run (tla-mc 0.2.0 beside 0.1.2, 2026-10-30: 443 of 446 decided, all
+agreeing, the same as 0.1.2; the slow entries through `-compile` at 192 workers) is in
+tla-mc's `results/validation-2026-10-30/`, with the scripts it ran; 0.2.1 is 0.2.0 with
+one crash fixed (an `ENABLED` invariant at load), and tla-mc's own gate runs the 343
+fast entries on every change. The one before (0.1.1, 2026-10-07) is in
+`results/validation-2026-10-07/`. The recorded inputs: `gate-sweep-2026-09-29.jsonl`
 (the entries and tla-mc's verdicts then), `tlc-vs-tlcrs-2026-09-26.jsonl` and the
 two `liveness-vs-tlc-*` files (TLC's distinct counts). The runs before the move —
 gate sweeps, codegen gates, the Examples sweep — are in tla-mc's `results/`.
