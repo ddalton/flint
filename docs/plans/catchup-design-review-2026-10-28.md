@@ -329,7 +329,9 @@ already does, only for an online raid, and becomes a pin; the proof uses
 the rule in place of the premise, its target rev 16. The drain probe
 showed the in-write guard carries the data invariant and a stamp on a
 planned removal carries the barrier claim; whether a planned removal
-stamps awaits the user's word. A model correction followed: the model
+stamps was adopted by the user on 2026-10-31: the hook sits on SPDK's
+shared removal path, a planned removal begins the hold at the RPC and
+stamps and holds like a loss, and the drain enters the proof. A model correction followed: the model
 let a zombie acknowledge on a confirmed continuation's sequence and
 generation rather than on the confirmed triple naming its leg alone,
 which §12 requires; at four replicas that loses a write (rev 16, depth

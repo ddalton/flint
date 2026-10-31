@@ -2329,10 +2329,17 @@ and, per channel, a queue of completions held while it is set:
    `raid_bdev_io_complete_part`, so the write that saw the failure is
    itself held, and so is every write that completes on any thread from
    that instant.
-2. `_raid_bdev_fail_base_bdev`, on the app thread, writes the next stamp,
-   carrying the last released generation as (`rgen`, `rmem`), to the
-   surviving configured bases, with the multi-base write pattern of
-   `raid_bdev_write_superblock` and a different offset and payload.
+2. `_raid_bdev_remove_base_bdev`, on the app thread, which
+   `_raid_bdev_fail_base_bdev` and the removal RPC both reach, writes
+   the next stamp, carrying the last released generation as (`rgen`,
+   `rmem`), to the surviving configured bases, with the multi-base write
+   pattern of `raid_bdev_write_superblock` and a different offset and
+   payload. A planned removal (`bdev_raid_remove_base_bdev`, the drain)
+   has no failed write to begin the hold, so the RPC begins it: every
+   completion from that instant is held, the stamp is written, and the
+   release follows the same rule, so no write acknowledges between the
+   stamp and the quiesce (the planned-removal stamp, adopted by the
+   user on 2026-10-31; rev 15's `DrainStamps` is its model).
    This runs **before** the removal's quiesce: the quiesce waits for
    in-flight I/O to complete, held completions never do, and the two
    would deadlock. The stock sequence (quiesce, superblock, deconfigure,
@@ -2690,8 +2697,9 @@ The stage, after the fence flip and before `bdev_raid_create`:
   down: one record round marks it stale under a leased suppression mark
   (`drain_for_maintenance`, replica_sync.rs), taken only when every
   other leg is in sync, and the roller refuses the consumer's own node
-  (docs/maintenance-drain-csi-node-roll.md). A drained leg is
-  record-stale, so step 1 excludes it and no stage waits for it; after
+  (docs/maintenance-drain-csi-node-roll.md), and the removal stamps the
+  survivors and holds like a loss (the planned-removal stamp). A drained
+  leg is record-stale, so step 1 excludes it and no stage waits for it; after
   the restart the roller clears the mark and the leg rejoins by catch-up
   as a delta, on its own node, not rebuilt elsewhere. A node taken down
   outside the roller is an unplanned loss to the raid: a three-replica
@@ -2783,12 +2791,13 @@ among the configured bases read in the same operation, with the drain's
 belt made atomic with its write; and the same check sits inside the
 stage's assembly write, or the stage is taken under the claim, since the
 stage path is outside it. The proof uses the rule in place of the
-premise. Open beside it: a planned removal, the drain, shrinks the
+premise. Beside it, a planned removal, the drain, shrank the
 membership through SPDK's shared removal path with no stamp as this
-section stands, since the stamp is written on the failure path only
-(`_raid_bdev_fail_base_bdev` calls `_raid_bdev_remove_base_bdev`, as
-the RPC does); whether the hook moves to the shared path is measured by
-rev 15 and decided by the user. The control above is the killed one; with
+section first stood, since the stamp was written on the failure path
+only (`_raid_bdev_fail_base_bdev` calls `_raid_bdev_remove_base_bdev`,
+as the RPC does); rev 15 measured it, and on 2026-10-31 the user
+adopted the planned-removal stamp: the hook sits on the shared path and
+a planned removal stamps and holds like a loss (the stamp's step 2). The control above is the killed one; with
 the whole mark on, no violation to the box's half hour (depth 19,
 55,239,809 states), three levels past the violation, bounded; the
 control with the failure model intact is clean to depth 23
@@ -3020,7 +3029,12 @@ and decided by the user:
       write, the barrier, the majority release, the `get_bdevs` field and
       the two RPCs, with raid unit tests for the barrier (a completion is
       never delivered before its stamp) and the chain (a survivor whose
-      stamp write fails is failed).
+      stamp write fails is failed). The stamp hook on the shared removal
+      path (`_raid_bdev_remove_base_bdev`), so a planned removal begins
+      the hold at the RPC and stamps and holds like a loss, with a unit
+      test that no write acknowledges between a planned removal's stamp
+      and its quiesce; line numbers checked against the carried series,
+      not upstream.
 - [ ] Driver: lvols one cluster larger; `bdev_raid_create` with `seq`
       from the assembly write; the stage's stamp read and steps 1 to 5;
       the tie's conjunct; F36c's writer set and gate from the read.
@@ -3098,8 +3112,9 @@ and decided by the user:
          proof uses the seventh gap's rule in place of the failure-model
          premise it inherited: its target is rev 17 (`61ae6829`) with
          `LastFails`, `WholeMark`, `InWriteGuard`, `MonitorGuard` and
-         `ZombieTriple` on, the drain outside the proof until the user
-         decides the planned removal's stamp.
+         `ZombieTriple` on, and the drain inside it (`OperatorMark`,
+         `InWriteGuard` and `DrainStamps` on) since the user adopted the
+         planned-removal stamp on 2026-10-31.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
