@@ -1,0 +1,23 @@
+RESTART-GATE PASS flint-csi-driver-chart 1.61.3 2026-10-31T21:32:22Z
+cluster: kubernetes-admin@kubernetes; nodes: gate1613r3-aws-1 gate1613r3-aws-2 gate1613r3-cp-1 
+images (node driver tgt):
+  gate1613r3-aws-1 docker.io/dilipdalton/flint-driver@sha256:31498fbc96f8027623f4b283c1c8cf391fe6b01b4973b71e3bec777f0ff15338 docker.io/dilipdalton/spdk-tgt@sha256:9e31bea6e914028c8387175c719071697a87e7cadaef0133695483b1e2a6c1b7
+  gate1613r3-cp-1 docker.io/dilipdalton/flint-driver@sha256:31498fbc96f8027623f4b283c1c8cf391fe6b01b4973b71e3bec777f0ff15338 docker.io/dilipdalton/spdk-tgt@sha256:9e31bea6e914028c8387175c719071697a87e7cadaef0133695483b1e2a6c1b7
+  gate1613r3-aws-2 docker.io/dilipdalton/flint-driver@sha256:31498fbc96f8027623f4b283c1c8cf391fe6b01b4973b71e3bec777f0ff15338 docker.io/dilipdalton/spdk-tgt@sha256:9e31bea6e914028c8387175c719071697a87e7cadaef0133695483b1e2a6c1b7
+results:
+  2026-10-31T20:56:01Z SDL-KERNEL A PASS: target gone 30 s (controller connecting), 0 failed writes, resumed 5 s after the export returned
+  2026-10-31T20:56:01Z SDL-KERNEL B PASS: writes failed 42 s after the target went (ctrl_loss_tmo 40), controller removed
+  2026-10-31T20:56:01Z SDL-KERNEL C PASS: umount blocked 10 s with the target gone; finished 3 s after delete_controller (rc=0)
+  2026-10-31T20:56:01Z SDL-KERNEL PASS
+  2026-10-31T20:57:24Z kernel controllers (rwo): gate1613r3-aws-2 nvme2 127.0.0.1 fio=off cl=300 rd=2;
+  2026-10-31T20:59:14Z done 2.2a -> PASS | 2026-10-31T20:57:38Z,2,2.2a,24,13,0,gate1613r3-aws-2,gate1613r3-aws-2,Y,Y,Y,PASS,Y,PASS,"RAID-host spdk-tgt kill; io_resume=20s; raid=raid_pvc-ded71638-04df-49c5-a7a5-6e8f195f832a 
+  2026-10-31T21:01:20Z done 1.9 -> PASS | 2026-10-31T20:59:23Z,1r3,1.9,44,36,0,gate1613r3-aws-2,gate1613r3-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=43s"
+  2026-10-31T21:03:28Z done 1.9-again -> PASS | 2026-10-31T21:01:29Z,1r3,1.9,44,37,0,gate1613r3-aws-2,gate1613r3-aws-2,Y,Y,Y,PASS,Y,PASS,"spdk-tgt hard kill; io_resume=43s"
+  2026-10-31T21:07:42Z done 2.7 -> PASS | 2026-10-31T21:03:43Z,2,2.7,162,5,0,gate1613r3-aws-2,gate1613r3-aws-2,Y,Y,Y,PASS,Y,PASS,"r3 DOUBLE remote-leg kill; worst_ack_age=3s; raid=raid_pvc-ded71638-04df-49c5-a7a5-6e8f195f8
+  2026-10-31T21:17:47Z done 2.11 -> PASS | 2026-10-31T21:07:56Z,2,2.11,515,137,0,gate1613r3-aws-2,gate1613r3-aws-2,Y,Y,Y,PASS,Y,PASS,"all-at-once 3-node csi-node kill incl raid host; degraded_direct=none; acked_tail_risk=no
+  2026-10-31T21:19:43Z kernel controllers (rwx): gate1613r3-aws-2 nvme2 127.0.0.1 fio=off cl=300 rd=2;
+  2026-10-31T21:21:22Z done 3.1 -> PASS | 2026-10-31T21:19:50Z,3,3.1,29,23,new:0,gate1613r3-aws-2,gate1613r3-cp-1,Y,Y,Y,PASS,Y,PASS,"RWX cross-node migration; nfs_pods_max=1 nfs_uid_same=Y"
+  2026-10-31T21:23:04Z done 3.2 -> PASS | 2026-10-31T21:21:29Z,3,3.2,39,32,0,gate1613r3-cp-1,gate1613r3-cp-1,Y,Y,Y,PASS,Y,PASS,"nfs pod delete: recreate=35s io_resume=36s estale=0"
+  2026-10-31T21:24:34Z done 3.3a -> PASS | 2026-10-31T21:23:12Z,3,3.3a,24,13,0,gate1613r3-cp-1,gate1613r3-cp-1,Y,Y,Y,PASS,Y,PASS,"spdk-tgt kill on nfs node: io_resume=19s nfs_restarts=0"
+  2026-10-31T21:29:48Z done 3.8 -> PASS | 2026-10-31T21:24:41Z,3,3.8,251,23,new:0,gate1613r3-cp-1,gate1613r3-cp-1,Y,Y,Y,PASS,Y,PASS,"RWX churn x10; nfs_uid_same=Y"
+  2026-10-31T21:31:33Z done 3.3a-again -> PASS | 2026-10-31T21:29:56Z,3,3.3a,41,27,0,gate1613r3-cp-1,gate1613r3-cp-1,Y,Y,Y,PASS,Y,PASS,"spdk-tgt kill on nfs node: io_resume=37s nfs_restarts=0"

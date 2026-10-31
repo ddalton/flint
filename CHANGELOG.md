@@ -12,6 +12,47 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.61.3] - 2026-10-31
+
+A fix release. The replicated block path closes several ways its staging,
+catch-up, rebuild and rejoin paths could serve a replica leg missing
+acknowledged writes, or an empty or half-built one; a replica that goes
+silent now faults out of its raid after spdk-tgt restarts instead of
+hanging the volume's I/O; a raw block volume's raid is rebuilt after its
+node's spdk-tgt restarts instead of staying gone until the pod restarts;
+an NFS server whose attachment watch misses a node now admits it within a
+minute instead of refusing it until a restart; and the S3 CSI node
+driver's `node.endpointAllow` judges the endpoint a mount's worker
+actually uses (#49). The CSI gRPC verbs, StorageClass parameters and
+volume_context keys are as in 1.61.2, and the crates are unchanged
+(`flint-lean` 0.12.0, `flint-lean-gateway` 0.10.0, `flint-store` 0.2.1).
+One change an operator may notice: with `node.endpointAllow` set, a CR
+must name its store in `spec.endpoint`, and `--endpoint-url` in a
+passthrough mount's `spec.mountOptions` is refused (see Security).
+
+Validated 2026-10-31. The CSI driver's restart gate ran on EC2 (3 x
+i4i.2xlarge spot, us-east-2) against `flint-driver:1.61.3-rc3`
+(`sha256:31498fbc…`, built from the release's source, dd8e9e76) and
+spdk-tgt 1.7.3: the kernel deadline checks and every drill (2.2a, 1.9
+twice, 2.7, 2.11, 3.1, 3.2, 3.3a twice, 3.8) passed; the record is
+`tests/chaos/gate-records/flint-csi-driver-chart-1.61.3.txt`. On the same
+cluster, for a raw block and a filesystem volume at three replicas,
+spdk-tgt was killed on the consumer's node: the raid came back with all
+three legs 16 s (block) and 28 s (filesystem) after the kill, the
+dead-target timeouts were applied before the first attach, and no repair
+was refused; one remote leg was then cut off for 150 s under a writer,
+the raid dropped it 48 s after the cut, and the writer kept writing with
+no errors. The gate run before it, on rc2, passed the drills but found
+the block-volume defect fixed here (the raid was still gone 521 s after
+the kill). The S3 CSI legs S1-S6 and S38 ran on kind against images
+built from 6d22dc99 (no s3csi source changed after it): 54 ok, 0 bad.
+On the Linux box, everything `--locked`: the advisory gate is clean
+across 7 lockfiles; spdk-csi-driver's lib 2,797 passed; the lite
+operator and s3csi tests 290 passed, and the s3csi root tests 3 of 3
+under sudo with none skipped; the lite chart render matches its fixture;
+the driver, flint-sync, gateway, forge and s3-worker build for x86_64
+and aarch64 musl. CI is green on dd8e9e76.
+
 ### Added
 
 - **csi-sanity on the kind tier** (2026-10-28; `tests/sanity/`).
