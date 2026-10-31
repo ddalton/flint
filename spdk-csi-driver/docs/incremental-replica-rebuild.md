@@ -2467,7 +2467,11 @@ The stage, after the fence flip and before `bdev_raid_create`:
    survivors go out and the dropped leg alone returns; its (`seq`, 0)
    stamp is the newest it can show, and the stage would serve without
    the write. An inconclusive read defers under step 3, which is what
-   record-before-ack gives there, unavailable rather than lost. Every
+   record-before-ack gives there, unavailable rather than lost. The
+   vouch by every unattached leg being record-stale rests on the
+   record's `in_sync` set keeping a member of the last released
+   membership; the rule that keeps it is the seventh gap's, before the
+   verdicts below. Every
    attached leg not in the candidates is marked stale in the assembly
    write, with the reason. A leg whose newest stamp is an unconfirmed
    continuation is a **torn leg**: unacknowledged writes may have landed
@@ -2649,7 +2653,7 @@ The stage, after the fence flip and before `bdev_raid_create`:
 | §6 survivor divergence after a crash or a move | closed; a crash leaves the stamps, a move leaves them and the record for a minority continuation |
 | the raid1 write hole (writes never acknowledged, landed on some legs) | shrunk to the writes in flight at a crash or at the fence; a torn leg beside a clean member is cleaned at the stage, and alone it waits or serves marked (step 2) |
 | unstage capture (`ef3a6f48`) | a belt: it refreshes the record early; the stamps already hold what it reads |
-| health monitor | a belt, gated on the VolumeAttachment's node (the gate shipped as `eb7c28fd`, 2026-10-30; a failed lookup still records); it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
+| health monitor | a belt, gated on the VolumeAttachment's node (the gate shipped as `eb7c28fd`, 2026-10-30; a failed lookup still records), marking every missing leg in one write (the seventh gap's pin); it copies the stamp's `clock` into `since`, so `T_back` covers the I/O timeout and skew, not the tick (`FLINT_CATCHUP_TBACK_SECS` can drop from 120 toward the timeout) |
 | fence-flip mark on the co-located leg | the decree in step 4 above, written only by a stage whose read concluded without that leg |
 | per-epoch membership (§5's rule) | stays for the scheduler and the catch-up: the record trails a majority drop by up to one poll, and a leg in that lag is still record-`in_sync` to `plan_cut` and `in_sync_sources`; the cut-time read from the live raid is what makes an epoch's membership exact |
 | the source tie | the "attached" conjunct becomes "named in the newest valid stamp at admission": a source whose node died after a clean unstage is still vouched for and its standby admitted; a source the raid dropped is not, and the demotion stands for that case only |
@@ -2737,6 +2741,64 @@ The stage, after the fence flip and before `bdev_raid_create`:
 - **A write quorum** (rev 7's option (a)): does not close the residual
   without record-before-ack underneath, and costs availability.
 - **The stamp without the majority rule**: the zombie hole above.
+
+**A seventh gap, from the stamp proof (2026-10-31; the in-write rule
+and the whole mark adopted by the user).** The read's vouch by every
+unattached leg being record-stale (step 1) is safe only while the
+record's `in_sync` set keeps at least one leg of the last released
+membership, since that leg holds every acknowledged write. The model's
+failure model kept it by never failing a raid's last healthy member, and
+the proof of the stamp rule inherited that as a premise. Let the last
+member fail and the trace is short (FlintCatchupS rev 14 `231150e6`,
+three failures, q14: `Inv_MembersHold` violated at depth 16, 11,761,818
+states): leg 1 fails; a write lands on leg 1 while leg 2 is failing and
+drops it; the stamp lands on legs 1 and 3 and releases as a majority,
+which writes no record, so leg 2 stays `in_sync`; the write is
+acknowledged on legs 1 and 3; leg 1 goes out and the monitor marks it
+alone; leg 3, the last member, fails and the monitor marks it alone,
+skipping leg 2; the next stage finds every `in_sync` leg attached, leg 2,
+and serves it without the write. Two things must both happen: every leg
+of the last release leaves the raid, and they are marked stale without
+the earlier-lost leg. Only a write that marks one leg at a time can do
+the second. The rule, in two parts. **The monitor marks every `in_sync`
+leg the live raid lacks in one write**: that is what
+`record_stale_replicas` does today (one `update_sync_record` closure
+over `replicas_missing_from_raid`; a raid not online marks nothing), and
+it becomes a pin. **No sync-record write may leave the `in_sync` set
+without a member of the live raid as read**, checked inside the write;
+a write with no live raid, the decree and the assembly write, may do so
+only when its own read concluded by the count, the sole continuation or
+the vouch. The assembly write, the unstage capture and the monitor
+already mark whole sets. The single-leg writers do not recheck inside
+the write (flint-91's audit at `c7e5adcc`): the maintenance drain's
+belt reads the raid once and writes the record later, so a member
+dropping in between lets it mark the last one; `mark_stale` itself has
+no precondition, so catch-up's and hot rejoin's demotions rest on a read
+made before the write; and NodeStage admission sits outside the
+controller's per-volume claim, so a leg admitted in between is demoted.
+Neither window is reproduced. Either form closes them: every mark names
+the source state it expects, as the hot-rejoin intent path does inside
+its write, or the write is refused when it would leave no `in_sync` leg
+among the configured bases read in the same operation, with the drain's
+belt made atomic with its write; and the same check sits inside the
+stage's assembly write, or the stage is taken under the claim, since the
+stage path is outside it. The proof uses the rule in place of the
+premise. Open beside it: a planned removal, the drain, shrinks the
+membership through SPDK's shared removal path with no stamp as this
+section stands, since the stamp is written on the failure path only
+(`_raid_bdev_fail_base_bdev` calls `_raid_bdev_remove_base_bdev`, as
+the RPC does); whether the hook moves to the shared path is measured by
+rev 15 and decided by the user. The control above is the killed one; with
+the whole mark on, no violation to the box's half hour (depth 19,
+55,239,809 states), three levels past the violation, bounded; the
+control with the failure model intact is running. The drain's probe (rev
+15 `3d409f1b`, c33, a second spot instance at the user's word) so far:
+the identity exact; without the in-write guard the drain loses
+`Inv_MembersHold` at depth 12 with or without a stamp on the planned
+removal, so the guard is load-bearing and that stamp alone is not;
+without that stamp `Inv_AckStamped` fails at depth 5 with or without
+the guard, as predicted, since the survivors' stamps keep naming the
+drained leg; the arms with the guard are running.
 
 ### Model verdicts (2026-10-30)
 
@@ -2860,6 +2922,12 @@ without the rule, and a HOLD on the data beside it.
 | c28 | the same three with the record unwritable (control) | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 9; 8; 8, each stuttering with the barrier held | a minority barrier never ends without the record, as designed; the three controls are killed |
 | c30 | the same three with the fairness on a failed path's return dropped (wrapper `b719dbbf` on rev 12; `SpecNoReturn` is `Spec` less only `WF_vars(Return(r))`) | all | `Prop_BarrierEnds` | HOLD over the full space: 3,627,109, depth 35; 5,326,386, depth 35; 29,140,655, depth 39, each equal to its c28 twin (tla-mc 0.2.1, 4 workers; tables-c28.md, 2026-10-31) | the barrier ends at two replicas without any leg's path coming back |
 | c30 | the dropped fairness shown dropped (positive control, wrapper `752b1a56`): `Prop_PathReturns`, a failed path comes back, under `Spec` and under `SpecNoReturn` | all | `Prop_PathReturns` | HOLD under `Spec` (3,627,109, depth 35); VIOLATED under `SpecNoReturn`, a lasso at depth 9 with a path staying out | the specification line switched the fairness, so the c30 HOLDs are earned |
+| q14 | three replicas, lost mark, three failures, the last healthy member allowed to fail (rev 14 `231150e6`: rev 13 plus the knobs `LastFails` and `WholeMark`, both off being rev 13; control) | all but `WholeMark`; `LastFails` on | `Inv_MembersHold`, `Inv_RaidHolds`, no bad loss | VIOLATED at depth 16 (11,761,818 states; the seventh gap's trace; tla-mc 0.2.1) | the seventh gap: two single-leg marks after a majority release strand the earlier-lost leg as the only `in_sync` one |
+| q14 | the same with the whole mark (`WholeMark` on) | all | the three above | no violation to the box's half hour: depth 19, 55,239,809 states, three levels past the control's violation, bounded (tla-mc 0.2.1) | the whole mark's closure, bounded |
+| q14 | the same with the failure model intact (both knobs off) | all | the three above | running | the premise's closure, the control for the rule |
+| d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, no bad loss | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard: running | the guard is load-bearing for the drain, and a stamp on the planned removal alone is not |
+| d15 | the drain with no stamp on the planned removal, the guard varied | all; `DrainStamps` off | `Inv_AckStamped` | VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397) | as predicted: the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped; whether data is affected is the members-hold column |
+| q14 | identity at rev 14, every knob off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 | rev 14 with its knobs off is rev 12 |
 
 What the table claims. At two replicas every arm under the full rule set
 is a full pass, and each safety rule has a control that fails without it
@@ -2935,6 +3003,14 @@ and decided by the user:
 - [ ] Node agent: the one-second `get_bdevs` poll on held raids, the
       gated record write, the confirm; the monitor copying `clock` into
       `since`.
+- [ ] The in-write rule (the seventh gap, adopted 2026-10-31): every
+      stale mark names the source state it expects, or the write is
+      refused when it would leave no `in_sync` leg among the configured
+      bases read in the same operation; the drain's belt atomic with its
+      write; the same check inside the stage's assembly write, or the
+      stage under the per-volume claim; the two windows of flint-91's
+      audit as the test cases. A pin: the monitor marks every missing
+      leg in one write.
 - [ ] Kind drills: cut one leg's path under a write stream and read the
       survivors' stamps before the write's acknowledgement is observed;
       cut two paths and confirm the write completes only after the record
@@ -2986,7 +3062,12 @@ and decided by the user:
          which removes the bound where it matters most, with model
          checking keeping the rest. The user chose the full proof on
          2026-10-31; flint-e4 carries it, and the record's 64 GB
-         instance is a separate plan and cost for the user's word.
+         instance is a separate plan and cost for the user's word. The
+         proof uses the seventh gap's rule in place of the failure-model
+         premise it inherited: its target moved to rev 15 (`3d409f1b`)
+         with `LastFails`, `WholeMark` and `InWriteGuard` on, the
+         drain outside the proof until the user decides the planned
+         removal's stamp.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct

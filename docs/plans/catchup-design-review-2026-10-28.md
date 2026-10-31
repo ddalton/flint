@@ -283,7 +283,7 @@ What it changes in the recommendations above:
 | The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
 | TLAPS proof of the trust rule | pass 7 proved all 7,673 obligations on a seeded cache (2026-10-29); the fresh-cache record done 2026-10-31 (all 7,673 proved, three md5s asserted; twelve of 13 controls fail at their premise's steps, the select-time base bound proves without its rule), cited in §5; the proof covers the clean setting only, never a crash or a zombie; the stamp model has no proof, see §12's gate; the confirmation batch c15 closed 2026-10-30 (67 arms on `8ac3cf00`, most with the pre-fix cut, see §5's status) |
 
-Four gaps were found by the model ahead of any code, all closed by
+Five gaps were found by the model ahead of any code, all closed by
 rules now in §12. First, a stamp read among the attached legs is conclusive
 only when those legs number a majority of the newest stamp's size, since
 two majorities of one size intersect; with one leg attached after three
@@ -317,7 +317,16 @@ epoch and came back through every later catch-up; a leg whose newest
 stamp is an unconfirmed continuation is now a torn leg, marked stale at
 the stage whenever a clean member is attached, never serving alone on a
 vouch, and the write hole shrinks to the writes in flight at a crash or
-at the fence.
+at the fence. Fifth, from the stamp proof (2026-10-31): the read's vouch
+by every unattached leg being record-stale needs the record's in_sync
+set to keep a leg of the last released membership, which the model kept
+only by never failing a raid's last member; two single-leg stale marks
+after a majority release strand the earlier-lost leg as the only in_sync
+one (rev 14, depth 16). The user adopted the in-write rule, that no
+sync-record write may leave in_sync without a member of the live raid as
+read, the stage's write included, and the whole mark, which the monitor
+already does and becomes a pin; the proof uses the rule in place of the
+premise.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.
