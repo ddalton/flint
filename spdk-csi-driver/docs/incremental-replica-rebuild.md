@@ -984,18 +984,25 @@ violation to depth 28), and the fixed cut is a premise of the proof.
 The TLAPS proof of the rule (clean setting: capture, no crash, no
 zombie move, both premises, the fixed cut; target `Inv_Catchup ∧
 MembersHold`) has all 7,673 obligations proved on a seeded cache (pass
-7, 2026-10-29). The fresh-cache record run is reported done by flint-e4
-(2026-10-31, 15:24 to 15:49Z on the box, otherwise idle: all 7,673
-proved, 1,539 s, peak 25.4 GB, the three input md5s asserted, run by
-`recT4.sh` after `recT.sh`'s summary was found reading the wrong
-stream); twelve of its thirteen controls are in, and its results
-section is cited here when the last lands. What the controls say so
-far: eleven fail only the steps that use their premise or rule; the
-crash and zombie-move controls fail only the lemma that those premises
-switch the actions off, so the proof is cited for the clean setting and
-never for a crash or a zombie; and the select-time bound on the base
-(at or below the target) is not killed, since the proof rests on the
-copy-time guard alone, so that filter is a progress rule, not safety.
+7, 2026-10-29). The fresh-cache record run is done (2026-10-31, 15:24Z
+on the box, otherwise idle, `recT4.sh`: all 7,673 proved, rc 0, tlapm
+`bfa9468`, 1,539 s, peak 25.4 GB, the three input md5s asserted;
+`formal/results/2026-10-29-flintcatchupt/RESULTS.txt` on flint-e4's
+branch, read here), with its thirteen controls one at a time on the
+record's cache (closed 18:59Z). Twelve fail: ten at the steps that use
+their premise or rule (the mark-race fix is the cut-record step; the
+drop takes the leg out of the members; the capture; the base-inclusive
+copy at its three sites; the retention pin, which the trust proof
+needs where FlintCatchup's did not; the code's leg sets against rev 7's
+oracle; source trust; the cut's removal; the copy-time bound; the
+demoted standby's revert), and the crash and zombie-move controls only
+at the lemma that those premises switch the actions off, so the proof
+is cited for the clean setting and never for a crash or a zombie. One
+is not killed: the select-time bound on the base (at or below the
+target) proves without its rule, so it is a progress rule, not safety,
+and the copy-time guard carries that bound. A failed step shows the
+proof uses a premise there, not that the premise is necessary;
+necessity needs a trace, which the cut has (c15).
 
 ### Tunables and space overhead
 
@@ -2946,10 +2953,10 @@ and decided by the user:
    and estimates it, and anything needing a box beyond the Linux one is
    a plan and a cost for the user to approve first.
    flint-e4 reviewed the list on 2026-10-31; the estimates are theirs.
-   - [ ] The trust rule's TLAPS record run on a fresh cache, asserting
-         every input's md5, with its thirteen controls (§5). Reported
-         done (all 7,673 proved; twelve controls in); ticked when its
-         results section is cited in §5.
+   - [x] The trust rule's TLAPS record run on a fresh cache, asserting
+         every input's md5, with its thirteen controls (§5). Done
+         2026-10-31: all 7,673 proved; twelve controls fail at their
+         premise's steps, one proves without its rule; cited in §5.
    - [ ] A TLAPS proof of the stamp rule itself, on FlintCatchupS. None
          exists: the proved rules are FlintCatchup and FlintCatchupT. To
          add anything over the trust proof it must run with the crash
@@ -2998,8 +3005,12 @@ and decided by the user:
          shares the full arm's constants and joins the session above;
          the three zombie arms (the expiry form, the zombie sole arm,
          four replicas) run bounded at one-hour caps in the same
-         session, four to five hours of instance in all, priced before
-         it is asked for.
+         session, four to five hours of instance in all. Priced on
+         2026-10-31 (spot, nothing provisioned): m7i.48xlarge at $1.48
+         an hour in us-west-1a plus a 2 TB gp3 disk at about $0.36,
+         about $8.30 for the session, with the hard shutdown at six
+         hours capping the worst case near $11; awaiting the user's
+         word.
    - [ ] The resize rule modelled (the model has fixed-size legs and no
          row covers it), or resize excluded from the patch's first cut
          by the user. A resize arm is one to two days to build (per-leg
