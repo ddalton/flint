@@ -104,6 +104,22 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **A raw block volume's raid comes back after spdk-tgt restarts on its
+  node, instead of staying gone until the pod restarts** (2026-10-31;
+  `spdk-csi-driver/src/node_agent.rs`). When spdk-tgt restarts on the node
+  a volume is attached to, the node agent rebuilds the volume's raid in
+  place, but only while kubelet still has the volume staged there. It
+  looked for kubelet's staging record only where kubelet keeps it for a
+  filesystem volume, so for a raw block volume (`volumeMode: Block`) it
+  always concluded the volume was not staged and refused the repair: the
+  raid stayed gone, the device had no data path, and the agent raised
+  `VolumeDataPathLost` until the pod was restarted. On the 1.61.3
+  release-gate cluster a block volume's raid was still gone 521 s after
+  its node's spdk-tgt was killed. The check now also reads kubelet's
+  block record (`volumeDevices/staging/<pv>` and the volume's
+  `vol_data.json`). Filesystem volumes, which the restart drills use,
+  were repaired before and still are.
+
 - **An NFS server that misses an attachment admits the node within a
   minute, instead of refusing it until the server restarts** (2026-10-31;
   `spdk-csi-driver/src/nfs/node_authz.rs`). With

@@ -5283,33 +5283,48 @@ impl NodeAgent {
     /// frontends (the device node died with spdk-tgt; only a restage
     /// helps) and tears its raid back down if the attachment vanished
     /// mid-repair (a zombie consumer raid is the §3 hazard).
-    /// Whether kubelet currently has `volume_handle` STAGED on this node
-    /// (its `vol_data.json` exists under the CSI staging dir). The VA can
-    /// linger mid-detach during a consumer handover; kubelet's staging
-    /// record is the truth about whether a mount on this node still
-    /// expects the data path. Observed live (layer-2 validation): the
-    /// previous consumer's agent repaired against a detaching VA and
-    /// kubelet's in-flight unstage immediately tore it down — harmless
-    /// there, but the repair could steal replica fences for a tick.
-    fn is_staged_here(volume_handle: &str) -> bool {
-        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/disk.csi.chert.us";
-        let Ok(entries) = std::fs::read_dir(staging_base) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let vol_data = entry.path().join("vol_data.json");
-            let Ok(content) = std::fs::read_to_string(&vol_data) else {
-                continue;
-            };
-            if serde_json::from_str::<serde_json::Value>(&content)
+    /// Whether kubelet currently has `volume_handle` (PersistentVolume
+    /// `pv_name`) STAGED on this node. The VA can linger mid-detach during
+    /// a consumer handover; kubelet's staging record is the truth about
+    /// whether a mount on this node still expects the data path. Observed
+    /// live (layer-2 validation): the previous consumer's agent repaired
+    /// against a detaching VA and kubelet's in-flight unstage immediately
+    /// tore it down — harmless there, but the repair could steal replica
+    /// fences for a tick.
+    ///
+    /// The record has two shapes. A filesystem volume's is its
+    /// `vol_data.json` under the driver's dir. A raw block volume's is
+    /// kubelet's `volumeDevices/staging/<pv>` directory, made at stage and
+    /// removed once NodeUnstageVolume succeeds, with the volume's
+    /// `vol_data.json` under `volumeDevices/<pv>/data/`. Reading only the
+    /// first refused every block volume's repair after a raid-host
+    /// spdk-tgt restart, so its raid never came back (1.61.3 gate cluster,
+    /// 2026-10-31).
+    fn is_staged_here(pv_name: &str, volume_handle: &str) -> bool {
+        Self::is_staged_under(
+            std::path::Path::new("/var/lib/kubelet/plugins/kubernetes.io/csi"),
+            pv_name,
+            volume_handle,
+        )
+    }
+
+    /// [`Self::is_staged_here`] under kubelet's CSI plugin dir `csi_dir`.
+    fn is_staged_under(csi_dir: &std::path::Path, pv_name: &str, volume_handle: &str) -> bool {
+        let names_handle = |vol_data: &std::path::Path| {
+            std::fs::read_to_string(vol_data)
                 .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
                 .and_then(|v| v["volumeHandle"].as_str().map(|h| h == volume_handle))
                 .unwrap_or(false)
-            {
-                return true;
-            }
-        }
-        false
+        };
+        let filesystem = std::fs::read_dir(csi_dir.join("disk.csi.chert.us"))
+            .map(|entries| entries.flatten().any(|e| names_handle(&e.path().join("vol_data.json"))))
+            .unwrap_or(false);
+        let block = csi_dir.join("volumeDevices").join("staging").join(pv_name).is_dir()
+            && names_handle(
+                &csi_dir.join("volumeDevices").join(pv_name).join("data").join("vol_data.json"),
+            );
+        filesystem || block
     }
 
     async fn repair_data_path(
@@ -5340,7 +5355,7 @@ impl NodeAgent {
             .as_ref()
             .and_then(|a| a.get("chert.us/ublk-id"))
             .and_then(|v| v.parse::<u32>().ok());
-        if !Self::is_staged_here(volume_handle) {
+        if !Self::is_staged_here(pv_name, volume_handle) {
             return Err(
                 "volume not staged on this node per kubelet (VA lingering mid-detach?) — \
                  repair refused"
@@ -6965,5 +6980,62 @@ mod monitor_gate_tests {
         let writes = tick(raid(&handle), vec![pv("pvc-1")], Some(server_here)).await;
         let rec = writes.iter().find_map(record_of).expect("a sync record write");
         assert_eq!(state(&rec, "u-b"), SyncState::Stale);
+    }
+}
+
+#[cfg(test)]
+mod staged_here_tests {
+    // The data-path repair runs only while kubelet has the volume staged on
+    // this node. Each test lays out kubelet's CSI plugin dir as kubelet
+    // does for one volume mode; the PV name and the volume handle differ
+    // so a check reading the wrong one fails.
+    use super::NodeAgent;
+    use std::path::Path;
+
+    fn vol_data(path: &Path, handle: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!(r#"{{"driverName":"disk.csi.chert.us","specVolID":"pv-a","volumeHandle":"{handle}"}}"#))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_filesystem_volume_is_staged_by_its_vol_data() {
+        let dir = tempfile::tempdir().unwrap();
+        vol_data(&dir.path().join("disk.csi.chert.us/0f3c9a/vol_data.json"), "handle-a");
+        assert!(NodeAgent::is_staged_under(dir.path(), "pv-a", "handle-a"));
+        assert!(
+            !NodeAgent::is_staged_under(dir.path(), "pv-b", "handle-b"),
+            "another volume's record"
+        );
+    }
+
+    /// The 1.61.3 gate cluster's case: a raw block volume on the raid
+    /// host, whose spdk-tgt restarted. Its repair was refused because only
+    /// the filesystem record was read.
+    #[test]
+    fn a_block_volume_is_staged_by_kubelets_volume_devices_record() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("volumeDevices/staging/pv-a")).unwrap();
+        vol_data(&dir.path().join("volumeDevices/pv-a/data/vol_data.json"), "handle-a");
+        assert!(NodeAgent::is_staged_under(dir.path(), "pv-a", "handle-a"));
+    }
+
+    /// NodeUnstageVolume done: kubelet removes the staging dir, and the
+    /// data record may outlive it; and a record naming another handle is
+    /// not this volume's.
+    #[test]
+    fn a_block_volume_kubelet_unstaged_is_not_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        vol_data(&dir.path().join("volumeDevices/pv-a/data/vol_data.json"), "handle-a");
+        assert!(!NodeAgent::is_staged_under(dir.path(), "pv-a", "handle-a"), "no staging dir");
+        std::fs::create_dir_all(dir.path().join("volumeDevices/staging/pv-a")).unwrap();
+        assert!(
+            !NodeAgent::is_staged_under(dir.path(), "pv-a", "handle-b"),
+            "the record names another handle"
+        );
+        assert!(
+            !NodeAgent::is_staged_under(dir.path(), "pv-b", "handle-a"),
+            "another PV's staging dir"
+        );
     }
 }
