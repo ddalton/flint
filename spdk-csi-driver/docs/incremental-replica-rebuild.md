@@ -2967,6 +2967,8 @@ without the rule, and a HOLD on the data beside it.
 | d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AdmitNoLoss` | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard, no violation to the 1,200 s cap: depth 19 (93,175,140 states) without the drain stamp, depth 18 (89,002,087) with it, bounded (tla-mc 0.2.1 compiled; tables-d15.md) | the guard carries the data invariant; a stamp on the planned removal alone does not |
 | d15 | the drain, `Inv_AckStamped`, the guard and the stamp varied | all; `InWriteGuard` and `DrainStamps` varied | `Inv_AckStamped` | without the stamp VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397); with the guard and the stamp, no violation to the 1,200 s cap: depth 18, 89,002,087 states, bounded (tla-mc 0.2.1 compiled) | the stamp carries the barrier claim: without it the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped, as predicted; only guard and stamp together show no violation at the bound |
 | q14 | identity at rev 14, every knob off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 | rev 14 with its knobs off is rev 12 |
+| lv | two replicas, liveness on the final setting (rev 17 `61ae6829`: the rule, the drain, the triple; two failures; wrapper `752b1a56`; c31, tla-mc 0.2.2 compiled, 12 workers): lost mark; crash; zombie move, under `Spec` and under `SpecNoReturn` | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 7 in every fault (3,489; 4,466; 6,023 states), the same without fairness on the return; the record-down controls lasso at depth 7 as before | the property as stated fails on the final setting: a leg begins to fail, the drain takes the healthy one, the stamp lands on no survivor, the raid holds with no member until unstaged; nothing acknowledged is lost |
+| lv | the same, the property restated: a barrier ends, or the raid has no member left (and: or no healthy member) (wrapper `6604c794`) | all | `Prop_BarrierEndsM`, `Prop_BarrierEndsH` | running | the liveness claim on the final setting |
 | z4 | four replicas, zombie move, three failures, the continuation tested by sequence and generation (rev 16 `d9062ab6`; control for the correction above; c33b, tla-mc 0.2.1 compiled, 24 workers) | all four rule knobs; the triple off | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | VIOLATED at depth 11 (3,368,405 states, 57 s): a zombie's leg passes as a confirmed two-leg continuation and acknowledges alone | the model was looser than the rule at four replicas; the killed control for rev 17 |
 | z4 | the same with the triple (rev 17 `61ae6829`); identity at rev 16 and rev 17 | all four rule knobs and `ZombieTriple` | the four above | running; the identity at rev 16 is exact (7,286,102, depth 36) | the literal rule, to be cited bounded |
 
@@ -2996,8 +2998,12 @@ fault (c28, rev 12, under the spec's weak fairness on the monitor's
 mark, the stamp landing or failing, the release and the record's
 confirm, with each record-down control killed; c30 drops the fairness
 on a failed path's return and the three HOLDs stand, with a positive
-control showing the fairness was dropped) and stays unshown at three,
-which the user accepted as the claim on 2026-10-31. No three-replica control
+control showing the fairness was dropped) and stays unshown at three.
+On the final setting (rev 17, the rule, the drain, the triple) the
+property as stated fails: a drain can take the last healthy leg while
+the other is failing and the raid holds with no member, a dead volume,
+nothing acknowledged lost; it is being restated as "a barrier ends,
+or the raid has no member left" (gate item 4). No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
 show the rules holding together, not which rule carries which HOLD.
@@ -3154,7 +3160,7 @@ and decided by the user:
          as uniqueness of the read fields and the three-replica pair is
          rerunning. No symmetry result for the three-replica zombie is
          cited until that holds.
-   - [x] Liveness: `Prop_BarrierEnds` as a full pass with its control
+   - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
          (c21's arm reached no verdict). Two replicas done (c28,
          2026-10-31, rev 12, the full rule set, tla-mc 0.2.1): the lost
          mark, the crash and the zombie move hold over their full
@@ -3170,10 +3176,26 @@ and decided by the user:
          ending needs no leg back. In code the premise is that timeouts
          fire, the P4 fix (`c7e5d2fe`). Three replicas has no feasible full pass (the
          safety spaces alone are 1.8 to 2.3 billion states): bounded
-         only. Accepted by the user on 2026-10-31: two-replica liveness is
-         the claim, three replicas bounded. The two-replica arms ran on
-         rev 12; their rerun on the final setting (rev 17 with the rule
-         knobs and the drain) is queued as the claim's confirmation.
+         only. The user accepted two-replica liveness as the claim on
+         2026-10-31, on rev 12's passes. Reopened the same day: the
+         rerun on the final setting (rev 17 `61ae6829`, the rule, the
+         drain and the triple, two replicas, two failures, tla-mc 0.2.2
+         compiled) fails the property as stated, a lasso at depth 7 in
+         every fault, with or without fairness on a leg's return: a leg
+         begins to fail, the drain takes the other, the healthy one,
+         since the in-write guard asks only for another `in_sync`
+         member, the stamp lands on no survivor, and the raid holds
+         with no member until it is unstaged. Nothing acknowledged is
+         lost; the volume is dead, which rev 12 could not reach
+         (its failure model never failed the last member, and it had no
+         drain). The property is restated as "a barrier ends, or the
+         raid has no member left" (and the variant "or no healthy
+         member"), running; the claim is re-cited on that verdict and
+         ticks when the user accepts the restated claim. Beside it, a
+         design question for the user: the drain's guard could ask for
+         another healthy member, not merely an `in_sync` one, which
+         would stop a drain from creating the dead raid; safety holds
+         either way.
    - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
          it at depth 23; c27's arm did not run). Cheapest: add it to the
          two full three-replica arms and rerun both on one m7i.48xlarge
