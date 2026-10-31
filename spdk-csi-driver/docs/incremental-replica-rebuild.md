@@ -2996,7 +2996,8 @@ fault (c28, rev 12, under the spec's weak fairness on the monitor's
 mark, the stamp landing or failing, the release and the record's
 confirm, with each record-down control killed; c30 drops the fairness
 on a failed path's return and the three HOLDs stand, with a positive
-control showing the fairness was dropped) and stays unshown at three. No three-replica control
+control showing the fairness was dropped) and stays unshown at three,
+which the user accepted as the claim on 2026-10-31. No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
 show the rules holding together, not which rule carries which HOLD.
@@ -3153,7 +3154,7 @@ and decided by the user:
          as uniqueness of the read fields and the three-replica pair is
          rerunning. No symmetry result for the three-replica zombie is
          cited until that holds.
-   - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
+   - [x] Liveness: `Prop_BarrierEnds` as a full pass with its control
          (c21's arm reached no verdict). Two replicas done (c28,
          2026-10-31, rev 12, the full rule set, tla-mc 0.2.1): the lost
          mark, the crash and the zombie move hold over their full
@@ -3169,8 +3170,10 @@ and decided by the user:
          ending needs no leg back. In code the premise is that timeouts
          fire, the P4 fix (`c7e5d2fe`). Three replicas has no feasible full pass (the
          safety spaces alone are 1.8 to 2.3 billion states): bounded
-         only. Ticked when the user accepts two-replica liveness as the
-         claim.
+         only. Accepted by the user on 2026-10-31: two-replica liveness is
+         the claim, three replicas bounded. The two-replica arms ran on
+         rev 12; their rerun on the final setting (rev 17 with the rule
+         knobs and the drain) is queued as the claim's confirmation.
    - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
          it at depth 23; c27's arm did not run). Cheapest: add it to the
          two full three-replica arms and rerun both on one m7i.48xlarge
