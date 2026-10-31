@@ -3007,7 +3007,8 @@ property as stated fails: every member can leave under a held loss, by
 two failures or by a drain beside a failing leg, and the raid holds
 with no member, a dead volume, nothing acknowledged lost; restated as "a barrier ends, or the raid has no member left" it holds
 over the full space in every fault on the final setting, as does the
-stronger "or no member is healthy" (gate item 4). No three-replica control
+stronger "or no member is healthy"; the user accepted it as the claim
+on 2026-10-31 (gate item 4). No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
 show the rules holding together, not which rule carries which HOLD.
@@ -3169,7 +3170,7 @@ and decided by the user:
          as uniqueness of the read fields and the three-replica pair is
          rerunning. No symmetry result for the three-replica zombie is
          cited until that holds.
-   - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
+   - [x] Liveness: `Prop_BarrierEnds` as a full pass with its control
          (c21's arm reached no verdict). Two replicas done (c28,
          2026-10-31, rev 12, the full rule set, tla-mc 0.2.1): the lost
          mark, the crash and the zombie move hold over their full
@@ -3205,8 +3206,8 @@ and decided by the user:
          final setting (lv2, the same spaces as the safety peels). The
          claim is therefore: at two replicas a barrier ends unless the
          raid has lost every member, and then nothing acknowledged is
-         lost and the volume is held until it is unstaged. Ticks when
-         the user accepts that restated claim. Beside it, a
+         lost and the volume is held until it is unstaged. Accepted by
+         the user as the claim on 2026-10-31. Beside it, a
          design question for the user: the drain's guard could ask for
          another healthy member, not merely an `in_sync` one, which
          would close the drain's path only, since two failures reach
