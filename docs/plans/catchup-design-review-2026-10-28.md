@@ -373,4 +373,9 @@ TieNA `780c1009`, every arm a full pass): the fence-flip mark closes the
 defer seam's catch-up claim under trust only and leaves §6's residual,
 which needs record-before-ack; the tie's attached conjunct is killed by
 no arm, with or without record-before-ack, so nothing credits it.
-Nothing in §12 is built.
+Nothing in §12 is built. On 2026-10-31 the user gated the raid1 patch
+on the models and proofs being complete; the checklist is under §12's
+delivery order (the trust rule's fresh-cache record, a TLAPS proof of
+the stamp rule, which does not exist yet, the three-replica zombie and
+liveness arms as full passes, the unrun c27 arms, resize modelled or
+excluded, the model files on main).

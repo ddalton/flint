@@ -2867,8 +2867,10 @@ each rule rests on the two-replica controls; the three-replica rows
 show the rules holding together, not which rule carries which HOLD. The
 hole is legal by definition in the rows that
 count it so, and its bound (in flight at the fence or at a crash) is a
-property of the raid, not of the model. The stamp's TLAPS proof (the
-record run of FlintCatchupS, flint-e4) waits for a quiet box. The model
+property of the raid, not of the model. The stamp model has no TLAPS
+proof; the proved rule is §5's trust rule (FlintCatchupT), whose
+fresh-cache record run waits for a quiet box, and a proof of the stamp
+rule is in the gate under *Delivery order*. The model
 files are local to flint-e4's branch until the user says push. Nothing
 in this section is built.
 
@@ -2882,7 +2884,8 @@ Open with flint-e4:
 
 ### Code asks
 
-flint-91, once the model holds, scoped here and decided by the user:
+flint-91, once the gate under *Delivery order* is passed, scoped here
+and decided by the user:
 
 - [ ] The raid1 patch in the carried series: the reserve, the stamp
       write, the barrier, the majority release, the `get_bdevs` field and
@@ -2923,7 +2926,33 @@ flint-91, once the model holds, scoped here and decided by the user:
 
 ### Delivery order
 
-1. The model arm and its controls (flint-e4).
+1. The model and the proofs, complete (flint-e4). **The user's gate
+   (2026-10-31): no work on the raid1 patch, the driver or the node agent
+   starts until every item below is done and cited in the table above
+   under its md5.** Each item is a checkbox; flint-e4 confirms the list
+   and estimates it, and anything needing a box beyond the Linux one is
+   a plan and a cost for the user to approve first.
+   - [ ] The trust rule's TLAPS record run on a fresh cache, asserting
+         every input's md5, with its thirteen controls (§5).
+   - [ ] A TLAPS proof of the stamp rule itself, on FlintCatchupS. None
+         exists: the proved rules are FlintCatchup and FlintCatchupT.
+   - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
+         depth 27), or the user's explicit acceptance of the bound.
+   - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
+         (c21's arm reached no verdict).
+   - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
+         it at depth 23; c27's arm did not run).
+   - [ ] The c27 arms the cut left unrun: the expiry form, the two
+         sole-continuation arms, four replicas.
+   - [ ] The resize rule modelled (the model has fixed-size legs and no
+         row covers it), or resize excluded from the patch's first cut
+         by the user.
+   - [ ] The monitor-skips question classed by a rev 10 or later arm
+         with the pre-stamp write legal (c21's arm neither confirms nor
+         refutes it); a follow-up unless the user folds it in.
+   - [ ] The model files pushed by PR at the user's word, so every md5
+         the table cites is on main.
+   The premises' pins are code and sit in step 4, not here.
 2. The raid1 patch with its unit tests, on the box.
 3. The driver and node-agent changes behind one flag, default off until
    the kind drills pass.
