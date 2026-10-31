@@ -350,9 +350,10 @@ could not count as legal and rev 10 does. Under the full rule set (rev
 pass on the lost mark and the crash (1,774,204,193 and 2,325,892,812
 states) and the zombie arm is checked to depth 27 without a violation,
 bounded, not a full pass. c21 closed on 2026-10-31 with every remaining
-rev 7 three-replica arm bounded at the box's hour (depths 20 to 24: three
-failures allowed, the member-only read, the acknowledgement stamp, the
-record unwritable, the late capture), its zombie arms at the depth 17
+rev 7 three-replica arm bounded at the box's cap, an hour, or half an
+hour for the acknowledgement stamp (depths 20 to 24: three failures
+allowed, the member-only read, the acknowledgement stamp, the record
+unwritable, the late capture), its zombie arms at the depth 17
 hole, and its liveness arm at no verdict, so the barrier's termination is
 claimed by no run; the monitor-skips arm neither confirms nor refutes the
 strand's alternative fix, since the hole masks it. The expiry
