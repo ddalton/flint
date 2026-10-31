@@ -379,8 +379,15 @@ termination was then shown at two replicas over the full space (c28,
 the spec's weak fairness, each record-down control lassos; c30 drops
 the fairness on a failed path's return and the three hold unchanged,
 with a positive control showing it was dropped) and stays
-unshown at three, which the user accepted as the claim on 2026-10-31;
-the monitor-skips arm neither confirms nor refutes the
+unshown at three; the user accepted that as the claim on 2026-10-31 on
+rev 12, and the same day the rerun on the final setting (the rule, the
+drain, the triple) refuted the property as stated by a dead raid, a
+drain taking the last healthy leg while the other fails, nothing
+acknowledged lost; the property is restated as "a barrier ends, or the
+raid has no member left" and the claim awaits that verdict and the
+user's word, with a drain guard asking for a healthy member as the
+design question beside it; the monitor-skips arm neither confirms nor
+refutes the
 strand's alternative fix, since the hole masks it. The expiry
 action loses an acknowledged write at depth 12, the measurement that
 decided the bound. Two of c21's controls ran in the wrong configuration
