@@ -169,7 +169,8 @@ operator listed (2026-10-05, §4.15).
 | | enforced by | in code |
 |---|---|---|
 | `identity.mode` must be in `node.identityModes`; the default list leaves out `ambient` (the worker's own chain — on EC2 the node's instance role, read-write to whatever that role reaches) | `identity_mode_allowed`, `DEFAULT_IDENTITY_MODES` | `s3csi/node.rs` |
-| when `node.endpointAllow` is set, `spec.endpoint`'s host must be in it (a host, or `*.suffix`; never the bare suffix); empty admits any | `endpoint_allowed`, `endpoint_host` | `s3csi/node.rs` |
+| when `node.endpointAllow` is set, `spec.endpoint`'s host must be in it (a host, or `*.suffix`; never the bare suffix), and a CR with no `spec.endpoint` is refused, since its worker would go to AWS's endpoint for whatever region wins, a host the list never judged (#49); empty admits any | `endpoint_allowed`, `endpoint_host` | `s3csi/node.rs` |
+| `--endpoint-url` in `spec.mountOptions`, in either form, is refused whatever the list: the endpoint is `spec.endpoint`'s to name (#49) | `MountSpec::validate` | `passthrough/spec.rs` |
 | both are judged at publish, before any worker exists; the refusal is FailedPrecondition naming the knob, and kubelet carries it as the pod's FailedMount | `publish` | `s3csi/node.rs` |
 | a misspelt mode in the list, or an empty list, is a start-up error by name | `parse_identity_modes` | `s3csi/node.rs` |
 
@@ -200,7 +201,7 @@ operator listed (2026-10-05, §4.15).
 | P10 | `redaction_masks_secret_shaped_arguments`; `creds_json_is_the_container_credentials_shape`; `our_audience_token_is_picked_and_never_debug_printed`; `the_start_up_line_never_prints_a_secret`; `token_is_written_once_at_0600_and_reloaded`; `a_launch_debug_prints_env_keys_and_never_a_value` (plugin and worker) | S3, S31 | sts runs | nothing greps events or the broker log for key material |
 | P11 | `the_worker_ceiling_admits_up_to_and_not_past_its_number` | S33, S36 | S36 on kind 2026-10-04: 1.57.1 peak 9 over a ceiling of 7 (the race); fixed, peak 7, one of six mounted | — |
 | P12 | `static_arm_needs_both_keys_and_passes_region`; `sharing_cannot_run_on_a_per_pod_secret` | S5c | sts run 2, 2/2 | — |
-| P13 | `identity_modes_default_leaves_ambient_out_and_a_refusal_names_the_knob`; `endpoint_allow_matches_hosts_and_suffixes_and_empty_admits_any`; `config_requires_the_image_and_node_name` (the env parse, a misspelt mode); `web_identity_reregisters_within_half_the_table_ttl_floor` | S38 | kind 2026-10-05: S38 + S37 17/0 (`s3csi/e2e/results/2026-10-05-hardening/`) | a mount made before a list changed is not re-judged on republish; `node.endpointAllow` is empty by default |
+| P13 | `identity_modes_default_leaves_ambient_out_and_a_refusal_names_the_knob`; `endpoint_allow_matches_hosts_and_suffixes_and_empty_admits_any`; `a_cr_with_no_endpoint_is_refused_while_the_list_is_set`; `an_endpoint_in_mount_options_is_refused` (#49); `config_requires_the_image_and_node_name` (the env parse, a misspelt mode); `web_identity_reregisters_within_half_the_table_ttl_floor` | S38 | kind 2026-10-05: S38 + S37 17/0 (`s3csi/e2e/results/2026-10-05-hardening/`) | a mount made before a list changed is not re-judged on republish; `node.endpointAllow` is empty by default |
 
 ## 4. What is NOT claimed
 

@@ -138,7 +138,11 @@ node:
   # space- or comma-separated; a host, or `*.suffix`). Empty ⇒ any: the
   # endpoint is the CR author's own choice and the credential a worker
   # carries is already bounded to its CR. Set it to confine worker egress
-  # to known stores, e.g. "*.amazonaws.com minio.flint-system.svc".
+  # to known stores, e.g. "*.amazonaws.com minio.flint-system.svc". While
+  # it is set, a CR must name its endpoint: one with no spec.endpoint is
+  # refused, since its worker would go to AWS's endpoint for its region
+  # (for AWS, write https://s3.<region>.amazonaws.com). A CR may never set
+  # the endpoint through spec.mountOptions (--endpoint-url).
   endpointAllow: ""
 
   # Above every tenant workload: a kubelet DiskPressure eviction of this

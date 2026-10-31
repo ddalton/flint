@@ -755,9 +755,13 @@ impl S3Node {
         // hosts a mount may be sent to. Refused here, before any worker
         // exists, by name.
         identity_mode_allowed(policy.credential_mode, &self.cfg.identity_modes).map_err(Status::failed_precondition)?;
-        if let Some(ep) = resolved.endpoint() {
-            endpoint_allowed(ep, &self.cfg.endpoint_allow).map_err(Status::failed_precondition)?;
-        }
+        // The list judges the endpoint the worker will use. A CR without
+        // spec.endpoint still has one: mount-s3 and the syncer resolve AWS's
+        // own for whichever region wins (the CR's, the node default, a
+        // static Secret's AWS_REGION), so with a list set the CR must name
+        // it (issue #49).
+        endpoint_allowed(resolved.endpoint(), &self.cfg.endpoint_allow)
+            .map_err(Status::failed_precondition)?;
         let kind = match resolved {
             Resolved::Passthrough { .. } => "FlintPassthroughMount",
             Resolved::Lean { .. } => "FlintLeanWorkspace",
@@ -3085,11 +3089,20 @@ fn host_matches(host: &str, pattern: &str) -> bool {
 /// An empty list admits any endpoint (the chart's default: the endpoint
 /// is the CR author's own choice, and the credential a worker carries is
 /// already bounded to its CR); a non-empty one is where a mount may be
-/// sent, and nowhere else.
-pub fn endpoint_allowed(url: &str, allow: &[String]) -> Result<(), String> {
+/// sent, and nowhere else. A CR that names no endpoint is refused while
+/// the list is set: its worker would go to AWS's endpoint for whatever
+/// region wins, a host the list never judged (issue #49).
+pub fn endpoint_allowed(url: Option<&str>, allow: &[String]) -> Result<(), String> {
     if allow.is_empty() {
         return Ok(());
     }
+    let Some(url) = url else {
+        return Err(format!(
+            "spec.endpoint is not set, and node.endpointAllow (FLINT_S3CSI_ENDPOINT_ALLOW: \"{}\") is — name the store \
+             in spec.endpoint (for AWS, https://s3.<region>.amazonaws.com); this node driver sends mounts only to those hosts",
+            allow.join(" ")
+        ));
+    };
     let host = endpoint_host(url).ok_or_else(|| format!("spec.endpoint {url:?} names no host"))?;
     if allow.iter().any(|p| host_matches(&host, p)) {
         return Ok(());
@@ -3373,9 +3386,12 @@ mod tests {
         assert_eq!(endpoint_host("http://"), None);
         let allow = parse_host_list("*.amazonaws.com, minio.flint-system.svc");
         assert_eq!(allow, vec!["*.amazonaws.com".to_string(), "minio.flint-system.svc".to_string()]);
-        assert!(endpoint_allowed("https://s3.us-west-1.amazonaws.com", &allow).is_ok());
-        assert!(endpoint_allowed("http://minio.flint-system.svc:9000/", &allow).is_ok());
-        assert!(endpoint_allowed("http://MINIO.flint-system.svc:9000", &allow).is_ok(), "case does not count");
+        assert!(endpoint_allowed(Some("https://s3.us-west-1.amazonaws.com"), &allow).is_ok());
+        assert!(endpoint_allowed(Some("http://minio.flint-system.svc:9000/"), &allow).is_ok());
+        assert!(
+            endpoint_allowed(Some("http://MINIO.flint-system.svc:9000"), &allow).is_ok(),
+            "case does not count"
+        );
         for bad in [
             "https://amazonaws.com",
             "https://s3.amazonaws.com.evil.example",
@@ -3383,11 +3399,34 @@ mod tests {
             "http://rustfs.flint-system.svc:9000",
             "http://xminio.flint-system.svc:9000",
         ] {
-            let e = endpoint_allowed(bad, &allow).unwrap_err();
+            let e = endpoint_allowed(Some(bad), &allow).unwrap_err();
             assert!(e.contains("node.endpointAllow") && e.contains("FLINT_S3CSI_ENDPOINT_ALLOW"), "{bad}: {e}");
         }
-        assert!(endpoint_allowed("http://anything.example", &[]).is_ok(), "an empty list admits any endpoint");
-        assert!(endpoint_allowed("http://", &allow).unwrap_err().contains("names no host"));
+        assert!(
+            endpoint_allowed(Some("http://anything.example"), &[]).is_ok(),
+            "an empty list admits any endpoint"
+        );
+        assert!(endpoint_allowed(Some("http://"), &allow).unwrap_err().contains("names no host"));
+    }
+
+    /// A CR with no spec.endpoint still sends its worker somewhere: AWS's
+    /// endpoint for whichever region wins. With a list set it is refused by
+    /// name, since that host was never judged (issue #49); with no list it
+    /// mounts as before.
+    #[test]
+    fn a_cr_with_no_endpoint_is_refused_while_the_list_is_set() {
+        let allow = parse_host_list("*.amazonaws.com minio.flint-system.svc");
+        let e = endpoint_allowed(None, &allow).unwrap_err();
+        assert!(e.contains("spec.endpoint is not set") && e.contains("node.endpointAllow"), "{e}");
+        assert!(
+            e.contains("FLINT_S3CSI_ENDPOINT_ALLOW")
+                && e.contains("https://s3.<region>.amazonaws.com"),
+            "{e}"
+        );
+        assert!(
+            endpoint_allowed(None, &[]).is_ok(),
+            "with no list, a CR may leave the endpoint to AWS"
+        );
     }
 
     /// The webIdentity re-register period sits under half the broker's

@@ -576,6 +576,27 @@ covered by the stability guarantee.
 
 ### Security
 
+- **`node.endpointAllow` now judges the endpoint a mount's worker
+  actually uses** (2026-10-31, #49; `spdk-csi-driver/src/s3csi/node.rs`,
+  `spdk-csi-driver/src/passthrough/spec.rs`). The list was checked only
+  when a CR set `spec.endpoint`. A CR that left it out still sent its
+  worker somewhere, signing requests with the mount's credential: to
+  AWS's endpoint for its region, or to any host named by `--endpoint-url`
+  in `spec.mountOptions`, which the mounter passes through as it stands.
+  Both were reproduced on v1.58.0 (kind, Istio ambient): with the list
+  set to one in-cluster store, such a CR mounted through a host the list
+  refused, sent its signed requests to another in-cluster store, or went
+  to AWS S3. The secret itself is never sent, but the access key ID and a
+  signature are. Now, while the list is set, a CR with no `spec.endpoint`
+  is refused at publish by name (for AWS, write
+  `https://s3.<region>.amazonaws.com`; a `FlintPassthroughMount` with an
+  endpoint sends path-style requests unless it sets `pathStyle: false`),
+  and a `FlintPassthroughMount` with `--endpoint-url` in
+  `spec.mountOptions`, in either form, is refused whatever the list
+  says. Both refusals come before any worker exists. With the list
+  empty, which is the chart's default, a CR may still leave its endpoint
+  to AWS.
+
 - **The CSI driver's build no longer pulls a vulnerable `pulldown-cmark`**
   (2026-10-29; `spdk-csi-driver/Cargo.lock`). `tonic-prost-build`, which
   generates the gRPC bindings when the driver is built, brought in

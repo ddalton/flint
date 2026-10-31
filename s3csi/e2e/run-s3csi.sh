@@ -2645,7 +2645,7 @@ fi
 # its mounter's own chain holds nothing, which is the rig's business,
 # not the allowlist's: the control is that the refusal is no longer the
 # allowlist's).
-leg S38 "the operator's allowlists: identity.mode ambient is refused by name under the chart's default list; a CR whose endpoint is off node.endpointAllow is refused by name; no worker is made for either; both proceed once the lists admit them"
+leg S38 "the operator's allowlists: identity.mode ambient is refused by name under the chart's default list; a CR whose endpoint is off node.endpointAllow is refused by name, and so is one with no spec.endpoint (#49); --endpoint-url in spec.mountOptions is refused always (#49); no worker is made for any of them; the first two proceed once the lists admit them"
 # The ambient CR is this leg's own: the kind setup applies tenants.yaml,
 # not pt-tenants.yaml.tpl (that is aws-passthrough.sh's), so pt-ambient
 # does not exist here (run 1: NotFound, 2026-10-05).
@@ -2661,6 +2661,32 @@ spec:
   uid: 1001
   consumers: { serviceAccounts: [trainer] }
   identity: { mode: ambient }
+EOF
+# Issue #49: the list judged spec.endpoint only when a CR set it. A CR
+# with no spec.endpoint still sends its worker to AWS's endpoint for its
+# region, and --endpoint-url in spec.mountOptions sent it anywhere. Now
+# the first is refused while the list is set, and the second always.
+$K apply -f - >/dev/null <<EOF
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: s38-noep, namespace: $NS }
+spec:
+  bucket: $BUCKET
+  keyPrefix: s38/noep
+  region: $S3_REGION
+  uid: 1001
+  consumers: { serviceAccounts: [trainer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: s38-mopt, namespace: $NS }
+spec:
+  bucket: $BUCKET
+  keyPrefix: s38/mopt
+  region: $S3_REGION
+  uid: 1001
+  mountOptions: ["--endpoint-url", "$S3_ENDPOINT"]
+  consumers: { serviceAccounts: [trainer] }
 EOF
 if chart_up --set node.identityModes="broker webIdentity static stsSecret" --set node.endpointAllow="*.amazonaws.com" >/dev/null 2>&1 && plugin_rolled; then
     ok "PRECONDITION: the plugin rolled with the chart's default identityModes and endpointAllow=*.amazonaws.com"
@@ -2678,7 +2704,18 @@ if chart_up --set node.identityModes="broker webIdentity static stsSecret" --set
         bad "no FailedMount naming node.endpointAllow on s38-endpoint in 180 s: $(mount_events s38-endpoint | tail -1 | cut -c1-200)"
     fi
     [ -z "$(worker_of_any s38-ambient)$(worker_of_any s38-endpoint)" ] && ok "no worker exists for either refused pod: the refusal came before any worker" || bad "a worker exists for a refused pod: $(worker_of_any s38-ambient) $(worker_of_any s38-endpoint)"
-    $K -n $NS delete pod s38-ambient s38-endpoint --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
+    sed -e "s#__NAME__#s38-noep#g" -e "s#__CR__#s38-noep#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
+    sed -e "s#__NAME__#s38-mopt#g" -e "s#__CR__#s38-mopt#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
+    if ev=$(wait_event s38-noep FailedMount "spec.endpoint is not set" 180); then
+        echo "$ev" | grep -q "node.endpointAllow" && ok "a CR with no spec.endpoint is refused while the list is set, naming the field and the knob" || bad "the no-endpoint refusal does not name node.endpointAllow: $(echo "$ev" | cut -c1-200)"
+    else
+        bad "no FailedMount naming 'spec.endpoint is not set' on s38-noep in 180 s (#49: the worker would go to AWS's endpoint): $(mount_events s38-noep | tail -1 | cut -c1-200)"
+    fi
+    wait_event s38-mopt FailedMount "spec.mountOptions sets the endpoint" 180 >/dev/null \
+        && ok "--endpoint-url in spec.mountOptions is refused, naming spec.endpoint" \
+        || bad "no FailedMount naming 'spec.mountOptions sets the endpoint' on s38-mopt in 180 s (#49): $(mount_events s38-mopt | tail -1 | cut -c1-200)"
+    [ -z "$(worker_of_any s38-noep)$(worker_of_any s38-mopt)" ] && ok "no worker exists for the no-endpoint or the mountOptions-endpoint pod" || bad "a worker exists for a refused pod: $(worker_of_any s38-noep) $(worker_of_any s38-mopt)"
+    $K -n $NS delete pod s38-ambient s38-endpoint s38-noep s38-mopt --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1
     if chart_up >/dev/null 2>&1 && plugin_rolled; then
         ok "chart restored (ambient listed, no endpoint list)"
         sed -e "s#__NAME__#s38-endpoint#g" -e "s#__CR__#datasets#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
@@ -2693,7 +2730,13 @@ if chart_up --set node.identityModes="broker webIdentity static stsSecret" --set
         else
             bad "CONTROL: the ambient pod made no observable publish attempt in 60 s (phase '$ph', no mount events)"
         fi
-        $K -n $NS delete pod s38-ambient s38-endpoint --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+        # with no list, the mountOptions endpoint is still refused: by the
+        # CR's validation, not by the list
+        sed -e "s#__NAME__#s38-mopt#g" -e "s#__CR__#s38-mopt#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
+        wait_event s38-mopt FailedMount "spec.mountOptions sets the endpoint" 180 >/dev/null \
+            && ok "with no list, --endpoint-url in spec.mountOptions is still refused (the CR's validation)" \
+            || bad "with no list, s38-mopt was not refused for its mountOptions endpoint: $(mount_events s38-mopt | tail -1 | cut -c1-200)"
+        $K -n $NS delete pod s38-ambient s38-endpoint s38-mopt --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
     else
         bad "chart restore failed"
     fi
@@ -2701,7 +2744,7 @@ else
     bad "PRECONDITION: chart_up with the allowlists did not roll — S38 made no observation"
     chart_up >/dev/null 2>&1 && plugin_rolled
 fi
-$K -n $NS delete flintpassthroughmount s38-ambient --ignore-not-found >/dev/null 2>&1
+$K -n $NS delete flintpassthroughmount s38-ambient s38-noep s38-mopt --ignore-not-found >/dev/null 2>&1
 
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the

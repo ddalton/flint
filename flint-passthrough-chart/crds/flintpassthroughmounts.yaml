@@ -183,6 +183,9 @@ spec:
                     ["--file-mode", "0755"] and ["--dir-mode", "0775"]
                     are the only way to change the modes the mount shows
                     (default 0644 and 0755): chmod is refused.
+                    --endpoint-url is refused here: the endpoint is
+                    spec.endpoint's to name, where the s3 CSI node's
+                    node.endpointAllow judges it.
                   items:
                     type: string
                 cache:

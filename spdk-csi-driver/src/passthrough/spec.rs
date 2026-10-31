@@ -308,6 +308,21 @@ impl MountSpec {
                  exit on it. Drop it, or write the mount-s3 equivalent"
             ));
         }
+        // The endpoint is spec.endpoint's to name: node.endpointAllow judges
+        // that field, and the mounter passes it as --endpoint-url. The same
+        // flag in mountOptions would send the worker, signing with the
+        // mount's credential, to a host the list never judged (issue #49);
+        // beside spec.endpoint, mount-s3 exits on the duplicate flag.
+        if let Some(o) = self
+            .mount_options
+            .iter()
+            .find(|o| *o == "--endpoint-url" || o.starts_with("--endpoint-url="))
+        {
+            return Err(format!(
+                "spec.mountOptions sets the endpoint ({o:?}) — name it in spec.endpoint, which \
+                 node.endpointAllow judges"
+            ));
+        }
         if let Some(p) = &self.key_prefix {
             if p.starts_with('/') {
                 return Err(format!(
@@ -375,6 +390,42 @@ mod tests {
     /// value rather than prune it silently — see the tombstone note in
     /// crds/flintpassthroughmounts.yaml.
     const TOMBSTONES: &[&str] = &["driver"];
+
+    /// The endpoint belongs in spec.endpoint, where node.endpointAllow
+    /// judges it: --endpoint-url in mountOptions, in either form, would
+    /// send the worker around the list (issue #49). Other flags pass.
+    #[test]
+    fn an_endpoint_in_mount_options_is_refused() {
+        let mut s = MountSpec {
+            bucket: "b".into(),
+            key_prefix: None,
+            endpoint: None,
+            region: None,
+            mount_path: "/mnt/s3".into(),
+            read_only: false,
+            path_style: None,
+            credentials_secret_ref: None,
+            uid: None,
+            gid: None,
+            mount_options: vec![],
+            cache: None,
+            sharing: None,
+            image: None,
+            consumers: None,
+            identity: None,
+        };
+        for opts in [
+            vec!["--endpoint-url", "http://other-s3:9000"],
+            vec!["--endpoint-url=http://other-s3:9000"],
+        ] {
+            s.mount_options = opts.iter().map(|o| o.to_string()).collect();
+            let e = s.validate().expect_err("an endpoint in mountOptions must be refused");
+            assert!(e.contains("spec.endpoint") && e.contains("node.endpointAllow"), "{e}");
+        }
+        s.mount_options =
+            vec!["--metadata-ttl".into(), "60".into(), "--endpoint-urls-are-not-a-flag".into()];
+        assert!(s.validate().is_ok(), "other flags are not judged here");
+    }
 
     /// An enabled cache with no ceiling is unbounded: it fills the
     /// worker's scratch emptyDir, whose sizeLimit then EVICTS the
