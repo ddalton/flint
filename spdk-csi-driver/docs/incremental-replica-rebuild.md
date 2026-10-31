@@ -2858,6 +2858,8 @@ without the rule, and a HOLD on the data beside it.
 | c27 | three replicas, zombie move, two failures | all | the five above | no violation to depth 27 (2,429,420,385 distinct states, bounded: cut at the user's word at 1,186 s with the space still growing by half per level and the queue spilled to disk) | the three-replica zombie space is too large to exhaust; checked ten levels past the deepest three-replica trace the model has found (depth 17, c21), bounded, not a full pass |
 | c28 | two replicas, liveness: lost mark; crash; zombie move (rev 12 `8e54566d`, the full rule set, the record up) | all | `Prop_BarrierEnds`: a held barrier ends or the consumer detaches, under the spec's weak fairness | HOLD over the full space: 3,627,109 states, depth 35; 5,326,386, depth 35; 29,140,655, depth 39, equal to the zombie safety space (tla-mc 0.2.1, 4 workers; flint-e4, 2026-10-31, each log closing with every property checked) | the barrier is not a hang at two replicas, every fault, while the record is up and timeouts fire |
 | c28 | the same three with the record unwritable (control) | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 9; 8; 8, each stuttering with the barrier held | a minority barrier never ends without the record, as designed; the three controls are killed |
+| c30 | the same three with the fairness on a failed path's return dropped (wrapper `b719dbbf` on rev 12; `SpecNoReturn` is `Spec` less only `WF_vars(Return(r))`) | all | `Prop_BarrierEnds` | HOLD over the full space: 3,627,109, depth 35; 5,326,386, depth 35; 29,140,655, depth 39, each equal to its c28 twin (tla-mc 0.2.1, 4 workers; tables-c28.md, 2026-10-31) | the barrier ends at two replicas without any leg's path coming back |
+| c30 | the dropped fairness shown dropped (positive control, wrapper `752b1a56`): `Prop_PathReturns`, a failed path comes back, under `Spec` and under `SpecNoReturn` | all | `Prop_PathReturns` | HOLD under `Spec` (3,627,109, depth 35); VIOLATED under `SpecNoReturn`, a lasso at depth 9 with a path staying out | the specification line switched the fairness, so the c30 HOLDs are earned |
 
 What the table claims. At two replicas every arm under the full rule set
 is a full pass, and each safety rule has a control that fails without it
@@ -2882,9 +2884,10 @@ depths 20 to 24, three failures allowed adding no trace within that
 cap, and its liveness arm at no verdict. The barrier's
 termination is shown at two replicas over the full space for every
 fault (c28, rev 12, under the spec's weak fairness on the monitor's
-mark, a failed path's return, the stamp landing or failing, the release
-and the record's confirm, with each record-down control killed) and
-stays unshown at three. No three-replica control
+mark, the stamp landing or failing, the release and the record's
+confirm, with each record-down control killed; c30 drops the fairness
+on a failed path's return and the three HOLDs stand, with a positive
+control showing the fairness was dropped) and stays unshown at three. No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
 show the rules holding together, not which rule carries which HOLD.
@@ -2998,19 +3001,30 @@ and decided by the user:
          on 2026-10-31, so no acceptance of the bound is asked; the
          symmetry work runs to its end on the box and is recorded here.
          Interim (flint-e4,
-         2026-10-31): symmetry needs model-value ids, so rev 13
+         2026-10-31, c29): symmetry needs model-value ids, so rev 13
          (`41fa0652`) drops only the assumption that replica ids are
          naturals (rev 12's generator still reproduces `8e54566d`), and
          a wrapper module (`34243d06`) adds the permutation set and an
-         invariant that the newest view is unique, which is what makes
-         the stamp read blind to ids; the audit found no other use of
-         replica order in any S arm. Three violation pairs reproduce
-         rev 12's depths with and without symmetry (the three-replica
-         ungated decree at depth 13, 1,945,868 against 413,450 states,
-         about 4.7 times smaller); the full-pass pairs, which must
-         reproduce rev 12's counts exactly without symmetry, and a
-         bounded three-replica zombie pair are running to size the
-         reduction.
+         invariant that the stamp read is blind to ids; the audit found
+         no other use of replica order in any S arm. Without symmetry
+         the wrapper reproduces rev 12 exactly (the identity arm
+         7,286,102; the two-replica zombie, lost mark and crash
+         29,140,655, 3,627,109 and 5,326,386); with it each arm holds
+         or fails at the same depth, the two-replica spaces halved
+         (14,571,364; 1,814,591; 2,664,908), the most two replicas
+         allow, and the three-replica identity arm five times smaller
+         (1,453,655); three violation pairs reproduce rev 12's depths
+         (the three-replica ungated decree at depth 13, 1,945,868
+         against 413,450 states). One correction: the invariant as
+         first written, that the newest view is unique, is too strict.
+         In the three-replica zombie arm it fails at depth 7, where a
+         zombie's minority stamp seen through the released view ties
+         the valid majority stamp on every field the read uses
+         (sequence, generation, size, members) and differs only in the
+         released view, which the read never consults; it is restated
+         as uniqueness of the read fields and the three-replica pair is
+         rerunning. No symmetry result for the three-replica zombie is
+         cited until that holds.
    - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
          (c21's arm reached no verdict). Two replicas done (c28,
          2026-10-31, rev 12, the full rule set, tla-mc 0.2.1): the lost
@@ -3021,13 +3035,14 @@ and decided by the user:
          ending without the record. The claim rests on the spec's weak
          fairness on the monitor's mark, a failed path's return, the
          stamp landing or failing, the release and the record's
-         confirm; a control without fairness on the return has not run,
-         so whether the barrier's ending needs a leg back is open. In
-         code the premise is that timeouts fire, the P4 fix
-         (`c7e5d2fe`). Three replicas has no feasible full pass (the
+         confirm; c30 drops the fairness on a failed path's return and
+         the three HOLDs stand over the same spaces, with a positive
+         control showing the fairness was dropped, so the barrier's
+         ending needs no leg back. In code the premise is that timeouts
+         fire, the P4 fix (`c7e5d2fe`). Three replicas has no feasible full pass (the
          safety spaces alone are 1.8 to 2.3 billion states): bounded
          only. Ticked when the user accepts two-replica liveness as the
-         claim, with or without the return control.
+         claim.
    - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
          it at depth 23; c27's arm did not run). Cheapest: add it to the
          two full three-replica arms and rerun both on one m7i.48xlarge
