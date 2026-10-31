@@ -2835,9 +2835,10 @@ replicas, three failures, `Inv_NoNewLoss` violated at depth 11). Rev 17
 (`61ae6829`, knob `ZombieTriple`) tests the confirmed triple, the
 literal rule, and the move is left as it was. Every three-replica row
 in the table stands, as a claim to be rechecked on rev 17; the
-four-replica arm of the EC2 session ran on rev 12 without the triple,
-bounded, and the four-replica claim waits for a rerun at three failures
-on rev 17.
+four-replica arm of the EC2 session was cut as superseded, and its
+rerun at three failures on rev 17 is in the table, bounded at depth 13,
+with the fixed model's four-replica zombie arm clean to depth 16 where
+rev 16 failed at 11.
 
 ### Model verdicts (2026-10-30)
 
@@ -2967,10 +2968,12 @@ without the rule, and a HOLD on the data beside it.
 | d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AdmitNoLoss` | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard, no violation to the 1,200 s cap: depth 19 (93,175,140 states) without the drain stamp, depth 18 (89,002,087) with it, bounded (tla-mc 0.2.1 compiled; tables-d15.md) | the guard carries the data invariant; a stamp on the planned removal alone does not |
 | d15 | the drain, `Inv_AckStamped`, the guard and the stamp varied | all; `InWriteGuard` and `DrainStamps` varied | `Inv_AckStamped` | without the stamp VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397); with the guard and the stamp, no violation to the 1,200 s cap: depth 18, 89,002,087 states, bounded (tla-mc 0.2.1 compiled) | the stamp carries the barrier claim: without it the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped, as predicted; only guard and stamp together show no violation at the bound |
 | q14 | identity at rev 14, every knob off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 | rev 14 with its knobs off is rev 12 |
-| lv | two replicas, liveness on the final setting (rev 17 `61ae6829`: the rule, the drain, the triple; two failures; wrapper `752b1a56`; c31, tla-mc 0.2.2 compiled, 12 workers): lost mark; crash; zombie move, under `Spec` and under `SpecNoReturn` | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 7 in every fault (3,489; 4,466; 6,023 states), the same without fairness on the return; the record-down controls lasso at depth 7 as before | the property as stated fails on the final setting: a leg begins to fail, the drain takes the healthy one, the stamp lands on no survivor, the raid holds with no member until unstaged; nothing acknowledged is lost |
+| lv | two replicas, liveness on the final setting (rev 17 `61ae6829`: the rule, the drain, the triple; two failures; wrapper `752b1a56`; c31, tla-mc 0.2.2 compiled, 12 workers): lost mark; crash; zombie move, under `Spec` and under `SpecNoReturn` | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 7 in every fault (3,489; 4,466; 6,023 states), the same without fairness on the return; the record-down controls lasso at depth 7 as before | the property as stated fails on the final setting: every member leaves under a held loss (two failures, or a drain beside a failing leg), the stamp lands on no survivor, the raid holds with no member until unstaged; nothing acknowledged is lost |
 | lv | the same, the property restated: a barrier ends, or the raid has no member left (and: or no healthy member) (wrapper `6604c794`) | all | `Prop_BarrierEndsM`, `Prop_BarrierEndsH` | running | the liveness claim on the final setting |
 | z4 | four replicas, zombie move, three failures, the continuation tested by sequence and generation (rev 16 `d9062ab6`; control for the correction above; c33b, tla-mc 0.2.1 compiled, 24 workers) | all four rule knobs; the triple off | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | VIOLATED at depth 11 (3,368,405 states, 57 s): a zombie's leg passes as a confirmed two-leg continuation and acknowledges alone | the model was looser than the rule at four replicas; the killed control for rev 17 |
-| z4 | the same with the triple (rev 17 `61ae6829`); identity at rev 16 and rev 17 | all four rule knobs and `ZombieTriple` | the four above | running; the identity at rev 16 is exact (7,286,102, depth 36) | the literal rule, to be cited bounded |
+| z4 | the same with the triple (rev 17 `61ae6829`, the drain off, cfg `5ee58d31`); identity at rev 16 and rev 17 | all four rule knobs and `ZombieTriple` | the four above | no violation to depth 16 (184,876,790 states, the 1,800 s cap; c31, tla-mc 0.2.2 compiled), five levels past rev 16's trace; the identities at rev 16 and rev 17 exact (7,286,102, depth 36) (flint-e4, 2026-10-31) | the literal rule removes the trace, bounded |
+| g17 | three replicas, lost mark; crash; zombie move, on the final setting (rev 17 `61ae6829`: the rule, the drain with its stamp, the triple; three failures; cfgs `9513f4ac`, `99c1d563`, `93162dde`; c31, tla-mc 0.2.2 compiled) | all | `Inv_NoNewLoss` with `Inv_AckedHeld`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | no violation to depths 19, 18 and 17 (178,807,970; 191,925,993; 171,150,282 states; the 1,800 s cap), bounded; with the drain off (c33b, tla-mc 0.2.1) depths 19, 19 and 17, the lost-mark and zombie counts equal to rev 16's exactly (flint-e4, 2026-10-31) | the three-replica rows rechecked on the final setting, bounded; the full three-replica passes remain c27's on rev 12 |
+| g17 | four replicas, zombie move, three failures, on the final setting (cfg `0bb5829f`, with `Inv_TornJunkMarked`) | all | the five | no violation to depth 13 (178,880,279 states, the 1,800 s cap), bounded | the four-replica rerun that replaces the EC2 session's cut arm |
 
 What the table claims. At two replicas every arm under the full rule set
 is a full pass, and each safety rule has a control that fails without it
@@ -3000,9 +3003,9 @@ confirm, with each record-down control killed; c30 drops the fairness
 on a failed path's return and the three HOLDs stand, with a positive
 control showing the fairness was dropped) and stays unshown at three.
 On the final setting (rev 17, the rule, the drain, the triple) the
-property as stated fails: a drain can take the last healthy leg while
-the other is failing and the raid holds with no member, a dead volume,
-nothing acknowledged lost; it is being restated as "a barrier ends,
+property as stated fails: every member can leave under a held loss, by
+two failures or by a drain beside a failing leg, and the raid holds
+with no member, a dead volume, nothing acknowledged lost; it is being restated as "a barrier ends,
 or the raid has no member left" (gate item 4). No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
@@ -3121,7 +3124,12 @@ and decided by the user:
          `LastFails`, `WholeMark`, `InWriteGuard`, `MonitorGuard` and
          `ZombieTriple` on, and the drain inside it (`OperatorMark`,
          `InWriteGuard` and `DrainStamps` on) since the user adopted the
-         planned-removal stamp on 2026-10-31.
+         planned-removal stamp on 2026-10-31. Progress (2026-10-31):
+         the inductive invariant's 66 conjuncts (`e6ffb518`) hold in
+         full on the four two-replica bases with the drain in
+         (28,546,374; 38,136,587; 149,739,816; 191,910,011 states) and
+         are bounded clean at three and four replicas; the last lemmas
+         and the record run are in progress.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
@@ -3181,11 +3189,13 @@ and decided by the user:
          rerun on the final setting (rev 17 `61ae6829`, the rule, the
          drain and the triple, two replicas, two failures, tla-mc 0.2.2
          compiled) fails the property as stated, a lasso at depth 7 in
-         every fault, with or without fairness on a leg's return: a leg
-         begins to fail, the drain takes the other, the healthy one,
-         since the in-write guard asks only for another `in_sync`
-         member, the stamp lands on no survivor, and the raid holds
-         with no member until it is unstaged. Nothing acknowledged is
+         every fault, with or without fairness on a leg's return: every
+         member leaves under a held loss, by two failures (a leg fails
+         out and the other, already failing, fails the stamp) or by a
+         drain beside a failing leg (the in-write guard asks only for
+         another `in_sync` member); either way the stamp lands on no
+         survivor and the raid holds with no member until it is
+         unstaged. Nothing acknowledged is
          lost; the volume is dead, which rev 12 could not reach
          (its failure model never failed the last member, and it had no
          drain). The property is restated as "a barrier ends, or the
@@ -3194,8 +3204,8 @@ and decided by the user:
          ticks when the user accepts the restated claim. Beside it, a
          design question for the user: the drain's guard could ask for
          another healthy member, not merely an `in_sync` one, which
-         would stop a drain from creating the dead raid; safety holds
-         either way.
+         would close the drain's path only, since two failures reach
+         the same dead raid without it; safety holds either way.
    - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
          it at depth 23; c27's arm did not run). Cheapest: add it to the
          two full three-replica arms and rerun both on one m7i.48xlarge
@@ -3209,9 +3219,10 @@ and decided by the user:
          session, four to five hours of instance in all. The four-replica
          arm runs on rev 12, which tests a zombie's continuation by
          sequence and generation rather than by its members (the
-         correction above); its verdict is bounded there and the
-         four-replica claim waits for a rerun at three failures on rev
-         17 in the next session. Priced on
+         correction above); that arm was cut as superseded when the user
+         gave the instance to the proof, and its rerun at three
+         failures on rev 17 with the drain in is in the table, bounded
+         at depth 13. Priced on
          2026-10-31 (spot, nothing provisioned): m7i.48xlarge at $1.48
          an hour in us-west-1a plus a 2 TB gp3 disk at about $0.36,
          about $8.30 for the session, with the hard shutdown at six
