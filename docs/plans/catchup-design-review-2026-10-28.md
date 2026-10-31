@@ -281,7 +281,7 @@ What it changes in the recommendations above:
 | The tie's demotion of an unattached source | the conjunct becomes "named in the newest valid stamp"; the demotion stands only for a source the raid dropped |
 | Base floor and forced re-revert | retire once per-epoch membership is in the record |
 | The residual, a consumer crash inside a failure window | closed by the stamp for a crash and for a move; the raid1 write hole on writes never acknowledged remains |
-| TLAPS proof of the trust rule | pass 7 proved all 7,673 obligations on a seeded cache (2026-10-29); the fresh-cache record and its 13 controls held for a quiet box now that batch c21 has closed (2026-10-31), to rerun alone; the confirmation batch c15 closed 2026-10-30 (67 arms on `8ac3cf00`, most with the pre-fix cut, see §5's status) |
+| TLAPS proof of the trust rule | pass 7 proved all 7,673 obligations on a seeded cache (2026-10-29); the fresh-cache record reported done 2026-10-31 (all 7,673 proved, three md5s asserted, twelve of 13 controls in), cited in §5 when its results section lands; the proof covers the clean setting only, never a crash or a zombie; the stamp model has no proof, see §12's gate; the confirmation batch c15 closed 2026-10-30 (67 arms on `8ac3cf00`, most with the pre-fix cut, see §5's status) |
 
 Four gaps were found by the model ahead of any code, all closed by
 rules now in §12. First, a stamp read among the attached legs is conclusive
@@ -378,4 +378,9 @@ on the models and proofs being complete; the checklist is under §12's
 delivery order (the trust rule's fresh-cache record, a TLAPS proof of
 the stamp rule, which does not exist yet, the three-replica zombie and
 liveness arms as full passes, the unrun c27 arms, resize modelled or
-excluded, the model files on main).
+excluded, the model files on main). flint-e4's estimates, 2026-10-31:
+the stamp proof five to ten days, or two to three for a proof of the
+read rule alone; the three-replica zombie full pass not feasible on the
+box; liveness full at two replicas only; one EC2 session of a few hours
+for the three-replica acknowledgement stamp and the unrun arms; a
+resize arm one to two days. What to buy is the user's decision.

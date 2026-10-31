@@ -958,8 +958,9 @@ load-bearing.
 shipped (`ef3a6f48`, 2026-10-28; gated on the attached VolumeAttachment
 naming this node and every configured base being in the writer set); the
 fence flip fails closed (`044f2010`: a probe that errors counts as still
-connected); the monitor's gate on the VolumeAttachment node and the
-fence-flip mark on the co-located leg are not written. Hot rejoin: §7's
+connected); the monitor's gate on the VolumeAttachment node shipped
+(`eb7c28fd`, 2026-10-30); the fence-flip mark on the co-located leg is
+not written. Hot rejoin: §7's
 rev 6 corrections hold in `FlintCatchupN3CHotFix` (195,931,627 states,
 depth 48, complete) and shipped in `395b442d` (2026-10-29). The trust
 model's rev 14/15 adds the cut's abort on a
@@ -983,9 +984,18 @@ violation to depth 28), and the fixed cut is a premise of the proof.
 The TLAPS proof of the rule (clean setting: capture, no crash, no
 zombie move, both premises, the fixed cut; target `Inv_Catchup ∧
 MembersHold`) has all 7,673 obligations proved on a seeded cache (pass
-7, 2026-10-29); the fresh-cache record run that asserts every input's
-md5, with its thirteen controls, is held for a quiet box now that batch
-c21 has closed (2026-10-31), to rerun alone.
+7, 2026-10-29). The fresh-cache record run is reported done by flint-e4
+(2026-10-31, 15:24 to 15:49Z on the box, otherwise idle: all 7,673
+proved, 1,539 s, peak 25.4 GB, the three input md5s asserted, run by
+`recT4.sh` after `recT.sh`'s summary was found reading the wrong
+stream); twelve of its thirteen controls are in, and its results
+section is cited here when the last lands. What the controls say so
+far: eleven fail only the steps that use their premise or rule; the
+crash and zombie-move controls fail only the lemma that those premises
+switch the actions off, so the proof is cited for the clean setting and
+never for a crash or a zombie; and the select-time bound on the base
+(at or below the target) is not killed, since the proof rests on the
+copy-time guard alone, so that filter is a progress rule, not safety.
 
 ### Tunables and space overhead
 
@@ -2864,7 +2874,10 @@ cap, and its liveness arm at no verdict, so the barrier's
 termination is claimed by no run. No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
-show the rules holding together, not which rule carries which HOLD. The
+show the rules holding together, not which rule carries which HOLD.
+Every batch here, c21 to c27, ran trust with the fixed cut
+(`CutStampsAll` FALSE in every cfg, checked by flint-e4), so §5's cut
+caveat on c15 does not apply to these rows. The
 hole is legal by definition in the rows that
 count it so, and its bound (in flight at the fence or at a crash) is a
 property of the raid, not of the model. The stamp model has no TLAPS
@@ -2932,27 +2945,87 @@ and decided by the user:
    under its md5.** Each item is a checkbox; flint-e4 confirms the list
    and estimates it, and anything needing a box beyond the Linux one is
    a plan and a cost for the user to approve first.
+   flint-e4 reviewed the list on 2026-10-31; the estimates are theirs.
    - [ ] The trust rule's TLAPS record run on a fresh cache, asserting
-         every input's md5, with its thirteen controls (§5).
+         every input's md5, with its thirteen controls (§5). Reported
+         done (all 7,673 proved; twelve controls in); ticked when its
+         results section is cited in §5.
    - [ ] A TLAPS proof of the stamp rule itself, on FlintCatchupS. None
-         exists: the proved rules are FlintCatchup and FlintCatchupT.
+         exists: the proved rules are FlintCatchup and FlintCatchupT. To
+         add anything over the trust proof it must run with the crash
+         and the zombie move on, in c27's setting (rev 12, trust, the
+         fixed cut), for `Inv_NoNewLoss`, `Inv_MembersHold`,
+         `Inv_RaidHolds` and `Inv_AckStamped`. Estimate, low confidence:
+         one to two days to find an inductive invariant and check it at
+         two and three replicas, then four to eight days of proof; the
+         stamps, the released view, the majority reasoning, a second
+         writer and torn legs are all new over the trust proof, which
+         took a day on top of FlintCatchup's. Cached passes fit the box;
+         a fresh-cache record likely does not (the trust record peaked
+         at 25.4 GB of 30) and would need one 64 GB spot instance, plan
+         and cost first. A middle option, two to three days: a proof of
+         the read rule alone, abstracted (majority-or-confirmed stamps
+         under the released view name members holding every
+         acknowledged write, for any replica count and generation),
+         which removes the bound where it matters most, with model
+         checking keeping the rest.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
-         depth 27), or the user's explicit acceptance of the bound.
+         depth 27), or the user's explicit acceptance of the bound. Not
+         feasible on the box: depth 27 was 2,429,420,385 distinct
+         states, about 20 GB of fingerprints, growing by half per level,
+         with no honest total (ten billion or more). First try SYMMETRY
+         over the replica ids, after checking the model is symmetric in
+         them, validated on the two-replica arms and the two full
+         three-replica passes; if still too large, the acceptance names
+         its evidence: the two-replica zombie full, the three-replica
+         lost mark and crash full, the zombie to depth 27. The stamp
+         proof above supersedes this item.
    - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
-         (c21's arm reached no verdict).
+         (c21's arm reached no verdict). Two replicas first, on rev 12,
+         for the lost mark, the crash and the zombie move, plus the
+         record-down control that must lasso: box work, a few hours per
+         arm. Three replicas has no feasible full pass (the safety
+         spaces alone are 1.8 to 2.3 billion states): bounded only, or
+         the user accepts two-replica liveness. The premise to cite:
+         timeouts fire, which is the P4 fix (`c7e5d2fe`).
    - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
-         it at depth 23; c27's arm did not run).
+         it at depth 23; c27's arm did not run). Cheapest: add it to the
+         two full three-replica arms and rerun both on one m7i.48xlarge
+         spot instance, about 25 minutes of checking; not the box, where
+         that space is a day and may not fit.
    - [ ] The c27 arms the cut left unrun: the expiry form, the two
-         sole-continuation arms, four replicas.
+         sole-continuation arms, four replicas. The lost-mark sole arm
+         shares the full arm's constants and joins the session above;
+         the three zombie arms (the expiry form, the zombie sole arm,
+         four replicas) run bounded at one-hour caps in the same
+         session, four to five hours of instance in all, priced before
+         it is asked for.
    - [ ] The resize rule modelled (the model has fixed-size legs and no
          row covers it), or resize excluded from the patch's first cut
-         by the user.
+         by the user. A resize arm is one to two days to build (per-leg
+         size, the stamp's tail offset moving with the lvol, the raid
+         following the lvol, the two windows, the short leg,
+         `raid1_resize`'s minimum over bases less the reserve), then
+         hours on the box at two replicas full and three bounded. If
+         excluded, the code refuses expansion of a stamped volume, and
+         that refusal ships with its callers.
    - [ ] The monitor-skips question classed by a rev 10 or later arm
          with the pre-stamp write legal (c21's arm neither confirms nor
-         refutes it); a follow-up unless the user folds it in.
+         refutes it); a follow-up unless the patch adopts the ungated
+         decree with the monitor skipping held legs in place of §12's
+         gated decree, which is what the rows cover. About an hour on
+         the box at two replicas, then bounded at three.
    - [ ] The model files pushed by PR at the user's word, so every md5
-         the table cites is on main.
-   The premises' pins are code and sit in step 4, not here.
+         the table cites is on main: FlintCatchupT with its modules,
+         inductive invariant, proof and cfgs; FlintCatchupS for each
+         cited revision, rev 7 to rev 12, each md5 reproduced or copied
+         from its batch directory and verified; the reachability files,
+         cfgs, results without generated logs, and the table script;
+         FlintCatchup's proof. About half a day to assemble and verify.
+   The premises' pins are code and sit in step 4, not here. The
+   decisions in this list are the user's: whether to buy the stamp
+   proof or the three-replica zombie run, whether two-replica liveness
+   is accepted, whether resize is in the first cut, and every EC2 run.
 2. The raid1 patch with its unit tests, on the box.
 3. The driver and node-agent changes behind one flag, default off until
    the kind drills pass.
