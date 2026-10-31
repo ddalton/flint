@@ -325,8 +325,11 @@ after a majority release strand the earlier-lost leg as the only in_sync
 one (rev 14, depth 16). The user adopted the in-write rule, that no
 sync-record write may leave in_sync without a member of the live raid as
 read, the stage's write included, and the whole mark, which the monitor
-already does and becomes a pin; the proof uses the rule in place of the
-premise.
+already does, only for an online raid, and becomes a pin; the proof uses
+the rule in place of the premise, its target rev 16. The drain probe
+showed the in-write guard carries the data invariant and a stamp on a
+planned removal carries the barrier claim; whether a planned removal
+stamps awaits the user's word.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.

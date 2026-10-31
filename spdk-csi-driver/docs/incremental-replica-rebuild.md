@@ -2761,10 +2761,10 @@ and serves it without the write. Two things must both happen: every leg
 of the last release leaves the raid, and they are marked stale without
 the earlier-lost leg. Only a write that marks one leg at a time can do
 the second. The rule, in two parts. **The monitor marks every `in_sync`
-leg the live raid lacks in one write**: that is what
-`record_stale_replicas` does today (one `update_sync_record` closure
-over `replicas_missing_from_raid`; a raid not online marks nothing), and
-it becomes a pin. **No sync-record write may leave the `in_sync` set
+leg the live raid lacks in one write, and only while the live raid has
+a member**: that is what `record_stale_replicas` does today (one
+`update_sync_record` closure over `replicas_missing_from_raid`; a raid
+not online marks nothing), and both become a pin. **No sync-record write may leave the `in_sync` set
 without a member of the live raid as read**, checked inside the write;
 a write with no live raid, the decree and the assembly write, may do so
 only when its own read concluded by the count, the sole continuation or
@@ -2791,14 +2791,26 @@ the RPC does); whether the hook moves to the shared path is measured by
 rev 15 and decided by the user. The control above is the killed one; with
 the whole mark on, no violation to the box's half hour (depth 19,
 55,239,809 states), three levels past the violation, bounded; the
-control with the failure model intact is running. The drain's probe (rev
-15 `3d409f1b`, c33, a second spot instance at the user's word) so far:
-the identity exact; without the in-write guard the drain loses
-`Inv_MembersHold` at depth 12 with or without a stamp on the planned
-removal, so the guard is load-bearing and that stamp alone is not;
-without that stamp `Inv_AckStamped` fails at depth 5 with or without
-the guard, as predicted, since the survivors' stamps keep naming the
-drained leg; the arms with the guard are running.
+control with the failure model intact is clean to depth 23
+(142,784,028 states), bounded (tables-q14.md). The drain's probe (rev
+15 `3d409f1b`, c33, a second spot instance at the user's word,
+tables-d15.md): the identity exact; without the in-write guard the
+drain loses `Inv_MembersHold` at depth 12 with or without a stamp on
+the planned removal, so the guard is load-bearing and that stamp alone
+is not; without that stamp `Inv_AckStamped` fails at depth 5 with or
+without the guard, as predicted, since the survivors' stamps keep
+naming the drained leg; with the guard and the stamp both on, no
+violation to the 1,200 s cap (depths 19 and 18, 93,175,140 and
+89,002,087 states), bounded. So the guard carries the data invariant
+and the stamp carries the barrier claim, and whether a planned removal
+stamps is the user's decision. One more writer: re-peeling the proof's
+candidates under the rule on rev 15 failed at depth 5 at two replicas,
+where every member fails out and the whole mark then empties the
+`in_sync` set, the monitor's write doing what the rule forbids; rev 16
+(`d9062ab6`) guards the monitor's mark on the live raid having a
+member, which is the code's own precondition (the monitor marks only
+for an online raid), and the proof's target is rev 16 with the four
+knobs on.
 
 ### Model verdicts (2026-10-30)
 
@@ -2922,11 +2934,11 @@ without the rule, and a HOLD on the data beside it.
 | c28 | the same three with the record unwritable (control) | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 9; 8; 8, each stuttering with the barrier held | a minority barrier never ends without the record, as designed; the three controls are killed |
 | c30 | the same three with the fairness on a failed path's return dropped (wrapper `b719dbbf` on rev 12; `SpecNoReturn` is `Spec` less only `WF_vars(Return(r))`) | all | `Prop_BarrierEnds` | HOLD over the full space: 3,627,109, depth 35; 5,326,386, depth 35; 29,140,655, depth 39, each equal to its c28 twin (tla-mc 0.2.1, 4 workers; tables-c28.md, 2026-10-31) | the barrier ends at two replicas without any leg's path coming back |
 | c30 | the dropped fairness shown dropped (positive control, wrapper `752b1a56`): `Prop_PathReturns`, a failed path comes back, under `Spec` and under `SpecNoReturn` | all | `Prop_PathReturns` | HOLD under `Spec` (3,627,109, depth 35); VIOLATED under `SpecNoReturn`, a lasso at depth 9 with a path staying out | the specification line switched the fairness, so the c30 HOLDs are earned |
-| q14 | three replicas, lost mark, three failures, the last healthy member allowed to fail (rev 14 `231150e6`: rev 13 plus the knobs `LastFails` and `WholeMark`, both off being rev 13; control) | all but `WholeMark`; `LastFails` on | `Inv_MembersHold`, `Inv_RaidHolds`, no bad loss | VIOLATED at depth 16 (11,761,818 states; the seventh gap's trace; tla-mc 0.2.1) | the seventh gap: two single-leg marks after a majority release strand the earlier-lost leg as the only `in_sync` one |
+| q14 | three replicas, lost mark, three failures, the last healthy member allowed to fail (rev 14 `231150e6`: rev 13 plus the knobs `LastFails` and `WholeMark`, both off being rev 13; control) | all but `WholeMark`; `LastFails` on | `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AdmitNoLoss` | VIOLATED at depth 16 (11,761,818 states; the seventh gap's trace; tla-mc 0.2.1) | the seventh gap: two single-leg marks after a majority release strand the earlier-lost leg as the only `in_sync` one |
 | q14 | the same with the whole mark (`WholeMark` on) | all | the three above | no violation to the box's half hour: depth 19, 55,239,809 states, three levels past the control's violation, bounded (tla-mc 0.2.1) | the whole mark's closure, bounded |
-| q14 | the same with the failure model intact (both knobs off) | all | the three above | running | the premise's closure, the control for the rule |
-| d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, no bad loss | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard: running | the guard is load-bearing for the drain, and a stamp on the planned removal alone is not |
-| d15 | the drain with no stamp on the planned removal, the guard varied | all; `DrainStamps` off | `Inv_AckStamped` | VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397) | as predicted: the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped; whether data is affected is the members-hold column |
+| q14 | the same with the failure model intact (both knobs off) | all | the three above | no violation to the box's half hour: depth 23, 142,784,028 states, bounded (tla-mc 0.2.1; tables-q14.md) | the premise's closure, the control for the rule, bounded |
+| d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AdmitNoLoss` | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard, no violation to the 1,200 s cap: depth 19 (93,175,140 states) without the drain stamp, depth 18 (89,002,087) with it, bounded (tla-mc 0.2.1 compiled; tables-d15.md) | the guard carries the data invariant; a stamp on the planned removal alone does not |
+| d15 | the drain, `Inv_AckStamped`, the guard and the stamp varied | all; `InWriteGuard` and `DrainStamps` varied | `Inv_AckStamped` | without the stamp VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397); with the guard and the stamp, no violation to the 1,200 s cap: depth 18, 89,002,087 states, bounded (tla-mc 0.2.1 compiled) | the stamp carries the barrier claim: without it the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped, as predicted; only guard and stamp together show no violation at the bound |
 | q14 | identity at rev 14, every knob off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 | rev 14 with its knobs off is rev 12 |
 
 What the table claims. At two replicas every arm under the full rule set
@@ -3010,7 +3022,7 @@ and decided by the user:
       write; the same check inside the stage's assembly write, or the
       stage under the per-volume claim; the two windows of flint-91's
       audit as the test cases. A pin: the monitor marks every missing
-      leg in one write.
+      leg in one write, and only for an online raid.
 - [ ] Kind drills: cut one leg's path under a write stream and read the
       survivors' stamps before the write's acknowledgement is observed;
       cut two paths and confirm the write completes only after the record
@@ -3064,10 +3076,10 @@ and decided by the user:
          2026-10-31; flint-e4 carries it, and the record's 64 GB
          instance is a separate plan and cost for the user's word. The
          proof uses the seventh gap's rule in place of the failure-model
-         premise it inherited: its target moved to rev 15 (`3d409f1b`)
-         with `LastFails`, `WholeMark` and `InWriteGuard` on, the
-         drain outside the proof until the user decides the planned
-         removal's stamp.
+         premise it inherited: its target is rev 16 (`d9062ab6`) with
+         `LastFails`, `WholeMark`, `InWriteGuard` and `MonitorGuard`
+         on, the drain outside the proof until the user decides the
+         planned removal's stamp.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
