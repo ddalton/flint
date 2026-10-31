@@ -329,7 +329,12 @@ already does, only for an online raid, and becomes a pin; the proof uses
 the rule in place of the premise, its target rev 16. The drain probe
 showed the in-write guard carries the data invariant and a stamp on a
 planned removal carries the barrier claim; whether a planned removal
-stamps awaits the user's word.
+stamps awaits the user's word. A model correction followed: the model
+let a zombie acknowledge on a confirmed continuation's sequence and
+generation rather than on the confirmed triple naming its leg alone,
+which §12 requires; at four replicas that loses a write (rev 16, depth
+11), rev 17 tests the triple, every three-replica row stands as a claim
+to be rechecked, and the four-replica arm awaits a rerun on rev 17.
 flint-91's five raid1 traps for the completion hold (split I/O, the
 processed channel, process reads, a reset aborting a stamp write, the app
 thread's channels) are in §12 with them.
