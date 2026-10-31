@@ -112,6 +112,24 @@ async fn apply_dead_target_timeouts(disk_service: &MinimalDiskService) {
     }
 }
 
+/// Whether kubelet's `vol_data.json` at `path` names `volume_handle`.
+fn vol_data_names(path: &std::path::Path, volume_handle: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|v| v["volumeHandle"].as_str().map(|h| h == volume_handle))
+        .unwrap_or(false)
+}
+
+/// One volume's stage on this node, from [`NodeAgent::staged_paths_under`].
+#[derive(Debug, Default, PartialEq)]
+struct StagedPaths {
+    /// Filesystem staging mounts.
+    globalmounts: Vec<std::path::PathBuf>,
+    /// Raw block staged device files (`block_bind::STAGED_DEVICE`).
+    block_devices: Vec<std::path::PathBuf>,
+}
+
 impl NodeAgent {
     pub fn new(
         node_name: String,
@@ -2612,67 +2630,95 @@ impl NodeAgent {
         let mut was_staged = false;
         let mut operations_performed = Vec::new();
 
-        // Step 1: Find and unmount all staging paths for this volume
-        let staging_base = "/var/lib/kubelet/plugins/kubernetes.io/csi/disk.csi.chert.us";
-        
-        if let Ok(entries) = std::fs::read_dir(staging_base) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let globalmount = path.join("globalmount");
-                    
-                    if globalmount.exists() {
-                        // Check if this path is mounted
-                        let is_mounted = std::process::Command::new("mountpoint")
-                            .arg("-q")
-                            .arg(&globalmount)
-                            .status()
-                            .map(|s| s.success())
-                            .unwrap_or(false);
-                        
-                        if is_mounted {
-                            debug!(path = %globalmount.display(), "[FORCE_UNSTAGE] Found mounted staging path");
-                            was_staged = true;
+        // Step 1: this volume's stage on this node, as kubelet recorded it
+        // (see `staged_paths_under`). This once unmounted EVERY mounted
+        // globalmount under the driver's dir, so each single-replica
+        // DeleteVolume unstaged every filesystem volume on its storage
+        // node, and it never saw a raw block volume's staged device, which
+        // it left bound to a number the ublk stop below frees for the next
+        // volume. The staged device is unbound first, as NodeUnstage does.
+        let staged = Self::staged_paths_under(
+            std::path::Path::new("/var/lib/kubelet/plugins/kubernetes.io/csi"),
+            volume_id,
+        );
+        for device in &staged.block_devices {
+            match crate::block_bind::held(device) {
+                Ok(crate::block_bind::Held::Missing) => continue,
+                Ok(crate::block_bind::Held::Device(_)) => was_staged = true,
+                _ => {}
+            }
+            match crate::block_bind::unbind_device(device).await {
+                Ok(()) => operations_performed.push(format!("Unbound {}", device.display())),
+                Err(e) if !force => {
+                    let error_response = json!({
+                        "success": false,
+                        "error": format!("Failed to unbind {}: {e}", device.display()),
+                        "was_staged": was_staged,
+                        "operations": operations_performed
+                    });
+                    return Ok(warp::reply::with_status(
+                        warp::reply::json(&error_response),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ));
+                }
+                Err(e) => {
+                    warn!(error = %e, "[FORCE_UNSTAGE] Failed to unbind the staged block device")
+                }
+            }
+        }
+        for globalmount in &staged.globalmounts {
+            if globalmount.exists() {
+                // Check if this path is mounted
+                let is_mounted = std::process::Command::new("mountpoint")
+                    .arg("-q")
+                    .arg(globalmount)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
 
-                            // Bounded unmount (mount_util): a plain umount
-                            // on a mount whose backing device is gone blocks
-                            // in D-state and would wedge the agent (same
-                            // hazard as the NodeUnstage hang found by the
-                            // 1.2.0 release gate, 2026-06-12).
-                            debug!("[FORCE_UNSTAGE] Attempting bounded unmount");
-                            let globalmount_str = globalmount.display().to_string();
-                            let mut unmounted =
-                                crate::mount_util::bounded_umount(&globalmount_str, false, 10)
-                                    .await;
-                            if unmounted {
-                                debug!("[FORCE_UNSTAGE] Unmounted");
-                                operations_performed.push(format!("Unmounted {}", globalmount.display()));
-                            }
+                if is_mounted {
+                    debug!(path = %globalmount.display(), "[FORCE_UNSTAGE] Found mounted staging path");
+                    was_staged = true;
 
-                            // If normal unmount failed, try lazy unmount
-                            if !unmounted {
-                                warn!("[FORCE_UNSTAGE] Normal unmount failed, trying lazy unmount");
-                                let result =
-                                    crate::mount_util::bounded_umount(&globalmount_str, true, 10)
-                                        .await;
+                    // Bounded unmount (mount_util): a plain umount
+                    // on a mount whose backing device is gone blocks
+                    // in D-state and would wedge the agent (same
+                    // hazard as the NodeUnstage hang found by the
+                    // 1.2.0 release gate, 2026-06-12).
+                    debug!("[FORCE_UNSTAGE] Attempting bounded unmount");
+                    let globalmount_str = globalmount.display().to_string();
+                    let mut unmounted =
+                        crate::mount_util::bounded_umount(&globalmount_str, false, 10).await;
+                    if unmounted {
+                        debug!("[FORCE_UNSTAGE] Unmounted");
+                        operations_performed.push(format!("Unmounted {}", globalmount.display()));
+                    }
 
-                                if result {
-                                    debug!("[FORCE_UNSTAGE] Lazy unmount succeeded");
-                                    operations_performed.push(format!("Lazy unmounted {}", globalmount.display()));
-                                    unmounted = true;
-                                }
-                            }
-                            
-                            if !unmounted && !force {
-                                let error_response = json!({
-                                    "success": false,
-                                    "error": format!("Failed to unmount {}", globalmount.display()),
-                                    "was_staged": was_staged,
-                                    "operations": operations_performed
-                                });
-                                return Ok(warp::reply::with_status(warp::reply::json(&error_response), StatusCode::INTERNAL_SERVER_ERROR));
-                            }
+                    // If normal unmount failed, try lazy unmount
+                    if !unmounted {
+                        warn!("[FORCE_UNSTAGE] Normal unmount failed, trying lazy unmount");
+                        let result =
+                            crate::mount_util::bounded_umount(&globalmount_str, true, 10).await;
+
+                        if result {
+                            debug!("[FORCE_UNSTAGE] Lazy unmount succeeded");
+                            operations_performed
+                                .push(format!("Lazy unmounted {}", globalmount.display()));
+                            unmounted = true;
                         }
+                    }
+
+                    if !unmounted && !force {
+                        let error_response = json!({
+                            "success": false,
+                            "error": format!("Failed to unmount {}", globalmount.display()),
+                            "was_staged": was_staged,
+                            "operations": operations_performed
+                        });
+                        return Ok(warp::reply::with_status(
+                            warp::reply::json(&error_response),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        ));
                     }
                 }
             }
@@ -5310,13 +5356,7 @@ impl NodeAgent {
 
     /// [`Self::is_staged_here`] under kubelet's CSI plugin dir `csi_dir`.
     fn is_staged_under(csi_dir: &std::path::Path, pv_name: &str, volume_handle: &str) -> bool {
-        let names_handle = |vol_data: &std::path::Path| {
-            std::fs::read_to_string(vol_data)
-                .ok()
-                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-                .and_then(|v| v["volumeHandle"].as_str().map(|h| h == volume_handle))
-                .unwrap_or(false)
-        };
+        let names_handle = |vol_data: &std::path::Path| vol_data_names(vol_data, volume_handle);
         let filesystem = std::fs::read_dir(csi_dir.join("disk.csi.chert.us"))
             .map(|entries| entries.flatten().any(|e| names_handle(&e.path().join("vol_data.json"))))
             .unwrap_or(false);
@@ -5325,6 +5365,38 @@ impl NodeAgent {
                 &csi_dir.join("volumeDevices").join(pv_name).join("data").join("vol_data.json"),
             );
         filesystem || block
+    }
+
+    /// Where `volume_handle` is staged under kubelet's CSI plugin dir
+    /// `csi_dir`, read from the same records as [`Self::is_staged_under`]
+    /// and only from those, so another volume's stage is never named: a
+    /// filesystem volume's `globalmount` beside a `vol_data.json` naming
+    /// the handle, and a raw block volume's staged device file in
+    /// `volumeDevices/staging/<pv>/`, for each `<pv>` whose
+    /// `volumeDevices/<pv>/data/vol_data.json` names it and whose staging
+    /// dir is still there.
+    fn staged_paths_under(csi_dir: &std::path::Path, volume_handle: &str) -> StagedPaths {
+        let mine = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+            let mut v: Vec<_> = std::fs::read_dir(dir)
+                .map(|entries| entries.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            v.sort();
+            v
+        };
+        let globalmounts = mine(&csi_dir.join("disk.csi.chert.us"))
+            .into_iter()
+            .filter(|d| vol_data_names(&d.join("vol_data.json"), volume_handle))
+            .map(|d| d.join("globalmount"))
+            .collect();
+        let devices = csi_dir.join("volumeDevices");
+        let block_devices = mine(&devices)
+            .into_iter()
+            .filter(|d| vol_data_names(&d.join("data").join("vol_data.json"), volume_handle))
+            .filter_map(|d| d.file_name().map(|pv| devices.join("staging").join(pv)))
+            .filter(|staging| staging.is_dir())
+            .map(|staging| staging.join(crate::block_bind::STAGED_DEVICE))
+            .collect();
+        StagedPaths { globalmounts, block_devices }
     }
 
     async fn repair_data_path(
@@ -6989,7 +7061,7 @@ mod staged_here_tests {
     // this node. Each test lays out kubelet's CSI plugin dir as kubelet
     // does for one volume mode; the PV name and the volume handle differ
     // so a check reading the wrong one fails.
-    use super::NodeAgent;
+    use super::{NodeAgent, StagedPaths};
     use std::path::Path;
 
     fn vol_data(path: &Path, handle: &str) {
@@ -7037,5 +7109,56 @@ mod staged_here_tests {
             !NodeAgent::is_staged_under(dir.path(), "pv-b", "handle-a"),
             "another PV's staging dir"
         );
+    }
+
+    // Force-unstage (DeleteVolume's defensive cleanup on the volume's
+    // storage node) acts on the paths `staged_paths_under` names. It used
+    // to unmount every mounted globalmount under the driver's dir, and
+    // never looked at the block layout.
+
+    /// Two filesystem volumes staged on one node: deleting one names only
+    /// its own globalmount, never its neighbour's.
+    #[test]
+    fn force_unstage_names_only_this_volumes_filesystem_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        vol_data(&dir.path().join("disk.csi.chert.us/0f3c9a/vol_data.json"), "handle-a");
+        vol_data(&dir.path().join("disk.csi.chert.us/7be210/vol_data.json"), "handle-b");
+        assert_eq!(
+            NodeAgent::staged_paths_under(dir.path(), "handle-a"),
+            StagedPaths {
+                globalmounts: vec![dir.path().join("disk.csi.chert.us/0f3c9a/globalmount")],
+                block_devices: vec![],
+            }
+        );
+    }
+
+    /// A raw block volume's stage is the device NodeStage bound into
+    /// kubelet's staging dir; another block volume's is not named.
+    #[test]
+    fn force_unstage_names_a_block_volumes_staged_device() {
+        let dir = tempfile::tempdir().unwrap();
+        for (pv, handle) in [("pv-a", "handle-a"), ("pv-b", "handle-b")] {
+            std::fs::create_dir_all(dir.path().join("volumeDevices/staging").join(pv)).unwrap();
+            vol_data(&dir.path().join("volumeDevices").join(pv).join("data/vol_data.json"), handle);
+        }
+        assert_eq!(
+            NodeAgent::staged_paths_under(dir.path(), "handle-a"),
+            StagedPaths {
+                globalmounts: vec![],
+                block_devices: vec![dir
+                    .path()
+                    .join("volumeDevices/staging/pv-a/flint-block-device")],
+            }
+        );
+    }
+
+    /// NodeUnstageVolume done (the staging dir gone, the data record
+    /// left), or never staged here: nothing is named.
+    #[test]
+    fn force_unstage_names_nothing_for_a_volume_not_staged_here() {
+        let dir = tempfile::tempdir().unwrap();
+        vol_data(&dir.path().join("volumeDevices/pv-a/data/vol_data.json"), "handle-a");
+        assert_eq!(NodeAgent::staged_paths_under(dir.path(), "handle-a"), StagedPaths::default());
+        assert_eq!(NodeAgent::staged_paths_under(dir.path(), "handle-z"), StagedPaths::default());
     }
 }

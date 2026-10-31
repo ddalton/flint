@@ -27,6 +27,26 @@ covered by the stability guarantee.
   attached is picked up by the 60 s list. The servers' roles are
   unchanged; they still `get` Nodes.
 
+### Fixed
+
+- **Deleting a single-replica volume no longer unstages every other
+  filesystem volume on its storage node, and cleans up a raw block
+  volume's stage** (2026-10-31; `spdk-csi-driver/src/node_agent.rs`).
+  DeleteVolume asks the volume's storage node to force-unstage it, in
+  case kubelet skipped NodeUnstageVolume. The node agent then unmounted
+  every mounted `globalmount` under the driver's kubelet dir, not only
+  the deleted volume's, so each single-replica delete pulled the staging
+  mount from under every other filesystem volume staged on that node. A
+  running pod kept its own bind mount; the volume's next NodePublish found
+  the staging path unmounted and staged it again (F29). The cleanup also
+  never looked at the block layout, so a raw block volume's staged device
+  stayed bound while its ublk device was stopped, a number the kernel can
+  give to the next volume. It now acts only on the deleted volume's stage,
+  found from kubelet's own records as the data-path repair does: the
+  `globalmount` beside a `vol_data.json` naming the volume, and the staged
+  device under `volumeDevices/staging/<pv>/`, which it unbinds before the
+  ublk stop, as NodeUnstageVolume does.
+
 ## [1.61.3] - 2026-10-31
 
 A fix release. The replicated block path closes several ways its staging,
