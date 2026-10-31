@@ -2812,6 +2812,24 @@ member, which is the code's own precondition (the monitor marks only
 for an online raid), and the proof's target is rev 16 with the four
 knobs on.
 
+**A model correction, not a rule (2026-10-31, found by a proof agent).**
+This section lets a zombie go on acknowledging only on the one
+continuation the record confirmed while it was still the consumer, its
+own leg as the sole member. The model tested that by the continuation's
+sequence and generation alone, without its members. At three replicas
+the two coincide, since a confirmed minority has one member; at four, a
+confirmed minority of two legs followed by a third failure let the
+zombie's leg pass as the continuation and acknowledge a write held on
+it alone, which the next stage, serving the returning member of the
+confirmed pair, left on no `in_sync` leg (rev 16 `d9062ab6`, four
+replicas, three failures, `Inv_NoNewLoss` violated at depth 11). Rev 17
+(`61ae6829`, knob `ZombieTriple`) tests the confirmed triple, the
+literal rule, and the move is left as it was. Every three-replica row
+in the table stands, as a claim to be rechecked on rev 17; the
+four-replica arm of the EC2 session ran on rev 12 without the triple,
+bounded, and the four-replica claim waits for a rerun at three failures
+on rev 17.
+
 ### Model verdicts (2026-10-30)
 
 FlintCatchupS (flint-e4; `formal/`, on the branch `csi-rebuild-tlaps`
@@ -2940,6 +2958,8 @@ without the rule, and a HOLD on the data beside it.
 | d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AdmitNoLoss` | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard, no violation to the 1,200 s cap: depth 19 (93,175,140 states) without the drain stamp, depth 18 (89,002,087) with it, bounded (tla-mc 0.2.1 compiled; tables-d15.md) | the guard carries the data invariant; a stamp on the planned removal alone does not |
 | d15 | the drain, `Inv_AckStamped`, the guard and the stamp varied | all; `InWriteGuard` and `DrainStamps` varied | `Inv_AckStamped` | without the stamp VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397); with the guard and the stamp, no violation to the 1,200 s cap: depth 18, 89,002,087 states, bounded (tla-mc 0.2.1 compiled) | the stamp carries the barrier claim: without it the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped, as predicted; only guard and stamp together show no violation at the bound |
 | q14 | identity at rev 14, every knob off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 | rev 14 with its knobs off is rev 12 |
+| z4 | four replicas, zombie move, three failures, the continuation tested by sequence and generation (rev 16 `d9062ab6`; control for the correction above; c33b, tla-mc 0.2.1 compiled, 24 workers) | all four rule knobs; the triple off | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | VIOLATED at depth 11 (3,368,405 states, 57 s): a zombie's leg passes as a confirmed two-leg continuation and acknowledges alone | the model was looser than the rule at four replicas; the killed control for rev 17 |
+| z4 | the same with the triple (rev 17 `61ae6829`); identity at rev 16 and rev 17 | all four rule knobs and `ZombieTriple` | the four above | running; the identity at rev 16 is exact (7,286,102, depth 36) | the literal rule, to be cited bounded |
 
 What the table claims. At two replicas every arm under the full rule set
 is a full pass, and each safety rule has a control that fails without it
@@ -3076,10 +3096,10 @@ and decided by the user:
          2026-10-31; flint-e4 carries it, and the record's 64 GB
          instance is a separate plan and cost for the user's word. The
          proof uses the seventh gap's rule in place of the failure-model
-         premise it inherited: its target is rev 16 (`d9062ab6`) with
-         `LastFails`, `WholeMark`, `InWriteGuard` and `MonitorGuard`
-         on, the drain outside the proof until the user decides the
-         planned removal's stamp.
+         premise it inherited: its target is rev 17 (`61ae6829`) with
+         `LastFails`, `WholeMark`, `InWriteGuard`, `MonitorGuard` and
+         `ZombieTriple` on, the drain outside the proof until the user
+         decides the planned removal's stamp.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
@@ -3146,7 +3166,12 @@ and decided by the user:
          shares the full arm's constants and joins the session above;
          the three zombie arms (the expiry form, the zombie sole arm,
          four replicas) run bounded at one-hour caps in the same
-         session, four to five hours of instance in all. Priced on
+         session, four to five hours of instance in all. The four-replica
+         arm runs on rev 12, which tests a zombie's continuation by
+         sequence and generation rather than by its members (the
+         correction above); its verdict is bounded there and the
+         four-replica claim waits for a rerun at three failures on rev
+         17 in the next session. Priced on
          2026-10-31 (spot, nothing provisioned): m7i.48xlarge at $1.48
          an hour in us-west-1a plus a 2 TB gp3 disk at about $0.36,
          about $8.30 for the session, with the hard shutdown at six
