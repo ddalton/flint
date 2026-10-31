@@ -12,6 +12,21 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **An NFS server no longer watches every Node in the cluster**
+  (2026-10-31; `spdk-csi-driver/src/nfs/node_authz.rs`). With
+  `nfs.kerberos.attachedNodesOnly`, an RWX volume's server and the pNFS
+  MDS and data servers watched Nodes as well as VolumeAttachments, and
+  listed every VolumeAttachment again on each Node update anywhere in the
+  cluster. There is one server per RWX volume, so that load grew with the
+  number of nodes times the number of volumes. A server reads a Node only
+  for its `Hostname` address, fresh at every list, so the Node watch is
+  gone: attaches and detaches still arrive through the VolumeAttachment
+  watch at once, and a node whose `Hostname` address changes while
+  attached is picked up by the 60 s list. The servers' roles are
+  unchanged; they still `get` Nodes.
+
 ## [1.61.3] - 2026-10-31
 
 A fix release. The replicated block path closes several ways its staging,

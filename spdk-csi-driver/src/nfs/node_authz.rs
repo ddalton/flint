@@ -248,7 +248,8 @@ async fn relist_forever<T, E, L, F, A, S>(
             Ok(v) if last.as_ref() != Some(&v) => {
                 if by_timer && last.is_some() {
                     tracing::warn!(
-                        "{ENV}: listing {what} after {}s with no watch event found a change: a watch missed it",
+                        "{ENV}: listing {what} after {}s with no watch event found a change: a watch missed it, \
+                         or an attached node's Hostname address changed",
                         every.as_secs()
                     );
                 }
@@ -271,8 +272,11 @@ async fn relist_forever<T, E, L, F, A, S>(
 
 /// Keep [`global`]'s set equal to the hostnames of the nodes `pv` is
 /// attached to (VolumeAttachments with `status.attached`), re-listing on
-/// every VolumeAttachment or Node change and at least every
-/// [`RESYNC_EVERY`]. Runs until the process ends.
+/// every VolumeAttachment change and at least every [`RESYNC_EVERY`].
+/// Nodes are not watched: a Node is read only for its `Hostname`
+/// address, fresh at every list, and a Node watch made every server list
+/// again on every Node update in the cluster. A changed address is
+/// picked up by the next list. Runs until the process ends.
 pub async fn watch(nodes: &'static AttachedNodes, pv: String, domain: Option<String>) {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::Node;
@@ -317,10 +321,8 @@ pub async fn watch(nodes: &'static AttachedNodes, pv: String, domain: Option<Str
         }
         Ok::<_, kube::Error>(hosts)
     };
-    let events = futures::stream::select(
-        watcher(vas.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
-        watcher(node_api.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
-    );
+    let events =
+        watcher(vas.clone(), watcher::Config::default()).default_backoff().map(seen).boxed();
     relist_forever(
         "VolumeAttachments",
         || resync(vas.clone(), node_api.clone(), pv.clone(), domain.clone()),
@@ -366,11 +368,11 @@ pub fn pnfs_volume_hosts(
 /// The pNFS servers' [`watch`]: keep `volumes` (the MDS's; a data server
 /// has none) equal to, per pNFS volume (a PV with
 /// `pnfs.chert.us/volume-file`), the nodes it is attached to, and `nodes`
-/// to their union, re-listing on every PersistentVolume,
-/// VolumeAttachment or Node change and at least every
-/// [`RESYNC_EVERY`]. Volumes of every MDS shard are kept; a shard holds
-/// only its own, so the others' names are never looked up here. Runs
-/// until the process ends.
+/// to their union, re-listing on every PersistentVolume or
+/// VolumeAttachment change and at least every [`RESYNC_EVERY`] (Nodes
+/// are not watched; see [`watch`]). Volumes of every MDS shard are
+/// kept; a shard holds only its own, so the others' names are never
+/// looked up here. Runs until the process ends.
 pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: Option<&'static VolumeNodes>, domain: Option<String>) {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::{Node, PersistentVolume};
@@ -444,7 +446,6 @@ pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: Option<&'static 
     let events = futures::stream::select_all([
         watcher(pv_api.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
         watcher(vas.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
-        watcher(node_api.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
     ]);
     relist_forever(
         "PersistentVolumes or VolumeAttachments",
