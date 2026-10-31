@@ -354,8 +354,11 @@ rev 7 three-replica arm bounded at the box's cap, an hour, or half an
 hour for the acknowledgement stamp (depths 20 to 24: three failures
 allowed, the member-only read, the acknowledgement stamp, the record
 unwritable, the late capture), its zombie arms at the depth 17
-hole, and its liveness arm at no verdict, so the barrier's termination is
-claimed by no run; the monitor-skips arm neither confirms nor refutes the
+hole, and its three-replica liveness arm at no verdict; the barrier's
+termination was then shown at two replicas over the full space (c28,
+2026-10-31, rev 12: the lost mark, the crash and the zombie hold under
+the spec's weak fairness, each record-down control lassos) and stays
+unshown at three; the monitor-skips arm neither confirms nor refutes the
 strand's alternative fix, since the hole masks it. The expiry
 action loses an acknowledged write at depth 12, the measurement that
 decided the bound. Two of c21's controls ran in the wrong configuration

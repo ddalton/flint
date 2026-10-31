@@ -2808,7 +2808,7 @@ without the rule, and a HOLD on the data beside it.
 | c21 | the member-only read (stricter than the count) | member, view, decree | the three above | zombie move: VIOLATED at depth 17, the hole class, as the count's arm; lost mark: clean to depth 23 (106,261,050 states, bounded at the box's hour); crash: clean to depth 22 (99,941,057 states, bounded) (tla-mc 0.2.1) | as safe as the count where it reaches: the same hole, the same bounded depth; it defers where the count serves |
 | c21 | the monitor silent during a hold, the decree ungated | count, view, monitor skips | `Inv_NoNewLoss` | VIOLATED at depth 17, the hole class by another path: the zombie's pre-stamp junk on its own leg is copied to a returning leg by that leg's catch-up and served after a second move; the ungated decree's depth 13 violation is gone (none at depth 16 or less) (tla-mc 0.2.1, two workers) | the strand's root: the skipped marks remove the strand's own trace, but rev 7's hole masks everything past depth 16, so whether the skip closes the third gap on its own is not shown either way; the test is a rev 10 or later arm with the pre-stamp write legal (a follow-up, step 4) |
 | c21 | zombie move, the capture late (SZLate2) | count, view, decree | `Inv_NoLateJunk2` | clean to depth 20 (100,707,189 states), bounded at the box's hour, 2 GB caps, tla-mc 0.2.1, two workers; under rev 3 clean to depth 21 (185,940,255 states, 1 h cap), whose depth 20 trace was the hole | the capture's timing: no late junk served within the cap; bounded, not a full pass |
-| c21 | liveness | count, view, decree | `Prop_BarrierEnds`: a majority drop's barrier ends; a minority's ends when the record is writable | no verdict: cut at the cap (1,800 s; depth 20, 26,300,370 states) before the liveness check could conclude, so the run claims nothing; its control with the record unwritable fails as expected, a lasso at depth 9 (tla-mc 0.2.1, two workers) | that the barrier is not a hang is shown by no run: a capped liveness check decides nothing, and the control shows only that the property can fail; it needs a full pass, at two replicas or on a larger box |
+| c21 | liveness | count, view, decree | `Prop_BarrierEnds`: a majority drop's barrier ends; a minority's ends when the record is writable | no verdict: cut at the cap (1,800 s; depth 20, 26,300,370 states) before the liveness check could conclude, so the run claims nothing; its control with the record unwritable fails as expected, a lasso at depth 9 (tla-mc 0.2.1, two workers) | that the barrier is not a hang is shown by no run: a capped liveness check decides nothing, and the control shows only that the property can fail; c28 gives that full pass at two replicas; three replicas stays unshown |
 | c22 | zombie move with the expiry on (the code's 180 s bound) | count, view, decree, expiry | `Inv_NoNewLoss` | VIOLATED at depth 12 (854,198 states) | the bound's cost, step 3: the write on the unreachable leg is lost, permanent and marked |
 | c22 | lost mark; crash, with the expiry on | count, view, decree, expiry | `Inv_NoNewLoss` | clean to depth 19 (16,512,065 states; 25,857,285 states), bounded | no loss found under the bound when the leg holding the write is attachable, to the cap |
 | c22 | zombie move, lost mark, crash, with the expiry on | count, view, decree, expiry | `Inv_LossMarked` (no acknowledged write absent from every `in_sync` leg while the risk ghost is unset) | zombie move: clean to depth 20 (112,224,732 states, bounded); lost mark: clean to depth 22 (70,484,362 states, bounded, 2 GB caps); crash: clean to depth 22 (106,316,435 states, bounded, 2 GB caps) | the bound never loses silently: a dead node or a person accepted it |
@@ -2856,6 +2856,8 @@ without the rule, and a HOLD on the data beside it.
 | c27 | three replicas, lost mark, two failures | all | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_NoLateJunk2`, `Inv_TornJunkMarked` | HOLD, 1,774,204,193 states, depth 45 (160 workers, 629 s) | the full rule set over the whole three-replica space on the lost mark |
 | c27 | three replicas, crash, two failures | all | the five above | HOLD, 2,325,892,812 states, depth 46 (190 workers, 824 s) | the same on the crash |
 | c27 | three replicas, zombie move, two failures | all | the five above | no violation to depth 27 (2,429,420,385 distinct states, bounded: cut at the user's word at 1,186 s with the space still growing by half per level and the queue spilled to disk) | the three-replica zombie space is too large to exhaust; checked ten levels past the deepest three-replica trace the model has found (depth 17, c21), bounded, not a full pass |
+| c28 | two replicas, liveness: lost mark; crash; zombie move (rev 12 `8e54566d`, the full rule set, the record up) | all | `Prop_BarrierEnds`: a held barrier ends or the consumer detaches, under the spec's weak fairness | HOLD over the full space: 3,627,109 states, depth 35; 5,326,386, depth 35; 29,140,655, depth 39, equal to the zombie safety space (tla-mc 0.2.1, 4 workers; flint-e4, 2026-10-31, each log closing with every property checked) | the barrier is not a hang at two replicas, every fault, while the record is up and timeouts fire |
+| c28 | the same three with the record unwritable (control) | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 9; 8; 8, each stuttering with the barrier held | a minority barrier never ends without the record, as designed; the three controls are killed |
 
 What the table claims. At two replicas every arm under the full rule set
 is a full pass, and each safety rule has a control that fails without it
@@ -2877,8 +2879,12 @@ depth 17, c21; the box's bounded zombie arms reached depths 17, 19 and
 2026-10-31 with every remaining rev 7 three-replica arm bounded at the
 box's cap (an hour; half an hour for the acknowledgement stamp), at
 depths 20 to 24, three failures allowed adding no trace within that
-cap, and its liveness arm at no verdict, so the barrier's
-termination is claimed by no run. No three-replica control
+cap, and its liveness arm at no verdict. The barrier's
+termination is shown at two replicas over the full space for every
+fault (c28, rev 12, under the spec's weak fairness on the monitor's
+mark, a failed path's return, the stamp landing or failing, the release
+and the record's confirm, with each record-down control killed) and
+stays unshown at three. No three-replica control
 was killed within its cap (c24) and c27 ran none, so the attribution of
 each rule rests on the two-replica controls; the three-replica rows
 show the rules holding together, not which rule carries which HOLD.
@@ -2986,15 +2992,37 @@ and decided by the user:
          three-replica passes; if still too large, the acceptance names
          its evidence: the two-replica zombie full, the three-replica
          lost mark and crash full, the zombie to depth 27. The stamp
-         proof above supersedes this item.
+         proof above supersedes this item. Interim (flint-e4,
+         2026-10-31): symmetry needs model-value ids, so rev 13
+         (`41fa0652`) drops only the assumption that replica ids are
+         naturals (rev 12's generator still reproduces `8e54566d`), and
+         a wrapper module (`34243d06`) adds the permutation set and an
+         invariant that the newest view is unique, which is what makes
+         the stamp read blind to ids; the audit found no other use of
+         replica order in any S arm. Three violation pairs reproduce
+         rev 12's depths with and without symmetry (the three-replica
+         ungated decree at depth 13, 1,945,868 against 413,450 states,
+         about 4.7 times smaller); the full-pass pairs, which must
+         reproduce rev 12's counts exactly without symmetry, and a
+         bounded three-replica zombie pair are running to size the
+         reduction.
    - [ ] Liveness: `Prop_BarrierEnds` as a full pass with its control
-         (c21's arm reached no verdict). Two replicas first, on rev 12,
-         for the lost mark, the crash and the zombie move, plus the
-         record-down control that must lasso: box work, a few hours per
-         arm. Three replicas has no feasible full pass (the safety
-         spaces alone are 1.8 to 2.3 billion states): bounded only, or
-         the user accepts two-replica liveness. The premise to cite:
-         timeouts fire, which is the P4 fix (`c7e5d2fe`).
+         (c21's arm reached no verdict). Two replicas done (c28,
+         2026-10-31, rev 12, the full rule set, tla-mc 0.2.1): the lost
+         mark, the crash and the zombie move hold over their full
+         spaces (3,627,109; 5,326,386; 29,140,655 states, the last
+         equal to the zombie safety space), and each record-down
+         control lassos (depths 9, 8, 8), a minority barrier never
+         ending without the record. The claim rests on the spec's weak
+         fairness on the monitor's mark, a failed path's return, the
+         stamp landing or failing, the release and the record's
+         confirm; a control without fairness on the return has not run,
+         so whether the barrier's ending needs a leg back is open. In
+         code the premise is that timeouts fire, the P4 fix
+         (`c7e5d2fe`). Three replicas has no feasible full pass (the
+         safety spaces alone are 1.8 to 2.3 billion states): bounded
+         only. Ticked when the user accepts two-replica liveness as the
+         claim, with or without the return control.
    - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
          it at depth 23; c27's arm did not run). Cheapest: add it to the
          two full three-replica arms and rerun both on one m7i.48xlarge
