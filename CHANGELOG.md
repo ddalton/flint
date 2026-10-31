@@ -104,6 +104,21 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **An NFS server that misses an attachment admits the node within a
+  minute, instead of refusing it until the server restarts** (2026-10-31;
+  `spdk-csi-driver/src/nfs/node_authz.rs`). With
+  `nfs.kerberos.attachedNodesOnly`, an RWX volume's server, and a pNFS
+  MDS or data server, admits only the nodes its volumes are attached to.
+  It learns them by listing VolumeAttachments, and listed again only when
+  a watch reported a change. When the watch went quiet, the server never
+  listed again: in CI a volume's server found no nodes at its start, then
+  heard nothing for five minutes while both of the volume's
+  VolumeAttachments read attached, and every mount of the volume failed
+  with "access denied by server". The servers now also list every 60 s,
+  and kubelet's next mount retry is admitted. A change that only the
+  timed list finds is logged as a missed watch event, and a failed watch
+  is logged and retried with backoff instead of at once.
+
 - **A replica that stops answering faults out of its raid after spdk-tgt
   restarts, instead of hanging the volume's I/O** (2026-10-30;
   `spdk-csi-driver/src/spdk_native.rs`). Flint bounds how long SPDK waits

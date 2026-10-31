@@ -207,15 +207,78 @@ pub fn global() -> Option<&'static AttachedNodes> {
         .as_ref()
 }
 
+/// How long [`watch`] and [`watch_pnfs`] wait for a watch event before
+/// listing again anyway. The watches are the fast path and this is the
+/// floor under them: a watch can go quiet without an error. In CI on
+/// 2026-10-31 a volume's server listed no nodes at its start and then
+/// heard nothing for five minutes while both of the volume's
+/// VolumeAttachments read attached, so every mount of it was refused.
+/// Now a missed attachment refuses its node for at most this long, and
+/// kubelet's next mount retry finds it.
+pub const RESYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A watch event or a watch error, as [`relist_forever`] takes them.
+fn seen<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<(), String> {
+    r.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// The loop both watches run: `list`, hand a changed result to `apply`,
+/// then wait for the next watch event or error, or for `every` of
+/// neither, and list again. A change only the timer finds is a watch's
+/// miss, and is logged as one. Runs until the process ends.
+async fn relist_forever<T, E, L, F, A, S>(
+    what: &str,
+    mut list: L,
+    mut apply: A,
+    mut events: S,
+    every: std::time::Duration,
+) where
+    T: PartialEq,
+    E: std::fmt::Display,
+    L: FnMut() -> F,
+    F: std::future::Future<Output = Result<T, E>>,
+    A: FnMut(&T),
+    S: futures::Stream<Item = Result<(), String>> + Unpin,
+{
+    use futures::StreamExt;
+    let mut last: Option<T> = None;
+    let mut by_timer = false;
+    loop {
+        match list().await {
+            Ok(v) if last.as_ref() != Some(&v) => {
+                if by_timer && last.is_some() {
+                    tracing::warn!(
+                        "{ENV}: listing {what} after {}s with no watch event found a change: a watch missed it",
+                        every.as_secs()
+                    );
+                }
+                apply(&v);
+                last = Some(v);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("{ENV}: listing {what}: {e}"),
+        }
+        by_timer = false;
+        match tokio::time::timeout(every, events.next()).await {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(e))) => tracing::warn!("{ENV}: a watch failed ({e}); listing {what} again"),
+            // The watches ended: list on the timer alone.
+            Ok(None) => tokio::time::sleep(every).await,
+            Err(_) => by_timer = true,
+        }
+    }
+}
+
 /// Keep [`global`]'s set equal to the hostnames of the nodes `pv` is
 /// attached to (VolumeAttachments with `status.attached`), re-listing on
-/// every VolumeAttachment or Node change. Runs until the process ends.
+/// every VolumeAttachment or Node change and at least every
+/// [`RESYNC_EVERY`]. Runs until the process ends.
 pub async fn watch(nodes: &'static AttachedNodes, pv: String, domain: Option<String>) {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::Node;
     use k8s_openapi::api::storage::v1::VolumeAttachment;
     use kube::api::{Api, ListParams};
-    use kube::runtime::watcher;
+    use kube::runtime::{watcher, WatchStreamExt};
 
     // The NFS server's first TLS client: without a process-level provider
     // `Client::try_default` panics ("Could not automatically determine the
@@ -254,25 +317,21 @@ pub async fn watch(nodes: &'static AttachedNodes, pv: String, domain: Option<Str
         }
         Ok::<_, kube::Error>(hosts)
     };
-    let mut events = futures::stream::select(
-        watcher(vas.clone(), watcher::Config::default()).map(|_| ()).boxed(),
-        watcher(node_api.clone(), watcher::Config::default()).map(|_| ()).boxed(),
+    let events = futures::stream::select(
+        watcher(vas.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
+        watcher(node_api.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
     );
-    let mut last: Option<HashSet<String>> = None;
-    loop {
-        match resync(vas.clone(), node_api.clone(), pv.clone(), domain.clone()).await {
-            Ok(hosts) if last.as_ref() != Some(&hosts) => {
-                tracing::info!("🔐 {ENV}: volume {pv} serves nodes {:?}", hosts);
-                nodes.set(hosts.clone());
-                last = Some(hosts);
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("{ENV}: listing VolumeAttachments: {e}"),
-        }
-        if events.next().await.is_none() {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    }
+    relist_forever(
+        "VolumeAttachments",
+        || resync(vas.clone(), node_api.clone(), pv.clone(), domain.clone()),
+        |hosts: &HashSet<String>| {
+            tracing::info!("🔐 {ENV}: volume {pv} serves nodes {:?}", hosts);
+            nodes.set(hosts.clone());
+        },
+        events,
+        RESYNC_EVERY,
+    )
+    .await
 }
 
 /// One VolumeAttachment, as [`pnfs_volume_hosts`] needs it.
@@ -308,15 +367,16 @@ pub fn pnfs_volume_hosts(
 /// has none) equal to, per pNFS volume (a PV with
 /// `pnfs.chert.us/volume-file`), the nodes it is attached to, and `nodes`
 /// to their union, re-listing on every PersistentVolume,
-/// VolumeAttachment or Node change. Volumes of every MDS shard are kept;
-/// a shard holds only its own, so the others' names are never looked up
-/// here. Runs until the process ends.
+/// VolumeAttachment or Node change and at least every
+/// [`RESYNC_EVERY`]. Volumes of every MDS shard are kept; a shard holds
+/// only its own, so the others' names are never looked up here. Runs
+/// until the process ends.
 pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: Option<&'static VolumeNodes>, domain: Option<String>) {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::{Node, PersistentVolume};
     use k8s_openapi::api::storage::v1::VolumeAttachment;
     use kube::api::{Api, ListParams};
-    use kube::runtime::watcher;
+    use kube::runtime::{watcher, WatchStreamExt};
     use crate::pnfs_csi::ctx_keys;
 
     crate::install_crypto_provider();
@@ -381,40 +441,32 @@ pub async fn watch_pnfs(nodes: &'static AttachedNodes, volumes: Option<&'static 
             ))
         }
     };
-    let mut events = futures::stream::select_all([
-        watcher(pv_api.clone(), watcher::Config::default()).map(|_| ()).boxed(),
-        watcher(vas.clone(), watcher::Config::default()).map(|_| ()).boxed(),
-        watcher(node_api.clone(), watcher::Config::default()).map(|_| ()).boxed(),
+    let events = futures::stream::select_all([
+        watcher(pv_api.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
+        watcher(vas.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
+        watcher(node_api.clone(), watcher::Config::default()).default_backoff().map(seen).boxed(),
     ]);
-    let mut last: Option<HashMap<String, HashSet<String>>> = None;
-    loop {
-        match resync(domain.clone()).await {
-            Ok(map) if last.as_ref() != Some(&map) => {
-                let mut attached: Vec<_> = map.iter().filter(|(_, h)| !h.is_empty()).collect();
-                attached.sort_by(|a, b| a.0.cmp(b.0));
-                tracing::info!(
-                    "🔐 {ENV}: {} pNFS volume(s), attached: {:?}",
-                    map.len(),
-                    attached
-                );
-                // Union first, then the map: a node that just gained a
-                // volume may make its session before the map shows it,
-                // and is refused the volume until it does; never the
-                // reverse (a volume admitting a node whose sessions are
-                // still refused is harmless either way).
-                nodes.set(map.values().flatten().cloned().collect());
-                if let Some(volumes) = volumes {
-                    volumes.set(map.clone());
-                }
-                last = Some(map);
+    relist_forever(
+        "PersistentVolumes or VolumeAttachments",
+        || resync(domain.clone()),
+        |map: &HashMap<String, HashSet<String>>| {
+            let mut attached: Vec<_> = map.iter().filter(|(_, h)| !h.is_empty()).collect();
+            attached.sort_by(|a, b| a.0.cmp(b.0));
+            tracing::info!("🔐 {ENV}: {} pNFS volume(s), attached: {:?}", map.len(), attached);
+            // Union first, then the map: a node that just gained a
+            // volume may make its session before the map shows it,
+            // and is refused the volume until it does; never the
+            // reverse (a volume admitting a node whose sessions are
+            // still refused is harmless either way).
+            nodes.set(map.values().flatten().cloned().collect());
+            if let Some(volumes) = volumes {
+                volumes.set(map.clone());
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("{ENV}: listing PersistentVolumes or VolumeAttachments: {e}"),
-        }
-        if events.next().await.is_none() {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    }
+        },
+        events,
+        RESYNC_EVERY,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -501,6 +553,89 @@ mod tests {
         assert_eq!(volume_of(Path::new("")), None);
         assert_eq!(volume_of(Path::new("pvc-a")), Some("pvc-a".into()));
         assert_eq!(volume_of(Path::new("pvc-a/d/f")), Some("pvc-a".into()));
+    }
+
+    /// [`relist_forever`] against a fake API: each list returns the next
+    /// of `lists` (the last one repeats), and each change `apply` gets is
+    /// sent back with the virtual time it landed at.
+    fn relist_rig<S>(
+        lists: Vec<Vec<&'static str>>,
+        events: S,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<(Vec<String>, std::time::Duration)>,
+    )
+    where
+        S: futures::Stream<Item = Result<(), String>> + Unpin + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let start = tokio::time::Instant::now();
+        let mut n = 0;
+        let task = tokio::spawn(async move {
+            relist_forever(
+                "VolumeAttachments",
+                move || {
+                    let hosts: HashSet<String> =
+                        lists[n.min(lists.len() - 1)].iter().map(|h| h.to_string()).collect();
+                    n += 1;
+                    async move { Ok::<_, String>(hosts) }
+                },
+                move |hosts: &HashSet<String>| {
+                    let mut hosts: Vec<String> = hosts.iter().cloned().collect();
+                    hosts.sort();
+                    let _ = tx.send((hosts, start.elapsed()));
+                },
+                events,
+                RESYNC_EVERY,
+            )
+            .await
+        });
+        (task, rx)
+    }
+
+    /// The CI failure of 2026-10-31: the first list finds no node, the
+    /// attachment lands after it, and the watch never says so. The node
+    /// is admitted at the next timed list, not never.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_watch_still_learns_an_attachment() {
+        let (task, mut rx) = relist_rig(vec![vec![], vec!["w1"]], futures::stream::pending());
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (vec![], std::time::Duration::ZERO),
+            "the first list, empty"
+        );
+        let (hosts, at) = tokio::time::timeout(RESYNC_EVERY * 5, rx.recv())
+            .await
+            .expect("a silent watch must not keep an attached node out")
+            .unwrap();
+        assert_eq!(hosts, vec!["w1".to_string()]);
+        assert!(
+            at >= RESYNC_EVERY && at < RESYNC_EVERY + std::time::Duration::from_secs(1),
+            "found by the timed list: {at:?}"
+        );
+        task.abort();
+    }
+
+    /// The fast path is unchanged: a watch event, or a watch error,
+    /// lists again at once rather than at the next timed list.
+    #[tokio::test(start_paused = true)]
+    async fn a_watch_event_or_error_lists_at_once() {
+        let (events, rx_events) = futures::channel::mpsc::unbounded::<Result<(), String>>();
+        let (task, mut rx) = relist_rig(vec![vec![], vec!["w1"], vec!["w1", "w2"]], rx_events);
+        assert_eq!(rx.recv().await.unwrap().0, Vec::<String>::new());
+        events.unbounded_send(Ok(())).unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (vec!["w1".to_string()], std::time::Duration::ZERO),
+            "an event"
+        );
+        events.unbounded_send(Err("watch stream closed".into())).unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (vec!["w1".to_string(), "w2".to_string()], std::time::Duration::ZERO),
+            "an error"
+        );
+        task.abort();
     }
 
     #[test]
