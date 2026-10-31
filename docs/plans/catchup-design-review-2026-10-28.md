@@ -386,4 +386,7 @@ the stamp proof five to ten days, or two to three for a proof of the
 read rule alone; the three-replica zombie full pass not feasible on the
 box; liveness full at two replicas only; one EC2 session of a few hours
 for the three-replica acknowledgement stamp and the unrun arms; a
-resize arm one to two days. What to buy is the user's decision.
+resize arm one to two days. On 2026-10-31 the user chose the full stamp
+proof and approved the EC2 session (tla-mc 0.2.2 compiled, built
+first); two-replica liveness as the claim, resize, and the model-files
+push await their word.

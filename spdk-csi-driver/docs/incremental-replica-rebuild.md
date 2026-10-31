@@ -2981,7 +2981,9 @@ and decided by the user:
          under the released view name members holding every
          acknowledged write, for any replica count and generation),
          which removes the bound where it matters most, with model
-         checking keeping the rest.
+         checking keeping the rest. The user chose the full proof on
+         2026-10-31; flint-e4 carries it, and the record's 64 GB
+         instance is a separate plan and cost for the user's word.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
@@ -2992,7 +2994,10 @@ and decided by the user:
          three-replica passes; if still too large, the acceptance names
          its evidence: the two-replica zombie full, the three-replica
          lost mark and crash full, the zombie to depth 27. The stamp
-         proof above supersedes this item. Interim (flint-e4,
+         proof above supersedes this item, and the user chose that proof
+         on 2026-10-31, so no acceptance of the bound is asked; the
+         symmetry work runs to its end on the box and is recorded here.
+         Interim (flint-e4,
          2026-10-31): symmetry needs model-value ids, so rev 13
          (`41fa0652`) drops only the assumption that replica ids are
          naturals (rev 12's generator still reproduces `8e54566d`), and
@@ -3037,8 +3042,10 @@ and decided by the user:
          2026-10-31 (spot, nothing provisioned): m7i.48xlarge at $1.48
          an hour in us-west-1a plus a 2 TB gp3 disk at about $0.36,
          about $8.30 for the session, with the hard shutdown at six
-         hours capping the worst case near $11; awaiting the user's
-         word.
+         hours capping the worst case near $11. Approved by the user on
+         2026-10-31, on tla-mc 0.2.2 in compiled mode with the compiled
+         model built and checked on the box first; flint-e4 runs it,
+         and its rows land here with the instance, window and cost.
    - [ ] The resize rule modelled (the model has fixed-size legs and no
          row covers it), or resize excluded from the patch's first cut
          by the user. A resize arm is one to two days to build (per-leg
