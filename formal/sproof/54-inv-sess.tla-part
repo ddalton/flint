@@ -1,0 +1,832 @@
+(* (S) The invariant layer: the catch-up session's selection, failure and  *)
+(* revert (each with NoStamp: the stamp layer carries over by its frames;  *)
+(* the leg being caught up is stale, so no J conjunct, Inv_AckedHeld or    *)
+(* I_HoldAtt reads its head).  Ported from FlintCatchupTProof's             *)
+(* I_SelectBase, I_SessionFail, I_RevertD.                                 *)
+
+\* the invariant's groups, opened
+LEMMA ZS_Open ==
+  ASSUME IndInv
+  PROVE  /\ TypeOK /\ TypeOKT /\ TyStampS /\ IndJ
+         /\ I_RangesS /\ I_Lineage /\ I_Chain /\ I_Pend /\ I_MembersS /\ I_HoldAtt /\ I_PendSeen /\ I_Vers
+         /\ I_Reverted /\ I_HeadPend /\ I_Session /\ Inv_TrustComplete /\ I_NoBadLoss /\ Inv_AckedHeld
+         /\ I_AckedEverS /\ I_LegalS /\ I_WHiS /\ I_AckMono /\ I_HeadLoS /\ I_FreshS
+<1>1. TypeOK /\ IndJ /\ IndT /\ IndS BY IndSplit
+<1>2. TypeOKT /\ TyStampS BY <1>1, TypeOKParts
+<1>. QED BY <1>1, <1>2 DEF IndT, IndS
+
+\* the stamp variables a NoStamp step leaves alone, one by one
+LEMMA ZS_NoStamp ==
+  ASSUME NoStamp
+  PROVE  /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, hold, due, sole, zseq, zgen, zsize, zm0>>
+         /\ UNCHANGED <<zrgen, zrmem, zst, badAck, zjv, zpost>>
+BY DEF NoStamp, stampVars, sGhost
+
+\* --- IndInv v7's candidates (FlintCatchupSInd.tla de01921e; main 10-31: NEEDS-INV hypotheses until 40-ind-base
+\* takes them): the replacements J_RelHoldS, I_FreshS2, I_LegalS2 and the adds, each proved preserved here
+ZS_V7 ==
+  /\ J_RelHoldS /\ I_FreshS2 /\ I_LegalS2 /\ I_SnapPend /\ J_ZxIdle /\ J_SeqLe /\ J_SoleRel /\ J_GenTop /\ J_ZLive
+  /\ J_RelLe /\ I_WHiC /\ I_HeadLoC /\ I_HeadLoA /\ I_StandbyLegal /\ I_HeadHiC /\ I_SnapLegal /\ I_PendTop
+  /\ I_PendNext
+LEMMA ZS_F_RelHoldS == J_RelHoldS /\ UNCHANGED <<rmemA, dState, head, acked>> => J_RelHoldS'
+BY DEF J_RelHoldS, InSyncR
+LEMMA ZS_F_FreshS2 == I_FreshS2 /\ UNCHANGED <<dState, rmemA, sPres, nextSeq, conf, sCon, cutAck>> => I_FreshS2'
+BY DEF I_FreshS2, InSyncR
+LEMMA ZS_F_LegalS2 == I_LegalS2 /\ UNCHANGED <<head, sPres, sCon, ackedEver, pend, zpost>> => I_LegalS2'
+BY DEF I_LegalS2, LegalV2, PendVal
+LEMMA ZS_F_SnapPend == I_SnapPend /\ UNCHANGED <<sPres, sCon, pend>> => I_SnapPend' BY DEF I_SnapPend
+LEMMA ZS_F_ZxIdle == J_ZxIdle /\ UNCHANGED <<zx, dState, sb, reverted, stamp, zseq>> => J_ZxIdle' BY DEF J_ZxIdle
+LEMMA ZS_F_SeqLe == J_SeqLe /\ UNCHANGED <<stamp, nseq, sole, zseq>> => J_SeqLe' BY DEF J_SeqLe
+LEMMA ZS_F_SoleRel == J_SoleRel /\ UNCHANGED <<sole, nseq, rmemA, asize>> => J_SoleRel' BY DEF J_SoleRel
+LEMMA ZS_F_GenTop == J_GenTop /\ UNCHANGED <<attached, dState, stamp, agen, due, members, sole>> => J_GenTop'
+BY DEF J_GenTop, InSyncR, View, Valid, Majority, SolePairs
+LEMMA ZS_F_ZLive ==
+  J_ZLive /\ UNCHANGED <<zx, dState, attached, rmemA, zseq, nseq, zsize, asize, zgen, agen, zrgen, rgenA, zrmem>>
+  => J_ZLive'
+BY DEF J_ZLive
+LEMMA ZS_F_RelLe == J_RelLe /\ UNCHANGED <<rgenA, agen>> => J_RelLe' BY DEF J_RelLe
+LEMMA ZS_F_WHiC == I_WHiC /\ UNCHANGED <<sPres, sCon, cutAck, acked>> => I_WHiC' BY DEF I_WHiC, AckW
+LEMMA ZS_F_HeadLoC ==
+  I_HeadLoC /\ UNCHANGED <<dState, reverted, mark, sPres, sCon, cutAck, acked, head>> => I_HeadLoC'
+BY DEF I_HeadLoC, AckW, CatchingUp, HiOf
+LEMMA ZS_F_HeadLoA == I_HeadLoA /\ UNCHANGED <<dState, reverted, mark, sPres, sCon, acked, head>> => I_HeadLoA'
+BY DEF I_HeadLoA, CatchingUp, HiOf
+LEMMA ZS_F_StandbyLegal == I_StandbyLegal /\ UNCHANGED <<dState, head, ackedEver, pend>> => I_StandbyLegal'
+BY DEF I_StandbyLegal, PendVal
+LEMMA ZS_F_HeadHiC ==
+  I_HeadHiC /\ UNCHANGED <<dState, reverted, mark, sPres, cutAck, acked, head>> => I_HeadHiC'
+BY DEF I_HeadHiC, AckW, CatchingUp, HiOf
+LEMMA ZS_F_SnapLegal == I_SnapLegal /\ UNCHANGED <<sPres, sCon, ackedEver, pend>> => I_SnapLegal'
+BY DEF I_SnapLegal, PendVal
+LEMMA ZS_F_PendTop == I_PendTop /\ UNCHANGED <<pend, head, sPres, sCon>> => I_PendTop' BY DEF I_PendTop
+LEMMA ZS_F_PendNext == I_PendNext /\ UNCHANGED <<pend, nextSeq, sPres>> => I_PendNext' BY DEF I_PendNext
+\* the later candidates (Ind e50f1573: inv-zombie, inv-cut, inv-admit), not yet assigned: a group of their own
+ZS_V7c == J_ZRel /\ I_CutLegal /\ I_InSyncLegal /\ I_ValidLegal /\ J_ZNoValid /\ J_ZM0 /\ J_SoleGen
+LEMMA ZS_F_ZRel == J_ZRel /\ UNCHANGED <<zx, zm0, zseq, zgen, zsize, zrgen, zrmem, sole, dState>> => J_ZRel'
+BY DEF J_ZRel, ZombieReleases, Majority, Valid, SolePairs, InSyncR
+LEMMA ZS_F_CutLegal == I_CutLegal /\ UNCHANGED <<cutK, cutTgt, head, ackedEver, pend>> => I_CutLegal'
+BY DEF I_CutLegal, PendVal
+LEMMA ZS_F_InSyncLegal == I_InSyncLegal /\ UNCHANGED <<attached, dState, head, ackedEver, pend>> => I_InSyncLegal'
+BY DEF I_InSyncLegal, InSyncR, PendVal
+LEMMA ZS_F_ValidLegal == I_ValidLegal /\ UNCHANGED <<dState, stamp, sole, head, ackedEver, pend>> => I_ValidLegal'
+BY DEF I_ValidLegal, InSyncR, Valid, Majority, SolePairs, PendVal
+LEMMA ZS_F_ZNoValid == J_ZNoValid /\ UNCHANGED <<zx, zst, dState, stamp, sole>> => J_ZNoValid'
+BY DEF J_ZNoValid, Valid, Majority, SolePairs
+LEMMA ZS_F_ZM0 == J_ZM0 /\ UNCHANGED <<zx, zm0, zsize>> => J_ZM0' BY DEF J_ZM0
+LEMMA ZS_F_SoleGen == J_SoleGen /\ UNCHANGED <<sole, nseq, agen>> => J_SoleGen' BY DEF J_SoleGen
+\* the stamp-only ones of the group carry over by their frames
+LEMMA ZS_F_V7cStamp ==
+  ASSUME ZS_V7c, NoStamp, UNCHANGED <<zx, dState>> PROVE J_ZRel' /\ J_ZNoValid' /\ J_ZM0' /\ J_SoleGen'
+<1>1. UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, hold, due, sole, zseq, zgen, zsize, zm0>>
+      /\ UNCHANGED <<zrgen, zrmem, zst, badAck, zjv, zpost>>
+  BY ZS_NoStamp
+<1>. QED BY <1>1, ZS_F_ZRel, ZS_F_ZNoValid, ZS_F_ZM0, ZS_F_SoleGen DEF ZS_V7c
+
+\* every v7 candidate a step that leaves the stamp alone carries over by its frame, but the five it names
+LEMMA ZS_F_V7Stamp ==
+  ASSUME ZS_V7, NoStamp, UNCHANGED <<zx, dState, attached, members>>
+  PROVE  J_SeqLe' /\ J_SoleRel' /\ J_GenTop' /\ J_ZLive' /\ J_RelLe'
+<1>1. UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, hold, due, sole, zseq, zgen, zsize, zm0>>
+      /\ UNCHANGED <<zrgen, zrmem, zst, badAck, zjv, zpost>>
+  BY ZS_NoStamp
+<1>. QED BY <1>1, ZS_F_SeqLe, ZS_F_SoleRel, ZS_F_GenTop, ZS_F_ZLive, ZS_F_RelLe DEF ZS_V7
+
+\* the acked values (AckW) are numbers
+LEMMA ZS_AckWNat == ASSUME TypeOKT, NEW x \in Blocks PROVE AckW(x) \subseteq Nat
+<1>1. \A q \in R : sPres[q] \subseteq Epochs BY Basics
+<1>2. acked[x] \in Nat /\ \A q \in R : \A e \in Epochs : cutAck[q][e][x] \in Nat BY Nats
+<1>. QED BY <1>1, <1>2 DEF AckW
+
+LEMMA I_SelectBase ==
+  ASSUME IndInv,
+         J_RelHoldS, I_FreshS2, I_LegalS2, I_SnapPend, J_ZxIdle, J_SeqLe, J_SoleRel, J_GenTop, J_ZLive,
+         J_RelLe, I_WHiC, I_HeadLoC, I_HeadLoA, I_StandbyLegal, I_HeadHiC, I_SnapLegal, I_PendTop, I_PendNext,
+         J_ZRel, I_CutLegal, I_InSyncLegal, I_ValidLegal, J_ZNoValid, J_ZM0, J_SoleGen,
+         NEW r \in R, SelectBase(r) /\ NoStamp
+  PROVE  IndInv' /\ ZS_V7' /\ ZS_V7c'
+<1>0. /\ TypeOK /\ TypeOKT /\ IndJ
+      /\ I_RangesS /\ I_Lineage /\ I_Chain /\ I_Pend /\ I_MembersS /\ I_HoldAtt /\ I_PendSeen /\ I_Vers
+      /\ I_Reverted /\ I_HeadPend /\ I_Session /\ Inv_TrustComplete /\ I_NoBadLoss /\ Inv_AckedHeld
+      /\ I_AckedEverS /\ I_LegalS /\ I_WHiS /\ I_AckMono /\ I_HeadLoS /\ I_FreshS
+  BY ZS_Open
+<1>T. /\ members \subseteq R /\ InSyncR \subseteq R
+      /\ cutTgt \subseteq R /\ cutDone \subseteq R /\ cutGone \subseteq R
+      /\ recorded \subseteq Epochs /\ Epochs \subseteq Nat /\ R \subseteq Nat
+      /\ nextSeq \in Nat /\ cutK \in Nat /\ ver \in Nat /\ MaxEpoch \in Nat
+      /\ \A q \in R : /\ sPres[q] \subseteq Epochs /\ tr[q] \subseteq Epochs
+                      /\ hPar[q] \in Nat /\ mark[q] \in Nat /\ pin[q] \in Nat
+                      /\ sb[q] \in Int /\ reverted[q] \in Int
+  BY <1>0, Basics
+<1>u. /\ UNCHANGED <<ver, head, hAl, hPar, sPres, sCon, sAl, sPar, anc, recorded, nextSeq>>
+      /\ UNCHANGED <<cutK, cutTgt, cutDone, cutGone, members, attached, path, dState, mark>>
+      /\ UNCHANGED <<pend, acked, fails, riskRec, badAdmit, badLoss, ackedEver, restamp, zx>>
+      /\ UNCHANGED <<cfgAt, conf, tr, htr, cutAck>>
+      /\ UNCHANGED <<stampVars, sGhost>>
+  BY DEF SelectBase, trustVars, NoStamp
+<1>us. UNCHANGED <<rmemA, zjv, zpost>> BY ZS_NoStamp
+<1>g. dState[r] = "stale" /\ path[r] = "back" /\ sb[r] = -1 /\ recorded # {} BY DEF SelectBase
+<1>r. reverted[r] = -1 BY <1>0, <1>g DEF I_Session, SessionOK
+<1>p. PICK b \in BaseCandidates(r) \cup {0} :
+        LET b2 == IF CoverageWalk /\ b # 0 /\ CoverSet(r, Tgt, b) = {} THEN 0 ELSE b
+        IN /\ sb' = [sb EXCEPT ![r] = b2]
+           /\ reverted' = [reverted EXCEPT ![r] = IF reverted[r] = b2 /\ ~mustRev[r] THEN reverted[r] ELSE -1]
+  BY DEF SelectBase
+<1>q. PICK b2 \in BaseCandidates(r) \cup {0} :
+        /\ sb' = [sb EXCEPT ![r] = b2] /\ reverted' = [reverted EXCEPT ![r] = -1]
+  <2>1. BaseCandidates(r) \subseteq Epochs BY <1>0, <1>T, Groups DEF BaseCandidates, TySets
+  <2>2. b \in Nat BY <2>1, <1>T DEF Epochs
+  <2>. QED BY <1>p, <1>r, <2>2
+<1>rv. reverted' = reverted BY <1>q, <1>r, <1>0, Groups DEF TyLeg
+<1>c. b2 # 0 => b2 \in recorded /\ b2 \in sPres[r] /\ b2 \in tr[r] BY <1>q, Full DEF BaseCandidates
+<1>n. b2 \in 0..(nextSeq - 1) /\ b2 # -1
+  <2>1. recorded \subseteq 1..(nextSeq - 1) BY <1>0 DEF I_RangesS
+  <2>2. nextSeq \in 1..(MaxEpoch + 1) BY <1>0, Groups DEF TyScalar
+  <2>. QED BY <1>c, <2>1, <2>2
+<1>s. pin'[r] = (IF b2 = 0 THEN Min(recorded) ELSE b2) /\ \A q \in R \ {r} : pin'[q] = pin[q]
+  BY <1>q, <1>0, Full, Groups DEF SelectBase, TyLeg
+<1>a. \A q \in R \ {r} : sb'[q] = sb[q] /\ reverted'[q] = reverted[q] BY <1>q, <1>rv, <1>0, Groups DEF TyLeg
+<1>1. TypeOK'
+  <2>1. (SelectBase(r) \/ RevertD(r) \/ BulkCopy(r) \/ SessionFail(r) \/ Chase(r)) /\ NoStamp OBVIOUS
+  <2>. QED BY <2>1, <1>0, S_TyCatchup
+<1>2. IndJ' BY <1>0, <1>u, F_IndJ
+<1>3. /\ I_RangesS' /\ I_Lineage' /\ I_Chain' /\ I_Pend' /\ I_MembersS' /\ I_HoldAtt' /\ I_PendSeen'
+      /\ I_Vers' /\ I_HeadPend' /\ Inv_TrustComplete' /\ I_NoBadLoss' /\ Inv_AckedHeld'
+  BY <1>0, <1>u, <1>rv, F_RangesS, F_Lineage, F_Chain, F_Pend, F_MembersS, F_HoldAtt, F_PendSeen, F_Vers,
+     F_HeadPend, F_TC, F_NoBadLoss, F_AckedHeld
+<1>4. IndS'
+  <2>1. I_AckedEverS' /\ I_LegalS' /\ I_WHiS' /\ I_AckMono'
+    BY <1>0, <1>u, <1>us, F_AckedEverS, F_LegalS, F_WHiS, F_AckMono
+  <2>2. I_HeadLoS' /\ I_FreshS' BY <1>0, <1>u, <1>us, <1>rv, F_HeadLoS, F_FreshS
+  <2>. QED BY <2>1, <2>2 DEF IndS
+<1>5. I_Reverted'
+  <2>1. \A q \in R \ {r} : RevOK(q)' BY <1>0, <1>T, <1>u, <1>a, RevOther DEF I_Reverted
+  <2>2. RevOK(r)'
+    <3>1. reverted'[r] = -1 BY <1>rv, <1>r
+    <3>. QED BY <3>1 DEF RevOK
+  <2>. QED BY <2>1, <2>2 DEF I_Reverted
+<1>6. I_Session'
+  <2>0. sb'[r] = b2 BY <1>q, <1>0, Groups DEF TyLeg
+  <2>1. sb'[r] # -1 => dState'[r] = "stale" /\ sb'[r] < nextSeq' /\ recorded' # {}
+    <3>1. dState'[r] = "stale" /\ nextSeq' = nextSeq /\ recorded' = recorded BY <1>g, <1>u
+    <3>2. b2 < nextSeq BY <1>n, <1>T
+    <3>. QED BY <2>0, <3>1, <3>2, <1>g
+  <2>2. dState'[r] = "stale" /\ sb'[r] > 0 => pin'[r] = sb'[r] /\ sb'[r] \in recorded
+    BY <2>0, <1>s, <1>c, <1>u, <1>0, <1>T
+  <2>3. dState'[r] = "stale" /\ sb'[r] > 0 /\ reverted'[r] = -1 /\ sb'[r] \in sPres'[r] => sb'[r] \in tr'[r]
+    BY <2>0, <1>c, <1>u
+  <2>4. \A q \in R \ {r} : SessionOK(q)' BY <1>0, <1>T, <1>u, <1>a, <1>s, SessionOther DEF I_Session
+  <2>5. SessionOK(r)'
+    <3>1. dState'[r] = "stale" /\ reverted'[r] = -1 /\ ~CatchingUp(r)'
+      BY <1>u, <1>g, <1>rv, <1>r DEF CatchingUp
+    <3>2. sb'[r] # -1 /\ dState'[r] # "insync" /\ dState'[r] # "standby" BY <3>1, <2>0, <1>n
+    <3>3. recorded' = recorded /\ nextSeq' = nextSeq /\ cutK' = cutK BY <1>u
+    <3>. QED BY <3>1, <3>2, <3>3, <2>1, <2>2, <2>3 DEF SessionOK
+  <2>. QED BY <2>4, <2>5 DEF I_Session
+<1>7. IndT' BY <1>3, <1>5, <1>6 DEF IndT
+<1>v. ZS_V7'
+  <2>0. UNCHANGED <<stamp, zseq>> BY ZS_NoStamp
+  <2>1. J_SeqLe' /\ J_SoleRel' /\ J_GenTop' /\ J_ZLive' /\ J_RelLe' BY <1>u, ZS_F_V7Stamp DEF ZS_V7
+  <2>2. J_RelHoldS' /\ I_FreshS2' /\ I_LegalS2' /\ I_SnapPend' /\ I_WHiC' /\ I_HeadLoC' /\ I_HeadLoA'
+        /\ I_StandbyLegal'
+    BY <1>u, <1>us, <1>rv, ZS_F_RelHoldS, ZS_F_FreshS2, ZS_F_LegalS2, ZS_F_SnapPend, ZS_F_WHiC, ZS_F_HeadLoC,
+       ZS_F_HeadLoA, ZS_F_StandbyLegal DEF ZS_V7
+  <2>3. I_HeadHiC' /\ I_SnapLegal' /\ I_PendTop' /\ I_PendNext'
+    BY <1>u, <1>rv, ZS_F_HeadHiC, ZS_F_SnapLegal, ZS_F_PendTop, ZS_F_PendNext DEF ZS_V7
+  <2>4. J_ZxIdle'
+    <3>1. r # zx BY Full DEF SelectBase
+    <3>2. zx # 0 => zx \in R \ {r} BY <3>1, <1>0, Groups DEF TyScalar
+    <3>3. J_ZxIdle BY DEF ZS_V7
+    <3>. QED BY <3>2, <3>3, <1>a, <1>rv, <1>u, <2>0 DEF J_ZxIdle
+  <2>. QED BY <2>1, <2>2, <2>3, <2>4 DEF ZS_V7
+<1>vc. ZS_V7c'
+  <2>1. J_ZRel' /\ J_ZNoValid' /\ J_ZM0' /\ J_SoleGen' BY <1>u, ZS_F_V7cStamp DEF ZS_V7c
+  <2>2. I_CutLegal' /\ I_InSyncLegal' /\ I_ValidLegal'
+    BY <1>u, ZS_NoStamp, ZS_F_CutLegal, ZS_F_InSyncLegal, ZS_F_ValidLegal DEF ZS_V7c
+  <2>. QED BY <2>1, <2>2 DEF ZS_V7c
+<1>. QED BY <1>1, <1>2, <1>7, <1>4, <1>v, <1>vc, IndSplitP
+
+LEMMA I_SessionFail ==
+  ASSUME IndInv,
+         J_RelHoldS, I_FreshS2, I_LegalS2, I_SnapPend, J_ZxIdle, J_SeqLe, J_SoleRel, J_GenTop, J_ZLive,
+         J_RelLe, I_WHiC, I_HeadLoC, I_HeadLoA, I_StandbyLegal, I_HeadHiC, I_SnapLegal, I_PendTop, I_PendNext,
+         J_ZRel, I_CutLegal, I_InSyncLegal, I_ValidLegal, J_ZNoValid, J_ZM0, J_SoleGen,
+         NEW r \in R, SessionFail(r) /\ NoStamp
+  PROVE  IndInv' /\ ZS_V7' /\ ZS_V7c'
+<1>0. /\ TypeOK /\ TypeOKT /\ IndJ
+      /\ I_RangesS /\ I_Lineage /\ I_Chain /\ I_Pend /\ I_MembersS /\ I_HoldAtt /\ I_PendSeen /\ I_Vers
+      /\ I_Reverted /\ I_HeadPend /\ I_Session /\ Inv_TrustComplete /\ I_NoBadLoss /\ Inv_AckedHeld
+      /\ I_AckedEverS /\ I_LegalS /\ I_WHiS /\ I_AckMono /\ I_HeadLoS /\ I_FreshS
+  BY ZS_Open
+<1>T. /\ members \subseteq R /\ InSyncR \subseteq R
+      /\ cutTgt \subseteq R /\ cutDone \subseteq R /\ cutGone \subseteq R
+      /\ recorded \subseteq Epochs /\ Epochs \subseteq Nat /\ R \subseteq Nat
+      /\ nextSeq \in Nat /\ cutK \in Nat /\ ver \in Nat /\ MaxEpoch \in Nat
+      /\ \A q \in R : /\ sPres[q] \subseteq Epochs /\ tr[q] \subseteq Epochs
+                      /\ hPar[q] \in Nat /\ mark[q] \in Nat /\ pin[q] \in Nat
+                      /\ sb[q] \in Int /\ reverted[q] \in Int
+  BY <1>0, Basics
+<1>u. /\ UNCHANGED <<ver, head, hAl, hPar, sPres, sCon, sAl, sPar, anc, recorded, nextSeq>>
+      /\ UNCHANGED <<cutK, cutTgt, cutDone, cutGone, members, attached, path, dState, mark, pin>>
+      /\ UNCHANGED <<pend, acked, fails, riskRec, badAdmit, badLoss, ackedEver, restamp, zx>>
+      /\ UNCHANGED <<cfgAt, conf, tr, htr, cutAck>>
+      /\ UNCHANGED <<stampVars, sGhost>>
+  BY DEF SessionFail, trustVars, NoStamp
+<1>us. UNCHANGED <<rmemA, zjv, zpost>> BY ZS_NoStamp
+<1>p. /\ dState[r] = "stale" /\ sb' = [sb EXCEPT ![r] = -1] /\ reverted' = [reverted EXCEPT ![r] = -1]
+  BY DEF SessionFail
+<1>a. \A q \in R \ {r} : sb'[q] = sb[q] /\ reverted'[q] = reverted[q] BY <1>p, <1>0, Groups DEF TyLeg
+<1>r. sb'[r] = -1 /\ reverted'[r] = -1 BY <1>p, <1>0, Groups DEF TyLeg
+<1>b. ~CatchingUp(r)' /\ \A q \in R \ {r} : CatchingUp(q)' = CatchingUp(q) /\ HiOf(q)' = HiOf(q)
+  BY <1>u, <1>p, <1>a, <1>r DEF CatchingUp, HiOf
+<1>1. TypeOK'
+  <2>1. (SelectBase(r) \/ RevertD(r) \/ BulkCopy(r) \/ SessionFail(r) \/ Chase(r)) /\ NoStamp OBVIOUS
+  <2>. QED BY <2>1, <1>0, S_TyCatchup
+<1>2. IndJ' BY <1>0, <1>u, F_IndJ
+<1>3. /\ I_RangesS' /\ I_Lineage' /\ I_Chain' /\ I_Pend' /\ I_MembersS' /\ I_HoldAtt' /\ I_PendSeen'
+      /\ I_Vers' /\ Inv_TrustComplete' /\ I_NoBadLoss' /\ Inv_AckedHeld'
+  BY <1>0, <1>u, F_RangesS, F_Lineage, F_Chain, F_Pend, F_MembersS, F_HoldAtt, F_PendSeen, F_Vers,
+     F_TC, F_NoBadLoss, F_AckedHeld
+<1>4. I_HeadPend'
+  <2>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW w \in pend', head'[q][w.b] = w.v
+               PROVE  w.cutAt <= HiOf(q)'
+    BY DEF I_HeadPend
+  <2>1. q # r BY <1>b
+  <2>. QED BY <2>1, <1>b, <1>u, <1>0 DEF I_HeadPend
+<1>5. I_HeadLoS'
+  <2>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW p \in sPres'[q2], p < HiOf(q)',
+                      NEW x \in Blocks
+               PROVE  cutAck'[q2][p][x] <= head'[q][x]
+    BY DEF I_HeadLoS
+  <2>1. q # r BY <1>b
+  <2>. QED BY <2>1, <1>b, <1>u, <1>0 DEF I_HeadLoS
+<1>6. IndS'
+  <2>1. I_AckedEverS' /\ I_LegalS' /\ I_WHiS' /\ I_AckMono' /\ I_FreshS'
+    BY <1>0, <1>u, <1>us, F_AckedEverS, F_LegalS, F_WHiS, F_AckMono, F_FreshS
+  <2>. QED BY <2>1, <1>5 DEF IndS
+<1>7. I_Reverted'
+  <2>1. \A q \in R \ {r} : RevOK(q)' BY <1>0, <1>T, <1>u, <1>a, RevOther DEF I_Reverted
+  <2>2. RevOK(r)' BY <1>r DEF RevOK
+  <2>. QED BY <2>1, <2>2 DEF I_Reverted
+<1>8. I_Session'
+  <2>1. \A q \in R \ {r} : SessionOK(q)' BY <1>0, <1>T, <1>u, <1>a, SessionOther DEF I_Session
+  <2>2. SessionOK(r)'
+    <3>1. sb'[r] = -1 /\ reverted'[r] = -1 /\ dState'[r] = "stale" BY <1>r, <1>p, <1>u
+    <3>. QED BY <3>1, <1>b DEF SessionOK
+  <2>. QED BY <2>1, <2>2 DEF I_Session
+<1>9. IndT' BY <1>3, <1>4, <1>7, <1>8 DEF IndT
+<1>v. ZS_V7'
+  <2>0. UNCHANGED <<stamp, zseq>> BY ZS_NoStamp
+  <2>1. J_SeqLe' /\ J_SoleRel' /\ J_GenTop' /\ J_ZLive' /\ J_RelLe' BY <1>u, ZS_F_V7Stamp DEF ZS_V7
+  <2>2. J_RelHoldS' /\ I_FreshS2' /\ I_LegalS2' /\ I_SnapPend' /\ I_WHiC' /\ I_StandbyLegal'
+    BY <1>u, <1>us, ZS_F_RelHoldS, ZS_F_FreshS2, ZS_F_LegalS2, ZS_F_SnapPend, ZS_F_WHiC, ZS_F_StandbyLegal
+    DEF ZS_V7
+  <2>6. I_SnapLegal' /\ I_PendTop' /\ I_PendNext' BY <1>u, ZS_F_SnapLegal, ZS_F_PendTop, ZS_F_PendNext DEF ZS_V7
+  <2>7. I_HeadHiC'
+    <3>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW e2 \in sPres'[q2], e2 > HiOf(q)',
+                        NEW x \in Blocks, NEW v \in AckW(x)', v <= head'[q][x]
+                 PROVE  v <= cutAck'[q2][e2][x]
+      BY DEF I_HeadHiC
+    <3>1. q # r BY <1>b
+    <3>2. AckW(x)' = AckW(x) BY <1>u DEF AckW
+    <3>3. I_HeadHiC BY DEF ZS_V7
+    <3>. QED BY <3>1, <3>2, <3>3, <1>b, <1>u DEF I_HeadHiC
+  <2>3. I_HeadLoC'
+    <3>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW p \in sPres'[q2], p < HiOf(q)',
+                        NEW x \in Blocks, NEW v \in AckW(x)', v <= sCon'[q2][p][x]
+                 PROVE  v <= head'[q][x]
+      BY DEF I_HeadLoC
+    <3>1. q # r BY <1>b
+    <3>2. AckW(x)' = AckW(x) BY <1>u DEF AckW
+    <3>3. I_HeadLoC BY DEF ZS_V7
+    <3>. QED BY <3>1, <3>2, <3>3, <1>b, <1>u DEF I_HeadLoC
+  <2>5. I_HeadLoA'
+    <3>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW p \in sPres'[q2], p < HiOf(q)',
+                        NEW x \in Blocks, acked'[x] <= sCon'[q2][p][x]
+                 PROVE  acked'[x] <= head'[q][x]
+      BY DEF I_HeadLoA
+    <3>1. q # r BY <1>b
+    <3>3. I_HeadLoA BY DEF ZS_V7
+    <3>. QED BY <3>1, <3>3, <1>b, <1>u DEF I_HeadLoA
+  <2>4. J_ZxIdle'
+    <3>. SUFFICES ASSUME zx' # 0
+                 PROVE  dState'[zx'] # "standby" /\ sb'[zx'] = -1 /\ reverted'[zx'] = -1 /\ stamp'[zx'].seq = zseq'
+      BY DEF J_ZxIdle
+    <3>1. zx \in R /\ zx # 0 BY <1>u, <1>0, Groups DEF TyScalar
+    <3>2. dState[zx] # "standby" /\ sb[zx] = -1 /\ reverted[zx] = -1 /\ stamp[zx].seq = zseq
+      BY <3>1 DEF ZS_V7, J_ZxIdle
+    <3>3. sb'[zx] = -1 /\ reverted'[zx] = -1 BY <3>1, <3>2, <1>a, <1>r
+    <3>. QED BY <3>2, <3>3, <1>u, <2>0
+  <2>. QED BY <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7 DEF ZS_V7
+<1>vc. ZS_V7c'
+  <2>1. J_ZRel' /\ J_ZNoValid' /\ J_ZM0' /\ J_SoleGen' BY <1>u, ZS_F_V7cStamp DEF ZS_V7c
+  <2>2. I_CutLegal' /\ I_InSyncLegal' /\ I_ValidLegal'
+    BY <1>u, ZS_NoStamp, ZS_F_CutLegal, ZS_F_InSyncLegal, ZS_F_ValidLegal DEF ZS_V7c
+  <2>. QED BY <2>1, <2>2 DEF ZS_V7c
+<1>. QED BY <1>1, <1>2, <1>9, <1>6, <1>v, <1>vc, IndSplitP
+
+LEMMA I_RevertD ==
+  ASSUME IndInv,
+         \* (I_SnapPend is this lemma's NEEDS-INV: T's I_RevertD took I_HeadPend from I_Legal, which S drops)
+         J_RelHoldS, I_FreshS2, I_LegalS2, I_SnapPend, J_ZxIdle, J_SeqLe, J_SoleRel, J_GenTop, J_ZLive,
+         J_RelLe, I_WHiC, I_HeadLoC, I_HeadLoA, I_StandbyLegal, I_HeadHiC, I_SnapLegal, I_PendTop, I_PendNext,
+         J_ZRel, I_CutLegal, I_InSyncLegal, I_ValidLegal, J_ZNoValid, J_ZM0, J_SoleGen,
+         NEW r \in R, RevertD(r) /\ NoStamp
+  PROVE  IndInv' /\ ZS_V7' /\ ZS_V7c'
+<1>0. /\ TypeOK /\ TypeOKT /\ TyStampS /\ IndJ
+      /\ I_RangesS /\ I_Lineage /\ I_Chain /\ I_Pend /\ I_MembersS /\ I_HoldAtt /\ I_PendSeen /\ I_Vers
+      /\ I_Reverted /\ I_HeadPend /\ I_Session /\ Inv_TrustComplete /\ I_NoBadLoss /\ Inv_AckedHeld
+      /\ I_AckedEverS /\ I_LegalS /\ I_WHiS /\ I_AckMono /\ I_HeadLoS /\ I_FreshS
+  BY ZS_Open
+<1>T. /\ members \subseteq R /\ InSyncR \subseteq R
+      /\ cutTgt \subseteq R /\ cutDone \subseteq R /\ cutGone \subseteq R
+      /\ recorded \subseteq Epochs /\ Epochs \subseteq Nat /\ R \subseteq Nat
+      /\ nextSeq \in Nat /\ cutK \in Nat /\ ver \in Nat /\ MaxEpoch \in Nat
+      /\ \A q \in R : /\ sPres[q] \subseteq Epochs /\ tr[q] \subseteq Epochs
+                      /\ hPar[q] \in Nat /\ mark[q] \in Nat /\ pin[q] \in Nat
+                      /\ sb[q] \in Int /\ reverted[q] \in Int
+  BY <1>0, Basics
+<1>. DEFINE keep == IF sb[r] = 0 THEN {e \in sPres[r] : e < Min(recorded)}
+                                  ELSE {e \in sPres[r] : e <= sb[r]}
+<1>. DEFINE base == IF sb[r] = 0 THEN Zero ELSE sCon[r][sb[r]]
+<1>so. SessionOK(r) /\ RevOK(r) BY <1>0 DEF I_Session, I_Reverted
+<1>g. /\ dState[r] = "stale" /\ path[r] = "back" /\ sb[r] # -1 /\ reverted[r] = -1
+      /\ (sb[r] > 0 => sb[r] \in sPres[r])
+  BY DEF RevertD
+<1>t. /\ sb[r] \in 0..MaxEpoch /\ recorded # {} /\ recorded \subseteq Nat
+      /\ Min(recorded) \in recorded /\ \A e \in recorded : Min(recorded) <= e
+  <2>1. sb[r] \in 0..MaxEpoch /\ recorded # {} BY <1>so, <1>g, <1>0, Groups DEF SessionOK, TyLeg
+  <2>2. recorded \subseteq Nat BY <1>0, Groups DEF TySets, Epochs
+  <2>. QED BY <2>1, <2>2, MinProp
+<1>c. ChainShape(sPres[r], sPar[r], anc[r]) /\ ChainReads(sPres[r], sPar[r], sAl[r], sCon[r])
+  BY <1>0, LegChain
+<1>k. /\ keep \subseteq sPres[r]
+      /\ \A e \in keep : e <= sb[r] \/ (sb[r] = 0 /\ \A f \in recorded : e < f)
+      /\ sb[r] > 0 => sb[r] \in keep
+      /\ \A e \in keep : sPar[r][e] # 0 => sPar[r][e] \in keep
+      /\ \A e \in sPres[r] : e > sb[r] /\ sb[r] > 0 => e \notin keep
+  <2>1. sPres[r] \subseteq Nat BY <1>0, Groups DEF TySnap, Epochs
+  <2>2. \A e \in sPres[r] : sPar[r][e] < e /\ (sPar[r][e] # 0 => sPar[r][e] \in sPres[r]) /\ sPar[r][e] \in Nat
+    BY <1>c DEF ChainShape
+  <2>. QED BY <1>g, <1>t, <2>1, <2>2
+<1>b. \A x \in Blocks : base[x] = Up(sPar[r], sCon[r], sb[r], x) /\ base[x] \in Nat
+  BY <1>t, <1>g, <1>0, Nats DEF Up, Zero, Epochs
+<1>. HIDE DEF keep, base
+<1>u. /\ UNCHANGED <<ver, sCon, sAl, sPar, recorded, nextSeq, cutK, cutTgt, cutDone>>
+      /\ UNCHANGED <<members, attached, path, dState, mark, sb, pin>>
+      /\ UNCHANGED <<pend, acked, fails, riskRec, badAdmit, badLoss, ackedEver, restamp, zx>>
+      /\ UNCHANGED <<cfgAt, conf, htr>>
+      /\ UNCHANGED <<stampVars, sGhost>>
+  BY Full DEF RevertD, NoStamp
+<1>us. /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, hold, due, sole, zgen>>
+       /\ UNCHANGED <<badAck, zjv, zpost>>
+  BY ZS_NoStamp
+<1>p. /\ sPres' = [sPres EXCEPT ![r] = keep]
+      /\ anc' = [anc EXCEPT ![r] = [c \in Epochs |-> IF c \in keep THEN anc[r][c] ELSE {}]]
+      /\ tr' = [tr EXCEPT ![r] = @ \cap keep]
+      /\ cutAck' = [cutAck EXCEPT ![r] = [c \in Epochs |-> IF c \in keep THEN @[c] ELSE Zero]]
+      /\ head' = [head EXCEPT ![r] = base]
+      /\ hAl' = [hAl EXCEPT ![r] = {}] /\ hPar' = [hPar EXCEPT ![r] = sb[r]]
+      /\ reverted' = [reverted EXCEPT ![r] = sb[r]]
+      /\ cutGone' = IF cutK # 0 /\ r \in cutTgt \ cutDone THEN cutGone \cup {r} ELSE cutGone
+  BY Full DEF RevertD, keep, base
+<1>m. \A q \in R \ {r} : /\ sPres'[q] = sPres[q] /\ anc'[q] = anc[q] /\ tr'[q] = tr[q]
+                          /\ cutAck'[q] = cutAck[q] /\ head'[q] = head[q] /\ hAl'[q] = hAl[q]
+                          /\ hPar'[q] = hPar[q] /\ reverted'[q] = reverted[q]
+  BY <1>p, <1>0, Groups DEF TySnap, TyTrust, TyHead, TyLeg
+<1>n. /\ sPres'[r] = keep /\ tr'[r] = tr[r] \cap keep /\ hAl'[r] = {} /\ hPar'[r] = sb[r]
+      /\ head'[r] = base /\ reverted'[r] = sb[r]
+      /\ \A c \in keep : anc'[r][c] = anc[r][c] /\ cutAck'[r][c] = cutAck[r][c]
+      /\ \A c \in Epochs \ keep : anc'[r][c] = {}
+  <2>1. /\ sPres'[r] = keep /\ tr'[r] = tr[r] \cap keep /\ hAl'[r] = {} /\ hPar'[r] = sb[r]
+        /\ head'[r] = base /\ reverted'[r] = sb[r]
+    BY <1>p, <1>0, Groups DEF TySnap, TyTrust, TyHead, TyLeg
+  <2>2. /\ anc'[r] = [c \in Epochs |-> IF c \in keep THEN anc[r][c] ELSE {}]
+        /\ cutAck'[r] = [c \in Epochs |-> IF c \in keep THEN cutAck[r][c] ELSE Zero]
+    BY <1>p, <1>0, Groups DEF TySnap, TyTrust
+  <2>3. keep \subseteq Epochs BY <1>k, <1>T
+  <2>. QED BY <2>1, <2>2, <2>3
+<1>s. r \notin members /\ r \notin InSyncR /\ ~CatchingUp(r)
+  BY <1>0, <1>g, <1>so DEF I_MembersS, I_RangesS, InSyncR, CatchingUp
+<1>sP. \A q \in R : sPres'[q] \subseteq sPres[q] /\ tr'[q] \subseteq tr[q] /\ tr'[q] \subseteq sPres'[q]
+               /\ \A c \in sPres'[q] : cutAck'[q][c] = cutAck[q][c]
+  <2>1. \A q \in R : tr[q] \subseteq sPres[q] BY <1>0 DEF I_RangesS
+  <2>. QED BY <1>m, <1>n, <1>k, <2>1
+<1>hq. \A q \in InSyncR : head'[q] = head[q] BY <1>m, <1>s, <1>T
+<1>bv. \A x \in Blocks : base[x] = 0 \/ (sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x])
+  <2>. SUFFICES ASSUME NEW x \in Blocks PROVE base[x] = 0 \/ (sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x])
+    OBVIOUS
+  <2>1. CASE sb[r] = 0 BY <2>1, <1>b DEF Up
+  <2>2. CASE sb[r] # 0 BY <2>2, <1>b, <1>g, <1>t DEF Up
+  <2>. QED BY <2>1, <2>2
+<1>1. TypeOK'
+  <2>1. (SelectBase(r) \/ RevertD(r) \/ BulkCopy(r) \/ SessionFail(r) \/ Chase(r)) /\ NoStamp OBVIOUS
+  <2>. QED BY <2>1, <1>0, S_TyCatchup
+<1>2. IndJ'
+  <2>1. /\ J_DueHold' /\ J_HoldAtt' /\ J_Rel' /\ J_Cur' /\ J_ZxOut' /\ J_Aseq' /\ J_SeqSync' /\ J_MemRel'
+        /\ J_NoAckBad' /\ J_M0'
+    BY <1>0, <1>u, <1>us, F_DueHold, F_JHoldAtt, F_Rel, F_Cur, F_ZxOut, F_Aseq, F_SeqSync, F_MemRel,
+       F_NoAckBad, F_M0 DEF IndJ
+  <2>2. /\ J_RelValid' /\ J_MinorRel' /\ J_RelInSync' /\ J_ViewIn' /\ J_ViewOut' /\ J_SoleSeq'
+        /\ J_GenBound' /\ J_ZGen'
+    BY <1>0, <1>u, <1>us, F_RelValid, F_MinorRel, F_RelInSync, F_ViewIn, F_ViewOut, F_SoleSeq,
+       F_GenBound, F_ZGen DEF IndJ
+  <2>3. J_RelHold'
+    <3>. SUFFICES ASSUME NEW q \in rmemA' \cap InSyncR', NEW x \in Blocks, ~Pending(x)'
+                 PROVE  head'[q][x] >= acked'[x]
+      BY DEF J_RelHold
+    <3>1. q \in rmemA \cap InSyncR BY <1>u, <1>us DEF InSyncR
+    <3>2. ~Pending(x) BY <1>u DEF Pending
+    <3>3. head[q][x] >= acked[x] BY <3>1, <3>2, <1>0 DEF IndJ, J_RelHold
+    <3>. QED BY <3>1, <3>3, <1>hq, <1>u
+  <2>. QED BY <2>1, <2>2, <2>3 DEF IndJ
+<1>3. I_RangesS'
+  <2>1. tr'[r] \subseteq sPres'[r] BY <1>n
+  <2>2. hPar'[r] \in sPres'[r] \cup {0} BY <1>n, <1>k, <1>t
+  <2>3. \A q \in R : /\ sPres'[q] \subseteq 1..nextSeq'
+                     /\ tr'[q] \subseteq sPres'[q] \cap 1..(nextSeq' - 1)
+                     /\ hPar'[q] \in sPres'[q] \cup {0}
+    BY <1>0, <1>u, <1>m, <1>sP, <2>1, <2>2 DEF I_RangesS
+  <2>4. /\ cutK' # 0 => cutK' = nextSeq'
+        /\ ~attached' => pend' = {} /\ cutK' = 0 /\ members' = {}
+        /\ recorded' \subseteq 1..(nextSeq' - 1)
+        /\ \A e \in Epochs : ~conf'[e] => attached' /\ e < nextSeq'
+    BY <1>0, <1>u DEF I_RangesS
+  <2>. QED BY <2>3, <2>4 DEF I_RangesS
+<1>4. I_Lineage'
+  <2>1. ChainShape(keep, sPar[r], anc'[r]) BY <1>c, <1>k, <1>n DEF ChainShape
+  <2>. QED BY <1>0, <1>T, <1>m, <1>n, <1>u, <2>1 DEF I_Lineage
+<1>5. I_Chain'
+  <2>1. ChainReads(keep, sPar[r], sAl[r], sCon[r]) BY <1>c, <1>k DEF ChainReads, Up
+  <2>2. \A x \in Blocks : head'[r][x] = Up(sPar[r], sCon[r], hPar'[r], x) BY <1>n, <1>b
+  <2>. QED BY <1>0, <1>T, <1>m, <1>n, <1>u, <2>1, <2>2 DEF I_Chain
+<1>6. I_Pend' /\ I_MembersS' /\ I_HoldAtt'
+  <2>0. \A q \in members : head'[q] = head[q] BY <1>m, <1>s, <1>T
+  <2>1. I_Pend'
+    <3>. SUFFICES ASSUME NEW w \in pend
+                 PROVE  \A q \in w.landed \cap members : head'[q][w.b] = w.v
+      BY <1>0, <1>u DEF I_Pend
+    <3>. QED BY <2>0, <1>0 DEF I_Pend
+  <2>2. I_HoldAtt' BY <2>0, <1>0, <1>u DEF I_HoldAtt
+  <2>. QED BY <1>0, <1>u, <2>1, <2>2, F_MembersS
+<1>7. I_PendSeen' /\ I_Vers'
+  <2>3. I_PendSeen'
+    <3>. SUFFICES ASSUME NEW w \in pend,
+                        \E q \in R : head'[q][w.b] = w.v \/ \E e \in sPres'[q] : sCon[q][e][w.b] = w.v
+                 PROVE  w.landed # {}
+      BY <1>u DEF I_PendSeen
+    <3>1. w.b \in Blocks /\ w.v >= 1 BY <1>0, Nats
+    <3>2. head'[r][w.b] = w.v => sCon[r][sb[r]][w.b] = w.v /\ sb[r] \in sPres[r] BY <3>1, <1>bv, <1>n
+    <3>3. \E q \in R : head[q][w.b] = w.v \/ \E e \in sPres[q] : sCon[q][e][w.b] = w.v
+      BY <3>2, <1>m, <1>sP
+    <3>. QED BY <3>3, <1>0 DEF I_PendSeen
+  <2>4. I_Vers'
+    <3>. SUFFICES ASSUME NEW q \in R, NEW x \in Blocks
+                 PROVE  head'[q][x] <= ver /\ \A e \in sPres'[q] : sCon[q][e][x] <= ver
+      BY <1>u, <1>0 DEF I_Vers
+    <3>1. CASE q = r
+      <4>1. base[x] = 0 \/ (sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x]) BY <1>bv
+      <4>2. ver \in Nat BY <1>0, Nats
+      <4>3. base[x] <= ver BY <4>1, <4>2, <1>0 DEF I_Vers
+      <4>4. \A e \in sPres'[r] : sCon[r][e][x] <= ver BY <1>sP, <1>0 DEF I_Vers
+      <4>. QED BY <3>1, <4>3, <4>4, <1>n
+    <3>2. CASE q # r BY <3>2, <1>m, <1>sP, <1>0 DEF I_Vers
+    <3>. QED BY <3>1, <3>2
+  <2>. QED BY <2>3, <2>4
+<1>8. I_LegalS'
+  <2>0. \A x \in Blocks : LegalV(x)' = LegalV(x) BY <1>u, <1>us DEF LegalV, PendVal
+  <2>z. \A x \in Blocks : 0 \in LegalV(x) BY <1>0 DEF I_AckedEverS, LegalV
+  <2>. SUFFICES ASSUME NEW q \in R, NEW x \in Blocks
+               PROVE  /\ head'[q][x] \in LegalV(x)
+                      /\ \A e \in sPres'[q] : sCon[q][e][x] \in LegalV(x)
+    BY <2>0, <1>u DEF I_LegalS
+  <2>L. \A q2 \in R : \A y \in Blocks : head[q2][y] \in LegalV(y) /\ \A e \in sPres[q2] : sCon[q2][e][y] \in LegalV(y)
+    BY <1>0 DEF I_LegalS
+  <2>1. \A e \in sPres'[q] : sCon[q][e][x] \in LegalV(x) BY <1>sP, <2>L
+  <2>2. CASE q = r
+    <3>1. CASE base[x] = 0 BY <3>1, <2>z, <1>n, <2>2, <2>1
+    <3>2. CASE base[x] # 0
+      <4>1. sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x] BY <3>2, <1>bv
+      <4>2. sCon[r][sb[r]][x] \in LegalV(x) BY <4>1, <2>L
+      <4>. QED BY <4>1, <4>2, <1>n, <2>2, <2>1
+    <3>. QED BY <3>1, <3>2, <2>1
+  <2>3. CASE q # r
+    <3>1. head'[q] = head[q] BY <2>3, <1>m
+    <3>2. head[q][x] \in LegalV(x) BY <2>L
+    <3>. QED BY <3>1, <3>2, <2>1
+  <2>. QED BY <2>2, <2>3
+<1>9. I_WHiS' /\ I_AckMono' /\ Inv_TrustComplete'
+  <2>1. I_WHiS' BY <1>0, <1>sP DEF I_WHiS
+  <2>2. I_AckMono' BY <1>0, <1>u, <1>sP DEF I_AckMono
+  <2>3. Inv_TrustComplete' BY <1>0, <1>u, <1>sP DEF Inv_TrustComplete
+  <2>. QED BY <2>1, <2>2, <2>3
+<1>10. I_HeadLoS'
+  <2>1. CatchingUp(r)' /\ HiOf(r)' = sb[r] BY <1>n, <1>g, <1>u DEF CatchingUp, HiOf
+  <2>2. \A q \in R \ {r} : CatchingUp(q)' = CatchingUp(q) /\ HiOf(q)' = HiOf(q) BY <1>m, <1>u DEF CatchingUp, HiOf
+  <2>4. \A q \in R : \A p \in sPres'[q] : p < sb[r] => \A x \in Blocks : cutAck'[q][p][x] <= base[x]
+    <3>. SUFFICES ASSUME NEW q \in R, NEW p \in sPres'[q], p < sb[r], NEW x \in Blocks
+                 PROVE  cutAck'[q][p][x] <= base[x]
+      OBVIOUS
+    <3>2. p \in sPres[q] /\ p \in Epochs /\ cutAck'[q][p] = cutAck[q][p] BY <1>sP, <1>0, Groups DEF TySnap
+    <3>0. sb[r] > 0 BY <3>2, <1>t DEF Epochs
+    <3>1. sb[r] > 0 /\ sb[r] \in sPres[r] /\ sb[r] \in tr[r] BY <3>0, <1>g, <1>t, <1>so DEF SessionOK
+    <3>3. cutAck[q][p][x] <= cutAck[r][sb[r]][x] BY <3>1, <3>2, <1>0 DEF I_WHiS
+    <3>4. cutAck[r][sb[r]][x] <= sCon[r][sb[r]][x] BY <3>1, <1>0 DEF Inv_TrustComplete
+    <3>5. base[x] = sCon[r][sb[r]][x] BY <3>1, <1>b DEF Up
+    <3>6. cutAck[q][p][x] \in Nat /\ cutAck[r][sb[r]][x] \in Nat /\ sCon[r][sb[r]][x] \in Nat
+      BY <3>1, <3>2, <1>0, Nats, Groups DEF TySnap
+    <3>. QED BY <3>2, <3>3, <3>4, <3>5, <3>6
+  <2>5. \A q \in R \ {r} : CatchingUp(q)' => \A q1 \in R : \A p \in sPres'[q1] : p < HiOf(q)' =>
+          \A x \in Blocks : cutAck'[q1][p][x] <= head'[q][x]
+    BY <1>0, <1>m, <1>sP, <2>2 DEF I_HeadLoS
+  <2>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q1 \in R, NEW p \in sPres'[q1], p < HiOf(q)',
+                      NEW x \in Blocks
+               PROVE  cutAck'[q1][p][x] <= head'[q][x]
+    BY DEF I_HeadLoS
+  <2>6. CASE q = r BY <2>6, <2>1, <2>4, <1>n
+  <2>7. CASE q # r BY <2>7, <2>5
+  <2>. QED BY <2>6, <2>7
+<1>11. I_Reverted'
+  <2>1. \A q \in R \ {r} : RevOK(q)' BY <1>0, <1>T, <1>m, <1>u, RevOther DEF I_Reverted
+  <2>2. RevOK(r)'
+    <3>1. head'[r] = (IF reverted'[r] = 0 THEN Zero ELSE sCon'[r][reverted'[r]])
+      BY <1>n, <1>u, <1>t, <1>g DEF base
+    <3>. QED BY <3>1, <1>n, <1>u, <1>k, <1>g DEF RevOK
+  <2>. QED BY <2>1, <2>2 DEF I_Reverted
+<1>12. I_HeadPend'
+  <2>1. \A w \in pend : base[w.b] = w.v => w.cutAt <= sb[r]
+    <3>. SUFFICES ASSUME NEW w \in pend, base[w.b] = w.v PROVE w.cutAt <= sb[r] OBVIOUS
+    <3>1. w.v >= 1 /\ w.b \in Blocks BY <1>0, Nats
+    <3>2. sb[r] \in sPres[r] /\ sCon[r][sb[r]][w.b] = w.v BY <3>1, <1>bv
+    <3>. QED BY <3>2 DEF I_SnapPend
+  <2>2. \A q \in R \ {r} : CatchingUp(q)' = CatchingUp(q) /\ HiOf(q)' = HiOf(q) BY <1>m, <1>u DEF CatchingUp, HiOf
+  <2>3. HiOf(r)' = sb[r] BY <1>n, <1>u, <1>g DEF HiOf
+  <2>. QED BY <1>0, <1>m, <1>n, <1>u, <2>1, <2>2, <2>3 DEF I_HeadPend
+<1>13. I_Session'
+  <2>0. cutGone \subseteq cutGone' BY <1>p
+  <2>1. \A q \in R \ {r} : SessionOK(q)' BY <1>0, <1>T, <1>m, <1>u, <2>0, SessionOtherG DEF I_Session
+  <2>2. SessionOK(r)'
+    <3>1. cutK # 0 /\ r \in cutTgt => r \in cutDone \cup cutGone' BY <1>p
+    <3>2. nextSeq \notin keep
+      <4>1. sb[r] < nextSeq BY <1>so, <1>g DEF SessionOK
+      <4>2. \A f \in recorded : f <= nextSeq - 1 BY <1>0 DEF I_RangesS
+      <4>3. keep \subseteq Nat BY <1>k, <1>T
+      <4>4. \A e \in keep : e < nextSeq BY <4>1, <4>2, <4>3, <1>k, <1>t, <1>T
+      <4>. QED BY <4>4, <1>T
+    <3>. QED BY <1>so, <1>n, <1>u, <1>g, <3>1, <3>2 DEF SessionOK, CatchingUp
+  <2>. QED BY <2>1, <2>2 DEF I_Session
+<1>14. I_FreshS'
+  <2>1. BasesS' = BasesS /\ r \notin BasesS BY <1>u, <1>us, <1>s DEF BasesS, InSyncR
+  <2>. SUFFICES ASSUME NEW q \in BasesS, NEW c \in sPres'[q], c >= nextSeq \/ ~conf[c], NEW x \in Blocks
+               PROVE  sCon[q][c][x] >= cutAck'[q][c][x]
+    BY <2>1, <1>u DEF I_FreshS
+  <2>2. q \in R \ {r} BY <2>1, <1>T, <1>0 DEF BasesS, TyStampS
+  <2>3. c \in sPres[q] /\ cutAck'[q] = cutAck[q] BY <2>2, <1>m
+  <2>. QED BY <2>3, <1>0 DEF I_FreshS
+<1>15. I_NoBadLoss' /\ Inv_AckedHeld' /\ I_MembersS' /\ I_AckedEverS'
+  <2>1. Inv_AckedHeld'
+    <3>. SUFFICES ASSUME NEW x \in Blocks PROVE \E q \in R : dState'[q] = "insync" /\ head'[q][x] >= acked'[x]
+      BY DEF Inv_AckedHeld
+    <3>1. PICK q \in R : dState[q] = "insync" /\ head[q][x] >= acked[x] BY <1>0 DEF Inv_AckedHeld
+    <3>2. q \in InSyncR BY <3>1 DEF InSyncR
+    <3>. QED BY <3>1, <3>2, <1>hq, <1>u
+  <2>. QED BY <2>1, <1>0, <1>u, F_NoBadLoss, F_MembersS, F_AckedEverS
+<1>16. IndT' BY <1>3, <1>4, <1>5, <1>6, <1>7, <1>9, <1>11, <1>12, <1>13, <1>15 DEF IndT
+<1>17. IndS' BY <1>8, <1>9, <1>10, <1>14, <1>15 DEF IndS
+<1>v. ZS_V7'
+  <2>0. UNCHANGED <<stamp, zseq, zpost>> BY ZS_NoStamp
+  <2>V. /\ J_RelHoldS /\ I_FreshS2 /\ I_LegalS2 /\ I_SnapPend /\ J_ZxIdle /\ I_WHiC /\ I_HeadLoC /\ I_HeadLoA
+        /\ I_StandbyLegal /\ I_HeadHiC /\ I_SnapLegal /\ I_PendTop /\ I_PendNext
+    BY DEF ZS_V7
+  <2>s. J_SeqLe' /\ J_SoleRel' /\ J_GenTop' /\ J_ZLive' /\ J_RelLe' BY <1>u, ZS_F_V7Stamp DEF ZS_V7
+  <2>A. \A x \in Blocks : AckW(x)' \subseteq AckW(x) /\ AckW(x) \subseteq Nat
+    <3>. SUFFICES ASSUME NEW x \in Blocks PROVE AckW(x)' \subseteq AckW(x) /\ AckW(x) \subseteq Nat OBVIOUS
+    <3>1. AckW(x) \subseteq Nat BY <1>0, ZS_AckWNat
+    <3>2. AckW(x)' \subseteq AckW(x) BY <1>sP, <1>u DEF AckW
+    <3>. QED BY <3>1, <3>2
+  <2>1. J_RelHoldS'
+    <3>. SUFFICES ASSUME NEW q \in rmemA' \cap InSyncR', NEW x \in Blocks PROVE head'[q][x] >= acked'[x]
+      BY DEF J_RelHoldS
+    <3>1. q \in rmemA \cap InSyncR BY <1>u, <1>us DEF InSyncR
+    <3>2. head[q][x] >= acked[x] BY <3>1, <2>V DEF J_RelHoldS
+    <3>. QED BY <3>1, <3>2, <1>hq, <1>u
+  <2>2. I_FreshS2'
+    <3>. SUFFICES ASSUME NEW q \in InSyncR' \cap rmemA', NEW c \in sPres'[q], c >= nextSeq' \/ ~conf'[c],
+                        NEW x \in Blocks
+                 PROVE  sCon'[q][c][x] >= cutAck'[q][c][x]
+      BY DEF I_FreshS2
+    <3>1. q \in InSyncR \cap rmemA /\ q \in R \ {r} BY <1>u, <1>us, <1>s DEF InSyncR
+    <3>2. c \in sPres[q] /\ cutAck'[q] = cutAck[q] BY <3>1, <1>m
+    <3>. QED BY <3>1, <3>2, <1>u, <2>V DEF I_FreshS2
+  <2>3. I_SnapPend'
+    <3>. SUFFICES ASSUME NEW q \in R, NEW e \in sPres'[q], NEW w \in pend', sCon'[q][e][w.b] = w.v
+                 PROVE  w.cutAt <= e
+      BY DEF I_SnapPend
+    <3>1. e \in sPres[q] BY <1>sP
+    <3>. QED BY <3>1, <1>u, <2>V DEF I_SnapPend
+  <2>4. J_ZxIdle'
+    <3>. SUFFICES ASSUME zx' # 0
+                 PROVE  dState'[zx'] # "standby" /\ sb'[zx'] = -1 /\ reverted'[zx'] = -1 /\ stamp'[zx'].seq = zseq'
+      BY DEF J_ZxIdle
+    <3>1. zx \in R /\ zx # 0 BY <1>u, <1>0, Groups DEF TyScalar
+    <3>2. dState[zx] # "standby" /\ sb[zx] = -1 /\ reverted[zx] = -1 /\ stamp[zx].seq = zseq
+      BY <3>1, <2>V DEF J_ZxIdle
+    <3>3. zx # r BY <3>2, <1>g
+    <3>4. reverted'[zx] = -1 BY <3>1, <3>2, <3>3, <1>m
+    <3>. QED BY <3>2, <3>4, <1>u, <2>0
+  <2>5. I_LegalS2'
+    <3>0. \A x \in Blocks : LegalV2(x)' = LegalV2(x) BY <1>u, <1>us DEF LegalV2, PendVal
+    <3>z. \A x \in Blocks : 0 \in LegalV2(x) BY <1>0 DEF I_AckedEverS, LegalV2
+    <3>. SUFFICES ASSUME NEW q \in R, NEW x \in Blocks
+                 PROVE  /\ head'[q][x] \in LegalV2(x)
+                        /\ \A e \in sPres'[q] : sCon[q][e][x] \in LegalV2(x)
+      BY <3>0, <1>u DEF I_LegalS2
+    <3>L. \A q2 \in R : \A y \in Blocks :
+            head[q2][y] \in LegalV2(y) /\ \A e \in sPres[q2] : sCon[q2][e][y] \in LegalV2(y)
+      BY <2>V DEF I_LegalS2
+    <3>1. \A e \in sPres'[q] : sCon[q][e][x] \in LegalV2(x) BY <1>sP, <3>L
+    <3>2. CASE q = r
+      <4>1. CASE base[x] = 0 BY <4>1, <3>z, <1>n, <3>2, <3>1
+      <4>2. CASE base[x] # 0
+        <5>1. sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x] BY <4>2, <1>bv
+        <5>2. sCon[r][sb[r]][x] \in LegalV2(x) BY <5>1, <3>L
+        <5>. QED BY <5>1, <5>2, <1>n, <3>2, <3>1
+      <4>. QED BY <4>1, <4>2, <3>1
+    <3>3. CASE q # r
+      <4>1. head'[q] = head[q] BY <3>3, <1>m
+      <4>2. head[q][x] \in LegalV2(x) BY <3>L
+      <4>. QED BY <4>1, <4>2, <3>1
+    <3>. QED BY <3>2, <3>3
+  <2>6. I_StandbyLegal'
+    <3>. SUFFICES ASSUME NEW q \in R, dState'[q] = "standby", NEW x \in Blocks
+                 PROVE  head'[q][x] \in ackedEver'[x] \cup PendVal(x)'
+      BY DEF I_StandbyLegal
+    <3>1. q # r /\ dState[q] = "standby" BY <1>g, <1>u
+    <3>2. head'[q] = head[q] BY <3>1, <1>m
+    <3>3. PendVal(x)' = PendVal(x) BY <1>u DEF PendVal
+    <3>. QED BY <3>1, <3>2, <3>3, <1>u, <2>V DEF I_StandbyLegal
+  <2>7. I_WHiC'
+    <3>. SUFFICES ASSUME NEW q \in R, NEW q2 \in R, NEW p \in sPres'[q], NEW e2 \in sPres'[q2], p < e2,
+                        NEW x \in Blocks, NEW v \in AckW(x)', v <= sCon'[q][p][x]
+                 PROVE  v <= cutAck'[q2][e2][x]
+      BY DEF I_WHiC
+    <3>1. p \in sPres[q] /\ e2 \in sPres[q2] /\ cutAck'[q2][e2] = cutAck[q2][e2] BY <1>sP
+    <3>2. v \in AckW(x) BY <2>A
+    <3>. QED BY <3>1, <3>2, <1>u, <2>V DEF I_WHiC
+  \* the reverted leg: an acked value an older snapshot holds is in the base's cut (I_WHiC), so in the base
+  \* (trusted: Inv_TrustComplete)
+  <2>8. \A q \in R : \A p \in sPres'[q] : p < sb[r] =>
+          \A x \in Blocks : \A v \in AckW(x) : v <= sCon[q][p][x] => v <= base[x]
+    <3>. SUFFICES ASSUME NEW q \in R, NEW p \in sPres'[q], p < sb[r], NEW x \in Blocks, NEW v \in AckW(x),
+                        v <= sCon[q][p][x]
+                 PROVE  v <= base[x]
+      OBVIOUS
+    <3>2. p \in sPres[q] /\ p \in Epochs BY <1>sP, <1>0, Groups DEF TySnap
+    <3>0. sb[r] > 0 BY <3>2, <1>t DEF Epochs
+    <3>1. sb[r] \in sPres[r] /\ sb[r] \in tr[r] BY <3>0, <1>g, <1>t, <1>so DEF SessionOK
+    <3>3. v <= cutAck[r][sb[r]][x] BY <3>1, <3>2, <2>V DEF I_WHiC
+    <3>4. cutAck[r][sb[r]][x] <= sCon[r][sb[r]][x] BY <3>1, <1>0 DEF Inv_TrustComplete
+    <3>5. base[x] = sCon[r][sb[r]][x] BY <3>0, <1>b DEF Up
+    <3>6. v \in Nat /\ cutAck[r][sb[r]][x] \in Nat /\ sCon[r][sb[r]][x] \in Nat
+      BY <3>1, <2>A, <1>0, Nats, Groups DEF TySnap
+    <3>. QED BY <3>3, <3>4, <3>5, <3>6
+  <2>c. /\ CatchingUp(r)' /\ HiOf(r)' = sb[r]
+        /\ \A q \in R \ {r} : CatchingUp(q)' = CatchingUp(q) /\ HiOf(q)' = HiOf(q)
+    BY <1>n, <1>g, <1>m, <1>u DEF CatchingUp, HiOf
+  <2>9. I_HeadLoC'
+    <3>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW p \in sPres'[q2], p < HiOf(q)',
+                        NEW x \in Blocks, NEW v \in AckW(x)', v <= sCon'[q2][p][x]
+                 PROVE  v <= head'[q][x]
+      BY DEF I_HeadLoC
+    <3>0. v \in AckW(x) /\ p \in sPres[q2] BY <2>A, <1>sP
+    <3>1. CASE q = r BY <3>0, <3>1, <2>c, <2>8, <1>n, <1>u
+    <3>2. CASE q # r BY <3>0, <3>2, <2>c, <1>m, <1>u, <2>V DEF I_HeadLoC
+    <3>. QED BY <3>1, <3>2
+  <2>10. I_HeadLoA'
+    <3>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW p \in sPres'[q2], p < HiOf(q)',
+                        NEW x \in Blocks, acked'[x] <= sCon'[q2][p][x]
+                 PROVE  acked'[x] <= head'[q][x]
+      BY DEF I_HeadLoA
+    <3>0. acked[x] \in AckW(x) /\ p \in sPres[q2] BY <1>sP DEF AckW
+    <3>1. CASE q = r BY <3>0, <3>1, <2>c, <2>8, <1>n, <1>u
+    <3>2. CASE q # r BY <3>0, <3>2, <2>c, <1>m, <1>u, <2>V DEF I_HeadLoA
+    <3>. QED BY <3>1, <3>2
+  <2>11. I_HeadHiC'
+    <3>. SUFFICES ASSUME NEW q \in R, CatchingUp(q)', NEW q2 \in R, NEW e2 \in sPres'[q2], e2 > HiOf(q)',
+                        NEW x \in Blocks, NEW v \in AckW(x)', v <= head'[q][x]
+                 PROVE  v <= cutAck'[q2][e2][x]
+      BY DEF I_HeadHiC
+    <3>0. v \in AckW(x) /\ v \in Nat /\ e2 \in sPres[q2] /\ cutAck'[q2][e2] = cutAck[q2][e2] BY <2>A, <1>sP
+    <3>n. cutAck[q2][e2][x] \in Nat BY <3>0, <1>0, Nats, Groups DEF TySnap
+    <3>1. CASE q = r
+      <4>1. head'[q][x] = base[x] /\ e2 > sb[r] BY <3>1, <1>n, <2>c
+      <4>2. CASE sb[r] = 0
+        <5>1. base[x] = 0 BY <4>2, <1>b DEF Up
+        <5>. QED BY <5>1, <4>1, <3>0, <3>n
+      <4>3. CASE sb[r] # 0
+        <5>1. sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x] BY <4>3, <1>g, <1>t, <1>b DEF Up
+        <5>2. v <= sCon[r][sb[r]][x] BY <5>1, <4>1
+        <5>. QED BY <5>1, <5>2, <4>1, <3>0, <2>V DEF I_WHiC
+      <4>. QED BY <4>2, <4>3
+    <3>2. CASE q # r BY <3>0, <3>2, <2>c, <1>m, <1>u, <2>V DEF I_HeadHiC
+    <3>. QED BY <3>1, <3>2
+  <2>12. I_SnapLegal'
+    <3>. SUFFICES ASSUME NEW q \in R, NEW e \in sPres'[q], NEW x \in Blocks
+                 PROVE  sCon'[q][e][x] \in ackedEver'[x] \cup PendVal(x)'
+      BY DEF I_SnapLegal
+    <3>1. e \in sPres[q] BY <1>sP
+    <3>2. PendVal(x)' = PendVal(x) BY <1>u DEF PendVal
+    <3>. QED BY <3>1, <3>2, <1>u, <2>V DEF I_SnapLegal
+  <2>13. I_PendTop'
+    <3>. SUFFICES ASSUME NEW w \in pend, NEW q \in R
+                 PROVE  head'[q][w.b] <= w.v /\ \A e \in sPres'[q] : sCon[q][e][w.b] <= w.v
+      BY <1>u DEF I_PendTop
+    <3>1. w.b \in Blocks /\ w.v \in Nat /\ w.v >= 1 BY <1>0, Nats
+    <3>2. \A e \in sPres'[q] : sCon[q][e][w.b] <= w.v BY <1>sP, <2>V DEF I_PendTop
+    <3>3. CASE q = r
+      <4>1. base[w.b] = 0 \/ (sb[r] \in sPres[r] /\ base[w.b] = sCon[r][sb[r]][w.b]) BY <3>1, <1>bv
+      <4>2. sb[r] \in sPres[r] => sCon[r][sb[r]][w.b] <= w.v BY <2>V DEF I_PendTop
+      <4>. QED BY <4>1, <4>2, <3>1, <3>2, <3>3, <1>n
+    <3>4. CASE q # r
+      <4>1. head'[q] = head[q] BY <3>4, <1>m
+      <4>2. head[q][w.b] <= w.v BY <2>V DEF I_PendTop
+      <4>. QED BY <4>1, <4>2, <3>2
+    <3>. QED BY <3>3, <3>4
+  <2>14. I_PendNext'
+    <3>. SUFFICES ASSUME NEW w \in pend, NEW q \in R, nextSeq \in sPres'[q] PROVE w.cutAt = nextSeq
+      BY <1>u DEF I_PendNext
+    <3>. QED BY <1>sP, <2>V DEF I_PendNext
+  <2>. QED BY <2>s, <2>1, <2>2, <2>3, <2>4, <2>5, <2>6, <2>7, <2>9, <2>10, <2>11, <2>12, <2>13, <2>14 DEF ZS_V7
+<1>vc. ZS_V7c'
+  <2>V. I_CutLegal /\ I_InSyncLegal /\ I_ValidLegal /\ I_SnapLegal /\ I_AckedEverS BY <1>0 DEF ZS_V7c, ZS_V7
+  <2>P. \A x \in Blocks : PendVal(x)' = PendVal(x) BY <1>u DEF PendVal
+  <2>1. J_ZRel' /\ J_ZNoValid' /\ J_ZM0' /\ J_SoleGen' BY <1>u, ZS_F_V7cStamp DEF ZS_V7c
+  <2>2. I_CutLegal'
+    <3>. SUFFICES ASSUME cutK' # 0, NEW q \in cutTgt', NEW x \in Blocks
+                 PROVE  head'[q][x] \in ackedEver'[x] \cup PendVal(x)'
+      BY DEF I_CutLegal
+    <3>0. cutK # 0 /\ q \in cutTgt /\ q \in R /\ PendVal(x)' = PendVal(x) /\ ackedEver' = ackedEver
+      BY <1>u, <1>T, <2>P
+    <3>1. CASE q = r
+      <4>1. head'[q][x] = base[x] BY <3>1, <1>n
+      <4>2. CASE base[x] = 0
+        <5>1. 0 \in ackedEver[x] BY <2>V DEF I_AckedEverS
+        <5>. QED BY <5>1, <4>1, <4>2, <3>0
+      <4>3. CASE base[x] # 0
+        <5>1. sb[r] \in sPres[r] /\ base[x] = sCon[r][sb[r]][x] BY <4>3, <1>bv
+        <5>2. sCon[r][sb[r]][x] \in ackedEver[x] \cup PendVal(x) BY <5>1, <2>V DEF I_SnapLegal
+        <5>. QED BY <5>1, <5>2, <4>1, <3>0
+      <4>. QED BY <4>2, <4>3
+    <3>2. CASE q # r
+      <4>1. head'[q] = head[q] BY <3>2, <3>0, <1>m
+      <4>2. head[q][x] \in ackedEver[x] \cup PendVal(x) BY <3>0, <2>V DEF I_CutLegal
+      <4>. QED BY <4>1, <4>2, <3>0
+    <3>. QED BY <3>1, <3>2
+  <2>3. I_InSyncLegal'
+    <3>. SUFFICES ASSUME attached', NEW q \in InSyncR', NEW x \in Blocks
+                 PROVE  head'[q][x] \in ackedEver'[x] \cup PendVal(x)'
+      BY DEF I_InSyncLegal
+    <3>1. q \in InSyncR /\ attached BY <1>u DEF InSyncR
+    <3>. QED BY <3>1, <1>hq, <1>u, <2>P, <2>V DEF I_InSyncLegal
+  <2>4. I_ValidLegal'
+    <3>. SUFFICES ASSUME NEW q \in InSyncR', Valid(stamp[q])', NEW x \in Blocks
+                 PROVE  head'[q][x] \in ackedEver'[x] \cup PendVal(x)'
+      BY DEF I_ValidLegal
+    <3>0. UNCHANGED <<stamp, sole>> BY ZS_NoStamp
+    <3>1. q \in InSyncR /\ Valid(stamp[q]) BY <3>0, <1>u DEF InSyncR, Valid, Majority, SolePairs
+    <3>. QED BY <3>1, <1>hq, <1>u, <2>P, <2>V DEF I_ValidLegal
+  <2>. QED BY <2>1, <2>2, <2>3, <2>4 DEF ZS_V7c
+<1>. QED BY <1>1, <1>2, <1>16, <1>17, <1>v, <1>vc, IndSplitP
+
+\* --- the final form (main 10-31): the whole invariant IndAll == IndInv /\ IndNew (41-ind-new) ------------------
+LEMMA I_SelectBaseAll ==
+  ASSUME IndInv, IndNew, NEW r \in R, SelectBase(r) /\ NoStamp PROVE IndInv' /\ IndNew'
+<1>1. /\ J_RelHoldS /\ I_FreshS2 /\ I_LegalS2 /\ I_SnapPend /\ J_ZxIdle /\ J_SeqLe /\ J_SoleRel /\ J_GenTop
+      /\ J_ZLive /\ J_RelLe /\ I_WHiC /\ I_HeadLoC /\ I_HeadLoA /\ I_StandbyLegal /\ I_HeadHiC /\ I_SnapLegal
+      /\ I_PendTop /\ I_PendNext /\ J_ZRel /\ I_CutLegal /\ I_InSyncLegal /\ I_ValidLegal /\ J_ZNoValid /\ J_ZM0
+      /\ J_SoleGen /\ J_ZCut
+  BY IndNewSplit
+<1>2. IndInv' /\ ZS_V7' /\ ZS_V7c' BY <1>1, I_SelectBase
+<1>3. J_ZCut' BY <1>1, F_ZCut DEF SelectBase
+<1>. QED BY <1>2, <1>3, IndNewSplitP DEF ZS_V7, ZS_V7c
+
+LEMMA I_SessionFailAll ==
+  ASSUME IndInv, IndNew, NEW r \in R, SessionFail(r) /\ NoStamp PROVE IndInv' /\ IndNew'
+<1>1. /\ J_RelHoldS /\ I_FreshS2 /\ I_LegalS2 /\ I_SnapPend /\ J_ZxIdle /\ J_SeqLe /\ J_SoleRel /\ J_GenTop
+      /\ J_ZLive /\ J_RelLe /\ I_WHiC /\ I_HeadLoC /\ I_HeadLoA /\ I_StandbyLegal /\ I_HeadHiC /\ I_SnapLegal
+      /\ I_PendTop /\ I_PendNext /\ J_ZRel /\ I_CutLegal /\ I_InSyncLegal /\ I_ValidLegal /\ J_ZNoValid /\ J_ZM0
+      /\ J_SoleGen /\ J_ZCut
+  BY IndNewSplit
+<1>2. IndInv' /\ ZS_V7' /\ ZS_V7c' BY <1>1, I_SessionFail
+<1>3. J_ZCut' BY <1>1, F_ZCut DEF SessionFail
+<1>. QED BY <1>2, <1>3, IndNewSplitP DEF ZS_V7, ZS_V7c
+
+LEMMA I_RevertDAll ==
+  ASSUME IndInv, IndNew, NEW r \in R, RevertD(r) /\ NoStamp PROVE IndInv' /\ IndNew'
+<1>1. /\ J_RelHoldS /\ I_FreshS2 /\ I_LegalS2 /\ I_SnapPend /\ J_ZxIdle /\ J_SeqLe /\ J_SoleRel /\ J_GenTop
+      /\ J_ZLive /\ J_RelLe /\ I_WHiC /\ I_HeadLoC /\ I_HeadLoA /\ I_StandbyLegal /\ I_HeadHiC /\ I_SnapLegal
+      /\ I_PendTop /\ I_PendNext /\ J_ZRel /\ I_CutLegal /\ I_InSyncLegal /\ I_ValidLegal /\ J_ZNoValid /\ J_ZM0
+      /\ J_SoleGen /\ J_ZCut
+  BY IndNewSplit
+<1>2. IndInv' /\ ZS_V7' /\ ZS_V7c' BY <1>1, I_RevertD
+<1>3. J_ZCut' BY <1>1, F_ZCut DEF RevertD
+<1>. QED BY <1>2, <1>3, IndNewSplitP DEF ZS_V7, ZS_V7c

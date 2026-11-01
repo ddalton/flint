@@ -1,0 +1,158 @@
+(* (S) The stage's read (Stage, StageAdmit: inv-stage owns it, inv-admit    *)
+(* cites it).  On a detached volume every in_sync leg reads the live seq;   *)
+(* the newest valid view among the attachable legs comes from a leg of the  *)
+(* last released generation (rmemA), because a conclusive read with every   *)
+(* attachable leg outside it would need more legs than the assembly has     *)
+(* (count, vouch), an in_sync leg of the release left unattached (the       *)
+(* decree's read), or a record confirmation of the live seq alongside a     *)
+(* majority release (J_SoleRel rules that out).  So the stage assembles     *)
+(* legs of rmemA that are in_sync, and they hold every acked write.         *)
+
+\* every in_sync leg reads the live seq; a view keeps the stamp's size
+LEMMA ZU_ViewSeq ==
+  ASSUME TypeOK, J_ViewIn, J_ViewOut, NEW l \in InSyncR
+  PROVE  /\ View(stamp[l]).seq = nseq
+         /\ View(stamp[l]).gen \in 0..(NR + 1)
+         /\ View(stamp[l]).size = stamp[l].size
+<1>1. l \in R BY DEF InSyncR
+<1>2. View(stamp[l]).seq = nseq
+  <2>1. CASE l \in rmemA BY <2>1 DEF J_ViewIn
+  <2>2. CASE l \notin rmemA BY <2>2 DEF J_ViewOut
+  <2>. QED BY <2>1, <2>2
+<1>3. stamp[l] \in StampRec BY <1>1 DEF TypeOK
+<1>4. View(stamp[l]).gen \in 0..(NR + 1) /\ View(stamp[l]).size = stamp[l].size BY <1>3 DEF View, StampRec
+<1>. QED BY <1>2, <1>4
+
+\* the newest valid view exists (all of them read the live seq; take the largest generation)
+LEMMA ZU_Newest ==
+  ASSUME TypeOK, J_ViewIn, J_ViewOut, VAtt # {}
+  PROVE  /\ \E q \in VAtt : NewestS = View(stamp[q])
+         /\ \A q \in VAtt : ~Newer(View(stamp[q]), NewestS)
+         /\ NewestS.seq = nseq
+<1>0. VAtt \subseteq InSyncR BY Full DEF VAtt, Attachable
+<1>1. \A q \in VAtt : View(stamp[q]).seq = nseq /\ View(stamp[q]).gen \in 0..(NR + 1)
+  BY <1>0, ZU_ViewSeq
+<1>. DEFINE G == {View(stamp[q]).gen : q \in VAtt}
+<1>2. G \subseteq 0..(NR + 1) /\ G # {} BY <1>1
+<1>3. NR + 1 \in Nat BY S_NR
+<1>4. Max(G) \in G /\ \A u \in G : u <= Max(G) BY <1>2, <1>3, MaxProp
+<1>5. PICK qs \in VAtt : View(stamp[qs]).gen = Max(G) BY <1>4
+<1>6. \A q \in VAtt : ~Newer(View(stamp[q]), View(stamp[qs]))
+  <2>. SUFFICES ASSUME NEW q \in VAtt PROVE ~Newer(View(stamp[q]), View(stamp[qs])) OBVIOUS
+  <2>1. View(stamp[q]).gen \in G OBVIOUS
+  <2>2. View(stamp[q]).gen <= View(stamp[qs]).gen BY <2>1, <1>4, <1>5
+  <2>3. View(stamp[q]).seq = View(stamp[qs]).seq BY <1>1
+  <2>4. View(stamp[q]).gen \in Nat /\ View(stamp[qs]).gen \in Nat BY <1>1, <1>3
+  <2>. QED BY <2>2, <2>3, <2>4 DEF Newer
+<1>. DEFINE P(st) == \A q \in VAtt : ~Newer(View(stamp[q]), st)
+<1>. DEFINE SS == {View(stamp[q]) : q \in VAtt}
+<1>7. \E st \in SS : P(st) BY <1>6
+<1>8. NewestS \in SS /\ P(NewestS)
+  <2>1. NewestS = CHOOSE st \in SS : P(st) BY DEF NewestS
+  <2>. HIDE DEF P, SS
+  <2>. QED BY <1>7, <2>1
+<1>9. PICK q1 \in VAtt : NewestS = View(stamp[q1]) BY <1>8
+<1>. QED BY <1>8, <1>9, <1>1
+
+\* two disjoint sets of legs inside a third
+LEMMA ZU_Disj ==
+  ASSUME NEW A \in SUBSET R, NEW B \in SUBSET R, NEW S \in SUBSET R, A \cap B = {}, A \subseteq S, B \subseteq S
+  PROVE  /\ Cardinality(A) \in Nat /\ Cardinality(B) \in Nat /\ Cardinality(S) \in Nat
+         /\ Cardinality(A) + Cardinality(B) <= Cardinality(S)
+<1>1. IsFiniteSet(R) BY RNat
+<1>2. IsFiniteSet(A) /\ IsFiniteSet(B) /\ IsFiniteSet(S) BY <1>1, FS_Subset
+<1>3. Cardinality(A) \in Nat /\ Cardinality(B) \in Nat /\ Cardinality(S) \in Nat BY <1>2, FS_CardinalityType
+<1>4. Cardinality(A \cap B) = 0 BY FS_EmptySet
+<1>5. Cardinality(A \cup B) = Cardinality(A) + Cardinality(B) - Cardinality(A \cap B) BY <1>2, FS_Union
+<1>6. A \cup B \in SUBSET S OBVIOUS
+<1>7. Cardinality(A \cup B) <= Cardinality(S) BY <1>2, <1>6, FS_Subset
+<1>. QED BY <1>3, <1>4, <1>5, <1>7
+
+\* a set of legs inside another is no larger
+LEMMA ZU_SubCard ==
+  ASSUME NEW A \in SUBSET R, NEW B \in SUBSET R, A \subseteq B
+  PROVE  Cardinality(A) \in Nat /\ Cardinality(B) \in Nat /\ Cardinality(A) <= Cardinality(B)
+<1>1. IsFiniteSet(R) BY RNat
+<1>2. IsFiniteSet(B) BY <1>1, FS_Subset
+<1>3. IsFiniteSet(A) /\ Cardinality(A) <= Cardinality(B) BY <1>2, FS_Subset
+<1>. QED BY <1>2, <1>3, FS_CardinalityType
+
+\* a majority of n is at least MajSize(n)
+LEMMA ZU_MajSize ==
+  ASSUME NEW k \in Nat, NEW n \in Nat, 2 * k > n PROVE k >= MajSize(n)
+BY DEF MajSize
+
+\* the read: StampMem (and the assembly) lie in rmemA, in_sync; the members hold every acked write
+LEMMA S_StageRead ==
+  ASSUME IndInv, J_SoleRel, ~attached, CanStampStage
+  PROVE  /\ AsmSet # {} /\ AsmSet \subseteq StampMem /\ StampMem \subseteq Attachable
+         /\ StampMem \subseteq rmemA \cap InSyncR
+         /\ AsmSet \subseteq rmemA \cap InSyncR
+         /\ \A q \in AsmSet : \A x \in Blocks : head[q][x] >= acked[x]
+         /\ NewestS.seq = nseq /\ NewestS.mem \subseteq rmemA
+<1>0. TypeOK /\ IndJ /\ IndT BY IndSplit
+<1>j. /\ J_SeqSync /\ J_RelHold /\ J_M0 /\ J_RelValid /\ J_MinorRel /\ J_RelInSync /\ J_ViewIn /\ J_ViewOut
+  BY <1>0 DEF IndJ
+<1>g. VAtt # {} /\ Conclusive /\ StampMem # {} /\ CleanMem # {} BY Full DEF CanStampStage
+<1>a. Attachable \subseteq InSyncR /\ InSyncR \subseteq R BY Full DEF Attachable, InSyncR
+<1>s. StampMem \subseteq Attachable /\ StampMem = NewestS.mem \cap Attachable BY DEF StampMem
+<1>m. AsmSet = CleanMem /\ CleanMem \subseteq StampMem BY <1>g, Full DEF AsmSet, CleanMem
+<1>n. /\ \E q \in VAtt : NewestS = View(stamp[q])
+      /\ \A q \in VAtt : ~Newer(View(stamp[q]), NewestS)
+      /\ NewestS.seq = nseq
+  BY <1>0, <1>j, <1>g, ZU_Newest
+<1>1. PICK q1 \in VAtt : NewestS = View(stamp[q1]) BY <1>n
+<1>2. q1 \in InSyncR BY <1>a DEF VAtt
+<1>v1. View(stamp[q1]).gen \in 0..(NR + 1) /\ View(stamp[q1]).size = stamp[q1].size BY <1>0, <1>j, <1>2, ZU_ViewSeq
+<1>3. q1 \in rmemA
+  <2>. SUFFICES ASSUME q1 \notin rmemA PROVE FALSE OBVIOUS
+  <2>1. View(stamp[q1]).gen < rgenA BY <1>2, <1>j DEF J_ViewOut
+  <2>2. CASE Attachable \cap rmemA # {}
+    <3>1. PICK q0 \in Attachable \cap rmemA : TRUE BY <2>2
+    <3>2. q0 \in InSyncR \cap rmemA BY <3>1, <1>a
+    <3>3. /\ Valid(View(stamp[q0])) /\ View(stamp[q0]).seq = nseq /\ View(stamp[q0]).gen >= rgenA
+      BY <3>2, <1>j DEF J_ViewIn
+    <3>4. q0 \in VAtt BY <3>1, <3>3 DEF VAtt
+    <3>5. View(stamp[q0]).gen \in 0..(NR + 1) /\ rgenA \in 0..(NR + 1) /\ NR \in Nat
+      BY <1>0, <1>j, <3>2, ZU_ViewSeq, S_NR DEF TypeOK
+    <3>6. Newer(View(stamp[q0]), NewestS) BY <3>3, <3>5, <2>1, <1>1, <1>n, <1>v1 DEF Newer
+    <3>. QED BY <3>4, <3>6, <1>n
+  <2>3. CASE Attachable \cap rmemA = {}
+    <3>1. Majority(RelStamp)
+      <4>. SUFFICES ASSUME ~Majority(RelStamp) PROVE FALSE OBVIOUS
+      <4>1. InSyncR \subseteq rmemA BY <1>j DEF J_MinorRel
+      <4>2. Attachable # {} BY <1>g, <1>s
+      <4>. QED BY <4>1, <4>2, <1>a, <2>3
+    <3>2. 2 * Cardinality(rmemA) > asize BY <3>1 DEF Majority, RelStamp
+    <3>3. /\ Cardinality(Attachable) \in Nat /\ Cardinality(rmemA) \in Nat
+          /\ Cardinality(Attachable) + Cardinality(rmemA) <= asize
+      <4>1. Attachable \subseteq SeqLegs /\ rmemA \subseteq SeqLegs /\ Cardinality(SeqLegs) = asize
+        BY <1>a, <1>j DEF J_M0
+      <4>2. SeqLegs \subseteq R /\ rmemA \subseteq R /\ Attachable \subseteq R BY <1>0, <1>a DEF SeqLegs, TypeOK
+      <4>. QED BY <4>1, <4>2, <2>3, ZU_Disj
+    <3>4. NewestS.size = asize BY <1>1, <1>2, <1>v1, <1>j DEF J_SeqSync
+    <3>a. asize \in Nat BY <1>0 DEF TypeOK
+    <3>5. ~CountOK BY <3>2, <3>3, <3>4, <3>a, Full DEF CountOK
+    <3>6. ~SoleOK
+      <4>. SUFFICES ASSUME SoleOK PROVE FALSE OBVIOUS
+      <4>1. PICK c \in sole : <<c[1], c[2]>> = <<NewestS.seq, NewestS.gen>> BY DEF SoleOK, SolePairs
+      <4>2. c[1] = nseq BY <4>1, <1>n
+      <4>3. rmemA \subseteq c[3] /\ 2 * Cardinality(c[3]) <= asize BY <4>2 DEF J_SoleRel
+      <4>4. c[3] \subseteq R /\ rmemA \subseteq R BY <1>0 DEF TypeOK
+      <4>5. Cardinality(rmemA) <= Cardinality(c[3]) /\ Cardinality(c[3]) \in Nat BY <4>3, <4>4, ZU_SubCard
+      <4>. QED BY <4>3, <4>5, <3>2, <3>3, <3>a
+    <3>7. ~(InSyncR \subseteq Attachable) BY <2>3, <1>j DEF J_RelInSync
+    <3>8. ~VouchOK
+      <4>. SUFFICES ASSUME VouchOK PROVE FALSE OBVIOUS
+      <4>1. Cardinality(Attachable) > asize - MajSize(asize) BY <3>4 DEF VouchOK, VouchCond
+      <4>2. Cardinality(rmemA) >= MajSize(asize) BY <3>2, <3>3, <3>a, ZU_MajSize
+      <4>3. MajSize(asize) \in Int BY <3>a DEF MajSize
+      <4>. QED BY <4>1, <4>2, <4>3, <3>3, <3>a
+    <3>. QED BY <3>5, <3>6, <3>7, <3>8, <1>g, Full DEF Conclusive, PlainConclusive
+  <2>. QED BY <2>2, <2>3
+<1>4. NewestS.mem \subseteq rmemA BY <1>1, <1>2, <1>3, <1>j DEF J_ViewIn
+<1>5. StampMem \subseteq rmemA \cap InSyncR BY <1>4, <1>s, <1>a
+<1>6. AsmSet \subseteq rmemA \cap InSyncR /\ AsmSet # {} BY <1>5, <1>m, <1>g
+<1>7. pend = {} BY <1>0 DEF IndT, I_RangesS
+<1>8. \A q \in AsmSet : \A x \in Blocks : head[q][x] >= acked[x] BY <1>6, <1>7, <1>j DEF J_RelHold, Pending
+<1>. QED BY <1>n, <1>m, <1>s, <1>4, <1>5, <1>6, <1>8
