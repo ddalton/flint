@@ -428,6 +428,7 @@ mod tests {
             (vec!["--metadata-ttl", "60", "x"], "where a flag belongs"),
             (vec!["--metadata-ttl", "--file-mode", "0640"], "reads as a flag"),
             (vec!["-o", "allow_other"], "s3fs option"),
+            (vec!["--user-agent-prefix", "a\r\nx-amz-acl: public-read"], "a control character"),
         ] {
             s.mount_options = opts.iter().map(|o| o.to_string()).collect();
             let e = s.validate().expect_err(want);

@@ -80,6 +80,20 @@ covered by the stability guarantee.
   exists. One change a CR author may notice: a CR that uses a flag off
   the built-in list (`--debug`, `--log-directory`, `--profile`, ...) is
   refused until the operator adds that flag.
+- **A passthrough mount's `spec.mountOptions` values may no longer hold
+  control characters** (2026-11-01, #72;
+  `spdk-csi-driver/src/passthrough/mount_options.rs`). A value was
+  checked only for being missing or starting with `-`, so one with CR,
+  LF, TAB or another control character reached mount-s3 as written.
+  Several flags on the built-in list put their value into an HTTP header
+  on every request the worker signs with the mount's credential
+  (`--user-agent-prefix`, `--storage-class`, `--sse`, `--sse-kms-key-id`,
+  `--expected-bucket-owner`), where CR/LF would try to add headers of
+  the CR author's choosing. On kind, mount-s3 1.24.0 sent no request
+  carrying such a value (the mount failed instead, while a plain value
+  reached a raw listener named as the endpoint), so no header got through
+  there, but nothing in flint relied on that. Such a value is now refused
+  at publish by name, shown escaped, before any worker exists.
 
 ## [1.61.3] - 2026-10-31
 

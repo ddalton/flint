@@ -192,8 +192,9 @@ spec:
                     --infer-content-type, --incremental-upload,
                     --requester-pays and --log-metrics. Any other flag, an
                     entry that is neither a flag nor its value, a value
-                    that starts with -, and a flag given twice fail the
-                    publish by name, before any worker is made.
+                    that starts with - or holds a control character, and
+                    a flag given twice fail the publish by name, before
+                    any worker is made.
                     ["--file-mode", "0755"] and ["--dir-mode", "0775"]
                     are the only way to change the modes the mount shows
                     (default 0644 and 0755): chmod is refused. A flag the

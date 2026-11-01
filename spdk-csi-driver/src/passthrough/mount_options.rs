@@ -172,7 +172,8 @@ fn spelled(f: &Flag) -> String {
 ///   flag nor the value of the flag before it (mount-s3 would read it as a
 ///   third positional and exit), `--` included;
 /// - a value flag whose value is missing or starts with `-` (mount-s3 would
-///   read it as a flag), and a value given to a switch;
+///   read it as a flag), a value with a control character (some reach an
+///   HTTP header the worker signs, #72), and a value given to a switch;
 /// - short flags run together or with a value attached (`-dl`, `-l/x`):
 ///   one short flag per entry, its value the next entry or after `=`;
 /// - a flag given twice, but for `--bind`.
@@ -300,6 +301,19 @@ pub fn check_shape(opts: &[String]) -> Result<Vec<&'static Flag>, String> {
                         return Err(format!(
                             "spec.mountOptions gives {} the value {v:?} — a value that starts with - reads as a \
                              flag (did {name} lose its value?); give {name} its own value",
+                            flag.long
+                        ))
+                    }
+                    // A value is plain text. Some reach an HTTP header on every
+                    // request the worker signs (--user-agent-prefix,
+                    // --storage-class, --sse, --sse-kms-key-id,
+                    // --expected-bucket-owner), where a CR or LF would try to
+                    // add headers to them (issue #72). No mount-s3 value has a
+                    // use for a control character.
+                    Some(v) if v.chars().any(char::is_control) => {
+                        return Err(format!(
+                            "spec.mountOptions gives {} a value with a control character ({v:?}) — a value is \
+                             plain text, and some reach an HTTP header the worker signs; remove it",
                             flag.long
                         ))
                     }
@@ -766,6 +780,42 @@ mod tests {
 
     /// A switch takes no value: `--flag=value` is refused, and a value in
     /// the next entry is a stray positional.
+    /// Issue #72: a value is plain text. Each flag whose value reaches an
+    /// HTTP header the worker signs, given CR/LF (a header injection), LF,
+    /// CR, TAB, ESC, DEL or a C1 control in either form, is refused by name
+    /// with the value shown escaped; the same flags with a plain value pass.
+    #[test]
+    fn a_value_with_a_control_character_is_refused() {
+        const HEADER_FLAGS: &[&str] = &[
+            "--user-agent-prefix",
+            "--storage-class",
+            "--sse",
+            "--sse-kms-key-id",
+            "--expected-bucket-owner",
+        ];
+        for fl in HEADER_FLAGS {
+            for bad in [
+                "a\r\nx-amz-acl: public-read",
+                "a\nb",
+                "a\rb",
+                "a\tb",
+                "a\u{1b}[31m",
+                "a\u{7f}",
+                "a\u{85}b",
+            ] {
+                for opts in [v(&[*fl, bad]), vec![format!("{fl}={bad}")]] {
+                    let e = check_shape(&opts).expect_err(&format!("{opts:?} must be refused"));
+                    assert!(e.contains(fl) && e.contains("a control character"), "{opts:?}: {e}");
+                    assert!(
+                        !e.chars().any(char::is_control),
+                        "the refusal shows the value escaped: {e:?}"
+                    );
+                }
+            }
+            assert_eq!(longs(&[*fl, "a plain value"]), vec![*fl], "{fl} with a plain value");
+        }
+    }
+
     #[test]
     fn a_switch_takes_no_value() {
         for opts in [v(&["--infer-content-type=true"]), v(&["--requester-pays="]), v(&["-d=1"])] {
