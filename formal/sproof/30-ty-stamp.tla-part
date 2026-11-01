@@ -1,0 +1,256 @@
+(* (S) The type layer, part 3: the stamp's own actions (Stage, StageAdmit,  *)
+(* AdmitRefuse, StampLand, Release, RecordConfirm, HeldFail, StageDecree).  *)
+(* Each: the shared-variable half (the copied T_* lemma where the action is *)
+(* the old model's), then the stamp half in its two groups.                 *)
+
+\* a set of legs has at most NR members
+LEMMA ZB_CardSub == ASSUME NEW S \in SUBSET R PROVE NR \in Nat /\ Cardinality(S) \in 0..NR
+<1>1. IsFiniteSet(R) BY RNat
+<1>2. IsFiniteSet(S) /\ Cardinality(S) <= Cardinality(R) BY <1>1, FS_Subset
+<1>3. Cardinality(S) \in Nat /\ Cardinality(R) \in Nat BY <1>1, <1>2, FS_CardinalityType
+<1>. QED BY <1>2, <1>3 DEF NR, R
+
+\* the held writes completing as failed leave every landed version legal: a version
+LEMMA ZB_AckedEverFail ==
+  ASSUME TyPend,
+         ackedEver' = [x \in Blocks |-> ackedEver[x] \cup {w.v : w \in {u \in pend : u.b = x /\ u.landed # {}}}]
+  PROVE  ackedEver' \in [Blocks -> SUBSET Vers]
+<1>1. \A w \in pend : w.v \in Vers BY Const DEF TyPend, Write, Vers
+<1>2. \A x \in Blocks : ackedEver[x] \subseteq Vers BY DEF TyPend
+<1>. QED BY <1>1, <1>2
+
+\* an assembly of M (a fresh seq below MaxAsm) and a stamped stage's ghosts
+LEMMA ZB_TyNewAsm ==
+  ASSUME TyStA, TyGh, NEW M \in SUBSET R, nseq < MaxAsm, NewAsm(M), StageGhosts
+  PROVE  TyStA' /\ TyGh'
+<1>0. NR \in Nat /\ Cardinality(M) \in 0..NR BY ZB_CardSub
+<1>n. MaxAsm \in Nat /\ nseq \in 1..MaxAsm BY Const DEF TyStA
+<1>1. /\ nseq' = nseq + 1 /\ aseq' = nseq + 1 /\ agen' = 0 /\ asize' = Cardinality(M)
+      /\ stamp' = [q \in R |-> IF q \in M THEN [seq |-> nseq + 1, gen |-> 0, size |-> Cardinality(M), mem |-> M,
+                                                 rgen |-> 0, rmem |-> M]
+                                           ELSE stamp[q]]
+      /\ rgenA' = 0 /\ rmemA' = M
+      /\ hold' = FALSE /\ due' = FALSE /\ zfreed' = 0
+      /\ zexcl' = (zexcl \/ (zLeg # 0 /\ zLeg \notin M))
+      /\ postMove' = (postMove \/ zLeg # 0)
+      /\ legalJ' = IF zLeg # 0 /\ ~postMove
+                     THEN [x \in Blocks |-> legalJ[x] \cup ({head'[q][x] : q \in M} \cap zjv)]
+                     ELSE legalJ
+      /\ UNCHANGED <<sole, zseq, zgen, zsize, zm0, zrgen, zrmem, zst, badAck, zAcked, zLeg, zjv>>
+  BY Full DEF NewAsm
+<1>2. [seq |-> nseq + 1, gen |-> 0, size |-> Cardinality(M), mem |-> M, rgen |-> 0, rmem |-> M] \in StampRec
+  BY <1>0, <1>n DEF StampRec, R
+<1>3. stamp' \in [R -> StampRec] BY <1>1, <1>2 DEF TyStA
+<1>4. /\ nseq' \in 1..MaxAsm /\ aseq' \in 1..MaxAsm /\ agen' \in 0..(NR + 1) /\ asize' \in 0..NR
+      /\ rgenA' \in 0..(NR + 1) /\ rmemA' \in SUBSET R
+  BY <1>0, <1>n, <1>1
+<1>5. TyStA' BY <1>1, <1>3, <1>4 DEF TyStA
+<1>6. legalJ' \in [Blocks -> SUBSET Vers] BY <1>1 DEF TyGh
+<1>7. /\ UNCHANGED <<riskTail, zpost>>
+      /\ vouched' \in BOOLEAN /\ tornMarked' \in BOOLEAN /\ tornServed' \in BOOLEAN /\ tornBare' \in BOOLEAN
+  BY DEF StageGhosts
+<1>8. zfreed' \in R \cup {0} /\ zexcl' \in BOOLEAN /\ postMove' \in BOOLEAN BY <1>1
+<1>9. TyGh' BY <1>1, <1>6, <1>7, <1>8 DEF TyGh
+<1>. QED BY <1>5, <1>9
+
+LEMMA S_TyStage ==
+  ASSUME TypeOK, Stage PROVE TypeOK'
+<1>0. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>1. TypeOKT' BY <1>0, T_Stage
+<1>2. AsmSet \in SUBSET R BY AsmSetSub
+<1>3. nseq < MaxAsm BY Full DEF Stage, CanStampStage
+<1>4. NewAsm(AsmSet) /\ StageGhosts BY Full DEF Stage
+<1>5. TyStA' /\ TyGh' BY <1>0, <1>2, <1>3, <1>4, ZB_TyNewAsm
+<1>. QED BY <1>1, <1>5, TyStampSplitP, TypeOKPartsP
+
+LEMMA S_TyStageAdmit ==
+  ASSUME TypeOK, NEW r \in R,
+         StageAdmit(r) /\ NewAsm(members') /\ (IF Stamp THEN StageGhosts ELSE TRUE)
+  PROVE  TypeOK'
+<1>0. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>1. TypeOKT' BY <1>0, T_StageAdmit
+<1>2. members' = AsmSet \cup {r}
+  <2>1. PICK s \in R : AdmGuard(r, s) /\ AdmSnap(r, s) /\ AdmRest(r, s) BY StageAdmitFacts
+  <2>. QED BY <2>1 DEF AdmRest, AdmT
+<1>3. members' \in SUBSET R BY <1>2, AsmSetSub
+<1>4. nseq < MaxAsm BY Full DEF StageAdmit, CanStampStage
+<1>5. NewAsm(members') /\ StageGhosts BY Full
+<1>6. TyStA' /\ TyGh' BY <1>0, <1>3, <1>4, <1>5, ZB_TyNewAsm
+<1>. QED BY <1>1, <1>6, TyStampSplitP, TypeOKPartsP
+
+\* (Under Full, Policy = "trust": AdmitRefuse is disabled.  The proof below
+\* does not lean on that.)
+LEMMA S_TyAdmitRefuse ==
+  ASSUME TypeOK, NEW r \in R, AdmitRefuse(r) /\ NoStamp PROVE TypeOK'
+<1>0. TypeOKT /\ TyStampS BY TypeOKParts
+<1>g. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>0, Groups
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED floor /\ UNCHANGED trustVars
+  BY DEF AdmitRefuse
+<1>a. /\ dState' = [dState EXCEPT ![r] = "stale"]
+      /\ mustRev' = [mustRev EXCEPT ![r] = TRUE]
+      /\ used' = [used EXCEPT ![r] = {}]
+      /\ tainted' = [tainted EXCEPT ![r] = FALSE]
+  BY DEF AdmitRefuse
+<1>1. TyLeg' BY <1>g, <1>u, <1>a DEF TyLeg
+<1>2. TyTie' BY <1>g, <1>u, <1>a DEF TyTie
+<1>3. TypeOKT' BY <1>g, <1>u, <1>1, <1>2, C_Scalar, C_Sets, C_Head, C_Snap, C_Pend, C_Trust, GroupsP
+<1>4. TyStampS' BY <1>0, C_NoStamp
+<1>. QED BY <1>3, <1>4, TypeOKPartsP
+
+\* StampLand's choice: the failing survivors G that fail the stamp write too
+ZB_Must == {q \in members : path[q] \in {"out", "back"}}
+ZB_May == {q \in members : path[q] = "failing"}
+ZB_LS(G) == members \ (ZB_Must \cup G)
+ZB_Pick(G) ==
+  /\ members' = ZB_LS(G)
+  /\ IF ZB_LS(G) = {}
+       THEN /\ pend' = {}
+            /\ ackedEver' = [x \in Blocks |-> ackedEver[x] \cup
+                               {w.v : w \in {u \in pend : u.b = x /\ u.landed # {}}}]
+            /\ UNCHANGED stamp
+       ELSE /\ stamp' = [q \in R |-> IF q \in ZB_LS(G) THEN [seq |-> aseq, gen |-> agen + 1,
+                                                             size |-> asize, mem |-> ZB_LS(G),
+                                                             rgen |-> rgenA, rmem |-> rmemA]
+                                                        ELSE stamp[q]]
+            /\ UNCHANGED <<pend, ackedEver>>
+
+LEMMA S_TyStampLand ==
+  ASSUME TypeOK, StampLand,
+         \* NEEDS-INV: agen <= NR (the landing's generation agen + 1 stays in 0..NR + 1)
+         agen <= NR
+  PROVE  TypeOK'
+<1>0. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>g. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>0, Groups
+<1>1. PICK G \in SUBSET ZB_May : ZB_Pick(G) BY DEF StampLand, ZB_Pick, ZB_LS, ZB_Must, ZB_May
+<1>2. ZB_LS(G) \subseteq members /\ members \subseteq R BY <1>g DEF ZB_LS, TySets
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED acked /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+  BY DEF StampLand
+<1>v. /\ agen' = agen + 1 /\ due' = FALSE
+      /\ UNCHANGED <<nseq, aseq, asize, rgenA, rmemA, hold, sole, zseq, zgen, zsize, zm0, zrgen, zrmem, zst>>
+      /\ UNCHANGED sGhost
+  BY DEF StampLand
+<1>3. TySets' BY <1>g, <1>u, <1>1, <1>2 DEF ZB_Pick, TySets
+<1>4. TyPend'
+  <2>1. CASE ZB_LS(G) = {}
+    <3>1. pend' = {} /\ ackedEver' = [x \in Blocks |-> ackedEver[x] \cup
+                                        {w.v : w \in {u \in pend : u.b = x /\ u.landed # {}}}]
+      BY <1>1, <2>1 DEF ZB_Pick
+    <3>2. ackedEver' \in [Blocks -> SUBSET Vers] BY <1>g, <3>1, ZB_AckedEverFail
+    <3>. QED BY <1>g, <1>u, <3>1, <3>2 DEF TyPend
+  <2>2. CASE ZB_LS(G) # {}
+    <3>1. UNCHANGED <<pend, ackedEver>> BY <1>1, <2>2 DEF ZB_Pick
+    <3>. QED BY <1>g, <1>u, <3>1, C_Pend
+  <2>. QED BY <2>1, <2>2
+<1>5. TypeOKT' BY <1>g, <1>u, <1>3, <1>4, C_Scalar, C_Leg, C_Head, C_Snap, C_Tie, C_Trust, GroupsP
+<1>6. NR \in Nat /\ Cardinality(members) \in 0..NR BY <1>2, ZB_CardSub
+<1>7. agen + 1 \in 0..(NR + 1) BY <1>0, <1>6 DEF TyStA
+<1>8. stamp' \in [R -> StampRec]
+  <2>1. CASE ZB_LS(G) = {}
+    <3>1. UNCHANGED stamp BY <1>1, <2>1 DEF ZB_Pick
+    <3>. QED BY <1>0, <3>1 DEF TyStA
+  <2>2. CASE ZB_LS(G) # {}
+    <3>1. stamp' = [q \in R |-> IF q \in ZB_LS(G) THEN [seq |-> aseq, gen |-> agen + 1,
+                                                       size |-> asize, mem |-> ZB_LS(G),
+                                                       rgen |-> rgenA, rmem |-> rmemA]
+                                                  ELSE stamp[q]]
+      BY <1>1, <2>2 DEF ZB_Pick
+    <3>2. aseq \in 0..MaxAsm /\ asize \in 0..NR /\ rgenA \in 0..(NR + 1) /\ rmemA \in SUBSET Reps
+      BY <1>0 DEF TyStA, R
+    <3>3. ZB_LS(G) \in SUBSET Reps BY <1>2 DEF R
+    <3>4. [seq |-> aseq, gen |-> agen + 1, size |-> asize, mem |-> ZB_LS(G),
+           rgen |-> rgenA, rmem |-> rmemA] \in StampRec
+      BY <1>7, <3>2, <3>3 DEF StampRec
+    <3>. QED BY <1>0, <3>1, <3>4 DEF TyStA
+  <2>. QED BY <2>1, <2>2
+<1>9. TyStA' BY <1>0, <1>v, <1>7, <1>8 DEF TyStA
+<1>10. TyGh' BY <1>0, <1>v, C_Gh
+<1>. QED BY <1>5, <1>9, <1>10, TyStampSplitP, TypeOKPartsP
+
+LEMMA S_TyRelease ==
+  ASSUME TypeOK, Release PROVE TypeOK'
+<1>0. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>g. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>0, Groups
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+  BY DEF Release
+<1>1. TypeOKT' BY <1>g, <1>u, C_Scalar, C_Sets, C_Leg, C_Head, C_Snap, C_Pend, C_Tie, C_Trust, GroupsP
+<1>v. /\ hold' = FALSE /\ rgenA' = agen /\ rmemA' = members
+      /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, due, sole, zseq, zgen, zsize, zm0, zrgen, zrmem, zst>>
+      /\ UNCHANGED sGhost
+  BY DEF Release
+<1>2. members \in SUBSET R BY <1>g DEF TySets
+<1>3. TyStA' BY <1>0, <1>v, <1>2 DEF TyStA
+<1>4. TyGh' BY <1>0, <1>v, C_Gh
+<1>. QED BY <1>1, <1>3, <1>4, TyStampSplitP, TypeOKPartsP
+
+LEMMA S_TyRecordConfirm ==
+  ASSUME TypeOK, RecordConfirm PROVE TypeOK'
+<1>0. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>g. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>0, Groups
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, mark, reverted, sb, pin, riskRec, used, mustRev>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED trustVars
+      /\ StaleMarks(InSyncR \ members)
+  BY DEF RecordConfirm
+<1>1. TyLeg' /\ TyTie' BY <1>g, <1>u, T_StaleMarks
+<1>2. TypeOKT' BY <1>g, <1>u, <1>1, C_Scalar, C_Sets, C_Head, C_Snap, C_Pend, C_Trust, GroupsP
+<1>v. /\ sole' = sole \cup {<<aseq, agen, members>>}
+      /\ hold' = FALSE /\ rgenA' = agen /\ rmemA' = members
+      /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, due, zseq, zgen, zsize, zm0, zrgen, zrmem, zst>>
+      /\ UNCHANGED sGhost
+  BY DEF RecordConfirm
+<1>3. members \in SUBSET R BY <1>g DEF TySets
+<1>4. <<aseq, agen, members>> \in (1..MaxAsm) \X (0..(NR + 1)) \X SUBSET R BY <1>0, <1>3 DEF TyStA
+<1>5. sole' \subseteq (1..MaxAsm) \X (0..(NR + 1)) \X SUBSET R BY <1>0, <1>v, <1>4 DEF TyStA
+<1>6. TyStA' BY <1>0, <1>v, <1>3, <1>5 DEF TyStA
+<1>7. TyGh' BY <1>0, <1>v, C_Gh
+<1>. QED BY <1>2, <1>6, <1>7, TyStampSplitP, TypeOKPartsP
+
+LEMMA S_TyHeldFail ==
+  ASSUME TypeOK, HeldFail PROVE TypeOK'
+<1>0. TypeOKT /\ TyStampS BY TypeOKParts
+<1>g. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>0, Groups
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED acked /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+      /\ NoStamp
+  BY DEF HeldFail, NoStamp
+<1>a. pend' = {} /\ ackedEver' = [x \in Blocks |-> ackedEver[x] \cup
+                                    {w.v : w \in {u \in pend : u.b = x /\ u.landed # {}}}]
+  BY DEF HeldFail
+<1>1. ackedEver' \in [Blocks -> SUBSET Vers] BY <1>g, <1>a, ZB_AckedEverFail
+<1>2. TyPend' BY <1>g, <1>u, <1>a, <1>1 DEF TyPend
+<1>3. TypeOKT' BY <1>g, <1>u, <1>2, C_Scalar, C_Sets, C_Leg, C_Head, C_Snap, C_Tie, C_Trust, GroupsP
+<1>4. TyStampS' BY <1>0, <1>u, C_NoStamp
+<1>. QED BY <1>3, <1>4, TypeOKPartsP
+
+LEMMA S_TyStageDecree ==
+  ASSUME TypeOK, StageDecree PROVE TypeOK'
+<1>0. TypeOKT /\ TyStampS BY TypeOKParts
+<1>g. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>0, Groups
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, mark, reverted, sb, pin, riskRec, used, mustRev>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED trustVars
+      /\ StaleMarks(DecreeSet) /\ NoStamp
+  BY DEF StageDecree, NoStamp
+<1>1. TyLeg' /\ TyTie' BY <1>g, <1>u, T_StaleMarks
+<1>2. TypeOKT' BY <1>g, <1>u, <1>1, C_Scalar, C_Sets, C_Head, C_Snap, C_Pend, C_Trust, GroupsP
+<1>3. TyStampS' BY <1>0, <1>u, C_NoStamp
+<1>. QED BY <1>2, <1>3, TypeOKPartsP

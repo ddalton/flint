@@ -1,0 +1,142 @@
+FlintCatchupS (the membership stamp, design doc rev 8 §12), 2026-10-31/11-01 -- the stamp design is safe for
+every bound on the final setting (TLAPS): gate item 2      [the record DONE 2026-11-01 00:35:48Z (c31) + 00:42:31Z
+(box): all 19,016 obligations proved, fresh cache; NO CONTROLS YET (below)]
+
+THEOREM Safety == Spec => []Goal                                     (FlintCatchupSProof.tla, line 11054)
+  Goal            = Inv_NoNewLoss /\ Inv_MembersHold /\ Inv_RaidHolds /\ Inv_AckStamped
+  Inv_NoNewLoss   = TypeOK /\ Inv_AdmitNoLoss (~badLoss: no admission loses an acked write its source holds or
+                    brings a value that is neither legal nor held by a member of the assembly) /\ Inv_AckedHeld
+                    (every acked write is held by a record-in_sync replica)
+  Inv_MembersHold = every configured member holds every acked write (no write in flight)
+  Inv_RaidHolds   = an attached raid with a member and its quorum can serve every acked write (some member holds it)
+  Inv_AckStamped  = ~badAck: every ack happened with every member stamped with the raid's membership
+for FlintCatchupS rev 17 (sproof/model/FlintCatchupS-r17.tla) under
+  ASSUME Const: MaxVer, MaxEpoch, MaxFails \in Nat; MaxAsm, Retain \in Nat, >= 1; Reps a finite non-empty set of
+                naturals without 0 (NO size bound); Blocks any set
+  ASSUME Full (every knob fixed; the faults ON):
+    Policy = "trust", Capture = FALSE (no capture at NodeUnstage), Crash = TRUE, ZombieMoves = TRUE,
+    ZombieWhere = "colocated", RaidFailsAtDrop = TRUE, StageOracle = FALSE (the code's admission set),
+    WriteQuorum = AssemblyQuorum = 1, BaseInclusive = TRUE, CutStampsAll = FALSE (the mark-race fix),
+    PinRetention = TRUE, Backoff, CoverageWalk, MarkGate, LocalLegGuard = TRUE, ReadFails = FALSE,
+    FenceMark = FALSE, CatchupWaitsCut = FALSE, AssemblyMark = TRUE, StageDefer = TRUE, AckAfterMark = FALSE,
+    the stamp: Stamp, RecordUp = TRUE, MajorityRead = "count", Decree, DecreeGated, DecreeSparesLast, RelView = TRUE,
+      DeferExpires = FALSE, MonitorSkipsHold = FALSE, EvenVouch = "decree", TornExcluded, TornNeverSole,
+      ZombiePreStampLegal = TRUE,
+    the user's 10-31 rules: LastFails = TRUE (every member may begin to fail: the IN-WRITE RULE in place of the
+      premise that the last healthy member never fails), WholeMark = TRUE (the monitor marks every in_sync leg the
+      live raid lacks), InWriteGuard = TRUE, MonitorGuard = TRUE (the monitor marks only while a live member stays
+      in_sync: the code's online check), OperatorMark = TRUE + DrainStamps = TRUE (the planned removal, the drain,
+      IN, with its stamp), ZombieTriple = TRUE (the zombie releases only on its confirmed <<seq, gen, {zx}>>).
+SAFETY ONLY.  Liveness is outside the proof (Prop_BarrierEndsM/H HOLD in full at two replicas, c31 lv2; the
+restated claim is with the user; three-replica liveness deferred by the user 10-31 ~23:55Z).  This is a proof of
+the MODEL; that the code is the model is review + pin tests, not proved.
+
+Design rules the proof work found, now in the model (each would be a control below):
+  - rev 16 MonitorGuard: under LastFails the monitor's MarkStale could empty in_sync (found by peel pk1); the code's
+    monitor already requires an online raid;
+  - rev 17 ZombieTriple: the four-replica zombie ack (continuation tested by (seq, gen), not the confirmed triple),
+    CONFIRMED by model checking (c33b pz1: Z4Ack on rev 16 VIOL Inv_NoNewLoss d11, 3,368,405 states).
+
+Inductive invariant: IndAll == IndInv /\ IndNew (FlintCatchupSInd.tla).
+  IndInv = TypeOK /\ IndJ (the stamp layer: J_DueHold .. J_SoleSeq, J_GenBound, J_ZGen) /\ IndT (I_RangesS,
+    I_Lineage, I_Chain, I_Pend, I_MembersS, I_HoldAtt, I_PendSeen, I_Vers, I_Reverted, I_HeadPend, I_Session,
+    Inv_TrustComplete, I_NoBadLoss, Inv_AckedHeld) /\ IndS (I_AckedEverS, I_LegalS, I_WHiS, I_AckMono, I_HeadLoS,
+    I_FreshS);
+  IndNew = 26 conjuncts: J_RelHoldS I_FreshS2 I_LegalS2 I_SnapPend J_ZxIdle J_SeqLe J_SoleRel J_GenTop J_ZLive
+    J_RelLe I_WHiC I_HeadLoC I_HeadLoA I_StandbyLegal I_HeadHiC I_SnapLegal I_PendTop I_PendNext J_ZRel I_CutLegal
+    I_InSyncLegal I_ValidLegal J_ZNoValid J_ZM0 J_SoleGen J_ZCut.
+Model-checked before the proof (tla-mc 0.2.2, c31 q5; every candidate an INVARIANT): all 66 conjuncts HOLD in full on
+the four two-replica drain-in bases P17DL 28,546,374 / d37, P17DC 38,136,587 / d36, P17DZ 149,739,816 / d40, P17DCZ
+191,910,011 / d39; the three- and four-replica peels bounded with no violation (P17DL3 d20, P17DC3 d19, P17DZ3 d18,
+P17DZ4 d13; tables-r17.md).
+
+The proof file is GENERATED: gen-FlintCatchupSProof.py = a head (Const, Full, TypeOK), the type layer copied from
+FlintCatchupTProof.tla with S's fixes (T_Unstage, T_Stage, the StageAdmit region, T_Path MarkStale; IsaT(300) on the
+two steps below; ovr/StageAdmitFacts.tla), then the parts sproof/*.tla-part in name order.  11,060 lines, 453 lemmas,
+one obligation stream of 19,016.  Parts (the checking job and its obligations; 51-59 by nine parallel agents):
+  10-ty-base, 20-ty-zombie, 30-ty-stamp  the type layer, S_Ty* per Next disjunct
+  40-ind-base, 41-ind-new                IndInv, IndNew, splits, frames, I_Init, I_Goal (m11: 131)
+  45-stage-read + 56-inv-stage           stage (u8 + u7: 1398)        51-inv-data     data (d5: 1623)
+  52-inv-path                            path (f4: 1478)              53-inv-cut      cut (c4: 2317)
+  54-inv-sess                            session (e7: 1446)           55-inv-copy     copy (y7: 2076)
+  57-inv-admit                           admit (k7: 1456)             58-inv-zombie   zombie (z8: 1947)
+  59-inv-stamp                           stamp (t7: 1938)             60-stutter      I_Stutter (m12: 399)
+  61-next                                I_Next over IndAll, I_InitAll, I_GoalAll, THEOREM Safety (the record only)
+  Each I_<X>All == ASSUME IndInv, IndNew, <disjunct> PROVE IndInv' /\ IndNew'.
+
+Inputs (md5):
+  9ed5580a462718e4f737f2cbab79499c  FlintCatchupSProof.tla     (generated, 11,060 lines)
+  c70f9660e53176e7290cae84a746f063  FlintCatchupSInd.tla
+  61ae6829c17e74477400f270734af5e7  sproof/model/FlintCatchupS-r17.tla   (rev 17)
+  9ad6ea2ec9f6f069db1101b282007f77  gen-FlintCatchupSProof.py
+  cf71b06af96e0cf7f9bd7d679181e471  FlintCatchupTProof.tla     (source of the copied type layer)
+  98cbe63934e54407c08a2ca4c5dedb69  sproof/ovr/StageAdmitFacts.tla
+  e0ee56c6444176f4f63e9ce6710a25c7  sproof/gen-stutter.py      (writes 60-stutter)
+  parts: 10 ad894218, 20 edeb6ff3, 30 bcf43e87, 40 3f743471, 41 3689f1ca, 45 05408e55, 51 8b1823fc, 52 c215ca2c,
+         53 9663489d, 54 50b0d82c, 55 1424e47a, 56 25d91539, 57 5e2f7431, 58 e8a88e84, 59 0c1cb854, 60 6b7ddf8b,
+         61 05fc7a19
+  tlapm bfa9468 on both machines: c31 from tlaps.tgz sha256 5eaf3aa705b69250afdd53e073ec145c49dfd771d77784a6315fd7d05bad4e44;
+  the box /mnt/nvme/tlaps/unpack (the T record's).
+
+RECORD (fresh cache: --cleanfp, --stretch 5), composed of two parts on the same file:
+ (a) c31 (m7i.48xlarge us-west-1a, 192 vCPU, 743 GB), sjob5.sh through c31's inbox: sixteen tlapm --toolbox runs, 5
+     threads each, all at once, line ranges cut at lemma boundaries covering lines 1..11061.  Every job's summary
+     carries S 61ae6829 ind c70f9660 proof 9ed5580a (sjob5 asserts the model's md5; the job prints all three).
+     job   lines        obligations  start      wall    peak RSS
+     fb1   1-1098        1196        00:03:45Z   407 s   5.6 GB
+     fb2   1099-1939     1146        00:03:47Z   453 s   6.4 GB
+     fb3   1940-2881     1541        00:04:19Z   863 s  10.0 GB
+     fb4   2882-3306      818        00:04:21Z   455 s   4.7 GB
+     fb5   3307-3996     1403        00:04:22Z   789 s   7.7 GB
+     fb6   3997-4953     1675        00:04:24Z  1117 s  10.6 GB
+     fb7   4954-5279      603        00:04:25Z   469 s   4.3 GB
+     fb8   5280-6130     1503        00:04:27Z  1195 s  10.4 GB
+     fb9   6131-6764      935        00:04:29Z   865 s   7.8 GB
+     fb10  6765-7318     1013        00:04:09Z   943 s   6.5 GB
+     fb11  7319-7979     1156        00:04:10Z  1116 s   9.0 GB
+     fb12  7980-8872     1599        00:04:12Z  1896 s  13.6 GB
+     fb13  8873-9239      590        00:04:13Z   703 s   5.6 GB
+     fb14  9240-9875     1357        00:04:15Z  1451 s   9.7 GB
+     fb15  9876-10511    1090        00:04:16Z  1287 s   9.1 GB
+     fb16  10512-11061   1391        00:04:18Z  1550 s   9.5 GB
+     Window 00:03:45Z - 00:35:48Z.  Per obligation ID (sproof/tlapm-tally.py over fb1..fb16): 5,430 proved, 13,584
+     trivial, 2 failed = 19,016, the single-run count (full1's @!!count 19016); the sixteen streams cover exactly
+     full1's 19,015 source locations (two obligations share 135:3:135:20, both proved in fb1).  The runner's own
+     RESULT dicts key by location and so read one less (fb1: trivial 835 for 836 ids).
+     The 2 failed: 131:5 (MinProp <2>1, BY <2>0, SmallestNatural, IsaT(300)) and 1262:3 (ReadAt <1>1, BY
+     ReadThrough, IsaT(300)).  Isabelle does not work on the EC2 instances: on c31 and c33b every Isabelle attempt
+     fails within a second (status false, 0.0-0.6 s), with HOME set or not; it proved nothing there all day.  SMT
+     cannot instantiate SmallestNatural's P(_) and Zenon gives up on both (c31 v1-v6), so these two need Isabelle.
+ (b) the box (10.0.0.249, 8 cores, 30 GB), box-isa/rec/isa-rec.sh (md5 520fb8a1): asserts all three md5s, then the
+     two ranges at once, 2 threads each, nice 10, beside flint-91's units (box-isa/rec/RECORD.txt):
+       isa-rec start 2026-11-01T00:41:07Z host master tlapm bfa9468 (/mnt/nvme/tlaps/unpack/tlapm/bin/tlapm)
+       md5 FlintCatchupSProof.tla 9ed5580a (want 9ed5580a) / FlintCatchupSInd.tla c70f9660 / FlintCatchupS.tla 61ae6829
+       minprop (lines 122-139)   rc=0 61 s  "All 23 obligations proved"  131:5 proved by isabelle auto, 0.6 s
+       readat  (lines 1250-1263) rc=0 84 s  "All 5 obligations proved"   1262:3 proved by isabelle auto, 0.3 s
+       isa-rec done 2026-11-01T00:42:31Z
+     (An earlier unasserted pair, box-isa/fin1 and fin2, 00:03Z, same file and result.)
+ => every one of the 19,016 obligations is proved: 19,014 on c31, the 2 Isabelle steps on the box.
+
+Why ranges: one tlapm on the whole file (full1: c31, 64 threads, --cleanfp, stretch 5, 23:16:07Z) is bound by its
+main process (one core at 100%, no z3 running; ~2.8 obligations/s), so it could not finish inside its 3600 s cap:
+stopped at 23:41Z after 1515 s with 4,058 obligations done, 24.5 GB RSS.  A range run only processes its own
+obligations, so sixteen of them run in parallel.
+CROSS-CHECK: the same sixteen ranges on 482059a8 (fa1..fa16, 23:42Z - 00:15:26Z), which differs from 9ed5580a only in
+those two lines (SMTT(120), the steps pinned to SMT): per ID the same 5,430 / 13,584 / 2 failed, at 131:5 and 1262:3.
+
+CONTROLS: NONE YET.  T's record had thirteen premise and rule flips (each failed only the steps that use its premise,
+one did not fail).  For S the candidates are the stamp's rules and the user's 10-31 rules (Stamp, RecordUp,
+MajorityRead, Decree, DecreeGated, DecreeSparesLast, RelView, EvenVouch, TornExcluded, TornNeverSole,
+ZombiePreStampLegal, WholeMark, InWriteGuard, MonitorGuard, DrainStamps, ZombieTriple), T's carried premises
+(CutStampsAll, RaidFailsAtDrop, BaseInclusive, PinRetention, StageOracle, LocalLegGuard) and T's five model-rule
+removals: about 27.  Each is a full run (a flipped ASSUME Full line is in every obligation's context; T's seeded
+controls still took 52-67% of its fresh record's time).  Cost: on an m7i.48xlarge one control is sixteen ranges,
+~32 min wall, ~150 GB; four fit at once, so ~27 controls take ~4 h with setup, ~$8 (or ~$6 for a ~20-control
+set); their 131:5 and 1262:3 fail on EC2 regardless (no knob or model rule touches MinProp or ReadAt).  On the box:
+not practical (the whole file does not fit in one 30 GB process; ranges one or two at a time = hours per control).
+c31 was torn down after the record (00:38:56Z), so the controls are a follow-up: a new EC2 session, the user's call.
+
+EC2: c31 i-08f520c6866db048b, 10-31 19:51:25Z - 11-01 00:38:56Z (terminated; teardown.sh, zero set 00:39:28Z:
+no flint-c31 instance, volume or open spot request in us-east-1/us-east-2/us-west-1/us-west-2, bucket and inline
+policy gone), m7i.48xlarge spot ~$1.48/h + 2 TB gp3 ~$0.36/h: ~4.79 h, ~$8.8.  c33 + c33b torn down 23:27Z (zero set).
+Logs and outputs stay here (jobs/, box-isa/); they are generated output.

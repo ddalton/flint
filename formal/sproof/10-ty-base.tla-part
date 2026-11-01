@@ -1,0 +1,119 @@
+(* (S) The type layer, part 1: Init, and every old action that leaves the   *)
+(* stamp alone (NoStamp) or holds it (LossS).  The shared-variable half is  *)
+(* the copied T_* lemma; the stamp half carries over or is two booleans.    *)
+
+LEMMA S_NR == NR \in Nat /\ NR >= 1
+<1>1. IsFiniteSet(R) /\ R # {} BY Const DEF R
+<1>2. Cardinality(R) \in Nat BY <1>1, FS_CardinalityType
+<1>3. Cardinality(R) # 0 BY <1>1, FS_EmptySet
+<1>. QED BY <1>2, <1>3 DEF NR, R
+
+LEMMA S_TyInit == Init => TypeOK
+<1>. SUFFICES ASSUME Init PROVE TypeOKT /\ TyStampS BY TypeOKParts
+<1>1. TypeOKT BY T_Init
+<1>2. TyStA
+  <2>1. NR \in Nat /\ NR >= 1 /\ MaxAsm \in Nat /\ MaxAsm >= 1 BY S_NR, Const
+  <2>2. stamp \in [R -> StampRec] BY <2>1 DEF Init, StampRec, R
+  <2>3. /\ nseq \in 1..MaxAsm /\ aseq \in 1..MaxAsm /\ agen \in 0..(NR + 1) /\ asize \in 0..NR
+        /\ rgenA \in 0..(NR + 1) /\ rmemA \in SUBSET R /\ zrgen \in 0..(NR + 1) /\ zrmem \in SUBSET R
+    BY <2>1 DEF Init
+  <2>4. /\ hold \in BOOLEAN /\ due \in BOOLEAN
+        /\ sole \subseteq (1..MaxAsm) \X (0..(NR + 1)) \X SUBSET R
+        /\ zseq \in 0..MaxAsm /\ zgen \in 0..(NR + 1) /\ zsize \in 0..NR /\ zm0 \in SUBSET R /\ zst \in BOOLEAN
+    BY <2>1 DEF Init
+  <2>. QED BY <2>2, <2>3, <2>4 DEF TyStA
+<1>3. TyGh BY DEF Init, TyGh
+<1>. QED BY <1>1, <1>2, <1>3, TyStampSplit
+
+\* the stamp half of an action that leaves the stamp alone, or holds it
+LEMMA S_TyKeep == ASSUME TypeOK, TypeOKT', NoStamp PROVE TypeOK'
+BY TypeOKParts, TypeOKPartsP, C_NoStamp
+
+LEMMA C_LossS == ASSUME TyStampS, NEW r \in R, LossS(r) PROVE TyStampS'
+<1>1. CASE Stamp /\ attached /\ r \in members
+  <2>1. /\ hold' = TRUE /\ due' = TRUE
+        /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, sole, zseq, zgen, zsize, zm0,
+                       zrgen, zrmem, zst, sGhost>>
+    BY <1>1 DEF LossS
+  <2>2. TyStA' BY <2>1, TyStampSplit DEF TyStA
+  <2>3. TyGh' BY <2>1, TyStampSplit DEF TyGh, sGhost
+  <2>. QED BY <2>2, <2>3, TyStampSplitP
+<1>2. CASE ~(Stamp /\ attached /\ r \in members) BY <1>2, C_NoStamp DEF LossS
+<1>. QED BY <1>1, <1>2
+
+LEMMA S_TyLossKeep == ASSUME TypeOK, TypeOKT', NEW r \in R, LossS(r) PROVE TypeOK'
+BY TypeOKParts, TypeOKPartsP, C_LossS
+
+LEMMA S_TySubmit == ASSUME TypeOK, NEW x \in Blocks, Submit(x) /\ NoStamp PROVE TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_Submit
+<1>. QED BY <1>1, S_TyKeep
+
+LEMMA S_TyComplete ==
+  ASSUME TypeOK, NEW w \in pend,
+         Complete(w) /\ badAck' = (badAck \/ (Stamp /\ \E q \in members : Core(stamp[q]) # Core(CurStamp)))
+                     /\ UNCHANGED <<stampVars, zAcked, zfreed, zLeg, zjv, zexcl, postMove, legalJ, riskTail, vouched, tornMarked, tornServed, tornBare, zpost>>
+  PROVE  TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_Complete
+<1>2. TyStA' BY TypeOKParts, TyStampSplit, C_StA
+<1>3. TyGh' BY TypeOKParts, TyStampSplit DEF TyGh
+<1>. QED BY <1>1, <1>2, <1>3, TyStampSplitP, TypeOKPartsP
+
+LEMMA S_TyLand == ASSUME TypeOK, NEW w \in pend, NEW r \in R, Land(w, r) /\ NoStamp PROVE TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_Land
+<1>. QED BY <1>1, S_TyKeep
+
+LEMMA S_TyDrop == ASSUME TypeOK, NEW w \in pend, NEW r \in R, Drop(w, r) /\ LossS(r) PROVE TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_Drop
+<1>. QED BY <1>1, S_TyLossKeep
+
+LEMMA S_TyPath ==
+  ASSUME TypeOK, NEW r \in R,
+         \/ FailBegin(r) /\ NoStamp
+         \/ FaultOut(r) /\ LossS(r)
+         \/ MarkStale(r) /\ ~(Stamp /\ MonitorSkipsHold /\ hold) /\ NoStamp
+         \/ Return(r) /\ NoStamp
+  PROVE  TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_Path
+<1>. QED BY <1>1, S_TyKeep, S_TyLossKeep
+
+LEMMA S_TyObserve == ASSUME TypeOK, NEW e \in Epochs, Observe(e) /\ NoStamp PROVE TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_Observe
+<1>. QED BY <1>1, S_TyKeep
+
+\* (the cut's own range, cutK # 0 => cutK = nextSeq, is a conjunct of the invariant: I_RangesS)
+LEMMA S_TyCutSmall ==
+  ASSUME TypeOK, cutK # 0 => cutK = nextSeq,
+         (CutBegin \/ CutRecord \/ CutAbort \/ CutAbortRead \/ Retire) /\ NoStamp
+  PROVE  TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_CutSmall
+<1>. QED BY <1>1, S_TyKeep
+
+LEMMA S_TyCutGC == ASSUME TypeOK, NEW r \in R, (CutOne(r) \/ \E e \in Epochs : GC(r, e)) /\ NoStamp PROVE TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_CutOne, T_GC
+<1>. QED BY <1>1, S_TyKeep
+
+LEMMA S_TyCatchup ==
+  ASSUME TypeOK, NEW r \in R,
+         (SelectBase(r) \/ RevertD(r) \/ BulkCopy(r) \/ SessionFail(r) \/ Chase(r)) /\ NoStamp
+  PROVE  TypeOK'
+<1>1. TypeOKT' BY TypeOKParts, T_SelectBase, T_RevertD, T_BulkCopy, T_SessionFail, T_Chase
+<1>. QED BY <1>1, S_TyKeep
+
+\* the drain (the user, 10-31: "adopt the planned-removal stamp"): r marked stale and removed, held as a loss
+LEMMA S_TyDrain ==
+  ASSUME TypeOK, NEW r \in R, Drain(r) /\ (IF DrainStamps THEN LossS(r) ELSE NoStamp) PROVE TypeOK'
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY TypeOKParts, Groups
+<1>1. /\ StaleMarks({r}) /\ members' = members \ {r}
+      /\ UNCHANGED <<ver, head, hAl, hPar, sPres, sCon, sAl, sPar, anc, recorded, nextSeq, cutK, cutTgt, cutDone,
+                     cutGone, attached, path, mark, reverted, sb, pin, pend, acked, fails, riskRec, badAdmit, badLoss,
+                     ackedEver, zx>>
+      /\ UNCHANGED <<used, mustRev, trustVars>>
+  BY DEF Drain
+<1>2. TyLeg' /\ TyTie' BY <1>0, <1>1, T_StaleMarks
+<1>3. TySets' BY <1>0, <1>1 DEF TySets
+<1>4. TypeOKT' BY <1>0, <1>1, <1>2, <1>3, C_Scalar, C_Head, C_Snap, C_Pend, C_Trust, GroupsP
+<1>5. TyStampS'
+  <2>1. CASE DrainStamps BY <2>1, TypeOKParts, C_LossS
+  <2>2. CASE ~DrainStamps BY <2>2, TypeOKParts, C_NoStamp
+  <2>. QED BY <2>1, <2>2
+<1>. QED BY <1>4, <1>5, TypeOKPartsP

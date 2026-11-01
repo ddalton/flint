@@ -1,0 +1,168 @@
+(* (S) The inductive invariant on rev 16 (FlintCatchupSInd v6, SIndAll6:  *)
+(* the stamp layer, the generation bounds, the surviving FlintCatchupT     *)
+(* conjuncts with I_MembersS, the restatements) and Inv_AckedHeld, split   *)
+(* in three groups; a frame per conjunct; Init; what it gives.             *)
+
+IndJ ==
+  /\ J_DueHold /\ J_HoldAtt /\ J_Rel /\ J_Cur /\ J_ZxOut /\ J_Aseq /\ J_SeqSync /\ J_MemRel /\ J_RelHold
+  /\ J_NoAckBad /\ J_M0 /\ J_RelValid /\ J_MinorRel /\ J_RelInSync /\ J_ViewIn /\ J_ViewOut /\ J_SoleSeq
+  /\ J_GenBound /\ J_ZGen
+IndT ==
+  /\ I_RangesS /\ I_Lineage /\ I_Chain /\ I_Pend /\ I_MembersS /\ I_HoldAtt /\ I_PendSeen /\ I_Vers
+  /\ I_Reverted /\ I_HeadPend /\ I_Session /\ Inv_TrustComplete /\ I_NoBadLoss /\ Inv_AckedHeld
+IndS == I_AckedEverS /\ I_LegalS /\ I_WHiS /\ I_AckMono /\ I_HeadLoS /\ I_FreshS
+IndInv == TypeOK /\ IndJ /\ IndT /\ IndS
+
+LEMMA IndIsSIndAll == IndInv <=> SIndAll6 /\ Inv_AckedHeld
+BY DEF IndInv, IndJ, IndT, IndS, SIndAll6, SInd1, SInd0
+LEMMA IndSplit == IndInv <=> TypeOK /\ IndJ /\ IndT /\ IndS
+BY DEF IndInv
+LEMMA IndSplitP == IndInv' <=> TypeOK' /\ IndJ' /\ IndT' /\ IndS'
+BY DEF IndInv
+
+Goal == Inv_NoNewLoss /\ Inv_MembersHold /\ Inv_RaidHolds /\ Inv_AckStamped
+
+\* --- frames: a conjunct carries over when what it reads does --------------------------------
+LEMMA F_DueHold == J_DueHold /\ UNCHANGED <<due, hold>> => J_DueHold' BY DEF J_DueHold
+LEMMA F_JHoldAtt == J_HoldAtt /\ UNCHANGED <<hold, attached>> => J_HoldAtt' BY DEF J_HoldAtt
+LEMMA F_Rel == J_Rel /\ UNCHANGED <<attached, hold, rgenA, agen, rmemA, members>> => J_Rel' BY DEF J_Rel
+LEMMA F_Cur == J_Cur /\ UNCHANGED <<attached, due, members, stamp, aseq, agen, asize, rgenA, rmemA>> => J_Cur'
+BY DEF J_Cur, CurStamp, Core
+LEMMA F_ZxOut == J_ZxOut /\ UNCHANGED <<zx, members>> => J_ZxOut' BY DEF J_ZxOut
+LEMMA F_Aseq == J_Aseq /\ UNCHANGED <<aseq, nseq>> => J_Aseq' BY DEF J_Aseq
+LEMMA F_SeqSync == J_SeqSync /\ UNCHANGED <<dState, stamp, nseq, asize>> => J_SeqSync' BY DEF J_SeqSync, InSyncR
+LEMMA F_MemRel == J_MemRel /\ UNCHANGED <<attached, members, rmemA>> => J_MemRel' BY DEF J_MemRel
+LEMMA F_RelHold == J_RelHold /\ UNCHANGED <<rmemA, dState, head, acked, pend>> => J_RelHold'
+BY DEF J_RelHold, InSyncR, Pending
+LEMMA F_NoAckBad == J_NoAckBad /\ UNCHANGED badAck => J_NoAckBad' BY DEF J_NoAckBad
+LEMMA F_M0 == J_M0 /\ UNCHANGED <<stamp, nseq, asize, rmemA, dState>> => J_M0' BY DEF J_M0, SeqLegs, InSyncR
+LEMMA F_RelValid == J_RelValid /\ UNCHANGED <<nseq, rgenA, asize, rmemA, sole>> => J_RelValid'
+BY DEF J_RelValid, RelStamp, Valid, Majority, SolePairs
+LEMMA F_MinorRel == J_MinorRel /\ UNCHANGED <<nseq, rgenA, asize, rmemA, dState>> => J_MinorRel'
+BY DEF J_MinorRel, RelStamp, Majority, InSyncR
+LEMMA F_RelInSync == J_RelInSync /\ UNCHANGED <<rmemA, dState>> => J_RelInSync' BY DEF J_RelInSync, InSyncR
+LEMMA F_ViewIn == J_ViewIn /\ UNCHANGED <<dState, rmemA, stamp, sole, nseq, rgenA>> => J_ViewIn'
+BY DEF J_ViewIn, InSyncR, View, Valid, Majority, SolePairs
+LEMMA F_ViewOut == J_ViewOut /\ UNCHANGED <<dState, rmemA, stamp, sole, nseq, rgenA>> => J_ViewOut'
+BY DEF J_ViewOut, InSyncR, View, Valid, Majority, SolePairs
+LEMMA F_SoleSeq == J_SoleSeq /\ UNCHANGED <<sole, nseq, dState>> => J_SoleSeq' BY DEF J_SoleSeq, InSyncR
+LEMMA F_GenBound == J_GenBound /\ UNCHANGED <<attached, agen, members, due, asize>> => J_GenBound' BY DEF J_GenBound
+LEMMA F_ZGen == J_ZGen /\ UNCHANGED zgen => J_ZGen' BY DEF J_ZGen
+\* every J conjunct at once, for a step that leaves the stamp and what the J layer reads alone
+LEMMA F_IndJ ==
+  IndJ /\ UNCHANGED <<stampVars, sGhost>>
+       /\ UNCHANGED <<attached, members, zx, dState, head, acked, pend>> => IndJ'
+BY F_DueHold, F_JHoldAtt, F_Rel, F_Cur, F_ZxOut, F_Aseq, F_SeqSync, F_MemRel, F_RelHold, F_NoAckBad, F_M0,
+   F_RelValid, F_MinorRel, F_RelInSync, F_ViewIn, F_ViewOut, F_SoleSeq, F_GenBound, F_ZGen DEF IndJ, stampVars, sGhost
+
+LEMMA F_RangesS ==
+  I_RangesS /\ UNCHANGED <<cutK, nextSeq, attached, pend, members, recorded, conf, sPres, tr, hPar>> => I_RangesS'
+BY DEF I_RangesS
+LEMMA F_Lineage == I_Lineage /\ UNCHANGED <<sPres, sPar, anc>> => I_Lineage' BY DEF I_Lineage
+LEMMA F_Chain == I_Chain /\ UNCHANGED <<sPres, sPar, sAl, sCon, hAl, head, hPar>> => I_Chain' BY DEF I_Chain
+LEMMA F_Pend == I_Pend /\ UNCHANGED <<pend, acked, ver, members, head, nextSeq, cutK>> => I_Pend' BY DEF I_Pend
+LEMMA F_MembersS == I_MembersS /\ UNCHANGED <<attached, members, dState>> => I_MembersS'
+BY DEF I_MembersS, InSyncR
+LEMMA F_AckedHeld == Inv_AckedHeld /\ UNCHANGED <<dState, head, acked>> => Inv_AckedHeld' BY DEF Inv_AckedHeld
+LEMMA F_HoldAtt == I_HoldAtt /\ UNCHANGED <<attached, members, head, acked>> => I_HoldAtt' BY DEF I_HoldAtt
+LEMMA F_PendSeen == I_PendSeen /\ UNCHANGED <<pend, head, sPres, sCon>> => I_PendSeen' BY DEF I_PendSeen
+LEMMA F_Vers == I_Vers /\ UNCHANGED <<acked, ver, head, sPres, sCon>> => I_Vers' BY DEF I_Vers
+LEMMA F_Reverted ==
+  I_Reverted /\ UNCHANGED <<dState, reverted, sb, hAl, hPar, head, sCon, sPres, recorded>> => I_Reverted'
+BY DEF I_Reverted, RevOK
+LEMMA F_HeadPend == I_HeadPend /\ UNCHANGED <<dState, reverted, mark, head, pend>> => I_HeadPend'
+BY DEF I_HeadPend, CatchingUp, HiOf
+LEMMA F_Session ==
+  I_Session /\ UNCHANGED <<dState, reverted, sb, mark, members, hPar, nextSeq, sPres, tr, pin,
+                           recorded, path, cutK, cutTgt, cutDone, cutGone>>
+  => I_Session'
+BY DEF I_Session, SessionOK, CatchingUp
+LEMMA F_TC == Inv_TrustComplete /\ UNCHANGED <<tr, sCon, cutAck>> => Inv_TrustComplete' BY DEF Inv_TrustComplete
+LEMMA F_NoBadLoss == I_NoBadLoss /\ UNCHANGED badLoss => I_NoBadLoss' BY DEF I_NoBadLoss
+LEMMA F_AckedEverS == I_AckedEverS /\ UNCHANGED <<acked, ackedEver>> => I_AckedEverS' BY DEF I_AckedEverS
+LEMMA F_LegalS == I_LegalS /\ UNCHANGED <<head, sPres, sCon, ackedEver, pend, zjv, zpost>> => I_LegalS'
+BY DEF I_LegalS, LegalV, PendVal
+LEMMA F_WHiS == I_WHiS /\ UNCHANGED <<sPres, cutAck>> => I_WHiS' BY DEF I_WHiS
+LEMMA F_AckMono == I_AckMono /\ UNCHANGED <<sPres, cutAck, acked>> => I_AckMono' BY DEF I_AckMono
+LEMMA F_HeadLoS == I_HeadLoS /\ UNCHANGED <<dState, reverted, mark, sPres, cutAck, head>> => I_HeadLoS'
+BY DEF I_HeadLoS, CatchingUp, HiOf
+LEMMA F_FreshS ==
+  I_FreshS /\ UNCHANGED <<attached, members, dState, rmemA, sPres, nextSeq, conf, sCon, cutAck>> => I_FreshS'
+BY DEF I_FreshS, BasesS, InSyncR
+
+\* A leg the step leaves alone keeps its per-leg facts (FlintCatchupTProof's, verbatim).
+LEMMA SessionOther ==
+  ASSUME NEW q \in R, SessionOK(q),
+         UNCHANGED <<members, nextSeq, recorded, cutK, cutTgt, cutDone, cutGone>>,
+         dState'[q] = dState[q], reverted'[q] = reverted[q], sb'[q] = sb[q], mark'[q] = mark[q],
+         hPar'[q] = hPar[q], sPres'[q] = sPres[q], tr'[q] = tr[q], pin'[q] = pin[q], path'[q] = path[q]
+  PROVE  SessionOK(q)'
+BY DEF SessionOK, CatchingUp
+LEMMA SessionOtherG ==
+  ASSUME NEW q \in R, SessionOK(q),
+         UNCHANGED <<members, nextSeq, recorded, cutK, cutTgt, cutDone>>, cutGone \subseteq cutGone',
+         dState'[q] = dState[q], reverted'[q] = reverted[q], sb'[q] = sb[q], mark'[q] = mark[q],
+         hPar'[q] = hPar[q], sPres'[q] = sPres[q], tr'[q] = tr[q], pin'[q] = pin[q], path'[q] = path[q]
+  PROVE  SessionOK(q)'
+BY DEF SessionOK, CatchingUp
+LEMMA RevOther ==
+  ASSUME NEW q \in R, RevOK(q), UNCHANGED recorded,
+         dState'[q] = dState[q], reverted'[q] = reverted[q], sb'[q] = sb[q], hAl'[q] = hAl[q],
+         hPar'[q] = hPar[q], head'[q] = head[q], sCon'[q] = sCon[q], sPres'[q] = sPres[q]
+  PROVE  RevOK(q)'
+BY DEF RevOK
+
+\* --- Init ---------------------------------------------------------------------------------
+LEMMA I_Init == Init => IndInv
+<1>. SUFFICES ASSUME Init PROVE IndInv OBVIOUS
+<1>0. TypeOK BY S_TyInit
+<1>a. R # {} /\ MaxEpoch \in Nat /\ NR \in Nat /\ NR >= 1 BY Const, S_NR DEF R
+<1>b. InSyncR = R /\ members = R /\ Healthy = R /\ rmemA = R BY DEF Init, InSyncR, Healthy
+<1>c. \A q \in R : stamp[q] = [seq |-> 1, gen |-> 0, size |-> NR, mem |-> R, rgen |-> 0, rmem |-> R] BY DEF Init
+<1>d. Cardinality(R) = NR BY DEF NR, R
+<1>e. 2 * NR > NR BY <1>a
+<1>1. J_DueHold /\ J_HoldAtt /\ J_Rel /\ J_ZxOut /\ J_Aseq /\ J_MemRel /\ J_NoAckBad /\ J_SoleSeq
+  BY DEF Init, J_DueHold, J_HoldAtt, J_Rel, J_ZxOut, J_Aseq, J_MemRel, J_NoAckBad, J_SoleSeq
+<1>2. J_Cur BY <1>c DEF Init, J_Cur, Core, CurStamp
+<1>3. J_SeqSync BY <1>b, <1>c DEF Init, J_SeqSync
+<1>4. J_RelHold BY <1>b DEF Init, J_RelHold, Zero
+<1>5. J_M0
+  <2>1. SeqLegs = R BY <1>c DEF Init, SeqLegs
+  <2>. QED BY <1>b, <1>d, <2>1 DEF Init, J_M0
+<1>6. Majority(RelStamp) /\ Valid(RelStamp) BY <1>d, <1>e DEF Init, RelStamp, Majority, Valid
+<1>7. J_RelValid /\ J_MinorRel /\ J_RelInSync BY <1>a, <1>b, <1>6 DEF J_RelValid, J_MinorRel, J_RelInSync
+<1>9. J_GenBound /\ J_ZGen BY <1>a, <1>b, <1>d DEF Init, J_GenBound, J_ZGen
+<1>8. J_ViewIn /\ J_ViewOut
+  <2>1. \A q \in R : Valid(stamp[q]) /\ View(stamp[q]) = stamp[q] BY <1>c, <1>d, <1>e DEF Valid, Majority, View
+  <2>. QED BY <1>b, <1>c, <2>1 DEF Init, J_ViewIn, J_ViewOut
+<1>j. IndJ BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>7, <1>8, <1>9 DEF IndJ
+<1>t1. I_RangesS BY Const DEF Init, I_RangesS, Epochs
+<1>t2. I_Lineage /\ I_Chain BY DEF Init, I_Lineage, ChainShape, Epochs, I_Chain, ChainReads, Up, Zero
+<1>t3. I_Pend /\ I_PendSeen /\ I_Vers BY Const DEF Init, I_Pend, I_PendSeen, I_Vers, Zero
+<1>t4. I_MembersS /\ Inv_AckedHeld BY <1>a, <1>b DEF Init, I_MembersS, Inv_AckedHeld, Zero
+<1>t5. I_HoldAtt BY DEF Init, I_HoldAtt, Zero
+<1>t6. I_Reverted /\ I_HeadPend /\ I_Session
+  BY DEF Init, I_Reverted, RevOK, I_Session, SessionOK, I_HeadPend, CatchingUp
+<1>t7. Inv_TrustComplete /\ I_NoBadLoss BY DEF Init, Inv_TrustComplete, I_NoBadLoss
+<1>t. IndT BY <1>t1, <1>t2, <1>t3, <1>t4, <1>t5, <1>t6, <1>t7 DEF IndT
+<1>s1. I_AckedEverS /\ I_LegalS BY DEF Init, I_AckedEverS, I_LegalS, LegalV, Zero
+<1>s2. I_WHiS /\ I_AckMono /\ I_HeadLoS /\ I_FreshS
+  BY DEF Init, I_WHiS, I_AckMono, I_HeadLoS, CatchingUp, I_FreshS, BasesS
+<1>s. IndS BY <1>s1, <1>s2 DEF IndS
+<1>. QED BY <1>0, <1>j, <1>t, <1>s, IndSplit
+
+\* --- what the invariant gives the theorem ------------------------------------------------
+LEMMA I_Goal == IndInv => Goal
+<1>. SUFFICES ASSUME IndInv PROVE Goal OBVIOUS
+<1>0. TypeOK /\ IndJ /\ IndT /\ IndS BY IndSplit
+<1>1. Inv_AckedHeld BY <1>0 DEF IndT
+<1>2. Inv_MembersHold
+  <2>1. CASE attached BY <2>1, <1>0 DEF IndT, I_HoldAtt, Inv_MembersHold
+  <2>2. CASE ~attached BY <2>2, <1>0 DEF IndT, I_RangesS, Inv_MembersHold
+  <2>. QED BY <2>1, <2>2
+<1>3. Inv_RaidHolds
+  <2>. SUFFICES ASSUME attached, members # {}, QuorumOK, NEW x \in Blocks, ~Pending(x)
+                PROVE \E r \in members : head[r][x] >= acked[x]
+    BY DEF Inv_RaidHolds
+  <2>. QED BY <1>0 DEF IndT, I_HoldAtt
+<1>. QED BY <1>0, <1>1, <1>2, <1>3 DEF IndT, IndJ, I_NoBadLoss, J_NoAckBad, Goal, Inv_NoNewLoss, Inv_AdmitNoLoss, Inv_AckStamped

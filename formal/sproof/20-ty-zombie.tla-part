@@ -1,0 +1,238 @@
+(* The type layer, S: the zombie's disjuncts of Next, the raid's end, the  *)
+(* expiry stage.  Each keeps TypeOK = TypeOKT /\ TyStA /\ TyGh.            *)
+
+LEMMA ZA_NRNat == NR \in Nat
+BY Const, FS_CardinalityType DEF NR, R
+
+\* CrashUnstage's half over the T variables (T's Clean had Crash = FALSE).
+LEMMA ZA_T_CrashUnstage ==
+  ASSUME TypeOKT, CrashUnstage PROVE TypeOKT'
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY Groups
+<1>u. UNCHANGED <<ver, nextSeq, fails, badAdmit, badLoss, zx>> /\ UNCHANGED recorded
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED acked /\ UNCHANGED tieVars /\ UNCHANGED <<cfgAt, tr, cutAck>>
+  BY DEF CrashUnstage
+<1>1. /\ attached' = FALSE /\ members' = {} /\ pend' = {}
+      /\ cutK' = 0 /\ cutTgt' = {} /\ cutDone' = {} /\ cutGone' = {}
+      /\ conf' = [e \in Epochs |-> TRUE] /\ htr' = [q \in R |-> FALSE]
+  BY Full DEF CrashUnstage
+<1>2. ackedEver' = [x \in Blocks |-> ackedEver[x] \cup
+                     {w.v : w \in {u \in pend : u.b = x /\ u.landed # {}}}]
+  BY DEF CrashUnstage
+<1>3. TyScalar' BY <1>0, <1>u, <1>1, Const DEF TyScalar
+<1>4. TySets' BY <1>0, <1>u, <1>1 DEF TySets
+<1>5. TyPend'
+  <2>1. \A w \in pend : w.v \in Vers BY <1>0 DEF TyPend, Write, Vers
+  <2>2. ackedEver' \in [Blocks -> SUBSET Vers] BY <1>0, <1>2, <2>1 DEF TyPend
+  <2>. QED BY <1>0, <1>u, <1>1, <2>2 DEF TyPend
+<1>6. TyTrust' BY <1>0, <1>u, <1>1 DEF TyTrust
+<1>. QED BY <1>0, <1>u, <1>3, <1>4, <1>5, <1>6, C_Leg, C_Head, C_Snap, C_Tie, GroupsP
+
+\* the zombie's write (not a released raid's): ver, z's head, its riskRec,
+\* the write hole; the ghosts zjv and zpost
+LEMMA S_TyZombie ==
+  ASSUME TypeOK, NEW r \in R, NEW x \in Blocks,
+         Zombie(r, x) /\ ~ZombieReleases /\ zjv' = zjv \cup {ver + 1}
+                                  /\ zpost' = (IF Stamp /\ zst THEN zpost \cup {ver + 1} ELSE zpost)
+                                  /\ UNCHANGED <<stampVars, badAck, zAcked, zfreed, zLeg, zexcl, postMove, legalJ, riskTail, vouched, tornMarked, tornServed, tornBare>>
+  PROVE  TypeOK'
+<1>t. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>t, Groups
+<1>z. Zombie(r, x) OBVIOUS
+<1>u. UNCHANGED <<nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, restamp>>
+      /\ UNCHANGED hPar /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked>> /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+  BY <1>z DEF Zombie
+<1>v. ver + 1 \in 1..MaxVer /\ ver' = ver + 1 BY <1>0, <1>z, Const DEF Zombie, TyScalar, Vers
+<1>1. TyScalar' BY <1>0, <1>u, <1>v DEF TyScalar, Vers
+<1>2. TyLeg'
+  <2>1. riskRec[r] \in 0..NoRisk BY <1>0 DEF TyLeg
+  <2>2. Latest \in 0..MaxEpoch BY <1>0, LatestType
+  <2>3. riskRec[r] \in Nat /\ Latest \in Nat BY <2>1, <2>2, NoRiskNat
+  <2>4. Min({riskRec[r], Latest}) \in {riskRec[r], Latest} BY <2>3, Min2
+  <2>5. Min({riskRec[r], Latest}) \in 0..NoRisk BY <2>1, <2>2, <2>4, NoRiskNat, Const
+  <2>6. riskRec' = [riskRec EXCEPT ![r] = Min({riskRec[r], Latest})] BY <1>z DEF Zombie
+  <2>7. riskRec' \in [R -> 0..NoRisk] BY <1>0, <2>5, <2>6 DEF TyLeg
+  <2>. QED BY <1>0, <1>u, <2>7 DEF TyLeg
+<1>3. TyHead'
+  <2>1. head' = [head EXCEPT ![r][x] = ver + 1] /\ hAl' = [hAl EXCEPT ![r] = @ \cup {x}] BY <1>z DEF Zombie
+  <2>. QED BY <1>0, <1>u, <1>v, <2>1 DEF TyHead, Vers
+<1>4. TyPend'
+  <2>1. ackedEver' = IF Stamp /\ ZombiePreStampLegal /\ ~zst THEN [ackedEver EXCEPT ![x] = @ \cup {ver + 1}]
+                                                              ELSE ackedEver
+    BY <1>z DEF Zombie
+  <2>. QED BY <1>0, <1>u, <1>v, <2>1 DEF TyPend, Vers
+<1>T. TypeOKT' BY <1>0, <1>u, <1>1, <1>2, <1>3, <1>4, C_Sets, C_Snap, C_Tie, C_Trust, GroupsP
+<1>s. /\ UNCHANGED stampVars
+      /\ UNCHANGED <<badAck, zAcked, zfreed, zLeg, zexcl, postMove, legalJ, riskTail, vouched, tornMarked, tornServed, tornBare>>
+      /\ zjv' = zjv \cup {ver + 1}
+      /\ zpost' = (IF Stamp /\ zst THEN zpost \cup {ver + 1} ELSE zpost)
+  OBVIOUS
+<1>5. TyStA' BY <1>t, <1>s, C_StA
+<1>6. TyGh' BY <1>t, <1>s, <1>v DEF TyGh, Vers
+<1>. QED BY <1>T, <1>5, <1>6, TyStampSplitP, TypeOKPartsP
+
+\* a zombie whose raid was a confirmed sole continuation acks on z
+LEMMA S_TyZombieAck ==
+  ASSUME TypeOK, NEW x \in Blocks, ZombieAck(x) PROVE TypeOK'
+<1>t. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>t, Groups
+<1>z. zx \in R BY <1>0 DEF ZombieAck, ZombieReleases, TyScalar
+<1>v. ver + 1 \in 1..MaxVer /\ ver' = ver + 1 BY <1>0, Const DEF ZombieAck, TyScalar, Vers
+<1>u. UNCHANGED <<nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED hPar /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED pend /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+  BY DEF ZombieAck
+<1>1. TyScalar' BY <1>0, <1>u, <1>v DEF TyScalar, Vers
+<1>2. TyHead'
+  <2>1. head' = [head EXCEPT ![zx][x] = ver + 1] /\ hAl' = [hAl EXCEPT ![zx] = @ \cup {x}] BY DEF ZombieAck
+  <2>. QED BY <1>0, <1>u, <1>v, <1>z, <2>1 DEF TyHead, Vers
+<1>3. TyPend'
+  <2>1. acked' = [acked EXCEPT ![x] = ver + 1] /\ ackedEver' = [ackedEver EXCEPT ![x] = @ \cup {ver + 1}]
+    BY DEF ZombieAck
+  <2>. QED BY <1>0, <1>u, <1>v, <2>1 DEF TyPend, Vers
+<1>T. TypeOKT' BY <1>0, <1>u, <1>1, <1>2, <1>3, C_Sets, C_Leg, C_Snap, C_Tie, C_Trust, GroupsP
+<1>s. /\ UNCHANGED stampVars /\ zAcked' = TRUE
+      /\ UNCHANGED <<badAck, zfreed, zLeg, zjv, zexcl, postMove, legalJ, riskTail, vouched, tornMarked, tornServed, tornBare, zpost>>
+  BY DEF ZombieAck
+<1>4. TyStA' BY <1>t, <1>s, C_StA
+<1>5. TyGh' BY <1>t, <1>s DEF TyGh
+<1>. QED BY <1>T, <1>4, <1>5, TyStampSplitP, TypeOKPartsP
+
+\* the raid goes away (unstage, crash): no barrier survives it
+LEMMA S_TyEndRaid ==
+  ASSUME TypeOK, (Unstage \/ CrashUnstage) /\ EndRaidS PROVE TypeOK'
+<1>t. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>1. TypeOKT'
+  <2>1. CASE Unstage BY <1>t, <2>1, T_Unstage
+  <2>2. CASE CrashUnstage BY <1>t, <2>2, ZA_T_CrashUnstage
+  <2>. QED BY <2>1, <2>2
+<1>e. /\ hold' = FALSE /\ due' = FALSE
+      /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, sole, zseq, zgen, zsize, zm0, zrgen, zrmem, zst>>
+      /\ UNCHANGED sGhost
+  BY DEF EndRaidS
+<1>2. TyStA' BY <1>t, <1>e DEF TyStA
+<1>3. TyGh' BY <1>t, <1>e, C_Gh
+<1>. QED BY <1>1, <1>2, <1>3, TyStampSplitP, TypeOKPartsP
+
+\* the zombie move (Full: StageDefer, no FenceMark): the raid detaches, the
+\* zombie raid keeps the old assembly
+LEMMA S_TyZombieMove ==
+  ASSUME TypeOK, ZombieMove /\ MoveS PROVE TypeOK'
+<1>t. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>t, Groups
+<1>1. PICK z \in members : /\ zx' = z /\ attached' = FALSE /\ members' = {}
+                           /\ path' = [path EXCEPT ![z] = "back"]
+                           /\ dState' = [q \in R |-> IF q \in {} THEN "stale" ELSE dState[q]]
+                           /\ restamp' = [q \in R |-> IF q \in {} THEN FALSE ELSE restamp[q]]
+                           /\ UNCHANGED <<tainted, floor>>
+  BY Full DEF ZombieMove, StaleMarks
+<1>u. UNCHANGED <<ver, nextSeq, cutK, fails, badAdmit, badLoss>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone>>
+      /\ UNCHANGED <<mark, reverted, sb, pin, riskRec, used, mustRev>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED <<cfgAt, tr, cutAck>>
+  BY DEF ZombieMove
+<1>2. conf' = [e \in Epochs |-> TRUE] /\ htr' = [q \in R |-> FALSE] BY Full DEF ZombieMove
+<1>3. z \in R BY <1>0, <1>1 DEF TySets
+<1>4. TyScalar' BY <1>0, <1>u, <1>1, <1>3 DEF TyScalar
+<1>5. TySets' BY <1>0, <1>u, <1>1 DEF TySets
+<1>6. TyLeg' /\ TyTie'
+  <2>1. path' \in [R -> {"ok", "failing", "out", "back"}] BY <1>0, <1>1 DEF TyLeg
+  <2>2. dState' \in [R -> {"insync", "stale", "standby"}] /\ restamp' \in [R -> BOOLEAN]
+    BY <1>0, <1>1 DEF TyLeg
+  <2>. QED BY <1>0, <1>u, <1>1, <2>1, <2>2 DEF TyLeg, TyTie
+<1>7. TyTrust' BY <1>0, <1>u, <1>2 DEF TyTrust
+<1>T. TypeOKT' BY <1>0, <1>u, <1>4, <1>5, <1>6, <1>7, C_Head, C_Snap, C_Pend, GroupsP
+<1>m. /\ zseq' = aseq /\ zgen' = agen /\ zsize' = asize /\ zm0' = members /\ zst' = FALSE
+      /\ zrgen' = rgenA /\ zrmem' = rmemA /\ hold' = FALSE /\ due' = FALSE
+      /\ zLeg' = zx' /\ zjv' = {} /\ zexcl' = FALSE /\ postMove' = FALSE /\ legalJ' = [x \in Blocks |-> {}]
+      /\ UNCHANGED <<stamp, nseq, aseq, agen, asize, rgenA, rmemA, sole>>
+      /\ UNCHANGED <<badAck, zAcked, zfreed, riskTail, vouched, tornMarked, tornServed, tornBare, zpost>>
+  BY Full DEF MoveS
+<1>8. TyStA' BY <1>t, <1>0, <1>m DEF TyStA, TySets
+<1>9. TyGh' BY <1>t, <1>1, <1>3, <1>m DEF TyGh
+<1>. QED BY <1>T, <1>8, <1>9, TyStampSplitP, TypeOKPartsP
+
+\* the zombie's late monitor (Full: MarkGate, so never; proved for any knob)
+LEMMA S_TyZombieMark ==
+  ASSUME TypeOK, ZombieMark /\ NoStamp PROVE TypeOK'
+<1>t. TypeOKT /\ TyStampS BY TypeOKParts
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>t, Groups
+<1>1. /\ StaleMarks({q \in InSyncR : q # zx})
+      /\ UNCHANGED <<path, mark, reverted, sb, pin, riskRec, used, mustRev>>
+  BY DEF ZombieMark
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED trustVars
+  BY DEF ZombieMark
+<1>2. TyLeg' /\ TyTie' BY <1>0, <1>1, T_StaleMarks
+<1>T. TypeOKT' BY <1>0, <1>u, <1>2, C_Scalar, C_Sets, C_Head, C_Snap, C_Pend, C_Trust, GroupsP
+<1>S. TyStampS' BY <1>t, C_NoStamp
+<1>. QED BY <1>T, <1>S, TypeOKPartsP
+
+\* hygiene: the zombie's raid goes away; zfreed records the leg
+LEMMA S_TyZombieHygiene ==
+  ASSUME TypeOK,
+         ZombieHygiene /\ zfreed' = zx /\ UNCHANGED <<stampVars, badAck, zAcked, zLeg, zjv, zexcl, postMove, legalJ, riskTail, vouched, tornMarked, tornServed, tornBare, zpost>>
+  PROVE  TypeOK'
+<1>t. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>t, Groups
+<1>h. ZombieHygiene OBVIOUS
+<1>u. UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss>> /\ zx' = 0
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+  BY <1>h DEF ZombieHygiene
+<1>1. TyScalar' BY <1>0, <1>u DEF TyScalar
+<1>T. TypeOKT' BY <1>0, <1>u, <1>1, C_Sets, C_Leg, C_Head, C_Snap, C_Pend, C_Tie, C_Trust, GroupsP
+<1>s. /\ UNCHANGED stampVars /\ zfreed' = zx
+      /\ UNCHANGED <<badAck, zAcked, zLeg, zjv, zexcl, postMove, legalJ, riskTail, vouched, tornMarked, tornServed, tornBare, zpost>>
+  OBVIOUS
+<1>2. TyStA' BY <1>t, <1>s, C_StA
+<1>3. TyGh' BY <1>t, <1>0, <1>s DEF TyGh, TyScalar
+<1>. QED BY <1>T, <1>2, <1>3, TyStampSplitP, TypeOKPartsP
+
+\* the zombie stamps its own leg (zseq, zgen + 1, zsize, {z})
+LEMMA S_TyZombieStamp ==
+  ASSUME TypeOK, ZombieStamp,
+         zgen <= NR   \* NEEDS-INV: zgen <= NR (zgen is agen at the move; agen <= asize <= NR)
+  PROVE  TypeOK'
+<1>t. TypeOKT /\ TyStA /\ TyGh BY TypeOKParts, TyStampSplit
+<1>0. TyScalar /\ TySets /\ TyLeg /\ TyHead /\ TySnap /\ TyPend /\ TyTie /\ TyTrust BY <1>t, Groups
+<1>u. /\ UNCHANGED <<ver, nextSeq, cutK, attached, fails, badAdmit, badLoss, zx>>
+      /\ UNCHANGED <<recorded, cutTgt, cutDone, cutGone, members>>
+      /\ UNCHANGED <<path, dState, mark, reverted, sb, pin, riskRec, restamp>>
+      /\ UNCHANGED <<head, hAl, hPar>> /\ UNCHANGED <<sPres, sCon, sAl, sPar, anc>>
+      /\ UNCHANGED <<pend, acked, ackedEver>> /\ UNCHANGED tieVars /\ UNCHANGED trustVars
+  BY DEF ZombieStamp
+<1>T. TypeOKT' BY <1>0, <1>u, C_Scalar, C_Sets, C_Leg, C_Head, C_Snap, C_Pend, C_Tie, C_Trust, GroupsP
+<1>z. zx \in R BY <1>0 DEF ZombieStamp, TyScalar
+<1>r. [seq |-> zseq, gen |-> zgen + 1, size |-> zsize, mem |-> {zx}, rgen |-> zrgen, rmem |-> zrmem] \in StampRec
+  <2>1. /\ zseq \in 0..MaxAsm /\ zgen \in 0..(NR + 1) /\ zsize \in 0..NR
+        /\ zrgen \in 0..(NR + 1) /\ zrmem \in SUBSET R
+    BY <1>t DEF TyStA
+  <2>2. zgen + 1 \in 0..(NR + 1) BY <2>1, ZA_NRNat
+  <2>. QED BY <1>z, <2>1, <2>2 DEF StampRec, R
+<1>s. /\ stamp' = [stamp EXCEPT ![zx] = [seq |-> zseq, gen |-> zgen + 1, size |-> zsize, mem |-> {zx},
+                                         rgen |-> zrgen, rmem |-> zrmem]]
+      /\ zst' = TRUE
+      /\ UNCHANGED <<nseq, aseq, agen, asize, rgenA, rmemA, hold, due, sole, zseq, zgen, zsize, zm0, zrgen, zrmem>>
+      /\ UNCHANGED sGhost
+  BY DEF ZombieStamp
+<1>1. stamp' \in [R -> StampRec] BY <1>t, <1>z, <1>r, <1>s DEF TyStA
+<1>2. TyStA' BY <1>t, <1>s, <1>1 DEF TyStA
+<1>3. TyGh' BY <1>t, <1>s, C_Gh
+<1>. QED BY <1>T, <1>2, <1>3, TyStampSplitP, TypeOKPartsP
+
+\* the defer's expiry: Full sets DeferExpires = FALSE, so StageRisk never fires
+LEMMA S_TyStageRisk ==
+  ASSUME TypeOK, StageRisk PROVE TypeOK'
+BY Full DEF StageRisk
