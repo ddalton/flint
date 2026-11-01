@@ -3017,10 +3017,11 @@ Every batch here, c21 to c27, ran trust with the fixed cut
 caveat on c15 does not apply to these rows. The
 hole is legal by definition in the rows that
 count it so, and its bound (in flight at the fence or at a crash) is a
-property of the raid, not of the model. The stamp model has no TLAPS
-proof; the proved rule is §5's trust rule (FlintCatchupT), whose
-fresh-cache record run waits for a quiet box, and a proof of the stamp
-rule is in the gate under *Delivery order*. The model
+property of the raid, not of the model. The stamp rule has a TLAPS
+proof (2026-11-01, gate item 2 under *Delivery order*): the four safety
+invariants for any number of replicas and free caps, on the final
+setting, its record read and reconciled, with its controls still to
+run; §5's trust rule has its own. The model
 files are local to flint-e4's branch until the user says push. Nothing
 in this section is built.
 
@@ -3126,12 +3127,38 @@ and decided by the user:
          `LastFails`, `WholeMark`, `InWriteGuard`, `MonitorGuard` and
          `ZombieTriple` on, and the drain inside it (`OperatorMark`,
          `InWriteGuard` and `DrainStamps` on) since the user adopted the
-         planned-removal stamp on 2026-10-31. Progress (2026-10-31):
-         the inductive invariant's 66 conjuncts (`e6ffb518`) hold in
-         full on the four two-replica bases with the drain in
-         (28,546,374; 38,136,587; 149,739,816; 191,910,011 states) and
-         are bounded clean at three and four replicas; the last lemmas
-         and the record run are in progress.
+         planned-removal stamp on 2026-10-31. **Proved (2026-11-01,
+         flint-e4; record read by flint-cb):** `Safety == Spec =>
+         []Goal` with `Goal == Inv_NoNewLoss /\ Inv_MembersHold /\
+         Inv_RaidHolds /\ Inv_AckStamped` (`Inv_NoNewLoss` is the type
+         invariant, no bad loss and `Inv_AckedHeld`), for rev 17
+         (`61ae6829`) under the full setting above, with the crash and
+         the zombie move on, for any finite non-empty set of numbered
+         replicas, no size bound, and free caps on writes, epochs,
+         failures, assemblies and retention: all 19,016 obligations of
+         `FlintCatchupSProof.tla` (`9ed5580a`, 11,060 lines, 453
+         lemmas; inductive invariant `FlintCatchupSInd.tla` `c70f9660`,
+         26 conjuncts over the trust proof's) proved on a fresh cache.
+         The record is composed: a single whole-file run is bound by
+         tlapm's single-threaded main process and did not fit its cap,
+         so sixteen fresh-cache runs over line ranges cut at lemma
+         boundaries ran on c31 (tlapm `bfa9468`, stretch 5, 00:03 to
+         00:36Z, the longest 32 minutes, 13.6 GB), every range naming
+         the same three input md5s and exiting clean, the obligation
+         totals summing to 19,016 and the tally by distinct obligation
+         id 5,430 proved, 13,584 trivial and 2 failed; those two are the
+         only steps Isabelle proves, and Isabelle does not run on the
+         instances, so they were proved on the box from the same file
+         (23 and 5 obligations, clean). A cross-check with the same
+         ranges on the generator's previous output (`482059a8`) gave the
+         same picture. Open before the tick: the box runs' outputs
+         carry no md5 line, so where their inputs were asserted is to
+         be cited; a results section like the trust proof's; and the
+         controls, since the trust record had thirteen premise and rule
+         flips showing which steps carry what and this proof has none
+         yet, which the user decides. Safety only: liveness is item 4.
+         It is a proof of the model; the code's match to it is the pins
+         and the drills.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
