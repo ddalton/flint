@@ -1,0 +1,97 @@
+(* (S) IndNew: the 26 conjuncts the invariant agents' counterexamples to  *)
+(* induction added (v7; peeled on rev 17 with the drain in, c31 q1/q3).    *)
+(* The final invariant is IndAll == IndInv /\ IndNew; each agent's lemma   *)
+(* is ASSUME IndInv, IndNew, <disjunct> PROVE IndInv' /\ IndNew'.           *)
+
+IndNew ==
+  /\ J_RelHoldS
+  /\ I_FreshS2
+  /\ I_LegalS2
+  /\ I_SnapPend
+  /\ J_ZxIdle
+  /\ J_SeqLe
+  /\ J_SoleRel
+  /\ J_GenTop
+  /\ J_ZLive
+  /\ J_RelLe
+  /\ I_WHiC
+  /\ I_HeadLoC
+  /\ I_HeadLoA
+  /\ I_StandbyLegal
+  /\ I_HeadHiC
+  /\ I_SnapLegal
+  /\ I_PendTop
+  /\ I_PendNext
+  /\ J_ZRel
+  /\ I_CutLegal
+  /\ I_InSyncLegal
+  /\ I_ValidLegal
+  /\ J_ZNoValid
+  /\ J_ZM0
+  /\ J_SoleGen
+  /\ J_ZCut
+IndAll == IndInv /\ IndNew
+
+\* a frame per new conjunct
+LEMMA F_RelHoldSN == J_RelHoldS /\ UNCHANGED <<rmemA, dState, head, acked>> => J_RelHoldS' BY DEF J_RelHoldS, InSyncR
+LEMMA F_FreshS2N == I_FreshS2 /\ UNCHANGED <<dState, rmemA, sPres, nextSeq, conf, sCon, cutAck>> => I_FreshS2' BY DEF I_FreshS2, InSyncR
+LEMMA F_LegalS2N == I_LegalS2 /\ UNCHANGED <<head, sPres, sCon, ackedEver, pend, zpost>> => I_LegalS2' BY DEF I_LegalS2, LegalV2, PendVal
+LEMMA F_SnapPend == I_SnapPend /\ UNCHANGED <<sPres, sCon, pend>> => I_SnapPend' BY DEF I_SnapPend
+LEMMA F_ZxIdle == J_ZxIdle /\ UNCHANGED <<zx, dState, sb, reverted, stamp, zseq>> => J_ZxIdle' BY DEF J_ZxIdle
+LEMMA F_SeqLe == J_SeqLe /\ UNCHANGED <<stamp, nseq, sole, zseq>> => J_SeqLe' BY DEF J_SeqLe
+LEMMA F_SoleRel == J_SoleRel /\ UNCHANGED <<sole, nseq, rmemA, asize>> => J_SoleRel' BY DEF J_SoleRel
+LEMMA F_GenTop == J_GenTop /\ UNCHANGED <<attached, dState, stamp, sole, agen, due, members>> => J_GenTop' BY DEF J_GenTop, InSyncR, View, Valid, Majority, SolePairs
+LEMMA F_ZLive == J_ZLive /\ UNCHANGED <<zx, dState, attached, rmemA, zseq, nseq, zsize, asize, zgen, agen, zrgen, rgenA, zrmem>> => J_ZLive' BY DEF J_ZLive
+LEMMA F_RelLe == J_RelLe /\ UNCHANGED <<rgenA, agen>> => J_RelLe' BY DEF J_RelLe
+LEMMA F_WHiC == I_WHiC /\ UNCHANGED <<acked, cutAck, sPres, sCon>> => I_WHiC' BY DEF I_WHiC, AckW
+LEMMA F_HeadLoC == I_HeadLoC /\ UNCHANGED <<dState, reverted, mark, sPres, sCon, head, acked, cutAck>> => I_HeadLoC' BY DEF I_HeadLoC, AckW, CatchingUp, HiOf
+LEMMA F_HeadLoA == I_HeadLoA /\ UNCHANGED <<dState, reverted, mark, sPres, sCon, acked, head>> => I_HeadLoA' BY DEF I_HeadLoA, CatchingUp, HiOf
+LEMMA F_StandbyLegal == I_StandbyLegal /\ UNCHANGED <<dState, head, ackedEver, pend>> => I_StandbyLegal' BY DEF I_StandbyLegal, PendVal
+LEMMA F_HeadHiC == I_HeadHiC /\ UNCHANGED <<dState, reverted, mark, sPres, cutAck, head, acked>> => I_HeadHiC' BY DEF I_HeadHiC, AckW, CatchingUp, HiOf
+LEMMA F_SnapLegal == I_SnapLegal /\ UNCHANGED <<sPres, sCon, ackedEver, pend>> => I_SnapLegal' BY DEF I_SnapLegal, PendVal
+LEMMA F_PendTop == I_PendTop /\ UNCHANGED <<pend, head, sPres, sCon>> => I_PendTop' BY DEF I_PendTop
+LEMMA F_PendNext == I_PendNext /\ UNCHANGED <<pend, nextSeq, sPres>> => I_PendNext' BY DEF I_PendNext
+LEMMA F_ZRel == J_ZRel /\ UNCHANGED <<zx, zm0, zseq, zgen, zsize, zrgen, zrmem, sole, dState>> => J_ZRel' BY DEF J_ZRel, ZombieReleases, InSyncR, Majority, Valid, SolePairs
+LEMMA F_CutLegal == I_CutLegal /\ UNCHANGED <<cutK, cutTgt, head, ackedEver, pend>> => I_CutLegal' BY DEF I_CutLegal, PendVal
+LEMMA F_InSyncLegal == I_InSyncLegal /\ UNCHANGED <<attached, dState, head, ackedEver, pend>> => I_InSyncLegal' BY DEF I_InSyncLegal, InSyncR, PendVal
+LEMMA F_ZNoValid == J_ZNoValid /\ UNCHANGED <<zx, zst, dState, stamp, sole>> => J_ZNoValid' BY DEF J_ZNoValid, Valid, Majority, SolePairs
+LEMMA F_ZM0 == J_ZM0 /\ UNCHANGED <<zx, zm0, zsize>> => J_ZM0' BY DEF J_ZM0
+LEMMA F_SoleGen == J_SoleGen /\ UNCHANGED <<sole, nseq, agen>> => J_SoleGen' BY DEF J_SoleGen
+LEMMA F_ZCut == J_ZCut /\ UNCHANGED <<cutK, zx, cutTgt>> => J_ZCut' BY DEF J_ZCut
+LEMMA F_ValidLegal == I_ValidLegal /\ UNCHANGED <<dState, stamp, sole, head, ackedEver, pend>> => I_ValidLegal' BY DEF I_ValidLegal, InSyncR, Valid, Majority, SolePairs, PendVal
+
+LEMMA IndNewSplit == IndNew <=> J_RelHoldS /\ I_FreshS2 /\ I_LegalS2 /\ I_SnapPend /\ J_ZxIdle /\ J_SeqLe /\ J_SoleRel /\ J_GenTop /\ J_ZLive /\ J_RelLe /\ I_WHiC /\ I_HeadLoC /\ I_HeadLoA /\ I_StandbyLegal /\ I_HeadHiC /\ I_SnapLegal /\ I_PendTop /\ I_PendNext /\ J_ZRel /\ I_CutLegal /\ I_InSyncLegal /\ I_ValidLegal /\ J_ZNoValid /\ J_ZM0 /\ J_SoleGen /\ J_ZCut BY DEF IndNew
+LEMMA IndNewSplitP == IndNew' <=> J_RelHoldS' /\ I_FreshS2' /\ I_LegalS2' /\ I_SnapPend' /\ J_ZxIdle' /\ J_SeqLe' /\ J_SoleRel' /\ J_GenTop' /\ J_ZLive' /\ J_RelLe' /\ I_WHiC' /\ I_HeadLoC' /\ I_HeadLoA' /\ I_StandbyLegal' /\ I_HeadHiC' /\ I_SnapLegal' /\ I_PendTop' /\ I_PendNext' /\ J_ZRel' /\ I_CutLegal' /\ I_InSyncLegal' /\ I_ValidLegal' /\ J_ZNoValid' /\ J_ZM0' /\ J_SoleGen' /\ J_ZCut' BY DEF IndNew
+
+LEMMA I_InitNew == Init => IndNew
+<1>. SUFFICES ASSUME Init PROVE IndNew OBVIOUS
+<1>a1. NR \in Nat /\ NR >= 1 /\ Cardinality(R) = NR BY S_NR DEF NR, R
+<1>a2. InSyncR = R /\ members = R BY DEF Init, InSyncR
+<1>a. NR \in Nat /\ NR >= 1 /\ Cardinality(R) = NR /\ InSyncR = R /\ members = R BY <1>a1, <1>a2
+<1>b. \A q \in R : stamp[q] = [seq |-> 1, gen |-> 0, size |-> NR, mem |-> R, rgen |-> 0, rmem |-> R] BY DEF Init
+<1>c. \A q \in R : View(stamp[q]) = stamp[q] BY <1>a, <1>b DEF View, Valid, Majority
+<1>3. J_RelHoldS BY <1>a, Const DEF Init, J_RelHoldS, InSyncR, Zero, CatchingUp
+<1>4. I_FreshS2 BY <1>a, Const DEF Init, I_FreshS2, InSyncR, Zero, CatchingUp
+<1>5. I_LegalS2 BY <1>a, Const DEF Init, I_LegalS2, LegalV2, PendVal, Zero, CatchingUp
+<1>6. I_SnapPend BY <1>a, Const DEF Init, I_SnapPend, Zero, CatchingUp
+<1>7. J_ZxIdle BY Const DEF Init, J_ZxIdle, Zero, CatchingUp
+<1>8. J_SeqLe BY <1>b, Const DEF Init, J_SeqLe, Zero, CatchingUp
+<1>9. J_SoleRel BY <1>a, Const DEF Init, J_SoleRel, Zero, CatchingUp
+<1>10. J_GenTop BY <1>a, <1>b, <1>c, Const DEF Init, J_GenTop, InSyncR, View, Valid, Majority, SolePairs, Zero, CatchingUp
+<1>11. J_ZLive BY Const DEF Init, J_ZLive, Zero, CatchingUp
+<1>12. J_RelLe BY <1>a, Const DEF Init, J_RelLe, Zero, CatchingUp
+<1>13. I_WHiC BY <1>a, Const DEF Init, I_WHiC, AckW, Zero, CatchingUp
+<1>14. I_HeadLoC BY <1>a, Const DEF Init, I_HeadLoC, AckW, CatchingUp, HiOf, Zero, CatchingUp
+<1>15. I_HeadLoA BY <1>a, Const DEF Init, I_HeadLoA, CatchingUp, HiOf, Zero, CatchingUp
+<1>16. I_StandbyLegal BY <1>a, Const DEF Init, I_StandbyLegal, PendVal, Zero, CatchingUp
+<1>17. I_HeadHiC BY <1>a, Const DEF Init, I_HeadHiC, AckW, CatchingUp, HiOf, Zero, CatchingUp
+<1>18. I_SnapLegal BY <1>a, Const DEF Init, I_SnapLegal, PendVal, Zero, CatchingUp
+<1>19. I_PendTop BY <1>a, Const DEF Init, I_PendTop, Zero, CatchingUp
+<1>20. I_PendNext BY <1>a, Const DEF Init, I_PendNext, Zero, CatchingUp
+<1>21. J_ZRel BY <1>a, Const DEF Init, J_ZRel, ZombieReleases, InSyncR, Majority, Zero, CatchingUp
+<1>22. I_CutLegal BY <1>a, Const DEF Init, I_CutLegal, PendVal, Zero, CatchingUp
+<1>23. I_InSyncLegal BY <1>a, Const DEF Init, I_InSyncLegal, InSyncR, PendVal, Zero, CatchingUp
+<1>24. I_ValidLegal BY <1>a, Const DEF Init, I_ValidLegal, InSyncR, Valid, Majority, SolePairs, PendVal, Zero, CatchingUp
+<1>25. J_ZNoValid /\ J_ZM0 /\ J_SoleGen BY Const DEF Init, J_ZNoValid, J_ZM0, J_SoleGen
+<1>z. J_ZCut BY DEF Init, J_ZCut
+<1>. QED BY <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9, <1>10, <1>11, <1>12, <1>13, <1>14, <1>15, <1>16, <1>17, <1>18, <1>19, <1>20, <1>21, <1>22, <1>23, <1>24, <1>25, <1>z, IndNewSplit

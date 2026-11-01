@@ -1,0 +1,198 @@
+FlintCatchupT (per-epoch trust), 2026-10-29 -- the trust rule is safe for every bound in the clean
+setting (TLAPS), and the confirmation batch on the same model      [DRAFT: c15 DONE 2026-10-30 20:36Z; the
+fresh-cache record DONE 2026-10-31 15:49Z (all proved); its 13 controls DONE 18:59Z]
+
+THEOREM Safety == Spec => [](Inv_Catchup /\ Inv_MembersHold)          (FlintCatchupTProof.tla)
+  Inv_Catchup     = TypeOK /\ Inv_AdmitNoLoss /\ Inv_AckedHeld /\ Inv_TrustComplete
+  Inv_MembersHold = every configured member holds every acked write (no write in flight)
+under ASSUME Const (MaxVer, MaxEpoch, MaxFails, Retain \in Nat, Retain >= 1; Reps a finite non-empty set
+of naturals without 0; Blocks any set) and ASSUME Clean, the premises of every HOLD below:
+  Policy = "trust"         the per-epoch rule (design doc rev 6 §5)
+  Capture = TRUE           NodeUnstage reads the raid's base list and marks every leg it lacks stale
+  Crash = FALSE            no consumer crash mid write
+  ZombieMoves = FALSE      no pod move leaving a zombie consumer
+  ZombieWhere = colocated  (unused without a zombie move)
+  RaidFailsAtDrop = TRUE   the raid leaves a base at its first dropped write (the trust rule's first premise)
+  StageOracle = FALSE      the code's admission set (attached in_sync legs)
+  WriteQuorum = AssemblyQuorum = 1   the code: raid1 acks on one landing, stages with one leg
+  BaseInclusive = TRUE     the copy includes its base epoch
+  CutStampsAll = FALSE     the MARK-RACE FIX (3cc7ccbe): the cut's record write stamps last_epoch only on
+                           legs still in_sync (TRUE = the code before it: FlintCatchupTE3Mark* violate)
+  PinRetention = TRUE
+  free: Backoff, CoverageWalk, MarkGate, ReadFails, LocalLegGuard, FenceMark, CatchupWaitsCut,
+        AssemblyMark, StageDefer, AckAfterMark (the proof holds for every value)
+Any number of blocks, writes, epochs, failures, retained epochs and replicas.
+
+Design rules the proof found, now in the model (rev 15; each removed in a control below):
+  - a session's base is never above its copy target, and the session fails when the target falls below its
+    base (the legs that trusted the newest epoch went stale).  The proof needs the COPY-time guard (BulkCopy:
+    sb <= Tgt); the select-time filter (BaseCandidates: e <= Tgt) is a progress rule: control M-BaseBelowTgt
+    proves without it;
+  - a demoted standby re-reverts (Demote resets reverted = -1) instead of resuming from its base;
+  - rev 14: a cut planned before a revert cannot snapshot the re-created head (cutGone; the plan
+    addresses each head by uuid, revert_head / revert_head_to_empty make a new one).
+
+Inductive invariant: IndInv (FlintCatchupTInd.tla) = TypeOK, ranges, the snapshot lineage (ChainShape:
+parents older and present, anc the parent walk) and reads (ChainReads: an unallocated block reads through),
+one write in flight per block, members hold acked writes, legal values, versions bounded, bounded cut skew
+(I_WHi: a snapshot holds nothing acked after a newer cut), a leg catching up holds everything older than
+its head's epoch (I_HeadLo) and nothing acked after any newer cut (I_HeadHi), the reverted head IS its
+base (RevOK), the session's shape (SessionOK), trusted epochs complete, bases fresh (I_Fresh).
+Model-checked part by part before the proof (tla-mc 0.1.2, box out/ind.txt, 600 s caps, no violation):
+  E3 9,524,422 d24 | D 14,188,008 d24 | V2 16,683,086 d21 | B2 12,731,674 d21 | E3Flip 13,273,126 d25 |
+  DFlip 15,537,620 d26   (Flip = CoverageWalk F, ReadFails T, CatchupWaitsCut T, AssemblyMark F, AckAfterMark T)
+
+Inputs (md5):
+  8ac3cf005cc1a236fbdb1c464157e260  FlintCatchupT.tla       (= every model-checking run below)
+  d5039bf8dba3dfab1a4f51c74d1bb3b9  FlintCatchupTInd.tla
+  cf71b06af96e0cf7f9bd7d679181e471  FlintCatchupTProof.tla
+Box 10.0.0.249, /mnt/nvme/catchup-t-proof-2026-10-29; tlapm bfa9468 (/mnt/nvme/tlaps/unpack).
+
+PROOF: "All 7673 obligations proved" (5696 trivial, 1976 proved), --stretch 3 --threads 4 on the cache of
+passes 5-6, 1098 s (pass 7, 19:46Z).
+RECORD (fresh cache): "All 7673 obligations proved", rc 0.  --toolbox 0 0 --cleanfp --stretch 4 --threads 4
+under nice -n 10, the box otherwise idle (2026-10-31 15:24:14Z, recT4.sh); 1539 s wall, 25.4 GB peak RSS
+(25,374,980 KB, tlapm).  Per source location: 1977 proved, 5695 trivial (tlapm's count of 7673 is per
+obligation).  The first attempt (10-29 20:16Z) was stopped at 20.7 GB RSS beside two model-checking batches
+on the 30 GB box.  (recT.sh, which that attempt ran, summarized the wrong file: tlapm's obligation stream is
+on stderr; recT2.sh and later read it.)
+CONTROLS (recT4.sh, one at a time after the record, each on a copy seeded from the record's cache; every one
+rc 0, 799-1035 s, 0.8-1.2 GB peak RSS; lines are FlintCatchupTProof.tla cf71b06a's unless "model"):
+  K-<premise> flips one ASSUME Clean line:
+  CutStampsAll = TRUE      1/7673 failed: 2717 I_CutRecord <1>p (the cut's record stamps mark only on
+                           planned legs still in_sync: the mark-race fix 3cc7ccbe)
+  RaidFailsAtDrop = FALSE  1/7673 failed: 2069 I_Drop <1>p (a dropped write takes its leg out of the
+                           members: the trust rule's first premise)
+  Capture = FALSE          2/7673 failed: 692 T_Unstage <1>1 and 3700 I_Unstage <1>p (NodeUnstage marks
+                           every in_sync leg the raid lacks stale; the type layer and the invariant step
+                           state the same capture)
+  BaseInclusive = FALSE    3/7673 failed: 791 StageAdmitFacts <1>1 (the final delta includes its base),
+                           3333 I_BulkCopy <1>lo and 3562 I_Chase <2>lo (the copy's low end is the base,
+                           not the epoch after it); the same three sites as the 10-28 FlintCatchup proof
+  PinRetention = FALSE     4/7673 failed: 1708 I_Retire <1>p (retirement takes only an unpinned oldest
+                           epoch), 1830 I_SelectBase <1>s (the selected base is pinned), 3307 I_BulkCopy
+                           <1>s and 3545 I_Chase <2>s (a copy moves the pin to its target).  Unlike the
+                           10-28 proof (PinRetention in no step), the trust proof needs it: the base a
+                           session trusts must not be retired under it
+  Crash = TRUE             1/7673 failed: 4337 Disabled QED (the clean setting disables CrashUnstage)
+  ZombieMoves = TRUE       1/7673 failed: 4337 Disabled QED (it disables ZombieMove/Mark/Hygiene)
+                           These two premises only switch an action OFF: the proof does not cover a
+                           consumer crash or a zombie consumer, and these controls say nothing about
+                           whether the trust rule survives one (the model-checking arms do, bounded)
+  StageOracle = TRUE       3/7673 failed: 1530 I_MarkStale <2>1 (the code's monitor marks stale only on a
+                           live raid), 3801 I_Stage <1>t (the stage assembles the reachable in_sync legs but
+                           the zombie's), 3877 AdmHold <1>si (admission's source is in_sync): the proof is
+                           of the code's sets, not rev 7's oracle (in_sync and path ok)
+  M-<rule> removes one rule from the model (FlintCatchupT.tla 8ac3cf00):
+  SourceTrust              1/7673 failed: 1369 CoverSetFacts QED (a copy source covers its target only if
+                           it trusts the target epoch: model 300, t \in tr[s]; the lemma every copy cites)
+  CutGone                  1/7673 failed: 2487 I_CutOne <1>p (a cut cannot snapshot a leg whose head was
+                           re-created after the plan: model 465, r \notin cutGone)
+  BaseBelowTgt             NOT KILLED: "All 7673 obligations proved" with model 563's "/\ e <= Tgt" removed
+                           from BaseCandidates (edit checked by diff; proof file unchanged).  I_SelectBase
+                           reads only that the base is recorded, present and trusted (1824); the bound
+                           the proof uses is the copy's (next line).  Without the select-time filter a
+                           base above the target is selected and its session cannot bulk-copy: a progress
+                           question, not safety
+  BulkBelowTgt             1/7673 failed: 3301 I_BulkCopy <1>g (the bulk copy runs only while its base is at
+                           or below the target: model 643, sb[r] <= Tgt)
+  DemoteReverts            2/7673 failed: 682 T_Chase <2>2 and 3516 I_Chase <2>c (a standby demoted by
+                           an empty cover set goes stale with reverted = -1 and re-reverts: model 675)
+  Each failing control fails only the steps that use its premise or rule (RECTDONE 2026-10-31 18:59:25Z).
+  A failed step shows the proof USES the premise there, not that the premise is necessary: necessity needs a
+  model-checking trace (CutStampsAll has one: c15 E3MarkTrust VIOL Inv_Catchup d28).  The one control
+  that proves without its rule (BaseBelowTgt) does show that rule is not needed for safety.
+  (tlapm --toolbox exits 0 on failed obligations; each line above is read from tlapm's summary line, not
+  the exit code.)
+
+CONFIRMATION BATCH c15 (one model, FlintCatchupT.tla md5 8ac3cf00; tla-mc compiled, 3 workers; tla-mc 0.1.2 until
+2026-10-30 16:54Z, then 0.2.1 at the user's word (same verdicts, ~2x faster; those lines end ", 0.2.1"); box out/c15.txt,
+C15DONE 2026-10-30 20:36:21Z).  67 arms: 50 PASS, 16 INFO, 1 FAIL.  PASS = the arm got what it wants (HOLD: the
+full space, no violation; Inv: the named invariant violated, a control; LASSO: a temporal counterexample); INFO = record
+only; FAIL = a want-HOLD arm with no verdict.  [module] = FlintCatchupT<module>.tla.  Generated from the log, not by hand.
+  PASS CaptureTrustCode [T] want HOLD: HOLD, full space 28,853,941 / d38; 416 s
+  PASS CaptureTieCode [T] want HOLD: HOLD, full space 7,139,766 / d41; 155 s
+  INFO CaptureShippedCode [T] want ANY: HOLD, full space 4,870,071 / d38; 114 s
+  PASS BoundCCaptureShippedCode [T] want Inv: VIOL Inv_Catchup d22 (1,953,469 distinct); 56 s
+  INFO BoundCCaptureTrustCode [T] want ANY: VIOL Inv d28 (162,609,754 distinct); 2787 s
+  PASS ReachCaptureTrustCode [Reach] want Inv: VIOL Inv_NoAdmission d13 (152,013 distinct); 25 s
+  PASS LostTrustANL [T] want HOLD: HOLD, full space 46,122,895 / d39; 719 s
+  PASS LostTieANL [T] want HOLD: HOLD, full space 7,363,457 / d40; 127 s
+  PASS LostShippedANL [T] want HOLD: HOLD, full space 5,099,441 / d38; 82 s
+  PASS OracleTrustNoDropANL [T] want HOLD: HOLD, full space 41,728,773 / d38; 702 s
+  PASS OracleTrustLagANL [T] want Inv: VIOL Inv_AdmitNoLoss d15 (395,246 distinct); 47 s
+  INFO CrashTrustANL11 [T] want ANY: HOLD, full space 110,277,570 / d43; 1870 s
+  PASS CrashTieANL11 [T] want HOLD: HOLD, full space 16,480,908 / d41; 279 s
+  PASS CrashShippedANL11 [T] want HOLD: HOLD, full space 11,629,473 / d38; 175 s
+  PASS ZombieTrustGuardANLAsmF1 [T] want HOLD: HOLD, full space 26,036,352 / d39; 380 s
+  PASS ZombieTieGuardANLAsm [T] want HOLD: HOLD, full space 18,538,320 / d44; 271 s
+  PASS ZombieTrustGuardANLCode [T] want Inv: VIOL Inv_AdmitNoLoss d17 (4,015,281 distinct); 54 s
+  INFO ZombieTrustFenceANL [T] want ANY: HOLD, full space 122,001,444 / d44; 1727 s
+  PASS ReachZZombieTrustAsm [ReachZ] want Inv: VIOL Inv_NoZombieLegAdmitted d11 (122,931 distinct); 20 s
+  PASS ZombieTrustDefer [T] want Inv: VIOL Inv d4 (488 distinct); 17 s
+  PASS ZombieTrustDeferMA [T] want Inv: VIOL Inv_MembersAgree d4 (495 distinct); 17 s
+  PASS ZombieTrustDeferNNL [T] want Inv: VIOL Inv_NoNewLoss d9 (19,153 distinct); 20 s
+  PASS ZombieTrustDeferANL [T] want Inv: VIOL Inv_AdmitNoLoss d17 (1,511,955 distinct); 35 s
+  PASS ZombieTrustNoDeferMA [T] want Inv: VIOL Inv_MembersAgree d7 (6,552 distinct); 18 s
+  PASS CrashTrustMA11 [T] want Inv: VIOL Inv_MembersAgree d4 (257 distinct); 18 s
+  PASS BZ11NNLND [T] want HOLD: HOLD, full space 80,314,239 / d41; 1092 s
+  PASS BZ11MHND [T] want HOLD: HOLD, full space 80,314,239 / d41; 1062 s
+  PASS BZ11RHND [T] want HOLD: HOLD, full space 80,314,239 / d41; 1094 s
+  PASS BC11NNL [T] want HOLD: HOLD, full space 95,144,541 / d43; 1349 s
+  PASS BC11MH [T] want HOLD: HOLD, full space 95,144,541 / d43; 1428 s
+  PASS BC11RH [T] want HOLD: HOLD, full space 95,144,541 / d43; 1979 s
+  PASS BL11NNL [T] want HOLD: HOLD, full space 34,985,188 / d39; 714 s
+  PASS BL11MH [T] want HOLD: HOLD, full space 34,985,188 / d39; 565 s
+  PASS BL11RH [T] want HOLD: HOLD, full space 34,985,188 / d39; 643 s
+  PASS CL11NNL [T] want HOLD: HOLD, full space 46,122,895 / d39; 1091 s
+  PASS CL11MH [T] want Inv: VIOL Inv_MembersHold d8 (8,808 distinct); 27 s
+  PASS QC11NNL [T] want HOLD: HOLD, full space 110,277,570 / d43; 2217 s
+  PASS QC11MH [T] want Inv: VIOL Inv_MembersHold d8 (9,703 distinct); 24 s
+  PASS QZ11NNLND [T] want Inv: VIOL Inv_NoNewLoss d8 (10,172 distinct); 21 s
+  PASS QZ11MHND [T] want Inv: VIOL Inv_MembersHold d7 (4,627 distinct); 24 s
+  PASS QZ22NNLND [T] want Inv: VIOL Inv_NoNewLoss d18 (1,275,051 distinct); 43 s
+  PASS QZ22RHND [T] want Inv: VIOL Inv_RaidHolds d18 (1,292,620 distinct); 52 s
+  PASS QZ22MHND [T] want Inv: VIOL Inv_MembersHold d7 (5,279 distinct); 21 s
+  PASS ReachQSoloAck11 [ReachQ] want Inv: VIOL Inv_NoSoloAck d7 (2,415 distinct); 21 s
+  PASS ReachQSoloStage11 [ReachQ] want Inv: VIOL Inv_NoSoloStage d6 (1,695 distinct); 20 s
+  PASS ReachQSoloAck22 [ReachQ] want HOLD: HOLD, full space 11,012,739 / d38; 120 s
+  PASS ReachQSoloStage22 [ReachQ] want HOLD: HOLD, full space 11,012,739 / d38; 114 s
+  PASS E3MarkShipped [T] want Inv: VIOL Inv_Catchup d23 (880,407 distinct); 32 s
+  PASS E3MarkTie [T] want Inv: VIOL Inv_Catchup d23 (773,613 distinct); 42 s
+  INFO E3MarkTrust [T] want ANY: VIOL Inv_Catchup d28 (70,721,422 distinct); 1364 s
+  INFO E3MarkFixShipped [T] want ANY: HOLD, full space 36,264,885 / d43; 792 s
+  INFO E3MarkFixTie [T] want ANY: HOLD, full space 43,181,628 / d43; 969 s
+  INFO E3MarkFixTrust [T] want ANY: no verdict at the cap: no violation to d28 (64,096,270 distinct), bounded; 1802 s
+  PASS LiveAckB [Live] want HOLD: HOLD, full space 23,212,330 / d39; 2103 s
+  PASS LiveAckBQ12 [Live] want LASSO: LASSO (temporal property violated) d8; 22 s
+  PASS LiveTrustLiveCode [Live] want HOLD: HOLD, full space 28,853,941 / d38; 657 s, 0.2.1
+  PASS LiveReadFailsTrustProgressCode [Live] want HOLD: HOLD, full space 36,199,966 / d40; 832 s, 0.2.1
+  INFO LiveStaleCaptureCode [Live] want ANY: HOLD, full space 28,847,629 / d38; 611 s, 0.2.1
+  INFO LiveStaleNoCaptureCode [Live] want ANY: LASSO (temporal property violated) d11; 23 s, 0.2.1
+  PASS ReadFailsTrustCode [T] want HOLD: HOLD, full space 36,199,966 / d40; 229 s, 0.2.1
+  FAIL AncAncCheck [Anc] want HOLD: no verdict at the cap: no violation to d21 (93,978,850 distinct), bounded; 3606 s, 0.2.1
+  INFO IndD [Ind] want ANY: HOLD, full space 34,052,590 / d37; 268 s, 0.2.1
+  INFO IndV2 [Ind] want ANY: no verdict at the cap: no violation to d24 (77,022,918 distinct), bounded; 1803 s, 0.2.1
+  INFO IndE3 [Ind] want ANY: no verdict at the cap: no violation to d28 (64,096,270 distinct), bounded; 1802 s, 0.2.1
+  INFO IndB2 [Ind] want ANY: HOLD, full space 82,183,361 / d35; 1440 s, 0.2.1
+  INFO IndE3Flip [Ind] want ANY: no verdict at the cap: no violation to d29 (77,409,937 distinct), bounded; 1804 s, 0.2.1
+  INFO IndDFlip [Ind] want ANY: HOLD, full space 26,385,946 / d37; 215 s, 0.2.1
+  Notes:
+  - THE CUT SETTING: 58 of the 67 arms run CutStampsAll = TRUE, the code BEFORE the mark-race fix (3cc7ccbe; the batch
+    began 2026-10-29 18:31Z, code-faithful as of then).  53 of them are at two epochs (MaxEpoch 2), where no arm finds
+    the race; both race traces need a third epoch (E3MarkTrust, BoundCCaptureTrustCode, d28).  9 arms run the fix
+    (CutStampsAll = FALSE): E3MarkFixShipped, E3MarkFixTie, E3MarkFixTrust and the six Ind* arms.  The fixed setting
+    at every bound is the theorem above (ASSUME Clean: CutStampsAll = FALSE).
+  - FAIL AncAncCheck is NO VERDICT at its 3600 s cap, not a violation: no violation to d21 (93,978,850 distinct).
+    Cite it as bounded.  (The ghost lineage equals the parent walk, under the widest behaviour.)
+  - INFO BoundCCaptureTrustCode VIOL Inv d28 runs CutStampsAll = TRUE, the code BEFORE the mark-race fix (3cc7ccbe);
+    its cfg's "Must hold" predates the race.  The trace is the race: leg 1 goes standby (step 22) between cut 2's
+    snapshots (steps 15-19) and its record (step 23); the record stamps last_epoch 2 on it anyway (mark <<2,2,2>>), and
+    at step 29 it is caught up onto epoch 3 from parent 1, missing epoch 2.  Same class as E3MarkTrust (d28).  Under
+    the fix (CutStampsAll = FALSE, a premise of ASSUME Clean) safety is the theorem above for every bound; the fixed
+    arms: E3MarkFixShipped and E3MarkFixTie HOLD over the full space, E3MarkFixTrust bounded (no violation to d28).
+  - IndE3 and E3MarkFixTrust have identical constants and the same Spec, so the same state graph: the same counts at
+    d28 are expected, not a copied line.  IndE3 checks IndInv's parts and Goal over it.
+  - LiveTrustLiveCode was cut on 0.1.2 at the switch and rerun whole on 0.2.1.
+
+Logs and outputs stay on the box; they are generated output.

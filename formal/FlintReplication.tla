@@ -676,6 +676,117 @@ CONSTANTS
                   \*               reclaim, OOM, eviction.  No accounting.
   MinReadySecsArm,\* TRUE = pods carry the minReadySeconds settle window.
   MaxKubeEvents,  \* budget on external readiness faults.
+  \* ---- the GONE-NODE tranche (2026-10-27, dash1 r3-idle) ---------------
+  \* A three-replica volume NOBODY stages kept one leg on a Node object that
+  \* had been deleted, and the record read "3/3 in_sync" forever.  This module
+  \* could not show it: Init is a served volume and Assemble is fair, so a
+  \* volume without a consumer did not exist here — and no liveness property
+  \* asked that a leg on a gone node is ever re-placed.  Two silent gates in
+  \* replica_replace.rs: (1) candidates were stale (and, since F57, standby)
+  \* legs only, while with no raid nothing (MonitorMarkStale) ever demotes an
+  \* in_sync leg; (2) the swap waited for an epoch the scheduler never cuts
+  \* on a detached volume.  Every knob below is FALSE in the legacy cfgs,
+  \* where hasEpoch is pinned TRUE: their state spaces are unchanged.
+  DetachedVolume, \* TRUE = no consumer for the whole run: Init has no raid,
+                  \* nothing stages it (Assemble disabled), so no write and no
+                  \* scheduler cut ever happens.
+  EpochHistory,   \* TRUE = model whether the record holds ANY epoch
+                  \* (hasEpoch); a never-staged volume starts with none.
+  ReplaceWaitsForEpoch, \* the PRE-FIX replacer: no swap while the record
+                  \* holds no epoch ("waiting a tick for the scheduler").
+  ReplaceAnyState,\* THE FIX, part 1: a leg on a gone node is a candidate in
+                  \* ANY sync state, provided ANOTHER leg is in_sync in the
+                  \* record (has_rebuild_source).
+  EpochOnDemand,  \* THE FIX, part 2: the catch-up cuts the volume's first
+                  \* epoch (EpochCutForRebuild) when a stale leg needs a full
+                  \* build and the record holds none.
+  ReplaceSparesWriters, \* the belt part 1 needs: never re-place an IN_SYNC
+                  \* leg that is a member of the recorded writer set (the
+                  \* legs of the last serving assembly; writer_set None
+                  \* holds no one) — is_replace_candidate's
+                  \* NOT (in_sync AND uuid in writer_set).  ReplaceAnyState
+                  \* ALONE loses an acked write silently: a member faulted
+                  \* out of the raid stays in_sync in the record until the
+                  \* monitor marks it, so "another leg is in_sync" does not
+                  \* mean "another leg holds the tail"; swapping the leg that
+                  \* does, and pruning it from the writer set, lets the next
+                  \* assembly pass the F36c gate without it
+                  \* (FlintReplicationGoneLoss.cfg).  Spared members are the
+                  \* F36c gate's to judge at the next assembly.
+  DetachedServed, \* with DetachedVolume: the volume WAS assembled (writer set
+                  \* stamped, epochs cut) and is detached now.  The belt then
+                  \* spares its dead in_sync leg until something stages the
+                  \* volume again — the documented residual, which
+                  \* FlintReplicationGoneDetachedServed.cfg must show parks.
+  \* ---- the GATE-POLICY tranche (2026-10-27) ------------------------------
+  \* The question (a 3-leg rolling upgrade): legs 1 and 2 go down in turn,
+  \* leg 1 returns and is catching up, and leg 3 — the last in-sync writer —
+  \* goes down before leg 1 is admitted.  Is the volume usable?  Shipped:
+  \* the F36c gate Defers, but only for FLINT_F36C_DEFER_SECS (180 s); then
+  \* GateDeadline serves the stale leg with a surfaced risk even though leg
+  \* 3 is merely restarting — a HOLLOW risk (falseRisk), and leg 3's acked
+  \* tail is later reverted away when it is caught up from leg 1.  The
+  \* proposed policy is GateDeadline = FALSE: serve past a missing writer
+  \* only on node-gone evidence (deemedDead), else keep Deferring; the
+  \* operator's LastResortServe is the escape.  Its price needs one more
+  \* world: a writer that never resolves (a Ready node whose tgt is
+  \* wedged — F33: Ready does not prove a live tgt) is never node-gone
+  \* evidence, so without the deadline the volume waits for the operator.
+  BlackholeResolves, \* TRUE (every legacy cfg) = WF(LegPerish): a blackhole
+                  \* eventually perishes or recovers.  FALSE = it may persist
+                  \* forever (EventuallyAvailable's cost worlds).
+  \* ---- the STAGE-ENFORCE tranche (2026-10-27, the dash1 restore loss) -----
+  \* NodeStage excludes record-Stale legs ONLY when the record holds epochs
+  \* (driver.rs create_raid_from_replicas: enforce = !epochs.is_empty()); with
+  \* none it attaches EVERY reachable leg and record_assembly_sync_state stamps
+  \* them all in_sync and into the writer set ("legacy: attach everything").
+  \* d788db50's restore seeded empty STALE placeholder legs with no epochs;
+  \* the first stage put them in the raid, the node read no filesystem and
+  \* mkfs'd the restored clone away.  The replacer's removed "no epochs, no
+  \* swap" guard had also kept an empty replacement out of every epoch-less
+  \* record.  None of this module's worlds staged an epoch-less volume, so
+  \* none could see it.
+  StageEnforceNeedsEpoch, \* TRUE = the shipped arm above (EpochHistory worlds)
+  RestoreInit,    \* TRUE = Init is a fresh restore: the legs outside
+                  \* SeededStale hold the restored content (acked), the
+                  \* placeholders are empty and stale, no epochs, never staged
+  SeededStale,    \* SUBSET Legs: the restore's placeholder legs
+  ExcludeSeededStale, \* fix (b): a seeded-stale leg is excluded at stage,
+                  \* epochs or not (stale_leg_excluded)
+  FreshVolume,    \* TRUE = served at Init but no epoch cut yet — the window
+                  \* before the scheduler's first cut (30 min)
+  ReplaceCutsFirst, \* fix (a): with no epochs, cut the first epoch on the
+                  \* in_sync legs other than the candidate BEFORE swapping
+                  \* (cut_first_epoch); an aborted cut = no swap
+  \* ---- the EMPTY-HEAD tranche (2026-10-27, flint-91's second path) --------
+  \* After the F36c gate, NodeStage's forced-stale fallback (StaleFloor)
+  \* attaches record-Stale legs until there are 2 bases.  The content
+  \* invariants exempt a forced-stale member as "knowingly behind" — fair for
+  \* a leg that missed a tail, but a restore placeholder, a U11 replacement
+  \* or a leg mid full build (reverted_to "empty") holds NO lineage: raid1
+  \* reads hit its zeros and the node formats over the good leg.
+  ModelVirgin,    \* TRUE = track `virgin`: legs whose head was recreated
+                  \* empty (seeded placeholder, Replace, Scrub) and not yet
+                  \* admitted in_sync (FALSE in every legacy cfg: no split)
+  ForcedStaleSkipsVirgin, \* the fix: the forced-stale fallback (and the
+                  \* operator's last resort) never take a virgin head
+  \* ---- consumer-node placement (2026-10-27; flint-91, live on dash1) ----
+  \* replica_replace.rs ranks every Ready node outside the volume's leg
+  \* nodes by free space, the CONSUMER's node included whenever it owns no
+  \* leg (the RWX shape).  A replacement placed there is never built while
+  \* the composition is online on it: catchup_stale and chase_standby both
+  \* attach the head through ensure_dst_attached, whose clear_head_sb
+  \* refuses on ANY online raid of the volume's name on the replica's node
+  \* (catchup.rs 1415-1427) — a guard written for a zombie or local
+  \* assembly holding the replica, which here holds nothing of it.
+  ConsumerNodeArm, \* TRUE = Replace picks a target: a spare node, or the
+                  \* consumer's node.  FALSE (every legacy cfg) = a fresh
+                  \* node, always, as before
+  ExcludeConsumerNode, \* the fix: the ranking skips the consumer's node (no
+                  \* target left = ReplicaReplacementBlocked)
+  SpareInit,      \* a Ready node owning no leg and no consumer, with room
+  NodeJoins,      \* TRUE = capacity is eventually added (WF NodeJoin): the
+                  \* operator answering ReplicaReplacementBlocked
   GraceExceedsRecovery
                   \* THE TRANCHE'S DELIVERABLE.  Without it ReadyOnDeadline
                   \* is enabled in the very state PodStart produces, so the
@@ -877,6 +988,13 @@ VARIABLES
                  \* per-volume and survives NodeStage retries) — cleared
                  \* by the next assembly, exactly like the code's two
                  \* clear sites (missing-empty and ServeWithRisk)
+  virgin,        \* SUBSET Legs — empty/half-built heads (ModelVirgin; else {})
+  onConsumer,    \* SUBSET Legs — legs placed on the consumer's node
+                 \* (ConsumerNodeArm; else {})
+  spare,         \* BOOLEAN — a spare target node exists (pinned TRUE unless
+                 \* ConsumerNodeArm)
+  hasEpoch,      \* BOOLEAN — the record holds at least one epoch (gone-node
+                 \* tranche; pinned TRUE unless EpochHistory)
   crashes,       \* failure budget spent
   \* ---- planned maintenance (the csi-node roll) ---------------------------
   rolling,       \* SUBSET Legs: node whose tgt is down for a PLANNED restart
@@ -1022,7 +1140,8 @@ VARIABLES
 \* roll-lease lasso runs.)
 vars == <<serving, zombie, legData, legUp, raidGen, legGen, acked, nextWrite,
           lineage, riskSurfaced, state, writerSet, epochCut, claim,
-          deferExpired, deemedDead, falseRisk, crashes,
+          deferExpired, hasEpoch, virgin, onConsumer, spare, deemedDead,
+          falseRisk, crashes,
           rolling, rolled, suppress, processed, maintSkipped, rollerDead,
           legSize, raidSize, pvSize, wantNew,
           raidHosts, staged, stagedAt, raidSeen, raidLostOnce, localLegs,
@@ -1044,7 +1163,10 @@ expandVars == <<legSize, raidSize, pvSize, wantNew>>
 
 \* The audit tranche's one new piece of persistent state: the per-volume
 \* f36c-defer deadline flag (grouped for the UNCHANGED lists).
-gateVars == <<deferExpired>>
+gateVars == <<deferExpired, hasEpoch, virgin, onConsumer, spare>>
+
+\* The placement pair, for the actions that list gateVars member by member.
+placeVars == <<onConsumer, spare>>
 
 \* The cutover tranche's state (grouped like maintVars/expandVars so every
 \* untouched action carries exactly one extra UNCHANGED line).
@@ -1179,6 +1301,10 @@ TypeOK ==
   /\ epochCut \subseteq 1..MaxWrites
   /\ claim \in {"none", "catchup", "admission"}
   /\ deferExpired \in BOOLEAN
+  /\ hasEpoch \in BOOLEAN
+  /\ virgin \subseteq Legs
+  /\ onConsumer \subseteq Legs
+  /\ spare \in BOOLEAN
   /\ crashes \in 0..MaxCrashes
   /\ rolling \subseteq Legs
   /\ rolled \subseteq Legs
@@ -1282,7 +1408,7 @@ WarmWaiting ==
     \* wedges on a leg Admit can never accept — a model artifact the
     \* ExpandWedge run surfaced (the code has no such hold-forever).
     /\ (SizeGuard => (SizeHeal \/ raidSize = "old" \/ legSize[l] = "new"))
-    /\ \E src \in serving :
+    /\ \E src \in {m \in serving : state[m] = "insync"} :   \* Admit's source
          /\ Responsive(src)
          /\ (RejoinGuard => legData[l] \subseteq legData[src])
          /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[l] = "new"))
@@ -1301,13 +1427,18 @@ WarmWaitingFor(n) ==
   /\ epochCut \subseteq legData[n]
   /\ serving # {}
   /\ (SizeGuard => (SizeHeal \/ raidSize = "old" \/ legSize[n] = "new"))
-  /\ \E src \in serving :
+  /\ \E src \in {m \in serving : state[m] = "insync"} :   \* Admit's source
        /\ Responsive(src)
        /\ (RejoinGuard => legData[n] \subseteq legData[src])
        /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[n] = "new"))
 
+\* A volume with no composition at Init: the detached world, or a restore
+\* that nothing has staged yet.
+Unstaged == DetachedVolume \/ RestoreInit
+
 Init ==
-  /\ serving = Legs
+  \* DetachedVolume: the volume exists, nobody stages it — no raid anywhere.
+  /\ serving = IF Unstaged THEN {} ELSE Legs
   \* ---- the kube-DS axis at rest.  With KubeDsArm = FALSE no action writes
   \* any of these, so they are constant across every state of all 71 legacy
   \* runs and each pre-existing state maps to exactly one new state — which
@@ -1334,21 +1465,30 @@ Init ==
   /\ relatched = FALSE
   /\ budgetBroken = FALSE
   /\ zombie = {}
-  /\ legData = [l \in Legs |-> {}]
+  \* A restore: the clone's leg(s) hold the restored content (write 1, which
+  \* must survive like any acked write); the placeholders are empty.
+  /\ legData = [l \in Legs |-> IF RestoreInit /\ l \notin SeededStale THEN {1} ELSE {}]
   /\ legUp = [l \in Legs |-> "up"]
   /\ deemedDead = {}
   /\ falseRisk = FALSE
   /\ raidGen = 1
   /\ legGen = [l \in Legs |-> 1]
-  /\ acked = {}
-  /\ nextWrite = 1
-  /\ lineage = {}
+  /\ acked = IF RestoreInit THEN {1} ELSE {}
+  /\ nextWrite = IF RestoreInit THEN 2 ELSE 1
+  /\ lineage = IF RestoreInit THEN {1} ELSE {}
   /\ riskSurfaced = FALSE
-  /\ state = [l \in Legs |-> "insync"]
-  /\ writerSet = Legs
+  /\ state = [l \in Legs |-> IF RestoreInit /\ l \in SeededStale THEN "stale" ELSE "insync"]
+  \* A never-staged volume has no writer set (writer_set: None, the F36c gate
+  \* inert) and no leg has served in it.
+  /\ writerSet = IF (DetachedVolume /\ ~DetachedServed) \/ RestoreInit THEN {} ELSE Legs
   /\ epochCut = {}
   /\ claim = "none"
   /\ deferExpired = FALSE
+  \* A served volume has long had scheduler epochs; a never-staged one has none.
+  /\ hasEpoch = ~(EpochHistory /\ ((DetachedVolume /\ ~DetachedServed) \/ RestoreInit \/ FreshVolume))
+  /\ virgin = IF ModelVirgin /\ RestoreInit THEN SeededStale ELSE {}
+  /\ onConsumer = {}
+  /\ spare = (SpareInit \/ ~ConsumerNodeArm)
   /\ crashes = 0
   /\ rolling = {}
   /\ rolled = {}
@@ -1359,16 +1499,16 @@ Init ==
   \* (the ordinary RWX shape — the NFS server's own node).  staged is what
   \* kubelet believes; raidSeen is TRUE because the agent has been running
   \* and has observed its own raid.
-  /\ raidHosts = {RaidHostInit}
+  /\ raidHosts = IF Unstaged THEN {} ELSE {RaidHostInit}
   \* The attacher agrees with reality at Init; only VaCanLag can separate them.
-  /\ vaNode = RaidHostInit
-  /\ stagedAt = RaidHostInit
+  /\ vaNode = IF Unstaged THEN "none" ELSE RaidHostInit
+  /\ stagedAt = IF Unstaged THEN "none" ELSE RaidHostInit
   /\ a2Created = {}      \* no composition here was built by A2
   /\ adoptedA2 = FALSE
   /\ validateRemoved = {}
   /\ flapped = FALSE
-  /\ staged = TRUE
-  /\ raidSeen = TRUE
+  /\ staged = ~Unstaged
+  /\ raidSeen = ~Unstaged
   /\ raidLostOnce = FALSE
   /\ localLegs = LocalLegs
   /\ relocating = FALSE
@@ -1385,7 +1525,7 @@ Init ==
   /\ bounceRisk = FALSE
   /\ consecutiveBounces = 0
   /\ dpFlag = "none"
-  /\ everServed = Legs                   \* Init serves every leg
+  /\ everServed = IF (DetachedVolume /\ ~DetachedServed) \/ RestoreInit THEN {} ELSE Legs  \* Init serves every leg
   /\ podUp = TRUE
   /\ bounceDoomed = FALSE
 
@@ -1635,7 +1775,98 @@ EpochCut ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED raidVars
-  /\ UNCHANGED gateVars
+  /\ UNCHANGED deferExpired
+  /\ UNCHANGED virgin
+  /\ UNCHANGED placeVars
+  /\ hasEpoch' = TRUE
+  /\ UNCHANGED bounceVars
+
+\* Gone-node fix, part 2 (catchup.rs ensure_epoch_for_rebuild): a stale
+\* leg's full build needs a target epoch, and the scheduler cuts none on a
+\* volume nobody consumes.  Cut the FIRST epoch on demand, on EVERY
+\* record-in_sync replica, all-or-abort (execute_cut): one unreachable
+\* in_sync leg aborts it and the stale leg waits.  No raid is involved —
+\* bdev_lvol_snapshot runs on the legs themselves, so the cut is the content
+\* the in_sync legs hold in common.  A drained (suppressed) leg does not
+\* count as needing a build (maint_drain_live).
+EpochCutForRebuild ==
+  /\ EpochOnDemand
+  /\ ~hasEpoch
+  /\ \E l \in Legs : state[l] = "stale" /\ l \notin suppress
+  /\ LET InSync == {m \in Legs : state[m] = "insync"} IN
+       /\ InSync # {}
+       /\ \A m \in InSync : Responsive(m)
+       /\ epochCut' = { b \in 1..MaxWrites : \A m \in InSync : b \in legData[m] }
+  /\ hasEpoch' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED deferExpired
+  /\ UNCHANGED virgin
+  /\ UNCHANGED placeVars
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
+  /\ UNCHANGED bounceVars
+
+\* Fix (a) (replica_replace.rs, cut_first_epoch): a replacement candidate on
+\* an epoch-less record first gets the volume's first epoch cut on the
+\* in_sync legs OTHER than itself (all-or-abort), so the swapped-in empty leg
+\* never exists in a record without epochs — the next stage enforces its
+\* exclusion.
+EpochCutForReplace(l) ==
+  /\ ReplaceCutsFirst /\ EpochHistory /\ ~hasEpoch
+  /\ l \in deemedDead /\ l \notin rolling /\ l \notin serving
+  /\ IF ReplaceAnyState THEN TRUE ELSE state[l] = "stale"
+  /\ ((ReplaceAnyState /\ ReplaceSparesWriters) => ~(state[l] = "insync" /\ l \in writerSet))
+  /\ LET InSync == {m \in Legs \ {l} : state[m] = "insync"} IN
+       /\ InSync # {}
+       /\ \A m \in InSync : Responsive(m)
+       /\ epochCut' = { b \in 1..MaxWrites : \A m \in InSync : b \in legData[m] }
+  /\ hasEpoch' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet, claim,
+                 deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED deferExpired
+  /\ UNCHANGED virgin
+  /\ UNCHANGED placeVars
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
+  /\ UNCHANGED bounceVars
+
+\* Where a replacement can land (ConsumerNodeArm).  The consumer's node is a
+\* candidate only while it owns no leg (leg nodes are excluded: LocalLegs =
+\* {}, and no earlier replacement sits there) and a consumer exists.  A spare
+\* is consumed by the placement; NodeJoin restores one.
+PlaceTargets ==
+  IF ~ConsumerNodeArm THEN {"fresh"}
+  ELSE (IF spare THEN {"spare"} ELSE {})
+       \cup (IF ~ExcludeConsumerNode /\ ~DetachedVolume /\ localLegs = {}
+                 /\ onConsumer = {}
+              THEN {"consumer"} ELSE {})
+
+\* clear_head_sb's refusal (catchup.rs 1415-1427), reached from the full
+\* build (catchup_stale) and the chase (chase_standby) through
+\* ensure_dst_attached: an ONLINE raid of the volume's name on the replica's
+\* node refuses the catch-up.  A partitioned head's raid stays online on its
+\* node until fenced.  The live hot-rejoin window (hot_rejoin_volume) does
+\* not pass through it, so Admit is not guarded.
+ConsumerRefuses(l) ==
+  ConsumerNodeArm /\ l \in onConsumer /\ (serving # {} \/ zombie # {})
+
+\* The operator answers ReplicaReplacementBlocked: a node with room joins.
+NodeJoin ==
+  /\ ConsumerNodeArm /\ NodeJoins
+  /\ ~spare
+  /\ spare' = TRUE
+  /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
+                 nextWrite, lineage, riskSurfaced, state, writerSet, epochCut,
+                 claim, deemedDead, falseRisk, crashes>>
+  /\ UNCHANGED <<deferExpired, hasEpoch, virgin, onConsumer>>
+  /\ UNCHANGED maintVars
+  /\ UNCHANGED expandVars
+  /\ UNCHANGED raidVars
   /\ UNCHANGED bounceVars
 
 \* replica_replace + prune_writers_for_replacement: swap the identity of a
@@ -1650,7 +1881,10 @@ EpochCut ==
 \* this abstraction; the record-level machine stays safe because the old
 \* identity is no longer referenced anywhere.
 Replace(l) ==
-  /\ state[l] = "stale"
+  \* Gone-node fix, part 1: the node being gone is the gate, not the state.
+  \* Pre-fix only a stale leg qualified, and on a detached volume nothing
+  \* ever marks an in_sync leg stale (MonitorMarkStale needs a raid).
+  /\ IF ReplaceAnyState THEN TRUE ELSE state[l] = "stale"
   /\ l \in deemedDead
   /\ l \notin rolling                     \* no identity swap mid-restart
   \* The slot's old base must have left the raid first — reachable only
@@ -1661,7 +1895,25 @@ Replace(l) ==
   \* (record's new identity vs the raid's old base) below this
   \* slot-granularity abstraction — the F44-F46 note above.
   /\ l \notin serving
-  /\ UpInSync # {}                        \* something to rebuild from
+  \* Something to rebuild from.  The fix's has_rebuild_source is a RECORD
+  \* test — another leg in_sync, never the candidate (which may itself be
+  \* in_sync and the last copy); the legacy guard is kept as it was.
+  /\ IF ReplaceAnyState THEN \E m \in Legs \ {l} : state[m] = "insync"
+                        ELSE UpInSync # {}
+  \* The pre-fix wait for an epoch the scheduler never cuts on a detached
+  \* volume (inert wherever hasEpoch is pinned TRUE).
+  /\ (ReplaceWaitsForEpoch => hasEpoch)
+  \* Fix (a): the swap waits for the cut that EpochCutForReplace makes first.
+  /\ (ReplaceCutsFirst => hasEpoch)
+  \* The belt: a writer-set member may hold acked writes no other leg holds.
+  /\ ((ReplaceAnyState /\ ReplaceSparesWriters) =>
+        ~(state[l] = "insync" /\ l \in writerSet))
+  \* Consumer-node placement: the target the free-space ranking picks (a
+  \* free choice — any candidate may hold the most room).  No target left
+  \* is ReplicaReplacementBlocked: the swap does not happen.
+  /\ \E dest \in PlaceTargets :
+       /\ onConsumer' = IF dest = "consumer" THEN {l} ELSE onConsumer \ {l}
+       /\ spare' = IF dest = "spare" THEN FALSE ELSE spare
   /\ legUp' = [legUp EXCEPT ![l] = "up"]
   /\ legData' = [legData EXCEPT ![l] = {}]
   /\ legGen' = [legGen EXCEPT ![l] = 0]
@@ -1688,7 +1940,8 @@ Replace(l) ==
                  riskSurfaced, epochCut, claim, falseRisk, crashes,
                  rolling, processed, maintSkipped, rollerDead, stalePlan, leaderMoved,
                  raidSize, pvSize, wantNew>>
-  /\ UNCHANGED gateVars
+  /\ UNCHANGED <<deferExpired, hasEpoch>>
+  /\ virgin' = IF ModelVirgin THEN virgin \cup {l} ELSE virgin
   /\ UNCHANGED raidVars
   \* A swapped-in identity is a FRESH lvol: whatever the old one served,
   \* this one has not (the ghost behind Inv_WriterSetGrounded).
@@ -1715,6 +1968,11 @@ HotRejoin(l) ==
   \* maint_drain_live — the volume-wide widening (SuppressScoped = FALSE)
   \* gates only ADMISSION planning (plan_hot_rejoin), not this door.
   /\ l \notin suppress
+  \* The full build copies toward the record's newest epoch: with none,
+  \* copy_chain_and_align errors and the leg stays stale (pinned TRUE
+  \* outside EpochHistory worlds).
+  /\ hasEpoch
+  /\ ~ConsumerRefuses(l)                 \* clear_head_sb on the consumer's node
   /\ state' = [state EXCEPT ![l] = "standby"]
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, writerSet, epochCut,
@@ -1744,7 +2002,9 @@ Scrub(l) ==
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
   /\ UNCHANGED raidVars
-  /\ UNCHANGED gateVars
+  /\ UNCHANGED <<deferExpired, hasEpoch>>
+  /\ virgin' = IF ModelVirgin THEN virgin \cup {l} ELSE virgin
+  /\ UNCHANGED placeVars
   \* The payload is wiped: a scrubbed leg's history no longer entitles it
   \* to anything (same ghost bookkeeping as Replace).
   /\ everServed' = everServed \ {l}
@@ -1759,6 +2019,7 @@ CatchUp(l) ==
   /\ state[l] = "standby"
   /\ Responsive(l)
   /\ l \notin suppress
+  /\ ~ConsumerRefuses(l)                 \* clear_head_sb on the consumer's node
   /\ \E src \in UpInSync :
        /\ epochCut \subseteq legData[src]
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
@@ -1794,7 +2055,12 @@ Admit(l) ==
                                           \* (the shipped plan_hot_rejoin)
   /\ epochCut \subseteq legData[l]        \* warm standby (caught up)
   /\ serving # {}
-  /\ \E src \in serving :
+  \* The source is a RECORD-in_sync serving leg (hot_rejoin.rs: pick_source /
+  \* select_covering_source / in_sync_sources).  Until 2026-10-27 any serving
+  \* member qualified, so a forced-stale member (StaleFloor) could source an
+  \* admission and mint an in_sync leg missing the tail — a model gap, found
+  \* by the 3-leg gate-policy and empty-head runs, that the code never had.
+  /\ \E src \in {m \in serving : state[m] = "insync"} :
        /\ Responsive(src)
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
        \* F43 item #8, the catch-up admission size guard: never record
@@ -1817,7 +2083,9 @@ Admit(l) ==
                  riskSurfaced, epochCut, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
-  /\ UNCHANGED gateVars
+  /\ UNCHANGED <<deferExpired, hasEpoch>>
+  /\ virgin' = IF ModelVirgin THEN virgin \ {l} ELSE virgin
+  /\ UNCHANGED placeVars
   /\ UNCHANGED raidVars
   \* An in-place admission is progress too — and it is precisely the S2
   \* door the bounce was supposed to be replaced by, so it resets the
@@ -1837,8 +2105,15 @@ Admit(l) ==
 \*   The new lineage's content is what the attached legs collectively
 \* hold.  FenceZombie is the F48 fix: admission severs the old head's
 \* consumers BEFORE serving; unfenced, the zombie keeps writing.
+\* The stage's enforcement arm (driver.rs: enforce = !record.epochs.is_empty()).
+NoEnforce == StageEnforceNeedsEpoch /\ EpochHistory /\ ~hasEpoch
+AttachAll == {l \in Legs : /\ Responsive(l)
+                           /\ ~(ExcludeSeededStale /\ l \in SeededStale /\ state[l] = "stale")}
+
 Assemble ==
   /\ serving = {}
+  \* No consumer, no NodeStage: the gone-node tranche's detached volume.
+  /\ ~DetachedVolume
   \* A reassembly happens because a POD is scheduled and NodeStage runs.
   /\ (PodLayer => podUp)
   \* ...AND NodeStage runs only for a volume kubelet believes UNSTAGED.  This
@@ -1863,10 +2138,14 @@ Assemble ==
   \* markers (driver.rs admits even a marked replica, contradicting its
   \* own exclusion-phase comment).
   /\ LET StalePool == IF StaleFloor
-                      THEN {l \in Legs : state[l] = "stale" /\ Responsive(l)}
+                      THEN {l \in Legs : /\ state[l] = "stale" /\ Responsive(l)
+                                         \* the empty-head fix: never a virgin head
+                                         /\ ~(ForcedStaleSkipsVirgin /\ l \in virgin)}
                       ELSE {}
      IN
-     \E A \in (SUBSET (UpInSync \cup StalePool)) \ {{}} :
+     \* No epochs, StageEnforceNeedsEpoch: attach EVERYTHING reachable (fix (b)
+     \* keeps the restore's seeded placeholders out).
+     \E A \in (SUBSET (IF NoEnforce THEN AttachAll ELSE UpInSync \cup StalePool)) \ {{}} :
        LET AIn  == A \cap UpInSync
            ASt  == A \ UpInSync
            \* MonitorCurrent is the record-currency axiom (see NewestOf):
@@ -1878,7 +2157,7 @@ Assemble ==
        IN
        \* The 2-base floor: stale material only while in-sync attachers
        \* are short of 2, and never past 2 bases.
-       /\ (ASt # {} => (Cardinality(AIn) < 2 /\ Cardinality(A) <= 2))
+       /\ ((~NoEnforce /\ ASt # {}) => (Cardinality(AIn) < 2 /\ Cardinality(A) <= 2))
        /\ \/ /\ writerSet \subseteq A
              /\ UNCHANGED <<riskSurfaced, falseRisk, bounceRisk>>
           \/ /\ GateStrict
@@ -1917,6 +2196,9 @@ Assemble ==
                   => legSize[m] = "new"))
        /\ serving' = Kept
        /\ writerSet' = Kept
+       \* record_assembly_sync_state: with no epochs every member is stamped in_sync.
+       /\ state' = IF NoEnforce THEN [m \in Legs |-> IF m \in Kept THEN "insync" ELSE state[m]]
+                                ELSE state
        \* The trusted lineage is the in-sync attachers' content only: a
        \* forced-stale member's blocks are exactly the divergence hazard
        \* (its phantoms trip Inv_NoDivergentServing, escaped by
@@ -1936,6 +2218,9 @@ Assemble ==
   \* decisions (missing-empty and ServeWithRisk): the deadline re-arms
   \* fresh on the next deferral.
   /\ deferExpired' = FALSE
+  /\ UNCHANGED hasEpoch
+  /\ UNCHANGED virgin
+  /\ UNCHANGED placeVars
   \* THE CREATOR.  All three assignments are no-ops in arm-off worlds (Init
   \* pins exactly these values there), so the 50 pre-F62 runs are untouched.
   \* raidSeen' = TRUE because the process that just built the raid has, by
@@ -1957,7 +2242,7 @@ Assemble ==
   /\ a2Created' = a2Created \ {HostFor(localLegs)}
   /\ UNCHANGED <<raidLostOnce, localLegs, adoptedA2, validateRemoved,
                  flapped>>
-  /\ UNCHANGED <<legData, legUp, acked, nextWrite, state, epochCut, claim,
+  /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim,
                  deemedDead, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
@@ -1976,6 +2261,7 @@ LastResortServe(l) ==
   /\ state[l] = "stale"
   /\ Responsive(l)
   /\ l \notin suppress                   \* never serve a mid-maintenance leg
+  /\ ~(ForcedStaleSkipsVirgin /\ l \in virgin)  \* the runbook skips empty heads too
   /\ l \in NewestOf({m \in Legs : state[m] = "stale" /\ Responsive(m)
                                   /\ m \notin suppress})
   \* Even the operator override stages through the leg-size belt: a
@@ -1993,6 +2279,9 @@ LastResortServe(l) ==
   /\ state' = [state EXCEPT ![l] = "insync"]
   /\ zombie' = IF FenceZombie THEN {} ELSE zombie
   /\ deferExpired' = FALSE               \* an assembly happened
+  /\ UNCHANGED hasEpoch
+  /\ UNCHANGED virgin
+  /\ UNCHANGED placeVars
   /\ UNCHANGED <<legData, legUp, acked, nextWrite, epochCut, claim, deemedDead, falseRisk, crashes>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED expandVars
@@ -3402,7 +3691,9 @@ AdmitAtStage(l) ==
   /\ UNCHANGED <<bounceWindow, bouncePlan, bounceRisk, dpFlag, everServed, podUp, bounceDoomed>>
   /\ UNCHANGED maintVars
   /\ UNCHANGED <<raidSize, pvSize, wantNew>>
-  /\ UNCHANGED gateVars
+  /\ UNCHANGED <<deferExpired, hasEpoch>>
+  /\ virgin' = IF ModelVirgin THEN virgin \ {l} ELSE virgin
+  /\ UNCHANGED placeVars
   /\ UNCHANGED raidVars
 
 (***************************************************************************)
@@ -3497,6 +3788,9 @@ DeferClockExpire ==
   /\ serving = {}
   /\ ~deferExpired
   /\ deferExpired' = TRUE
+  /\ UNCHANGED hasEpoch
+  /\ UNCHANGED virgin
+  /\ UNCHANGED placeVars
   /\ UNCHANGED <<serving, zombie, legData, legUp, raidGen, legGen, acked,
                  nextWrite, lineage, riskSurfaced, state, writerSet,
                  epochCut, claim, deemedDead, falseRisk, crashes>>
@@ -3515,6 +3809,9 @@ NextLegacy ==
   \/ WriteTorn
   \/ ZombieWrite
   \/ EpochCut
+  \/ EpochCutForRebuild
+  \/ \E l \in Legs : EpochCutForReplace(l)
+  \/ NodeJoin
   \/ ServerCrash
   \/ ServerPartition
   \/ Assemble
@@ -3880,10 +4177,13 @@ Next ==
 \* environment; HotRejoin is the orchestrator's choice.
 FairnessCore ==
   /\ \A l \in Legs :
-       /\ WF_vars(LegPerish(l))
+       \* Gated so a cost world can drop it; (A /\ TRUE) is A, so every
+       \* BlackholeResolves = TRUE run keeps exactly the old obligation.
+       /\ WF_vars(LegPerish(l) /\ BlackholeResolves)
        /\ WF_vars(DeemDead(l))
        /\ WF_vars(MonitorMarkStale(l))
        /\ WF_vars(Replace(l))
+       /\ WF_vars(EpochCutForReplace(l))
        \* 2026-07-29 audit: hot-rejoin has been a default-ON 60s
        \* timer-driven retrier since v1.19.0 (076985d) — "initiation is
        \* the orchestrator's choice" was the pre-default-ON world.  WF
@@ -3927,6 +4227,12 @@ FairnessCore ==
        /\ WF_vars(AgentClear(l))
   /\ WF_vars(Assemble)
   /\ WF_vars(EpochCut)
+  \* Gone-node fix, part 2: the catch-up tick retries the on-demand cut (WF of
+  \* a permanently disabled action obligates nothing in EpochOnDemand=FALSE runs).
+  /\ WF_vars(EpochCutForRebuild)
+  \* Capacity is eventually added where the world says so (NodeJoins); WF of
+  \* a permanently disabled action obligates nothing elsewhere.
+  /\ WF_vars(NodeJoin)
   /\ WF_vars(AcquireCatchup)
   /\ WF_vars(ReleaseCatchup)
   /\ WF_vars(AcquireAdmission)
@@ -4157,6 +4463,15 @@ Inv_NoFalseRisk == ~falseRisk
 \* StaleReplicaAdmitted event).  Its violation trace is the reachability
 \* proof for every StaleServed exemption above.
 Inv_NoStaleServe == ~StaleServed
+
+\* THE EMPTY-HEAD THEOREM (ModelVirgin worlds): no raid member is a head that
+\* was recreated empty and never admitted — a restore placeholder, a U11
+\* replacement, or a leg mid full build.  Unlike a forced-stale leg that
+\* missed a tail (StaleServed, an evented availability trade), such a head
+\* holds none of the lineage: raid1 serves its zeros.  Not escaped by
+\* riskSurfaced or by the stale record state — that exemption is the blind
+\* spot this closes.
+Inv_NoVirginServing == \A l \in serving : l \notin virgin
 
 \* THE MAINTENANCE THEOREM: with zero REAL failures, a rolling restart
 \* alone never takes the volume down.  Rolls cost no crash budget, so
@@ -4619,6 +4934,27 @@ EventuallyWritable ==
   <>[](crashes < MaxCrashes \/ GoodWritable \/ Deferred)
 
 (***************************************************************************)
+(* THE GATE POLICY'S PRICE (2026-10-27).  EventuallyServingAgain accepts  *)
+(* Deferred as honest unavailability, so it cannot tell the shipped       *)
+(* deadline arm from the proposed policy.  This property can: after the   *)
+(* storm, the volume eventually SERVES.  Checked only in the cost worlds, *)
+(* where a writer's blackhole may persist (BlackholeResolves = FALSE) and *)
+(* NodeStage's at-stage admission is ON as shipped (StageAdmit — it runs  *)
+(* BEFORE the gate, so a warm standby writer is attached when it rules):  *)
+(* with GateDeadline the persisted deadline serves the stale survivor     *)
+(* (with a hollow risk) and this holds; without it the volume Defers      *)
+(* until the operator's LastResortServe, which is not fair, so TLC finds  *)
+(* the lasso.  That lasso IS the policy's price, stated as a trace.       *)
+(***************************************************************************)
+\* The honest escape: no responsive leg is assembly material for ANY gate —
+\* none in_sync, none stale (a standby that missed the tail is admitted
+\* only from an in-sync source, and no gate serves it in place).
+EventuallyAvailable ==
+  <>[](\/ crashes < MaxCrashes
+       \/ serving # {}
+       \/ ~\E l \in Legs : Responsive(l) /\ state[l] \in {"insync", "stale"})
+
+(***************************************************************************)
 (* The F43 theorem: no warm standby waits forever.  Every wait resolves — *)
 (* by admission (the arbitrated claim eventually reaches the window) or   *)
 (* by the world changing (the standby or its source died; a new epoch     *)
@@ -4806,13 +5142,33 @@ WarmLeg(l) ==
   /\ l \notin suppress
   /\ epochCut \subseteq legData[l]
   /\ (SizeGuard => (SizeHeal \/ raidSize = "old" \/ legSize[l] = "new"))
-  /\ \E src \in serving :
+  /\ \E src \in {m \in serving : state[m] = "insync"} :   \* as Admit
        /\ Responsive(src)
        /\ (RejoinGuard => legData[l] \subseteq legData[src])
        /\ (SizeGuard => (SizeHeal \/ legSize[src] = "old" \/ legSize[l] = "new"))
 
 StandbyAdmissionNotParked ==
   \A l \in Legs : [](WarmLeg(l) => <>(state[l] = "insync" \/ ~WarmLeg(l)))
+
+(***************************************************************************)
+(* THE GONE-NODE THEOREM (2026-10-27): a leg whose node is gone is        *)
+(* eventually re-placed — a fresh identity on a live node — and rebuilt   *)
+(* to at least a warm standby.  Standby, not in_sync: a volume nobody     *)
+(* stages has no assembly to admit into, and that is by design (Tier 1). *)
+(* Unconditional per leg, because the crash budget leaves a survivor to   *)
+(* rebuild from in every gone-node world.  In the detached world the      *)
+(* shipped pre-fix code (ReplaceAnyState = FALSE) parks the dead in_sync  *)
+(* leg forever with every action disabled; ReplaceAnyState alone still    *)
+(* parks it (the swap waits for an epoch, or, without that wait, the      *)
+(* replaced leg's full build has no target); the full fix holds.  Safety  *)
+(* cannot see any of this — every state on that lasso is a good state.    *)
+(***************************************************************************)
+GoneLegRebuilt ==
+  \A l \in Legs : (legUp[l] = "dead") ~> (legUp[l] = "up" /\ state[l] \in {"standby", "insync"})
+
+\* Belt for the detached worlds: nothing in them may build a composition
+\* (every creator other than Assemble is behind an arm those cfgs keep off).
+Inv_DetachedStaysDetached == DetachedVolume => (serving = {} /\ raidHosts = {})
 
 (***************************************************************************)
 (* THE F56 THEOREM: an outstanding expansion reaches every leg.  Per-leg  *)

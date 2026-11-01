@@ -3,7 +3,7 @@
 # replica-lifecycle / writer-set machine; formal/FlintSnapshots.tla — the
 # epoch-chain / delta-copy protocol at block-content level).
 #
-# Two hundred and forty-six runs, ALL required.
+# Two hundred and ninety-five runs, ALL required.
 #
 # (Counted as invocations — `grep -c '^strict_run \|^mutation_run \|^liveness_mutation_run '`
 # with the trailing spaces, so the three function DEFINITIONS don't inflate
@@ -17,12 +17,13 @@
 #   awk '/^(strict_run|mutation_run|liveness_mutation_run)[ ]/ {print $2}' \
 #     scripts/check-tla.sh | sort | uniq -c | sort -rn
 #
-#   71 FlintReplication    33 FlintComposition    24 ForgeSync
+#   98 FlintReplication    34 ForgeSync           33 FlintComposition
 #   15 FlintExtents        15 FlintClientIdentity  12 FlintCsiMount
-#   11 FlintExtentsProbe   11 FlintDelegRecall      8 FlintTierEpoch
-#    7 FlintTruncate        7 FlintTierSession      7 FlintTierMarker
-#    7 FlintShareDisk       5 FlintAdmission        4 FlintSnapshots
-#    3 FlintClaims          3 FlintA2Probe     3 ForgeMergeChain)
+#   12 FlintCatchup        11 FlintExtentsProbe    11 FlintDelegRecall
+#    8 FlintTierEpoch       7 FlintTruncate         7 FlintTierSession
+#    7 FlintTierMarker      7 FlintShareDisk        5 FlintAdmission
+#    4 FlintSnapshots       3 FlintClaims           3 FlintA2Probe
+#    3 ForgeMergeChain)
 #
 # FlintTruncate.tla — the pNFS truncate gate; the tranche is documented at the
 # bottom of this file, next to its runs.
@@ -536,7 +537,7 @@ trap print_profile EXIT
 
 # ── SHARDING: which modules does THIS process check? ───────────────────
 #
-# The gate is 246 TLC runs.  On the 4-vCPU CI runner that does not fit in
+# The gate is 302 TLC runs.  On the 4-vCPU CI runner that does not fit in
 # a job, so the workflow splits it across a matrix and each process is
 # handed a group of modules in TLA_MODULES (space-separated).  Empty or
 # unset means the whole gate, which is what a developer running this by
@@ -845,6 +846,163 @@ strict_run   FlintReplication FlintReplicationKubeToothSocket.cfg  "kube-DS toot
 strict_run   FlintReplication FlintReplicationKubeToothLatched.cfg "kube-DS tooth: the LATCHING self-scoped predicate never reddens a live pod"
 mutation_run FlintReplication FlintReplicationKubeToothVolume.cfg   "kube-DS tooth mutation (ReadyScope=volume: a CROSS-NODE term)"      "Inv_ProbeNeverReddensLive"
 mutation_run FlintReplication FlintReplicationKubeToothSelfLive.cfg "kube-DS tooth mutation (ReadyScope=selfLive: self-scoped but NOT latching)" "Inv_ProbeNeverReddensLive"
+
+# ── 2026-10-27: REPLACEMENT, RESTORE AND THE FORCED-STALE FALLBACK ──────────
+#
+# Four tranches from one day, each forced by a live finding on dash1 or by
+# the run before it, plus one model-fidelity correction that every run
+# below depends on.
+#
+# THE CORRECTION.  Admit's source, WarmLeg and WarmWaiting(For) now require
+# a RECORD-in_sync serving leg (hot_rejoin.rs pick_source /
+# select_covering_source / in_sync_sources).  Until 2026-10-27 any serving
+# member qualified, so a forced-stale member (StaleFloor) could source an
+# admission and mint an in_sync leg missing the tail — the model was WEAKER
+# than the code, and the 3-leg gate-policy and empty-head runs reported
+# losses the code cannot have.  The StaleFloor legacy runs change counts.
+#
+# GONE-NODE: a leg whose node is gone is re-placed and rebuilt even on a
+# volume nobody stages (GoneLegRebuilt).  Shipped, the replacer took stale
+# legs only and waited for an epoch; without a raid nothing marks an
+# in_sync leg stale, and a never-staged volume gets no epoch — three
+# lassos, one per missing part of the fix.  Widening the candidates
+# unguarded swaps out the writer-set member holding the acked tail
+# (GoneLoss); the guard (an in_sync writer-set member is never swapped)
+# holds, served and detached, with one documented residual
+# (GoneDetachedServed).
+#
+# GATE POLICY: the shipped F36c deadline serves a stale leg with a hollow
+# risk marker (GateRolling); the policy (wait for the writer, node-gone
+# evidence or the operator) holds safety and EventuallyAvailable at 2 and
+# 3 legs, and GatePolicyCost is its price stated as a lasso: a Ready-but-
+# wedged writer keeps the volume down until the operator acts.
+#
+# STAGE ENFORCEMENT + EMPTY HEADS (d788db50, reverted as d55e3ba5): the
+# restore stamped empty placeholders in_sync (RestoreLoss); an epoch-less
+# record lets a stale leg that missed acked writes stage in_sync
+# (FreshStaleLoss, older than the restore); and the forced-stale fallback
+# serves an EMPTY head — a U11 replacement on main today (EmptyHeadU11),
+# a restore placeholder under the broader rule alone (EmptyHeadRestore).
+# The fix the *Fixed/*Enforced runs hold, on main as 4dfd3878: record-Stale
+# legs excluded at stage with no epoch precondition, the fallback skipping
+# empty and half-built heads, the writer-set guard.
+#
+# CONSUMER NODE: the replacement ranking never excluded the consumer's
+# node, and clear_head_sb (catchup.rs) refuses any catch-up onto a node
+# where the volume's raid is online — a replacement placed there is never
+# built (GoneConsumerNode).  Excluding the node holds (GoneConsumerFixed,
+# on main as 4dfd3878);
+# its price is a blocked replacement until capacity exists
+# (GoneConsumerBlocked).
+liveness_mutation_run FlintReplication FlintReplicationGoneDetached.cfg "gone-node, detached, shipped replacer (stale legs only: the dead in_sync leg parks forever)"
+liveness_mutation_run FlintReplication FlintReplicationGoneDetachedNoGuard.cfg "gone-node, detached, widened replacer still waiting for an epoch nobody cuts"
+liveness_mutation_run FlintReplication FlintReplicationGoneDetachedNoCut.cfg "gone-node, detached, no on-demand epoch cut (the replaced leg's full build has no target)"
+liveness_mutation_run FlintReplication FlintReplicationGoneDetachedServed.cfg "gone-node fix's documented residual (a detached volume's dead writer-set leg is spared: only the next assembly's F36c gate can judge it)"
+strict_run FlintReplication FlintReplicationGoneDetachedFixed.cfg "gone-node fix, detached (any-state candidacy + on-demand cut + writer-set guard)"
+mutation_run FlintReplication FlintReplicationGoneLoss.cfg "gone-node widening UNGUARDED (swaps out the writer-set leg holding the acked tail)" "Inv_NoSilentLoss"
+strict_run FlintReplication FlintReplicationGoneResurrect.cfg "gone-node fix under fallible node-gone evidence (the content invariants hold; the evidence ones are FlintReplicationResurrect.cfg's teeth)"
+strict_run FlintReplication FlintReplicationGoneFixed.cfg "gone-node fix, served 3-leg breadth (every invariant and property, GoneLegRebuilt)"
+liveness_mutation_run FlintReplication FlintReplicationGoneConsumerNode.cfg "consumer-node placement (the ranking picks the consumer's node; clear_head_sb refuses the build forever)"
+liveness_mutation_run FlintReplication FlintReplicationGoneConsumerBlocked.cfg "consumer-node exclusion's price (no other node: ReplicaReplacementBlocked until capacity is added)"
+strict_run FlintReplication FlintReplicationGoneConsumerFixed.cfg "consumer-node exclusion strict (GoneLegRebuilt with a spare and capacity re-added)"
+mutation_run FlintReplication FlintReplicationGateRolling.cfg "shipped F36c deadline, rolling upgrade (serves the stale leg with a hollow risk marker)" "Inv_NoFalseRisk"
+strict_run FlintReplication FlintReplicationGatePolicy.cfg "gate policy strict, 2 legs (wait for the writer, evidence or the operator)"
+liveness_mutation_run FlintReplication FlintReplicationGatePolicyCost.cfg "gate policy's price (a Ready-but-wedged writer keeps the volume down until the operator)"
+strict_run FlintReplication FlintReplicationGateDeadlineAvail.cfg "what the shipped deadline arm buys (EventuallyAvailable in the persistent-blackhole world)"
+mutation_run FlintReplication FlintReplicationRestoreLoss.cfg "restore as in d788db50 (empty placeholders stamped in_sync: the restored data lost)" "Inv_NoSilentLoss"
+strict_run FlintReplication FlintReplicationRestoreFixed.cfg "restore, narrow fix (seeded-stale excluded at stage + replacer cuts first)"
+strict_run FlintReplication FlintReplicationRestoreEnforced.cfg "restore, broader stage rule (record-Stale excluded, epochs or not)"
+mutation_run FlintReplication FlintReplicationFreshReplaceLoss.cfg "fresh volume, d788db50's replacer (no epochs yet: the swapped-in empty leg stages in_sync)" "Inv_NoSilentLoss"
+mutation_run FlintReplication FlintReplicationFreshStaleLoss.cfg "fresh volume, narrow fix only (an epoch-less record stages a stale leg that missed acked writes)" "Inv_NoSilentLoss"
+strict_run FlintReplication FlintReplicationFreshEnforced.cfg "fresh volume, broader stage rule (every invariant and the post-storm liveness)"
+mutation_run FlintReplication FlintReplicationEmptyHeadU11.cfg "forced-stale fallback serves an EMPTY U11 replacement (main today)" "Inv_NoVirginServing"
+mutation_run FlintReplication FlintReplicationEmptyHeadRestore.cfg "broader stage rule alone: the fallback attaches an empty restore placeholder" "Inv_NoVirginServing"
+strict_run FlintReplication FlintReplicationEmptyHeadU11Fixed.cfg "fallback skips empty heads, U11 world (liveness included)"
+strict_run FlintReplication FlintReplicationEmptyHeadRestoreFixed.cfg "fallback skips empty heads + broader rule, restore (the clone serves alone until the placeholders are built)"
+# NOT IN THIS GATE: two strict worlds whose liveness TLC cannot finish in a
+# shard — FlintReplicationEmptyHeadFreshFixed.cfg (the fallback skipping empty
+# heads + the broader rule, fresh volume) and FlintReplicationGateRollingPolicy.cfg
+# (the gate policy, 3-leg rolling upgrade: a writer down while another leg
+# catches up).  TLC's safety pass on the first is 4 min; its temporal check
+# was still running after an hour (box, 2 workers, 2026-10-27).  tla-mc 0.1.2
+# compiled, model 7f12bd11, 4 workers on the box (2026-10-28): both HOLD,
+# every invariant and the three properties — 828,445 distinct, depth 31, 106 s;
+# 1,565,366 distinct, depth 31, 183 s.  Their safety is in the gate through
+# EmptyHeadU11Fixed / EmptyHeadRestoreFixed and GatePolicy above.
+
+# ── FlintCatchup.tla: the §5 catch-up at block-content level (2026-10-27) ───
+#
+# FlintReplication models content as a write-set and a cut as one event;
+# FlintSnapshots gives the target no snapshots of its own.  Neither can state
+# §5's argument (F75's write-up §7).  This module can: two replicas, each
+# with its OWN epoch snapshots (content, allocated clusters, parent), skewed
+# per-replica cuts, raid1 writes landing leg by leg, zombie writes, the
+# blobstore's absorb-on-delete GC, and the catch-up exactly as catchup_stale /
+# chase_standby / admit_one_standby run it.  The back-off premise (A2) is a
+# ghost bound; the real T_back is wall-clock, so the selector may pick ANY
+# eligible base, or none (the full build).
+#
+# Its first runs found two data paths in shipped code, both fixed on main
+# (8da1efb5, c8f6c784):
+#   * admit_one_standby's final cut is named latest+1 — the scheduler's next
+#     name — and execute_cut takes EEXIST as the cut, so an aborted
+#     scheduler cut's leftover on the source (older than its head) became
+#     the "final" epoch and the standby was admitted without the writes after
+#     it (FinalCutLeftover; fix: the strict cut, defer).
+#   * F75 through the FULL BUILD: revert_head_to_empty left D's snapshots
+#     under retained names, one of them cut in the detection lag with a
+#     zombie write; the align took it as converged and a second failure's
+#     time back-off chose it as the base (NoFullBuildReap; fix: reap the
+#     retained names on the full build too).
+#
+# Two bounds, both complete in minutes: one failure / two writes / three
+# epochs / one retained, and the two-failure bound (one write, four epochs,
+# two retained) the F75 corners need.  FlintCatchupProof.tla proves the
+# safety theorems for EVERY bound (TLAPS, 2026-10-28: Spec => []Inv under
+# the shipped guards, PinRetention free; record and the seven controls in
+# formal/results/2026-10-28-flintcatchup-tlaps/).  The Probe runs check that
+# proof's inductive invariant IndInv at both bounds, and NoPinRetention
+# checks it without the pin.  PinRetention is NOT a safety guard: the
+# lineage-coverage check is (NoPinRetention must HOLD).
+strict_run FlintCatchup FlintCatchup.cfg "catch-up strict (every §5 guard, both reaps, the strict final cut)"
+strict_run FlintCatchup FlintCatchupF75.cfg "catch-up strict, two-failure bound (the second-failure corners)"
+strict_run FlintCatchup FlintCatchupProbe.cfg "catch-up inductive invariant IndInv (FlintCatchupProof.tla) and the blob-chain probe"
+strict_run FlintCatchup FlintCatchupProbeF75.cfg "catch-up inductive invariant IndInv, two-failure bound"
+strict_run FlintCatchup FlintCatchupNoPinRetention.cfg "catch-up without the retention pin (the lineage-coverage check is the safety; the pin buys progress), IndInv included"
+mutation_run FlintCatchup FlintCatchupNoBackoff.cfg "catch-up mutation (Backoff=FALSE: a base holding a zombie or missing a write)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoRevert.cfg "catch-up mutation (Revert=FALSE: D keeps its own tail)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoBaseInclusive.cfg "catch-up mutation (BaseInclusive=FALSE: the base's own delta is skipped)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoFinalDelta.cfg "catch-up mutation (FinalDelta=FALSE: admission on the last chase alone)" "Inv"
+mutation_run FlintCatchup FlintCatchupFinalCutLeftover.cfg "SHIPPED admission (FinalCutStrict=FALSE: the final cut adopts an aborted cut's leftover)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoReapNewer.cfg "pre-F75 revert (ReapNewer=FALSE: a pre-failure leftover becomes a later base)" "Inv"
+mutation_run FlintCatchup FlintCatchupNoFullBuildReap.cfg "SHIPPED full build (FullBuildReaps=FALSE: F75 through the full build)" "Inv"
+
+# ── FlintLocalLeg.tla: a stale leg on the CONSUMER'S node (2026-10-28) ──────
+#
+# FlintReplication's consumer-node residual: a consumer that moves onto a
+# stale leg's node.  catchup_stale runs F36 (head_live_consumer: nvmf
+# exports with live controllers ONLY) -> revert (bdev_lvol_delete: v26.05
+# unregisters with no claim check, so a configured LOCAL base is hot-removed
+# from the live raid) -> clear_head_sb (any ONLINE raid on the node refuses)
+# -> copy.  A record-Stale leg the forced-stale fallback serves on the
+# consumer's own node is invisible to F36, and the refusal comes after the
+# revert: in the detection lag (the in_sync member faulted out, its record
+# not yet marked) the catch-up takes the raid's last base and the only copy
+# of a write acked since (ShippedLoss); and a Stale leg under the consumer
+# is never rebuilt while the pod stays (ShippedStuck).  The fix needs BOTH
+# halves: the membership check before the revert (F36 reads the replica
+# node's raid bases) and the precise refusal in clear_head_sb (only a raid
+# holding THIS head), which must never delete the online raid.  SPDK's
+# examine is a no-op on the live raid: consumer raids are superblock:false.
+mutation_run FlintLocalLeg FlintLocalLegShipped.cfg "SHIPPED local stale leg (F36 blind to a local raid base; clear_head_sb refuses only after the revert)" "Inv"
+mutation_run FlintLocalLeg FlintLocalLegShippedLoss.cfg "SHIPPED local stale leg, loss probe (the revert under the live raid destroys a last acked copy in the detection lag)" "Inv_NoCatchupLoss"
+liveness_mutation_run FlintLocalLeg FlintLocalLegShippedStuck.cfg "SHIPPED local stale leg, liveness (any online raid on the node refuses: never rebuilt while the pod stays)"
+mutation_run FlintLocalLeg FlintLocalLegPreciseOnly.cfg "precise clear_head_sb alone (after the revert, so no protection)" "Inv"
+liveness_mutation_run FlintLocalLeg FlintLocalLegF36Only.cfg "F36 sees local bases, blanket clear_head_sb kept (safe, still stuck)"
+strict_run FlintLocalLeg FlintLocalLegFixed.cfg "local stale leg fixed (membership check before the revert + precise clear_head_sb), 2 legs, liveness included"
+mutation_run FlintLocalLeg FlintLocalLegDeleteOnline.cfg "fixed but the precise path's phantom-delete loop deletes the online raid" "Inv"
+mutation_run FlintLocalLeg FlintLocalLegShipped3.cfg "SHIPPED local stale leg, 3 legs" "Inv"
+strict_run FlintLocalLeg FlintLocalLegFixed3.cfg "local stale leg fixed, 3 legs (fill-to-two with stale legs), liveness included"
 
 mutation_run FlintClaims FlintClaimsNoGrace.cfg "F50 mutation (MarkerGrace=FALSE: scrub under a live window, cold admission)" "Inv_NoColdAdmission"
 
