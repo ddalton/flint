@@ -3149,16 +3149,27 @@ and decided by the user:
          id 5,430 proved, 13,584 trivial and 2 failed; those two are the
          only steps Isabelle proves, and Isabelle does not run on the
          instances, so they were proved on the box from the same file
-         (23 and 5 obligations, clean). A cross-check with the same
+         by an asserting launcher that checks the three md5s before
+         tlapm runs and records them (`box-isa/rec/RECORD.txt`,
+         00:41 to 00:42Z: 23 and 5 obligations, clean, the two steps by
+         Isabelle in under a second each). A cross-check with the same
          ranges on the generator's previous output (`482059a8`) gave the
-         same picture. Open before the tick: the box runs' outputs
-         carry no md5 line, so where their inputs were asserted is to
-         be cited; a results section like the trust proof's; and the
-         controls, since the trust record had thirteen premise and rule
-         flips showing which steps carry what and this proof has none
-         yet, which the user decides. Safety only: liveness is item 4.
-         It is a proof of the model; the code's match to it is the pins
-         and the drills.
+         same picture. The results section is
+         `formal/results/2026-10-31-c31-ec2/RESULTS.txt` (`c5b05a7c`),
+         in the trust proof's format, local to flint-e4's branch until
+         the model files are pushed. Open before the tick: the
+         controls. The trust record had thirteen premise and rule flips
+         showing which steps carry what; this proof has none, and they
+         are the user's call: about 27 candidates (the stamp rules and
+         the rules adopted on 2026-10-31, the carried premises, the
+         trust proof's five rule removals), each a full ranged run
+         since a flipped line sits in every obligation's context, four
+         at a time on one m7i.48xlarge, about four hours and $8 for
+         all, $6 for twenty; not the box. Safety only: liveness is item
+         4. It is a proof of the model; the code's match to it is the
+         pins and the drills. EC2 for the proof: c31 ran 19:51Z to
+         00:39Z (about $8.80), c33 and c33b about $1.55; zero sets
+         verified, nothing left running; the day's total about $10.40.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
