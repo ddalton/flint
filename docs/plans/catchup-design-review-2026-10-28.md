@@ -368,7 +368,10 @@ could not count as legal and rev 10 does. Under the full rule set (rev
 12 `8e54566d`, the user's 192-core run, c27) three replicas are a full
 pass on the lost mark and the crash (1,774,204,193 and 2,325,892,812
 states) and the zombie arm is checked to depth 27 without a violation,
-bounded, not a full pass. c21 closed on 2026-10-31 with every remaining
+bounded, not a full pass; the acknowledgement stamp and the lost-mark
+sole continuation are full passes at three replicas too (c31,
+2026-10-31, the same counts), the zombie sole and expiry arms bounded
+at the hour near depth 28. c21 closed on 2026-10-31 with every remaining
 rev 7 three-replica arm bounded at the box's cap, an hour, or half an
 hour for the acknowledgement stamp (depths 20 to 24: three failures
 allowed, the member-only read, the acknowledgement stamp, the record

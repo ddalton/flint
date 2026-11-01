@@ -2862,7 +2862,9 @@ full-space run at three replicas on a 192-core spot box (2026-10-30,
 m7i.48xlarge, 160 workers, 180 GB fingerprint and queue caps, tla-mc
 0.2.1; the batch was cut short at the user's word after its three
 safety arms, so its expiry, sole-continuation, barrier and four-replica
-arms did not run and nothing is claimed for them). Three replicas and two
+arms did not run there; the barrier, the expiry form and the two
+sole-continuation arms ran in c31, the rows so named, and the
+four-replica arm was cut as superseded and reran on rev 17, g17). Three replicas and two
 failures (§5's bound D) unless the row says two replicas. The rules
 column names what is on beyond the stamp itself: *count* is step 2's
 majority read over attached `in_sync` legs, *view* the released
@@ -2968,6 +2970,8 @@ without the rule, and a HOLD on the data beside it.
 | d15 | three replicas, lost mark, three failures, the drain (rev 15 `3d409f1b`: rev 14 plus `OperatorMark`, the drain; `InWriteGuard`, the in-write refusal; `DrainStamps`, a stamp on the planned removal; `WholeMark` on, `LastFails` off; c33, a second spot instance, m7i.16xlarge, at the user's word) | all; the guard and the drain stamp varied | `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AdmitNoLoss` | identity exact (7,286,102, depth 36); without the guard VIOLATED at depth 12 with the drain stamp off (1,692,391 states) and on (2,783,875); with the guard, no violation to the 1,200 s cap: depth 19 (93,175,140 states) without the drain stamp, depth 18 (89,002,087) with it, bounded (tla-mc 0.2.1 compiled; tables-d15.md) | the guard carries the data invariant; a stamp on the planned removal alone does not |
 | d15 | the drain, `Inv_AckStamped`, the guard and the stamp varied | all; `InWriteGuard` and `DrainStamps` varied | `Inv_AckStamped` | without the stamp VIOLATED at depth 5 with the guard off (3,115 states) and on (3,397); with the guard and the stamp, no violation to the 1,200 s cap: depth 18, 89,002,087 states, bounded (tla-mc 0.2.1 compiled) | the stamp carries the barrier claim: without it the survivors' stamps keep naming the drained leg, so the next acknowledgement is not with every member stamped, as predicted; only guard and stamp together show no violation at the bound |
 | q14 | identity at rev 14, every knob off | count, view, decree | the three of c21 | 7,286,102 states, depth 36 | rev 14 with its knobs off is rev 12 |
+| c31 | three replicas, lost mark; crash, `Inv_AckStamped` (rev 12 `8e54566d`, the full rule set; c31, tla-mc 0.2.2 compiled, 190 workers, each arm's compiled source asserted against the box's build; tables-c31.md) | all | `Inv_AckStamped` | HOLD over the full space: 1,774,204,193 states, depth 45; 2,325,892,812, depth 46, each count equal to c27's | the barrier claim at three replicas, full |
+| c31 | three replicas, lost mark, the sole-continuation form; zombie move, the sole form; zombie move with the expiry on (rev 12) | all; the expiry on in the last | `Inv_SoleOnly`; `Inv_SoleOnly`; `Inv_TornJunkMarked`, `Inv_LossMarked` | HOLD over the full space (1,774,204,193 states, depth 45); no violation to the hour at depth 29 (4,776,730,423 states) and at depth 28 (4,048,397,901), bounded | a sole continuation never serves alone beside a clean member, full on the lost mark and bounded on the zombie; the expiry's serve with its risk surfaced loses nothing unmarked to depth 28, bounded |
 | lv | two replicas, liveness on the final setting (rev 17 `61ae6829`: the rule, the drain, the triple; two failures; wrapper `752b1a56`; c31, tla-mc 0.2.2 compiled, 12 workers): lost mark; crash; zombie move, under `Spec` and under `SpecNoReturn` | all | `Prop_BarrierEnds` | VIOLATED, a lasso at depth 7 in every fault (3,489; 4,466; 6,023 states), the same without fairness on the return; the record-down controls lasso at depth 7 as before | the property as stated fails on the final setting: every member leaves under a held loss (two failures, or a drain beside a failing leg), the stamp lands on no survivor, the raid holds with no member until unstaged; nothing acknowledged is lost |
 | lv | the same, the property restated: a barrier ends, or the raid has no member left (`Prop_BarrierEndsM`), and the stronger form, or no member is healthy (`Prop_BarrierEndsH`) (wrapper `6604c794`; c31, tla-mc 0.2.2 compiled, 16 workers; tables-lv.md) | all | `Prop_BarrierEndsM`, `Prop_BarrierEndsH` | HOLD over the full space in every fault, both forms: 28,546,374 states, depth 37; 38,136,587, depth 36; 149,739,816, depth 40, the spaces of the safety peels, so the check ran over the whole reachable graph; the positive control holds under `Spec` (28,546,374) and lassos under `SpecNoReturn` | the liveness claim on the final setting: a barrier ends unless the raid has lost every member, and then nothing acknowledged is lost and the volume is held until it is unstaged |
 | z4 | four replicas, zombie move, three failures, the continuation tested by sequence and generation (rev 16 `d9062ab6`; control for the correction above; c33b, tla-mc 0.2.1 compiled, 24 workers) | all four rule knobs; the triple off | `Inv_NoNewLoss`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | VIOLATED at depth 11 (3,368,405 states, 57 s): a zombie's leg passes as a confirmed two-leg continuation and acknowledges alone | the model was looser than the rule at four replicas; the killed control for rev 17 |
@@ -3250,12 +3254,16 @@ and decided by the user:
          another healthy member, not merely an `in_sync` one, which
          would close the drain's path only, since two failures reach
          the same dead raid without it; safety holds either way.
-   - [ ] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
+   - [x] `Inv_AckStamped` at three replicas as a full pass (c21 bounded
          it at depth 23; c27's arm did not run). Cheapest: add it to the
          two full three-replica arms and rerun both on one m7i.48xlarge
          spot instance, about 25 minutes of checking; not the box, where
-         that space is a day and may not fit.
-   - [ ] The c27 arms the cut left unrun: the expiry form, the two
+         that space is a day and may not fit. Done (c31, 2026-10-31,
+         tla-mc 0.2.2 compiled, 190 workers; tables-c31.md): HOLD over
+         the full space on the lost mark (1,774,204,193 states, depth
+         45) and the crash (2,325,892,812, depth 46), each count equal
+         to c27's.
+   - [x] The c27 arms the cut left unrun: the expiry form, the two
          sole-continuation arms, four replicas. The lost-mark sole arm
          shares the full arm's constants and joins the session above;
          the three zombie arms (the expiry form, the zombie sole arm,
@@ -3266,7 +3274,11 @@ and decided by the user:
          correction above); that arm was cut as superseded when the user
          gave the instance to the proof, and its rerun at three
          failures on rev 17 with the drain in is in the table, bounded
-         at depth 13. Priced on
+         at depth 13. Done (c31; tables-c31.md): the lost-mark sole arm
+         holds over the full space (1,774,204,193 states, depth 45); the
+         zombie sole arm and the expiry form are bounded clean at the
+         hour (depths 29 and 28; 4,776,730,423 and 4,048,397,901
+         states); the four-replica arm as said. Priced on
          2026-10-31 (spot, nothing provisioned): m7i.48xlarge at $1.48
          an hour in us-west-1a plus a 2 TB gp3 disk at about $0.36,
          about $8.30 for the session, with the hard shutdown at six
