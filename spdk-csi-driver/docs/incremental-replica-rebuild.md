@@ -3024,8 +3024,9 @@ count it so, and its bound (in flight at the fence or at a crash) is a
 property of the raid, not of the model. The stamp rule has a TLAPS
 proof (2026-11-01, gate item 2 under *Delivery order*): the four safety
 invariants for any number of replicas and free caps, on the final
-setting, its record read and reconciled, with its controls still to
-run; §5's trust rule has its own. The model
+setting, its record read and reconciled, with its controls approved
+by the user on 2026-11-01 and not yet run; §5's trust rule has its
+own. The model
 files are local to flint-e4's branch until the user says push. Nothing
 in this section is built.
 
@@ -3163,17 +3164,23 @@ and decided by the user:
          in the trust proof's format, local to flint-e4's branch until
          the model files are pushed. Open before the tick: the
          controls. The trust record had thirteen premise and rule flips
-         showing which steps carry what; this proof has none, and they
-         are the user's call: about 27 candidates (the stamp rules and
-         the rules adopted on 2026-10-31, the carried premises, the
-         trust proof's five rule removals), each a full ranged run
-         since a flipped line sits in every obligation's context, four
-         at a time on one m7i.48xlarge, about four hours and $8 for
-         all, $6 for twenty; not the box. Safety only: liveness is item
-         4. It is a proof of the model; the code's match to it is the
-         pins and the drills. EC2 for the proof: c31 ran 19:51Z to
-         00:39Z (about $8.80), c33 and c33b about $1.55; zero sets
-         verified, nothing left running; the day's total about $10.40.
+         showing which steps carry what; this proof has none yet: about
+         27 candidates (the stamp rules and the rules adopted on
+         2026-10-31, the carried premises, the trust proof's five rule
+         removals), each a full ranged run since a flipped line sits in
+         every obligation's context, four at a time on one
+         m7i.48xlarge, about four hours and $8 for all; not the box.
+         **The user said go on 2026-11-01 ("go ahead with the proof
+         controls"): the full set, on a new instance, run by flint-e4.**
+         A flip counts only where a step that uses the flipped line
+         fails; the two Isabelle-only steps (131:5, 1262:3) fail on EC2
+         under every flip and are named and set aside, not counted. The
+         item ticks when the controls' table lands under its md5.
+         Safety only: liveness is item 4. It is a proof of the model;
+         the code's match to it is the pins and the drills. EC2 for the
+         proof: c31 ran 19:51Z to 00:39Z (about $8.80), c33 and c33b
+         about $1.55; zero sets verified, nothing left running; the
+         day's total about $10.40.
    - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
