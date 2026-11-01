@@ -6,8 +6,10 @@
 //! FUSE fd to an unprivileged worker and binds the result into the pod.
 //! Design of record: docs/plans/csi-node-mount-design.md.
 //!
-//! What stays here is the CR itself (`spec`) and the mount-s3 argument
-//! vector (`mounter`) the worker execs.
+//! What stays here is the CR itself (`spec`), the mount-s3 argument
+//! vector (`mounter`) the worker execs, and the mount-s3 flags a CR's
+//! `mountOptions` may add to it (`mount_options`).
 
+pub mod mount_options;
 pub mod mounter;
 pub mod spec;

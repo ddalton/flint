@@ -26,6 +26,7 @@ use tonic::{Request, Response, Status};
 
 use crate::csi;
 use crate::csi::volume_capability::AccessType;
+use crate::passthrough::mount_options::{self, MountOptionsAllow};
 
 use super::attrs::{self, PublishRequest};
 use super::creds::{self, BrokerClient, Creds, ExchangeError, Materialized, Registration};
@@ -122,6 +123,11 @@ pub struct Config {
     /// `node.endpointAllow` (FLINT_S3CSI_ENDPOINT_ALLOW): the hosts a CR's
     /// `spec.endpoint` may name (`host`, or `*.suffix`); empty = any.
     pub endpoint_allow: Vec<String>,
+    /// `node.mountOptionsAllow` (FLINT_S3CSI_MOUNT_OPTIONS_ALLOW): the
+    /// mount-s3 flags a passthrough CR's `spec.mountOptions` may carry.
+    /// Unset = the built-in list; set, it replaces that list, and set but
+    /// empty allows none (issue #60; `parse_mount_options_allow`).
+    pub mount_options_allow: MountOptionsAllow,
 }
 
 impl std::fmt::Debug for Config {
@@ -135,6 +141,7 @@ impl std::fmt::Debug for Config {
             .field("creds_lifetime_secs", &self.creds_lifetime_secs)
             .field("identity_modes", &self.identity_modes)
             .field("endpoint_allow", &self.endpoint_allow)
+            .field("mount_options_allow", &self.mount_options_allow.flags())
             .field("plugin_root", &self.plugin_root)
             .field("cache_host_path", &self.cache_host_path)
             .finish_non_exhaustive()
@@ -202,6 +209,17 @@ impl Config {
                 Some(p)
             }
         };
+        // Read RAW, not through `opt`: set-but-empty is a list that allows
+        // nothing, and must not read as unset, which is the built-in list.
+        let mount_options_allow = match std::env::var("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW") {
+            Ok(v) => parse_mount_options_allow(Some(&v))?,
+            Err(std::env::VarError::NotPresent) => parse_mount_options_allow(None)?,
+            Err(e) => {
+                return Err(format!(
+                    "FLINT_S3CSI_MOUNT_OPTIONS_ALLOW (node.mountOptionsAllow): {e}"
+                ))
+            }
+        };
         // A misspelt ceiling must not read as "no ceiling".
         let max_workers_per_node = match opt("FLINT_S3CSI_MAX_WORKERS_PER_NODE") {
             None => None,
@@ -236,6 +254,7 @@ impl Config {
             cache_size_mib: opt("FLINT_S3CSI_CACHE_SIZE_MIB").and_then(|v| v.parse().ok()).unwrap_or(4096),
             identity_modes: parse_identity_modes(&opt("FLINT_S3CSI_IDENTITY_MODES").unwrap_or_else(|| DEFAULT_IDENTITY_MODES.into()))?,
             endpoint_allow: parse_host_list(&opt("FLINT_S3CSI_ENDPOINT_ALLOW").unwrap_or_default()),
+            mount_options_allow,
         })
     }
 }
@@ -762,6 +781,13 @@ impl S3Node {
         // it (issue #49).
         endpoint_allowed(resolved.endpoint(), &self.cfg.endpoint_allow)
             .map_err(Status::failed_precondition)?;
+        // And which mount-s3 flags a passthrough CR may add to the argv
+        // (issue #60): its mountOptions were read as mount-s3 reads them by
+        // `MountSpec::validate`; here each flag must be on the list.
+        if let Resolved::Passthrough { spec } = &resolved {
+            mount_options::check_allowed(&spec.mount_options, &self.cfg.mount_options_allow)
+                .map_err(Status::failed_precondition)?;
+        }
         let kind = match resolved {
             Resolved::Passthrough { .. } => "FlintPassthroughMount",
             Resolved::Lean { .. } => "FlintLeanWorkspace",
@@ -3059,6 +3085,22 @@ pub fn identity_mode_allowed(mode: CredentialMode, allowed: &[CredentialMode]) -
     ))
 }
 
+/// `FLINT_S3CSI_MOUNT_OPTIONS_ALLOW`, as read raw from the environment:
+/// `None` (unset) is the built-in list (`MountOptionsAllow::builtin`); a
+/// value REPLACES it — words separated by commas or whitespace, each a
+/// mount-s3 flag as mount-s3 spells it (`--debug` or `-d`) — and a value
+/// with no word allows no flag at all, deliberately unlike
+/// `node.endpointAllow`, where empty admits any. A word that is not a
+/// mount-s3 1.24.0 flag, or names one no list may admit (the mounter sets
+/// it, or it stops mount-s3 mounting), is a start-up error by name.
+pub fn parse_mount_options_allow(v: Option<&str>) -> Result<MountOptionsAllow, String> {
+    match v {
+        None => Ok(MountOptionsAllow::builtin()),
+        Some(s) => MountOptionsAllow::operator(&words(s))
+            .map_err(|e| format!("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW (node.mountOptionsAllow): {e}")),
+    }
+}
+
 /// `FLINT_S3CSI_ENDPOINT_ALLOW`: hosts, lowercased.
 pub fn parse_host_list(s: &str) -> Vec<String> {
     words(s).into_iter().map(|w| w.to_ascii_lowercase()).collect()
@@ -3429,6 +3471,51 @@ mod tests {
         );
     }
 
+    /// `node.mountOptionsAllow` (issue #60): unset is the built-in list,
+    /// set REPLACES it (commas or spaces, either spelling, duplicates
+    /// folded), set but empty — or only separators — allows nothing; an
+    /// unknown flag or one no list admits is an error naming the knob and
+    /// the word. A refusal at publish names the flag and the knob.
+    #[test]
+    fn mount_options_allow_unset_is_the_builtin_list_empty_allows_none_and_a_list_replaces_it() {
+        assert_eq!(parse_mount_options_allow(None).unwrap(), MountOptionsAllow::builtin());
+        assert!(parse_mount_options_allow(None).unwrap().flags().contains(&"--metadata-ttl"));
+        for empty in ["", " ", " , ,"] {
+            let none = parse_mount_options_allow(Some(empty)).unwrap();
+            assert!(none.flags().is_empty(), "{empty:?} allows nothing");
+            let e = mount_options::check_allowed(&["--metadata-ttl".into(), "60".into()], &none)
+                .unwrap_err();
+            assert!(
+                e.contains("set and empty") && e.contains("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW"),
+                "{e}"
+            );
+        }
+        let l = parse_mount_options_allow(Some("--cache-xz, -d --metadata-ttl,--debug")).unwrap();
+        assert_eq!(l.flags(), &["--cache-xz", "--debug", "--metadata-ttl"]);
+        assert!(mount_options::check_allowed(
+            &["--cache-xz".into(), "b--usw2-az1--x-s3".into(), "-d".into()],
+            &l
+        )
+        .is_ok());
+        assert!(
+            mount_options::check_allowed(&["--file-mode".into(), "0640".into()], &l).is_err(),
+            "the list replaced the default"
+        );
+        for (bad, names) in [
+            ("--debug --bogus", "--bogus"),
+            ("--region", "spec.region"),
+            ("--allow-other", "--allow-other"),
+            ("-o", "-o"),
+        ] {
+            let e = parse_mount_options_allow(Some(bad)).unwrap_err();
+            assert!(
+                e.contains("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW (node.mountOptionsAllow)")
+                    && e.contains(names),
+                "{bad}: {e}"
+            );
+        }
+    }
+
     /// The webIdentity re-register period sits under half the broker's
     /// TTL floor, so an entry is renewed before it can lapse.
     #[test]
@@ -3440,6 +3527,7 @@ mod tests {
     fn config_requires_the_image_and_node_name() {
         std::env::remove_var("FLINT_S3CSI_NODE_NAME");
         std::env::remove_var("FLINT_S3CSI_PASSTHROUGH_IMAGE");
+        std::env::remove_var("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW");
         assert!(Config::from_env().unwrap_err().contains("FLINT_S3CSI_NODE_NAME"));
         std::env::set_var("FLINT_S3CSI_NODE_NAME", "n");
         assert!(Config::from_env().unwrap_err().contains("FLINT_S3CSI_PASSTHROUGH_IMAGE"));
@@ -3459,6 +3547,30 @@ mod tests {
         assert_eq!(c.identity_modes, parse_identity_modes(DEFAULT_IDENTITY_MODES).unwrap());
         assert!(!c.identity_modes.contains(&CredentialMode::Ambient), "ambient is not in the default list");
         assert!(c.endpoint_allow.is_empty(), "no endpoint list ⇒ any endpoint");
+        // node.mountOptionsAllow end to end: unset is the built-in list,
+        // set-but-empty is NOTHING (not unset), a list replaces it, and a
+        // word that is no allowable flag stops the start by name.
+        assert_eq!(
+            c.mount_options_allow,
+            MountOptionsAllow::builtin(),
+            "unset ⇒ the built-in list"
+        );
+        std::env::set_var("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW", "");
+        assert!(
+            Config::from_env().unwrap().mount_options_allow.flags().is_empty(),
+            "set but empty ⇒ no flag is allowed"
+        );
+        std::env::set_var("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW", "--debug --cache-xz");
+        assert_eq!(
+            Config::from_env().unwrap().mount_options_allow.flags(),
+            &["--debug", "--cache-xz"]
+        );
+        std::env::set_var("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW", "--debug --prefix");
+        assert!(
+            Config::from_env().unwrap_err().contains("--prefix"),
+            "a never-allowable flag is a startup error by name"
+        );
+        std::env::remove_var("FLINT_S3CSI_MOUNT_OPTIONS_ALLOW");
         std::env::set_var("FLINT_S3CSI_IDENTITY_MODES", "broker knox");
         assert!(Config::from_env().unwrap_err().contains("knox"), "a misspelt mode is a startup error by name");
         std::env::set_var("FLINT_S3CSI_IDENTITY_MODES", "ambient");

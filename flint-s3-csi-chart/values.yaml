@@ -145,6 +145,35 @@ node:
   # the endpoint through spec.mountOptions (--endpoint-url).
   endpointAllow: ""
 
+  # The mount-s3 flags a FlintPassthroughMount's spec.mountOptions may
+  # carry (FLINT_S3CSI_MOUNT_OPTIONS_ALLOW; space- or comma-separated, or a
+  # YAML list; each spelled as mount-s3 takes it, e.g. --debug or -d).
+  # Unset (null) ⇒ the built-in list: tuning (--metadata-ttl
+  # --negative-metadata-ttl --memory-target --max-threads
+  # --maximum-throughput-gbps --part-size --read-part-size
+  # --write-part-size), the modes the mount shows (--file-mode --dir-mode),
+  # attributes of the objects written to the CR's own bucket
+  # (--storage-class --sse --sse-kms-key-id --upload-checksums
+  # --bucket-type --expected-bucket-owner --user-agent-prefix
+  # --infer-content-type --incremental-upload --requester-pays) and
+  # --log-metrics. Set, this list REPLACES the built-in one, so name every
+  # flag to allow; set but EMPTY ("" or []) allows NO flag — unlike
+  # endpointAllow, where empty means any. Off the built-in list on purpose,
+  # and yours to add: --cache-xz, --transfer-acceleration, --dual-stack,
+  # --otlp-endpoint, --otlp-export-interval and --bind send the worker's
+  # traffic or data where endpointAllow never judges; --profile,
+  # --no-sign-request and --ca-bundle change its credential or trust
+  # store; --log-directory (-l), --debug (-d), --debug-crt and --no-log its
+  # logging; --allow-root and --auto-unmount. Never allowed, whatever this
+  # says: the flags the mounter sets from a spec field (--prefix --region
+  # --endpoint-url --force-path-style --read-only --allow-delete
+  # --allow-overwrite --uid --gid --cache --max-cache-size), --foreground,
+  # --allow-other, --help, --version and -o. Naming one of those, or a flag
+  # mount-s3 1.24.0 does not have, fails the plugin at start by name. A CR
+  # whose mountOptions carry a flag off the list fails its publish with a
+  # message naming the flag and this knob, before any worker is made.
+  mountOptionsAllow: null
+
   # Above every tenant workload: a kubelet DiskPressure eviction of this
   # pod would strand every mounted pod on the node with nobody to
   # unpublish it (§6.2). Same class the block CSI node uses.

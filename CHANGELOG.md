@@ -47,6 +47,40 @@ covered by the stability guarantee.
   device under `volumeDevices/staging/<pv>/`, which it unbinds before the
   ublk stop, as NodeUnstageVolume does.
 
+### Security
+
+- **A passthrough mount's `spec.mountOptions` is now an allowlist of
+  mount-s3 flags, and the list is the operator's** (2026-10-31, #60;
+  `spdk-csi-driver/src/passthrough/mount_options.rs`,
+  `spdk-csi-driver/src/s3csi/node.rs`, `flint-s3-csi-chart`). The S3 CSI
+  node passed every `spec.mountOptions` entry to mount-s3 except `-o` and
+  `--endpoint-url` (#49). A CR author could add flags that send the
+  worker's traffic or data where `node.endpointAllow` never judges
+  (`--cache-xz` writes object content to another bucket, signed with the
+  mount's credential; `--transfer-acceleration`, `--dual-stack`,
+  `--otlp-endpoint`, `--bind`), change its credential or trust store
+  (`--profile`, `--no-sign-request`, `--ca-bundle`), or turn on file and
+  debug logging in the worker. Now each flag must be on the new chart
+  value `node.mountOptionsAllow`. Unset, that is a built-in list: the
+  tuning flags, `--file-mode` and `--dir-mode`, and attributes of the
+  objects written (`--storage-class`, `--sse`, `--upload-checksums` and
+  the like), which covers every use the docs and the rig's fixtures
+  show. Set, it replaces the built-in list; set but empty, no flag is
+  allowed (unlike `node.endpointAllow`, where empty admits any). A flag
+  the mounter sets from a spec field (`--prefix`, `--region`,
+  `--endpoint-url`, `--force-path-style`, `--read-only`, `--uid`,
+  `--cache` and the rest) is refused whatever the list, naming the field
+  to set instead, and so are `--foreground`, `--allow-other`, `--help`
+  and `--version`; listing one, or a flag mount-s3 1.24.0 does not have,
+  stops the plugin at start-up by name. Entries are read the way mount-s3
+  reads them (`--flag value`, `--flag=value`, `-d`, `-l value`), and a
+  stray positional, a missing value, a value that starts with `-`, a
+  value on a switch, or a flag given twice is refused by name instead of
+  making mount-s3 exit. Every refusal comes at publish, before any worker
+  exists. One change a CR author may notice: a CR that uses a flag off
+  the built-in list (`--debug`, `--log-directory`, `--profile`, ...) is
+  refused until the operator adds that flag.
+
 ## [1.61.3] - 2026-10-31
 
 A fix release. The replicated block path closes several ways its staging,

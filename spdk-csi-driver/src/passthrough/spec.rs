@@ -293,36 +293,14 @@ impl MountSpec {
             ));
         }
 
-        // mount-s3 has no `-o` flag — every option it takes is a
-        // `--long` one — so `-o` here is an s3fs-shaped option that
-        // outlived s3fs. Caught because of what it costs otherwise:
-        // mount-s3 exits on the unknown argument, and the pod is a
-        // PRIVILEGED sidecar in CrashLoopBackOff whose reason exists
-        // only in a container log. Measured on kind 2026-08-27, from a
-        // CR written before the driver field was removed.
-        if let Some(i) = self.mount_options.iter().position(|o| o == "-o") {
-            let val = self.mount_options.get(i + 1).map(String::as_str).unwrap_or("");
-            return Err(format!(
-                "spec.mountOptions contains \"-o\" (\"{val}\") — that is an s3fs option and \
-                 this mounts with Mountpoint for S3, which takes only --long flags and would \
-                 exit on it. Drop it, or write the mount-s3 equivalent"
-            ));
-        }
-        // The endpoint is spec.endpoint's to name: node.endpointAllow judges
-        // that field, and the mounter passes it as --endpoint-url. The same
-        // flag in mountOptions would send the worker, signing with the
-        // mount's credential, to a host the list never judged (issue #49);
-        // beside spec.endpoint, mount-s3 exits on the duplicate flag.
-        if let Some(o) = self
-            .mount_options
-            .iter()
-            .find(|o| *o == "--endpoint-url" || o.starts_with("--endpoint-url="))
-        {
-            return Err(format!(
-                "spec.mountOptions sets the endpoint ({o:?}) — name it in spec.endpoint, which \
-                 node.endpointAllow judges"
-            ));
-        }
+        // spec.mountOptions, read the way mount-s3 1.24.0 reads it (issue
+        // #60): `-o` in any spelling, a flag the mounter sets from a spec
+        // field (`--endpoint-url` among them, #49), one no list admits, a
+        // flag mount-s3 does not have, a stray positional, and a value that
+        // is missing or reads as a flag are refused here by name. Whether
+        // each flag is on the operator's list (node.mountOptionsAllow) is
+        // the node driver's to judge, before any worker exists.
+        super::mount_options::check_shape(&self.mount_options)?;
         if let Some(p) = &self.key_prefix {
             if p.starts_with('/') {
                 return Err(format!(
@@ -393,7 +371,9 @@ mod tests {
 
     /// The endpoint belongs in spec.endpoint, where node.endpointAllow
     /// judges it: --endpoint-url in mountOptions, in either form, would
-    /// send the worker around the list (issue #49). Other flags pass.
+    /// send the worker around the list (issue #49). A flag that only
+    /// looks like it is refused for what it is, an unknown flag (#60);
+    /// the shape of the rest passes `validate`.
     #[test]
     fn an_endpoint_in_mount_options_is_refused() {
         let mut s = MountSpec {
@@ -424,7 +404,37 @@ mod tests {
         }
         s.mount_options =
             vec!["--metadata-ttl".into(), "60".into(), "--endpoint-urls-are-not-a-flag".into()];
-        assert!(s.validate().is_ok(), "other flags are not judged here");
+        let e = s.validate().expect_err("an unknown flag must be refused");
+        assert!(
+            e.contains("--endpoint-urls-are-not-a-flag") && e.contains("not a flag of mount-s3"),
+            "{e}"
+        );
+        s.mount_options = vec!["--metadata-ttl".into(), "60".into(), "--debug".into()];
+        assert!(s.validate().is_ok(), "the operator's list is the node's to judge, not validate's");
+    }
+
+    /// `validate` reads mountOptions the way mount-s3 does (issue #60): a
+    /// flag the mounter sets from a field is refused naming that field, and
+    /// a stray positional and a value that reads as a flag by name.
+    #[test]
+    fn validate_reads_mount_options_as_mount_s3_does() {
+        let mut s: MountSpec =
+            serde_json::from_value(serde_json::json!({ "bucket": "b" })).unwrap();
+        for (opts, want) in [
+            (vec!["--region", "eu-west-1"], "set spec.region instead"),
+            (vec!["--uid=0"], "set spec.uid instead"),
+            (vec!["--cache", "/x"], "set spec.cache instead"),
+            (vec!["--read-only"], "set spec.readOnly instead"),
+            (vec!["--metadata-ttl", "60", "x"], "where a flag belongs"),
+            (vec!["--metadata-ttl", "--file-mode", "0640"], "reads as a flag"),
+            (vec!["-o", "allow_other"], "s3fs option"),
+        ] {
+            s.mount_options = opts.iter().map(|o| o.to_string()).collect();
+            let e = s.validate().expect_err(want);
+            assert!(e.contains(want), "{opts:?}: {e}");
+        }
+        s.mount_options = vec!["--file-mode".into(), "0755".into(), "--dir-mode=0775".into()];
+        assert!(s.validate().is_ok());
     }
 
     /// An enabled cache with no ceiling is unbounded: it fills the

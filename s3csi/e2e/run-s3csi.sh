@@ -2630,7 +2630,7 @@ else
     chart_up >/dev/null 2>&1 && plugin_rolled
 fi
 
-# ── S38 the operator's allowlists: identity.mode and spec.endpoint ──────
+# ── S38 the operator's allowlists: identity.mode, spec.endpoint, mountOptions
 # A CR author chooses identity.mode and spec.endpoint, and the operator
 # had no say. `ambient` is the worker's OWN chain — on EC2 the node's
 # instance role, read-write to whatever that role reaches — and was
@@ -2644,8 +2644,11 @@ fi
 # Running pod that reads; the ambient one past the allowlist (on kind
 # its mounter's own chain holds nothing, which is the rig's business,
 # not the allowlist's: the control is that the refusal is no longer the
-# allowlist's).
-leg S38 "the operator's allowlists: identity.mode ambient is refused by name under the chart's default list; a CR whose endpoint is off node.endpointAllow is refused by name, and so is one with no spec.endpoint (#49); --endpoint-url in spec.mountOptions is refused always (#49); no worker is made for any of them; the first two proceed once the lists admit them"
+# allowlist's). Since #60 spec.mountOptions is an allowlist too
+# (node.mountOptionsAllow; unset here, so the built-in list): a flag off
+# it is refused by name before any worker, and a CR with only listed
+# flags mounts, reads, and shows the --file-mode it asked for.
+leg S38 "the operator's allowlists: identity.mode ambient is refused by name under the chart's default list; a CR whose endpoint is off node.endpointAllow is refused by name, and so is one with no spec.endpoint (#49); --endpoint-url in spec.mountOptions is refused always (#49); a spec.mountOptions flag off node.mountOptionsAllow (--cache-xz, under the built-in list) is refused by name (#60); no worker is made for any of them; the first two proceed once the lists admit them, and a CR with only built-in flags mounts and reads (#60)"
 # The ambient CR is this leg's own: the kind setup applies tenants.yaml,
 # not pt-tenants.yaml.tpl (that is aws-passthrough.sh's), so pt-ambient
 # does not exist here (run 1: NotFound, 2026-10-05).
@@ -2686,6 +2689,36 @@ spec:
   region: $S3_REGION
   uid: 1001
   mountOptions: ["--endpoint-url", "$S3_ENDPOINT"]
+  consumers: { serviceAccounts: [trainer] }
+EOF
+# Issue #60: spec.mountOptions passed any mount-s3 flag the mounter did not
+# set itself. --cache-xz writes object content to ANOTHER bucket, signed
+# with the mount's credential, where node.endpointAllow never judges; it
+# is off the built-in list. The control asks only for built-in flags, in
+# both forms, and a mode it can read back.
+$K apply -f - >/dev/null <<EOF
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: s38-xz, namespace: $NS }
+spec:
+  bucket: $BUCKET
+  keyPrefix: s38/xz
+  region: $S3_REGION
+  endpoint: $S3_ENDPOINT
+  uid: 1001
+  mountOptions: ["--metadata-ttl", "60", "--cache-xz", "s38xz--usw2-az1--x-s3"]
+  consumers: { serviceAccounts: [trainer] }
+---
+apiVersion: chert.us/v1alpha1
+kind: FlintPassthroughMount
+metadata: { name: s38-allowed, namespace: $NS }
+spec:
+  bucket: $BUCKET
+  keyPrefix: datasets/imagenet
+  region: $S3_REGION
+  endpoint: $S3_ENDPOINT
+  uid: 1001
+  mountOptions: ["--metadata-ttl", "60", "--file-mode=0640", "--max-threads", "8"]
   consumers: { serviceAccounts: [trainer] }
 EOF
 if chart_up --set node.identityModes="broker webIdentity static stsSecret" --set node.endpointAllow="*.amazonaws.com" >/dev/null 2>&1 && plugin_rolled; then
@@ -2737,6 +2770,30 @@ if chart_up --set node.identityModes="broker webIdentity static stsSecret" --set
             && ok "with no list, --endpoint-url in spec.mountOptions is still refused (the CR's validation)" \
             || bad "with no list, s38-mopt was not refused for its mountOptions endpoint: $(mount_events s38-mopt | tail -1 | cut -c1-200)"
         $K -n $NS delete pod s38-ambient s38-endpoint s38-mopt --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
+        # #60: node.mountOptionsAllow is unset here, so the built-in list.
+        # --cache-xz is off it: refused by name, before any worker. CONTROL:
+        # only built-in flags, separate and `=` forms, mount and read — and
+        # the file shows the --file-mode=0640 the CR asked for, so the flags
+        # reached mount-s3 rather than being dropped on the way.
+        sed -e "s#__NAME__#s38-xz#g" -e "s#__CR__#s38-xz#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
+        sed -e "s#__NAME__#s38-allowed#g" -e "s#__CR__#s38-allowed#g" -e "s#__NODE__#$NODE#g" pt-pod.yaml.tpl | $K apply -f - >/dev/null
+        if ev=$(wait_event s38-xz FailedMount "node.mountOptionsAllow" 180); then
+            echo "$ev" | grep -q -- "contains --cache-xz" \
+                && ok "--cache-xz in spec.mountOptions is refused under the built-in list, naming the flag and the knob" \
+                || bad "the mountOptions refusal does not name --cache-xz: $(echo "$ev" | cut -c1-200)"
+        else
+            bad "no FailedMount naming node.mountOptionsAllow on s38-xz in 180 s (#60): $(mount_events s38-xz | tail -1 | cut -c1-200)"
+        fi
+        [ -z "$(worker_of_any s38-xz)" ] && ok "no worker exists for the --cache-xz pod: the refusal came before any worker" || bad "a worker exists for the refused --cache-xz pod: $(worker_of_any s38-xz)"
+        if wait_phase s38-allowed Running 240 && [ "$(inpod s38-allowed 'cat /mnt/s3/shard-01.txt')" = seeded-object-01 ]; then
+            mode=$(inpod s38-allowed 'stat -c %a /mnt/s3/shard-01.txt')
+            [ "$mode" = 640 ] \
+                && ok "CONTROL: a CR with only built-in flags (--metadata-ttl 60 --file-mode=0640 --max-threads 8) mounts and reads, at the mode it asked for ($mode)" \
+                || bad "CONTROL: s38-allowed reads, but shows mode '$mode', not the 640 its --file-mode=0640 asked for"
+        else
+            bad "CONTROL: s38-allowed (only built-in flags) did not mount and read: $(mount_events s38-allowed | tail -1 | cut -c1-200)"
+        fi
+        $K -n $NS delete pod s38-xz s38-allowed --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1
     else
         bad "chart restore failed"
     fi
@@ -2744,7 +2801,7 @@ else
     bad "PRECONDITION: chart_up with the allowlists did not roll — S38 made no observation"
     chart_up >/dev/null 2>&1 && plugin_rolled
 fi
-$K -n $NS delete flintpassthroughmount s38-ambient s38-noep s38-mopt --ignore-not-found >/dev/null 2>&1
+$K -n $NS delete flintpassthroughmount s38-ambient s38-noep s38-mopt s38-xz s38-allowed --ignore-not-found >/dev/null 2>&1
 
 # ── S21 (audit 2026-09-03, finding 4) ─────────────────────────────────
 # A node reboot empties the worker's memory-backed comm dir: the

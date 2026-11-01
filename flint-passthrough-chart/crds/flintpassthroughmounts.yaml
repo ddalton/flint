@@ -177,15 +177,34 @@ spec:
                 mountOptions:
                   type: array
                   description: >-
-                    Extra mount-s3 arguments, appended verbatim as ARGV
-                    (never through a shell). A flag and its value are
-                    two entries: ["--metadata-ttl", "60"].
+                    Extra mount-s3 flags, appended as ARGV (never through a
+                    shell). A flag and its value are two entries,
+                    ["--metadata-ttl", "60"], or one, "--metadata-ttl=60".
+                    Only flags on the s3 CSI node's list are taken: its
+                    operator's node.mountOptionsAllow, by default
+                    --metadata-ttl, --negative-metadata-ttl,
+                    --memory-target, --max-threads,
+                    --maximum-throughput-gbps, --part-size,
+                    --read-part-size, --write-part-size, --file-mode,
+                    --dir-mode, --storage-class, --sse, --sse-kms-key-id,
+                    --upload-checksums, --bucket-type,
+                    --expected-bucket-owner, --user-agent-prefix,
+                    --infer-content-type, --incremental-upload,
+                    --requester-pays and --log-metrics. Any other flag, an
+                    entry that is neither a flag nor its value, a value
+                    that starts with -, and a flag given twice fail the
+                    publish by name, before any worker is made.
                     ["--file-mode", "0755"] and ["--dir-mode", "0775"]
                     are the only way to change the modes the mount shows
-                    (default 0644 and 0755): chmod is refused.
-                    --endpoint-url is refused here: the endpoint is
-                    spec.endpoint's to name, where the s3 CSI node's
-                    node.endpointAllow judges it.
+                    (default 0644 and 0755): chmod is refused. A flag the
+                    mounter sets from a field is refused whatever the
+                    list; set the field instead: keyPrefix (--prefix),
+                    region (--region), endpoint (--endpoint-url; there the
+                    s3 CSI node's node.endpointAllow judges it), pathStyle
+                    (--force-path-style), readOnly (--read-only,
+                    --allow-delete, --allow-overwrite), uid (--uid), gid
+                    (--gid), cache (--cache, --max-cache-size). -o, an
+                    s3fs option, is refused too.
                   items:
                     type: string
                 cache:
