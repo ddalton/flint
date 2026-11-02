@@ -12,6 +12,52 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.62.1] - 2026-11-02
+
+A patch release. Every image is rebuilt on current Chainguard bases,
+which fix a critical and a high CVE in OS packages the 1.62.0 images
+shipped (#74). No flint source changed beyond version pins. The CSI gRPC
+verbs, StorageClass parameters and volume_context keys are as in 1.62.0,
+the crates are unchanged (`flint-lean` 0.12.0, `flint-lean-gateway`
+0.10.0, `flint-store` 0.2.1), and `spdk-tgt` stays 1.7.3.
+
+Validated 2026-11-02, only as far as the user asked: no gates for this
+release, so the CSI driver's restart gate is waived and no test suites
+or E2E ran. Each new pin is the current index digest of its tag and
+carries linux/amd64 and linux/arm64 (`scripts/refresh-chainguard-bases.sh
+--check`). Read from the registry on both arches, `wolfi-base`
+`sha256:fd50bd0c…` carries `ca-certificates-bundle` 20261020-r0 and
+`libbrotli*` 1.2.1-r3, and `static` `sha256:fc42af33…` carries
+`ca-certificates-bundle` 20261020-r0; the old pins carried 20260909-r2
+and 1.2.0-r6. The advisory gate is clean across 7 lockfiles, the lite
+chart render matches its fixture, and every shipped binary builds
+`--locked` for x86_64 and aarch64 musl.
+
+### Security
+
+- **Every image is rebuilt on current Chainguard bases** (2026-11-02,
+  #74; `spdk-csi-driver/docker/Dockerfile*`). The 1.62.0 images carried
+  `ca-certificates-bundle` 20260909-r2 (CVE-2026-91403, critical;
+  CVE-2026-111943, medium), and those on `wolfi-base` also
+  `libbrotlicommon1`, `libbrotlidec1` and `libbrotlienc1` 1.2.0-r6
+  (CVE-2026-111497, high). Each Dockerfile pins its base by digest,
+  `wolfi-base` in nine and `static` in the two operator images, and the
+  pins had not moved since 2026-10-19. `apk add --no-cache` installs what
+  a base lacks but does not upgrade what it already has, so those
+  packages stayed at the pinned versions however recently an image was
+  built, and the S3 worker images inherit them from the mounter and sync
+  images they are built `FROM`. The pins now name `wolfi-base`
+  `sha256:fd50bd0c…` and `static` `sha256:fc42af33…`, with
+  `ca-certificates-bundle` 20261020-r0 and `libbrotli*` 1.2.1-r3. The
+  release's advisory gate reads only the `Cargo.lock` files, so it never
+  saw these OS packages; scanning the built images is still open in #74.
+- **`pulldown-cmark` 0.13.6** (2026-11-02, #75;
+  `spdk-csi-driver/Cargo.lock`). RUSTSEC-2026-0433: quadratic parsing of
+  nested image wikilinks, only with `ENABLE_WIKILINKS`. It is a build
+  dependency (`tonic-prost-build` → `prost-build`, which tidies the doc
+  comments of flint's own `.proto` files) and in no shipped binary; the
+  bump clears the release's advisory gate and the daily scan.
+
 ## [1.62.0] - 2026-11-01
 
 A minor release. A passthrough mount's `spec.mountOptions` becomes an
@@ -11985,7 +12031,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.62.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.62.1...HEAD
+[1.62.1]: https://github.com/ddalton/flint/compare/v1.62.0...v1.62.1
 [1.62.0]: https://github.com/ddalton/flint/compare/v1.61.3...v1.62.0
 [1.61.3]: https://github.com/ddalton/flint/compare/v1.61.2...v1.61.3
 [1.61.2]: https://github.com/ddalton/flint/compare/v1.61.1...v1.61.2
