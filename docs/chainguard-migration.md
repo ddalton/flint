@@ -138,8 +138,19 @@ scripts/refresh-chainguard-bases.sh           # rewrite stale digests in place
 It resolves each `ARG BASE_IMAGE=cgr.dev/chainguard/<name>:<tag>` line's current
 index digest with `docker buildx imagetools inspect` (a registry read, no pull),
 requires linux/amd64 and linux/arm64 in the index, and rewrites only the digest.
-A resolution failure exits 2 and is never reported as "current". It is not
-wired into `scripts/release.sh`.
+A resolution failure exits 2 and is never reported as "current".
+
+**A release refuses a stale pin** (since 2026-11-02, #74).
+`scripts/base-pin-gate.sh` runs `--check` before `publish-images.sh` builds
+anything and before `scripts/release.sh images|chart|all` pushes; a pin that is
+behind its tag, a base that is not pinned, or a registry that does not answer
+refuses. `publish-images.sh --dry-run` and `release.sh check` only report.
+1.62.0 shipped bases that had been superseded for at least four days, with a critical
+CVE in `ca-certificates-bundle`, because nothing ran the refresh. There is no
+grace period, so refresh the pins as the last edit before the release commit.
+If the tag moves between that commit and the publish, cut the next patch with
+fresh pins, or set `BASE_PIN_WAIVER="<why>"` for that one run; the waiver is
+printed in the release log.
 
 The free `cgr.dev/chainguard/*` tier serves `:latest` (and `-dev`) tags. There is
 **no `:nonroot` tag** (`static:nonroot` is not found; that is gcr.io

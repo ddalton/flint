@@ -13,7 +13,9 @@
 # and it also FREEZES the base: Chainguard rebuilds `:latest` as CVEs are
 # fixed, and a pin nobody moves ships last month's CVEs forever — the
 # opposite of why the images moved to Chainguard. So a release refreshes
-# the pins (and rebuilds), and `--check` says whether that was done.
+# the pins (and rebuilds), and `--check` says whether that was done:
+# scripts/base-pin-gate.sh runs it before publish-images.sh builds and
+# before release.sh pushes, and refuses a stale pin (since 2026-11-02).
 #
 # WHAT IT DOES
 #

@@ -85,6 +85,12 @@ done
 # like them. See scripts/cve-gate.sh.
 if [ "$cmd" = check ]; then "$here/cve-gate.sh" --report; else "$here/cve-gate.sh"; fi
 
+# BASE-PIN GATE (2026-11-02, #74): the same split, for the Chainguard
+# base images the Dockerfiles pin by digest. 1.62.0 passed the CVE gate
+# and shipped bases superseded at least four days earlier, as that gate reads
+# only the Cargo.lock files. See scripts/base-pin-gate.sh.
+if [ "$cmd" = check ]; then "$here/base-pin-gate.sh" --report; else "$here/base-pin-gate.sh"; fi
+
 # --- read the chart ---------------------------------------------------------
 # images_table lines:  <name> <tag> <context-dir> <dockerfile-rel-to-context>
 # The build recipes live here too so values.yaml stays the single source of

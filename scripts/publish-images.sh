@@ -85,6 +85,13 @@ crate=$(cd "$here/../spdk-csi-driver" && pwd)
 # still shows everything a real run would do. See scripts/cve-gate.sh.
 if [ "$dry" = "--dry-run" ]; then "$here/cve-gate.sh" --report; else "$here/cve-gate.sh"; fi
 
+# BASE-PIN GATE (2026-11-02, #74): every image here sits on a Chainguard
+# base pinned by digest (the two worker images through the mounter and
+# sync images they are built FROM), and a stale pin ships last month's OS
+# packages however fresh the binaries are. Same dry-run rule. See
+# scripts/base-pin-gate.sh.
+if [ "$dry" = "--dry-run" ]; then "$here/base-pin-gate.sh" --report; else "$here/base-pin-gate.sh"; fi
+
 cd "$crate"
 
 [ -d docker/prebuilt/amd64 ] && [ -d docker/prebuilt/arm64 ] || {

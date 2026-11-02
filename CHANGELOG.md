@@ -12,6 +12,24 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Security
+
+- **A release now refuses a stale Chainguard base pin** (2026-11-02,
+  #74; `scripts/base-pin-gate.sh`, `scripts/publish-images.sh`,
+  `scripts/release.sh`). 1.62.0 shipped every image on bases pinned on
+  2026-10-19, at least four days after Chainguard published bases that
+  fixed a critical CVE in `ca-certificates-bundle` and a high one in
+  brotli. The CVE gate reads only the `Cargo.lock` files, and nothing ran
+  `scripts/refresh-chainguard-bases.sh`. Now `publish-images.sh` refuses
+  to build, and `release.sh images`, `chart` and `all` refuse to push,
+  unless every Dockerfile's Chainguard base pin is its tag's current
+  digest; a base that is not pinned, or a registry that does not answer,
+  refuses too. `publish-images.sh --dry-run` and `release.sh check`
+  report instead. A pin is stale as soon as its tag moves, so refresh the
+  pins as the last edit before a release commit;
+  `BASE_PIN_WAIVER="<why>"` lets one run through and is printed in the
+  release log.
+
 ## [1.62.1] - 2026-11-02
 
 A patch release. Every image is rebuilt on current Chainguard bases,
