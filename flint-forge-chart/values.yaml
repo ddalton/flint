@@ -30,7 +30,7 @@ global:
 image:
   registry: ""
   repository: dilipdalton/flint-forge-operator
-  tag: "1.61.3"
+  tag: "1.62.0"
   ref: ""
   pullPolicy: IfNotPresent
 

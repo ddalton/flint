@@ -12,6 +12,59 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.62.0] - 2026-11-01
+
+A minor release. A passthrough mount's `spec.mountOptions` becomes an
+allowlist of mount-s3 flags, set by the operator with the S3 CSI chart's
+new `node.mountOptionsAllow` (#60), and its values may no longer hold
+control characters (#72); deleting a single-replica volume no
+longer unstages every other filesystem volume on its storage node, and
+it cleans up a raw block volume's staged device; and an NFS server in
+attached-nodes mode no longer watches every Node in the cluster. The CSI
+gRPC verbs, StorageClass parameters and volume_context keys are as in
+1.61.3, and the crates are unchanged (`flint-lean` 0.12.0,
+`flint-lean-gateway` 0.10.0, `flint-store` 0.2.1). One change a CR author
+may notice: a passthrough CR whose `spec.mountOptions` carries a flag off
+the built-in list (`--debug`, `--log-directory`, `--profile`, ...) is
+refused at publish until the operator adds that flag (see Security).
+
+Validated 2026-11-01. The CSI driver's restart gate was waived for this
+release: no code on the restart path changed since 1.61.3 (the
+force-unstage fix runs only from DeleteVolume, and the NFS watch change
+only with Kerberos). On the Linux box, against the release candidate
+(`flint-driver:1.62.0-rc1`, `sha256:9c0d17b5…`, built from acec6f72) and
+S3 CSI images built from the release's source:
+- **kind, SPDK on malloc disks:** deleting a single-replica volume left
+  another filesystem volume staged on its node mounted, and unbound a raw
+  block volume's staged device. The published 1.61.3 driver unmounted the
+  first and left the second bound.
+- **kind, RustFS as the store:** the S3 CSI legs S1-S6 and S38 passed 57
+  ok, 0 bad. `node.mountOptionsAllow` ran live in every mode, 55 ok, 0 bad,
+  both before and after #72:
+  - unset, with every refusal by name and no worker
+  - a list, as a string and as a YAML list with a short flag
+  - set but empty
+  - an entry no list admits, which stops the plugin by name
+  - a shared read-only mount
+  - both operator lists at once
+
+  A `--user-agent-prefix` value with CR/LF is refused at publish with no
+  worker; before the fix, mount-s3 1.24.0 sent no request carrying it.
+- **kind, Kerberos:** the RWX suite (`rwx-krb5`) against the candidate and
+  the pNFS suite (`pnfs-krb5`, built from the same commit) passed. Their
+  servers now watch VolumeAttachments without Nodes.
+
+Everything was built `--locked`:
+- the advisory gate is clean across 7 lockfiles
+- spdk-csi-driver's lib: 2,816 passed
+- the lite operator and s3csi tests: 291 passed
+- the s3csi root tests: 3 of 3 under sudo, none skipped
+- the lite chart render matches its fixture
+- the driver, flint-sync, gateway, forge and s3-worker build for x86_64
+  and aarch64 musl
+
+CI is green on 7ca82dd7.
+
 ### Changed
 
 - **An NFS server no longer watches every Node in the cluster**
@@ -11932,7 +11985,9 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.61.2...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.62.0...HEAD
+[1.62.0]: https://github.com/ddalton/flint/compare/v1.61.3...v1.62.0
+[1.61.3]: https://github.com/ddalton/flint/compare/v1.61.2...v1.61.3
 [1.61.2]: https://github.com/ddalton/flint/compare/v1.61.1...v1.61.2
 [1.61.1]: https://github.com/ddalton/flint/compare/v1.61.0...v1.61.1
 [1.61.0]: https://github.com/ddalton/flint/compare/v1.60.3...v1.61.0

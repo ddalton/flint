@@ -30,8 +30,8 @@ Everything below was run end to end on 2026-09-15 against the published
 charts `flint-lean` 0.11.0 and `flint-s3-csi` 0.3.0 (images 1.54.0), on a
 kind cluster (Kubernetes 1.36) with MinIO standing in for the bucket — the
 only change for that was `endpoint:` and the keys. The commands pin
-`flint-lean` 0.14.12 and `flint-s3-csi` 0.5.10 (images 1.61.3), this
-release: it carries lean syncer fixes and the same install surface.
+`flint-lean` 0.14.13 and `flint-s3-csi` 0.5.11 (images 1.62.0), this
+release, which keeps the same install surface.
 Commands are copy-pasteable, not illustrative.
 
 ---
@@ -64,13 +64,13 @@ kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_REGION=us-west-1
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.12 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.13 \
   -n flint-system \
   --set operatorCredentialsSecret=s3
   # add --set endpoint=http://... for a non-AWS store
 
 helm install flint-s3-csi \
-  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.10 \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.11 \
   -n flint-system \
   --set broker.static.secretRef=s3 \
   --set node.region=us-west-1
