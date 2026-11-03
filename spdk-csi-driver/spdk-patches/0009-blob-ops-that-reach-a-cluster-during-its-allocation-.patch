@@ -20,10 +20,10 @@ Formerly spdk-csi-driver/blob-alloc-window-order.patch.
  2 files changed, 213 insertions(+)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 64d20b982..76925dcb4 100644
+index f80e01af6..69fbd3f8d 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -2695,6 +2695,84 @@ bs_claim_alloc_slot(struct spdk_bs_channel *ch, struct spdk_blob *blob, uint32_t
+@@ -2711,6 +2711,84 @@ bs_claim_alloc_slot(struct spdk_bs_channel *ch, struct spdk_blob *blob, uint32_t
  	return NULL;
  }
  
@@ -108,7 +108,7 @@ index 64d20b982..76925dcb4 100644
  static void
  blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
  {
-@@ -3289,6 +3367,10 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
+@@ -3305,6 +3383,10 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
  	}
  	case SPDK_BLOB_WRITE:
  	case SPDK_BLOB_WRITE_ZEROES: {
@@ -119,7 +119,7 @@ index 64d20b982..76925dcb4 100644
  		if (is_allocated) {
  			/* Write to the blob */
  			spdk_bs_batch_t *batch;
-@@ -3329,6 +3411,11 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
+@@ -3345,6 +3427,11 @@ blob_request_submit_op_single(struct spdk_io_channel *_ch, struct spdk_blob *blo
  		struct spdk_blob_free_cluster_ctx *ctx = NULL;
  		spdk_bs_batch_t *batch;
  
@@ -131,7 +131,7 @@ index 64d20b982..76925dcb4 100644
  		/* if aligned with cluster release cluster,
  		 * but if blob locked_operation_in_progress has been set
  		 * because of some specical cases, such as doing inflate,
-@@ -3619,6 +3706,11 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_chan
+@@ -3635,6 +3722,11 @@ blob_request_submit_rw_iov(struct spdk_blob *blob, struct spdk_io_channel *_chan
  							 rw_iov_done, NULL);
  			}
  		} else {

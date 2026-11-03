@@ -12,10 +12,10 @@ Formerly spdk-csi-driver/blob-shutdown-debug.patch.
  1 file changed, 7 insertions(+), 1 deletion(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 85569bd21..880af453c 100644
+index 8801c8467..1c9e3adbd 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -6027,6 +6027,9 @@ spdk_bs_destroy(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn,
+@@ -6038,6 +6038,9 @@ spdk_bs_destroy(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn,
  static void
  bs_unload_finish(struct spdk_bs_load_ctx *ctx, int bserrno)
  {
@@ -25,7 +25,7 @@ index 85569bd21..880af453c 100644
  	spdk_bs_sequence_t *seq = ctx->seq;
  	struct spdk_blob_store *bs = ctx->bs;
  
-@@ -6138,7 +6141,10 @@ spdk_bs_unload(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn, void *cb_a
+@@ -6149,7 +6152,10 @@ spdk_bs_unload(struct spdk_blob_store *bs, spdk_bs_op_complete cb_fn, void *cb_a
  	struct spdk_bs_cpl	cpl;
  	struct spdk_bs_load_ctx *ctx;
  

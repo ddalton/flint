@@ -16,10 +16,10 @@ Formerly spdk-csi-driver/blob-parallel-cluster-alloc.patch.
  3 files changed, 476 insertions(+), 24 deletions(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 880af453c..9e3b28eb1 100644
+index 1c9e3adbd..ee55b343b 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -2650,6 +2650,7 @@ struct spdk_blob_copy_cluster_ctx {
+@@ -2666,6 +2666,7 @@ struct spdk_blob_copy_cluster_ctx {
  	uint32_t new_extent_page;
  	spdk_bs_sequence_t *seq;
  	struct spdk_blob_md_page *new_cluster_page;
@@ -27,7 +27,7 @@ index 880af453c..9e3b28eb1 100644
  };
  
  struct spdk_blob_free_cluster_ctx {
-@@ -2663,17 +2664,58 @@ struct spdk_blob_free_cluster_ctx {
+@@ -2679,17 +2680,58 @@ struct spdk_blob_free_cluster_ctx {
  	struct spdk_bs_channel *bs_channel;
  };
  
@@ -88,7 +88,7 @@ index 880af453c..9e3b28eb1 100644
  	while (!TAILQ_EMPTY(&requests)) {
  		op = TAILQ_FIRST(&requests);
  		TAILQ_REMOVE(&requests, op, link);
-@@ -2684,6 +2726,17 @@ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+@@ -2700,6 +2742,17 @@ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
  		}
  	}
  
@@ -106,7 +106,7 @@ index 880af453c..9e3b28eb1 100644
  	spdk_free(ctx->buf);
  	free(ctx);
  }
-@@ -2866,6 +2919,7 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -2882,6 +2935,7 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  {
  	struct spdk_bs_cpl cpl;
  	struct spdk_bs_channel *ch;
@@ -114,7 +114,7 @@ index 880af453c..9e3b28eb1 100644
  	struct spdk_blob_copy_cluster_ctx *ctx;
  	uint64_t cluster_start_io_unit;
  	uint32_t cluster_number;
-@@ -2877,14 +2931,6 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -2893,14 +2947,6 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  
  	ch = spdk_io_channel_get_ctx(_ch);
  
@@ -129,7 +129,7 @@ index 880af453c..9e3b28eb1 100644
  	/* Round the io_unit offset down to the first io_unit in the cluster */
  	cluster_start_io_unit = bs_io_unit_to_cluster_start(blob, io_unit);
  
-@@ -2892,6 +2938,23 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -2908,6 +2954,23 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  	 * cluster is supposed to be at. */
  	cluster_number = bs_io_unit_to_cluster_number(blob, io_unit);
  
@@ -153,7 +153,7 @@ index 880af453c..9e3b28eb1 100644
  	ctx = calloc(1, sizeof(*ctx));
  	if (!ctx) {
  		bs_user_op_abort(op, -ENOMEM);
-@@ -2902,7 +2965,6 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -2918,7 +2981,6 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  
  	ctx->blob = blob;
  	ctx->io_unit = cluster_start_io_unit;
@@ -161,7 +161,7 @@ index 880af453c..9e3b28eb1 100644
  
  	/* Check if the cluster that we intend to do CoW for is valid for
  	 * the backing dev. For zeroes backing dev, it'll be always valid.
-@@ -2955,8 +3017,15 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -2971,8 +3033,15 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  		return;
  	}
  
@@ -179,7 +179,7 @@ index 880af453c..9e3b28eb1 100644
  
  	if (blob->parent_id != SPDK_BLOBID_INVALID && !is_zeroes) {
  		if (can_copy) {
-@@ -3677,20 +3746,30 @@ bs_channel_create(void *io_device, void *ctx_buf)
+@@ -3693,20 +3762,30 @@ bs_channel_create(void *io_device, void *ctx_buf)
  		return -1;
  	}
  
@@ -218,7 +218,7 @@ index 880af453c..9e3b28eb1 100644
  		free(channel->req_mem);
  		channel->dev->destroy_channel(channel->dev, channel->dev_channel);
  		return -1;
-@@ -3710,6 +3789,15 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
+@@ -3726,6 +3805,15 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
  {
  	struct spdk_bs_channel *channel = ctx_buf;
  	spdk_bs_user_op_t *op;
@@ -234,7 +234,7 @@ index 880af453c..9e3b28eb1 100644
  
  	while (!TAILQ_EMPTY(&channel->need_cluster_alloc)) {
  		op = TAILQ_FIRST(&channel->need_cluster_alloc);
-@@ -3726,7 +3814,9 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
+@@ -3742,7 +3830,9 @@ bs_channel_destroy(void *io_device, void *ctx_buf)
  	blob_esnap_destroy_bs_channel(channel);
  
  	free(channel->req_mem);

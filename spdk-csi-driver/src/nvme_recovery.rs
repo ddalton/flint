@@ -158,17 +158,26 @@ impl ReconnectPolicy {
 
     /// The `nvme connect` argument fragment for this policy.
     ///
-    /// NOTE fast-io-fail is deliberately NOT here. `nvme connect` in the
-    /// shipped image (nvme-cli 2.8) exposes only `--keep-alive-tmo` and
-    /// `--ctrl-loss-tmo` — verified by running `nvme connect --help` inside
-    /// the driver container on a live node. Passing an unknown flag would
+    /// NOTE fast-io-fail is deliberately NOT here. `nvme connect` has no
+    /// option for it (nvme-cli 2.8 when this was written; the shipped
+    /// Chainguard driver image carries 3.2, and `nvme connect --help` there
+    /// still lists none, checked 2026-11-02). Passing an unknown flag would
     /// fail EVERY attach, so it goes through sysfs after connect instead.
+    ///
+    /// `--disable-sqflow` asks the target to disable SQ flow control. Since
+    /// SPDK v26.09 (00c2f8cd4) the TCP target marks a READ's last data PDU
+    /// SUCCESS, so the host completes the READ without waiting for a
+    /// response capsule, only for a host that asked for this at connect;
+    /// for any other host every READ costs one more PDU. A v26.05 target
+    /// ignores the request and always marked SUCCESS, so the flag is safe
+    /// against either.
     pub fn connect_args(&self) -> Vec<String> {
         vec![
             "--ctrl-loss-tmo".to_string(),
             self.ctrl_loss_tmo_secs.to_string(),
             "--reconnect-delay".to_string(),
             self.reconnect_delay_secs.to_string(),
+            "--disable-sqflow".to_string(),
         ]
     }
 
@@ -583,8 +592,33 @@ mod tests {
         assert_eq!(p.reconnect_delay_secs, 5);
         assert_eq!(
             p.connect_args(),
-            vec!["--ctrl-loss-tmo", "1800", "--reconnect-delay", "5"]
+            vec![
+                "--ctrl-loss-tmo",
+                "1800",
+                "--reconnect-delay",
+                "5",
+                "--disable-sqflow"
+            ]
         );
+    }
+
+    /// Without the request a v26.09 target sends every READ an extra
+    /// response capsule (00c2f8cd4); both kernel connect paths (node agent,
+    /// pNFS block session) take their flags from here, and so does a
+    /// same-node connect.
+    #[test]
+    fn every_kernel_connect_asks_to_disable_sq_flow_control() {
+        for p in [
+            ReconnectPolicy::default(),
+            ReconnectPolicy::same_node_from_lookup(|_| None),
+            ReconnectPolicy::for_target("127.0.0.1"),
+            ReconnectPolicy::for_target("10.0.0.7"),
+        ] {
+            assert!(
+                p.connect_args().iter().any(|a| a == "--disable-sqflow"),
+                "{p:?}"
+            );
+        }
     }
 
     /// The regression for the runay D-state wedge: queued I/O on the KERNEL
@@ -606,9 +640,10 @@ mod tests {
         );
     }
 
-    /// nvme-cli 2.8 in the shipped image has no fast-io-fail flag (verified
-    /// with `nvme connect --help` on a live node), so passing one would fail
-    /// EVERY attach. It must travel via sysfs, never in the argv.
+    /// nvme-cli in the shipped image has no fast-io-fail flag (2.8, verified
+    /// with `nvme connect --help` on a live node; 3.2 in the Chainguard
+    /// image, checked 2026-11-02), so passing one would fail EVERY attach.
+    /// It must travel via sysfs, never in the argv.
     #[test]
     fn fast_io_fail_never_leaks_into_the_connect_arguments() {
         let p = ReconnectPolicy::default();

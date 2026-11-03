@@ -33,8 +33,8 @@ ones, and amend the commits' `Fixes` lines (keep the Change-Ids).
 
 | # | What | GitHub issue | Gerrit change | Local patch | Status (date) |
 |---|------|--------------|---------------|-------------|---------------|
-| 1 | Snapshot during a cluster allocation writes an extent page over md page 0; the lvolstore fails to load. | spdk/spdk#3113 (closed 2024, unreproducible; reopen requested) | [29555](https://review.spdk.io/c/spdk/spdk/+/29555) (`I452a0154469e29772040eed147e9ef6099709755`) | `spdk-patches/0008-*` (was `blob-extent-page-md0.patch`) | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/3113#issuecomment-6327105627) asks @jimharris to reopen |
-| 2 | A write to a cluster being allocated completes before the mapping is persisted and can be overtaken (raid1 legs diverge; crash loses an acked write). | spdk/spdk#2144 (closed 2024, stale; reopen requested) | [29556](https://review.spdk.io/c/spdk/spdk/+/29556) (`Iedd02cdb146a4af3cd6aaa778006fbc9fa410f48`) | `spdk-patches/0009-*` (was `blob-alloc-window-order.patch`) | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/2144#issuecomment-6327106023) asks @tomzawadzki to reopen |
+| 1 | Snapshot during a cluster allocation writes an extent page over md page 0; the lvolstore fails to load. | spdk/spdk#3113 (closed 2024, unreproducible; reopen requested) | [29555](https://review.spdk.io/c/spdk/spdk/+/29555) (`I452a0154469e29772040eed147e9ef6099709755`) | `spdk-patches/0008-*` (was `blob-extent-page-md0.patch`) | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/3113#issuecomment-6327105627) asks @jimharris to reopen. 2026-11-02: PS2 Verified+1, no maintainer vote; issue still closed; nvidia-cr-bot review (2026-10-23) UNANSWERED: the undo after a failed extent page write acts on the blob's current map, which a snapshot swap may have replaced (num_allocated_clusters underflow, releases a cluster the snapshot maps); tests build the race state by hand; the new undo paths are untested |
+| 2 | A write to a cluster being allocated completes before the mapping is persisted and can be overtaken (raid1 legs diverge; crash loses an acked write). | spdk/spdk#2144 (closed 2024, stale; reopen requested) | [29556](https://review.spdk.io/c/spdk/spdk/+/29556) (`Iedd02cdb146a4af3cd6aaa778006fbc9fa410f48`) | `spdk-patches/0009-*` (was `blob-alloc-window-order.patch`) | 2026-10-21: change pushed; [comment](https://github.com/spdk/spdk/issues/2144#issuecomment-6327106023) asks @tomzawadzki to reopen. 2026-11-02: PS2 Verified+1, no maintainer vote; issue still closed; nvidia-cr-bot review (2026-10-23) UNANSWERED: only the allocating channel parks, so a write from another channel to the same cluster is acked before the mapping is persisted (a crash then reads it back as zeros); the ordering the test asserts is not a blobstore guarantee; one parked op tested, failed-allocation path untested |
 
 Evidence for both: bench4, 2026-10-21
 (`bench/results/2026-10-21-ec2-phase3/`: `lvs-load-failure/ANALYSIS.md`,
@@ -45,7 +45,9 @@ master 58e2d77bb. The stock-master ports and the md0 reproducer
 ### Flint's local patches vs the upstream changes
 
 Flint's patches are written against Flint's SPDK tree (v26.05 + the
-concurrent-allocation patch), so they differ from the Gerrit changes:
+concurrent-allocation patch until 2026-11-02, v26.09 + it since; both carried
+to v26.09 with their changed lines unchanged), so they differ from the Gerrit
+changes:
 
 - 0009 (`blob-alloc-window-order`) vs 29556. Flint queues window ops on the
   allocation slot (up to 32 in flight per channel); upstream records the one

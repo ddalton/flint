@@ -12,6 +12,38 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **spdk-tgt is built on SPDK v26.09** (2026-11-02;
+  `spdk-csi-driver/spdk-patches/`, `docker/Dockerfile.spdk`). The base
+  moves from v26.05, and Flint's patch series moves with it: the raid
+  skip_rebuild and leased-quiesce patch (0006) now declares its RPCs in
+  v26.09's generated `schema/schema.yaml`, with its raid code unchanged,
+  and the other eleven carry over unchanged. The image is not published
+  yet: the chart pins spdk-tgt 1.7.3 (v26.05) until the next release
+  builds and pins the new one. The assessment and every check below are
+  in `spdk-csi-driver/docs/spdk-2609-upgrade/README.md`.
+- **An lvol or raid export still receives FLUSH on v26.09** (new patch
+  0013). v26.09 advertises a volatile write cache only for a bdev that
+  reports one, and lvol and raid bdevs never did. A kernel nvme-tcp host
+  then ran the device write-through and never sent FLUSH, so the lvol
+  FLUSH handler that commits blob metadata (the F5 fix) never ran.
+  Measured on the box: without 0013 the host reads `write through` and an
+  fsync sends no FLUSH; with it, `write back` and one FLUSH, as on v26.05.
+- **A read keeps costing one PDU on v26.09** (`nvme_recovery.rs`,
+  `spdk_native.rs`). v26.09 skips the response capsule after a READ's
+  data only for a host that disabled SQ flow control when it connected.
+  So every kernel `nvme connect` now passes `--disable-sqflow`, and every
+  TCP `bdev_nvme_attach_controller` asks for
+  `disable_sq_flow_control: true` when the local spdk-tgt is v26.09 or
+  later. An older target is never sent that parameter, since v26.05
+  refuses an attach that names it; a v26.05 target ignores the kernel
+  request. Measured over loopback (4 KiB random reads, QD1, IOPS):
+  kernel path 41.4k without the request, 62.8k with it, 61.9k on v26.05;
+  through bdev_nvme and ublk 49.4k, 61.5k and 61.6k.
+- `scripts/spdk-patches.sh test` also runs the nvmf controller unit test,
+  which links again: patch 0001 gained the stub it needed.
+
 ### Security
 
 - **A release now refuses a stale Chainguard base pin** (2026-11-02,

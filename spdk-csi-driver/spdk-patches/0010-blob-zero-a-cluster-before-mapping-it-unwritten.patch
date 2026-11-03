@@ -24,10 +24,10 @@ Formerly spdk-csi-driver/blob-zero-new-clusters.patch.
  2 files changed, 262 insertions(+), 5 deletions(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 76925dcb4..720628380 100644
+index 69fbd3f8d..64db70caa 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -1820,6 +1820,37 @@ bs_batch_clear_dev(struct spdk_blob *blob, spdk_bs_batch_t *batch, uint64_t lba,
+@@ -1836,6 +1836,37 @@ bs_super_set_defaults_if_unset(struct spdk_bs_super_block *super)
  	}
  }
  
@@ -65,7 +65,7 @@ index 76925dcb4..720628380 100644
  static int
  bs_super_validate(struct spdk_bs_super_block *super, struct spdk_blob_store *bs)
  {
-@@ -2484,6 +2515,64 @@ blob_persist_write_extent_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
+@@ -2500,6 +2531,64 @@ blob_persist_write_extent_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
  	blob_persist_generate_new_md(ctx);
  }
  
@@ -130,7 +130,7 @@ index 76925dcb4..720628380 100644
  static void
  blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  {
-@@ -2505,6 +2594,18 @@ blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -2521,6 +2610,18 @@ blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  
  	}
  
@@ -149,7 +149,7 @@ index 76925dcb4..720628380 100644
  	if (blob->clean.num_clusters < blob->active.num_clusters) {
  		/* Blob was resized up */
  		assert(blob->clean.num_extent_pages <= blob->active.num_extent_pages);
-@@ -3116,6 +3217,10 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -3132,6 +3233,10 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  						blob_write_copy, ctx);
  		}
  

@@ -4,7 +4,7 @@ set -e
 echo "SPDK Pre-start cleanup..."
 rm -f /var/tmp/spdk.sock /var/tmp/spdk.ready
 
-echo "Starting SPDK v26.01 in --wait-for-rpc mode (PID: $$)"
+echo "Starting SPDK v26.09 in --wait-for-rpc mode (PID: $$)"
 echo "Will minimize memory pools before subsystem init"
 
 /usr/local/bin/spdk_tgt -r /var/tmp/spdk.sock -L all --json /etc/spdk/config.json --wait-for-rpc "$@" &

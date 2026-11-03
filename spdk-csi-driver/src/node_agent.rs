@@ -1895,8 +1895,9 @@ impl NodeAgent {
             Err(e) => {
                 let msg = e.to_string();
                 // P3 (the F54 pattern): deleting an ABSENT subsystem is
-                // SPDK's "-32602 Invalid parameters" — there is no missing
-                // text to match, so probe the live list instead of parsing
+                // SPDK's "-32602 Invalid parameters" on v26.05 — there is no
+                // missing text to match (v26.09 says "not found" under the
+                // same code), so probe the live list instead of parsing
                 // the message. Reachable when the caller's list races a
                 // concurrent teardown; gone is converged.
                 let still_present = node_agent

@@ -19,10 +19,10 @@ Formerly spdk-csi-driver/blob-extent-page-md0.patch.
  2 files changed, 350 insertions(+), 2 deletions(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 9e3b28eb1..64d20b982 100644
+index ee55b343b..f80e01af6 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -9124,6 +9124,10 @@ struct spdk_blob_cluster_op_ctx {
+@@ -9135,6 +9135,10 @@ struct spdk_blob_cluster_op_ctx {
  	/* for serializing concurrent cluster alloc/release operations on the same extent page */
  	spdk_msg_fn		msg_fn;
  	TAILQ_ENTRY(spdk_blob_cluster_op_ctx) link;
@@ -33,7 +33,7 @@ index 9e3b28eb1..64d20b982 100644
  };
  
  static void
-@@ -9220,18 +9224,57 @@ blob_op_cluster_msg_cb(void *arg, int bserrno)
+@@ -9231,18 +9235,57 @@ blob_op_cluster_msg_cb(void *arg, int bserrno)
  	spdk_thread_send_msg(ctx->thread, blob_op_cluster_msg_cpl, ctx);
  }
  
@@ -91,7 +91,7 @@ index 9e3b28eb1..64d20b982 100644
  struct spdk_blob_write_extent_page_ctx {
  	struct spdk_blob_store		*bs;
  
-@@ -9301,6 +9344,18 @@ blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint64_t cluster
+@@ -9312,6 +9355,18 @@ blob_write_extent_page(struct spdk_blob *blob, uint32_t extent, uint64_t cluster
  	spdk_bs_sequence_t			*seq;
  	struct spdk_bs_cpl			cpl;
  
@@ -110,7 +110,7 @@ index 9e3b28eb1..64d20b982 100644
  	ctx = calloc(1, sizeof(*ctx));
  	if (!ctx) {
  		cb_fn(cb_arg, -ENOMEM);
-@@ -9359,7 +9414,31 @@ blob_insert_cluster_msg(void *arg)
+@@ -9370,7 +9425,31 @@ blob_insert_cluster_msg(void *arg)
  	extent_page = bs_cluster_to_extent_page(ctx->blob, ctx->cluster_num);
  	if (*extent_page == 0) {
  		/* Extent page requires allocation.
@@ -143,7 +143,7 @@ index 9e3b28eb1..64d20b982 100644
  		assert(ctx->extent_page != 0);
  		assert(spdk_bit_array_get(ctx->blob->bs->used_md_pages, ctx->extent_page) == true);
  		blob_write_extent_page(ctx->blob, ctx->extent_page, ctx->cluster_num, ctx->page,
-@@ -9378,7 +9457,7 @@ blob_insert_cluster_msg(void *arg)
+@@ -9389,7 +9468,7 @@ blob_insert_cluster_msg(void *arg)
  		/* Extent page already allocated.
  		 * Every cluster allocation, requires just an update of single extent page. */
  		blob_write_extent_page(ctx->blob, *extent_page, ctx->cluster_num, ctx->page,

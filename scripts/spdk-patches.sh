@@ -18,7 +18,7 @@
 #
 # Change a patch: tree; amend its commit (git rebase -i, or commit --fixup
 # and rebase --autosquash); test; export. Add one: commit on top; test;
-# export. Upgrade SPDK: `tree DIR v26.09`. `git am -3` merges a patch whose
+# export. Upgrade SPDK: `tree DIR <tag>`. `git am -3` merges a patch whose
 # context moved and stops on a real conflict: resolve it, then
 # `git -C DIR am --continue`. A patch upstream has merged applies empty:
 # `git -C DIR am --skip`. Then test, export (which writes BASE), and the
@@ -28,10 +28,10 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 P=$here/spdk-csi-driver/spdk-patches
 UPSTREAM=${SPDK_UPSTREAM:-https://github.com/spdk/spdk.git}
-# the unit-test suites the series touches (blob, lvol, raid)
+# the unit-test suites the series touches (blob, lvol, raid, nvmf ctrlr)
 SUITES="test/unit/lib/blob/blob.c/blob_ut test/unit/lib/lvol/lvol.c/lvol_ut
 test/unit/lib/bdev/vbdev_lvol.c/vbdev_lvol_ut test/unit/lib/bdev/raid/bdev_raid.c/bdev_raid_ut
-test/unit/lib/bdev/raid/raid1.c/raid1_ut"
+test/unit/lib/bdev/raid/raid1.c/raid1_ut test/unit/lib/nvmf/ctrlr.c/ctrlr_ut"
 
 die() { echo "spdk-patches: $*" >&2; exit 1; }
 git_id() {  # committer identity for am/rebase in the scratch clone
@@ -57,10 +57,10 @@ cmd_test() {
     stamp=$(mktemp)
     log=$dir/spdk-patches-test.log
     # Needs SPDK's build dependencies (its scripts/pkgdep.sh; the image's
-    # builder installs them), python3-tabulate among them. `make -k`:
-    # spdk_top (needs ncurses headers) and nvmf's ctrlr_ut (does not link
-    # with 0001) may fail; what counts is each suite below being rebuilt now
-    # and passing.
+    # builder installs them), python3-tabulate and (from v26.09)
+    # python3-yaml among them. `make -k`: spdk_top (needs ncurses headers)
+    # may fail; what counts is each suite below being rebuilt now and
+    # passing.
     ( cd "$dir" && ./configure --enable-unit-tests --with-uring --with-ublk &&
       nice make -k -j"$(nproc)" ) > "$log" 2>&1 || true
     for ut in $SUITES; do

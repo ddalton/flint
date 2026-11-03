@@ -8,6 +8,67 @@
 > `write-cache-advertise.patch`, the corrected `nvmf-hostlog.patch`) are the
 > inputs for resolving that rebase.
 
+> **2026-11-02: the upgrade is done in the source tree.** `spdk-patches/BASE` is v26.09
+> (`0bbb7fe4d`). The chart still pins spdk-tgt 1.7.3 (v26.05) until a release builds and
+> pins the next image. The three ports this directory held became series patches:
+> `raid-skip-rebuild-2609.patch` is 0006, `write-cache-advertise.patch` is 0013, and the
+> corrected `nvmf-hostlog.patch` is folded into 0001. They and the two
+> `Dockerfile.spdk-2609*` drafts are removed; git history has them. Patches 0007-0012,
+> written after this assessment, applied to v26.09 with their changed lines identical;
+> between the tags upstream changed `lib/blob/blobstore.c` once (`11ebc9f85`, defaults on
+> the grow paths), and nothing in lvol, vbdev_lvol, raid1, uring or ublk. Section 7, item
+> by item:
+>
+> 1. **Dockerfile**: `python3-yaml` in the builder, BASE v26.09, the version strings. Done.
+>    The image builds with all 13 patches applied.
+> 2. **Driver**: every kernel `nvme connect` passes `--disable-sqflow`
+>    (`ReconnectPolicy::connect_args`, both kernel connect paths; harmless on a v26.05
+>    target, which ignores the request). Every TCP `bdev_nvme_attach_controller` asks for
+>    `disable_sq_flow_control: true` when the local target is v26.09 or later
+>    (`SpdkNative`, which asks `spdk_get_version` per attach), because v26.05 refuses an
+>    attach naming a parameter it does not decode. `enable_flush` is unchanged, so 6.3
+>    stands. Measured on the box over loopback, 4 KiB random reads from a malloc bdev,
+>    15 s per point, three rounds in alternating order (means; every arm within 2%):
+>
+>    | Initiator | Target, setting | Target bytes per read | QD1 IOPS (mean us) | QD16 IOPS |
+>    |---|---|---|---|---|
+>    | kernel | v26.05 | 4120 | 61.9k (13.9) | 194.0k |
+>    | kernel | v26.09, no `--disable-sqflow` | 4144 | 41.4k (21.9) | 204.4k |
+>    | kernel | v26.09, `--disable-sqflow` | 4120 | 62.8k (13.7) | 193.4k |
+>    | SPDK bdev_nvme + ublk | v26.05 | 4120 | 61.6k (14.6) | 177.2k |
+>    | SPDK bdev_nvme + ublk | v26.09, flag off | 4144 | 49.4k (18.6) | 175.7k |
+>    | SPDK bdev_nvme + ublk | v26.09, flag on | 4120 | 61.5k (14.6) | 178.0k |
+>
+>    4120 bytes is the data PDU alone (header and 4096 bytes, SUCCESS set); 4144 adds the
+>    24-byte response capsule. Without the opt-in a QD1 read on v26.09 costs a third of its
+>    IOPS on the kernel path and a fifth on the ublk path; with it the numbers are
+>    v26.05's. At QD16 the kernel path without the opt-in is about 5% faster on loopback,
+>    the one point where not asking wins. A kernel host asking a v26.05 target changes
+>    nothing (62.9k / 195.3k).
+> 3. **Lease ids**: shipped in 1.7.0. The 8.4 contract check, extended to 24 steps (the
+>    lapse, expiry auto-release, bare acquire and release, and the stock rebuild of a
+>    plain add), passes 24/24 on the v26.09 image and on 1.7.3.
+> 4. **Live checks**: on the box, a kernel nvme-tcp host of an lvol export and of a
+>    raid1-over-lvols export, each with a 16-block `dd ... conv=fsync`:
+>
+>    | Image | `queue/write_cache` (lvol, raid) | FLUSH sent by the fsync |
+>    |---|---|---|
+>    | v26.09 + series (13 patches) | write back, write back | yes, yes |
+>    | v26.09 + series without 0013 | write through, write through | no, no |
+>    | v26.05, spdk-tgt 1.7.3 | write back, write back | yes, yes |
+>
+>    (A FLUSH counts on the controller's path device, `nvmeXcYnZ`, not on the
+>    multipath head.) The hot-rejoin scrub and the F5 dirty-restart drill on v26.09
+>    need a cluster and are **open**.
+> 5. **The adversarial set per SPDK bump** (`docs/incremental-replica-rebuild.md` 9-8):
+>    needs a cluster; **open**.
+>
+> Also re-run: the error shapes of `docs/spdk-error-classification-audit.md` §1 (one
+> message changed, no classifier affected) and the series unit tests
+> (`scripts/spdk-patches.sh test`: blob, lvol, vbdev_lvol, bdev_raid, raid1 and now
+> nvmf ctrlr, all pass). The kind entrypoint (`docker/spdk-csi-start-kind.sh`) runs
+> unchanged on v26.09.
+
 Date: 2026-09-27. Base today: SPDK v26.05 plus six patches (`docker/Dockerfile.spdk`).
 Candidate: SPDK v26.09 (tag `0bbb7fe4d`, 347 commits after v26.05, same DPDK submodule).
 

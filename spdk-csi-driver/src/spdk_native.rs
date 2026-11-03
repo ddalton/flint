@@ -77,6 +77,29 @@ pub fn lvol_alloc_deadline(method: &str, bytes: u64, thin_provision: bool) -> Du
     zeroing_deadline(base, bytes, floor)
 }
 
+/// A TCP `bdev_nvme_attach_controller` whose caller left
+/// `disable_sq_flow_control` unset ([`SpdkNative::ask_to_disable_sq_flow_control`]).
+fn wants_sq_flow_control_request(params: &Value) -> bool {
+    params
+        .get("trtype")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.eq_ignore_ascii_case("tcp"))
+        && params.get("disable_sq_flow_control").is_none()
+}
+
+/// Whether an `spdk_get_version` answer is v26.09 or later, the first release
+/// whose `bdev_nvme_attach_controller` takes `disable_sq_flow_control`
+/// (d6945b55a). `v26.09-pre` predates it, so a `-pre` build of 26.09 does not
+/// count; an unreadable answer does not either.
+fn knows_sq_flow_control_request(version: &Value) -> bool {
+    let f = &version["fields"];
+    let (Some(major), Some(minor)) = (f["major"].as_i64(), f["minor"].as_i64()) else {
+        return false;
+    };
+    let pre = f["suffix"].as_str().is_some_and(|s| s.starts_with("-pre"));
+    (major, minor) > (26, 9) || ((major, minor) == (26, 9) && !pre)
+}
+
 // SPDK v25.05.x uses RPC calls for all operations
 // This implementation follows the official SPDK Go client pattern
 
@@ -217,7 +240,7 @@ impl SpdkNative {
     async fn call_rpc_with_deadline(
         &self,
         method: &str,
-        params: Option<Value>,
+        mut params: Option<Value>,
         deadline: Duration,
     ) -> Result<Value> {
         tracing::trace!("[SPDK_NATIVE] call_rpc('{}') incoming params: {:?}", method, params);
@@ -235,6 +258,9 @@ impl SpdkNative {
                 crate::nvme_recovery::DeadTargetTimeouts::from_env().set_options_params(),
             )
             .await;
+            if let Some(p) = params.as_mut() {
+                self.ask_to_disable_sq_flow_control(p).await;
+            }
         }
 
         // Handle empty parameters like official SPDK CGO bridge
@@ -618,6 +644,37 @@ impl SpdkNative {
         }
     }
 
+    /// Since SPDK v26.09 (00c2f8cd4) a TCP target marks a READ's last data
+    /// PDU SUCCESS, which lets the host complete the READ without waiting
+    /// for a response capsule, only for a host that disabled SQ flow control
+    /// at connect; for any other host every READ costs one more PDU. So a TCP
+    /// attach asks for it, but only from a target that knows the parameter:
+    /// v26.05 refuses an attach that names a parameter it does not decode,
+    /// and a driver may meet an older spdk-tgt. The version is asked on every
+    /// attach (attaches are rare), not cached, so an spdk-tgt replaced under
+    /// a running agent is asked again. A caller that set the field keeps its
+    /// value. A failed probe sends nothing, which is how every attach ran
+    /// before. Called from the bounded exchange directly, like the options.
+    async fn ask_to_disable_sq_flow_control(&self, params: &mut Value) {
+        if !wants_sq_flow_control_request(params) {
+            return;
+        }
+        let probe = "spdk_get_version";
+        match self
+            .call_rpc_bounded(probe, None, rpc_deadline(probe))
+            .await
+        {
+            Ok(version) if knows_sq_flow_control_request(&version) => {
+                params["disable_sq_flow_control"] = json!(true);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(
+                error = %e,
+                "[SPDK_RPC] spdk_get_version failed; the attach does not ask to disable SQ flow control"
+            ),
+        }
+    }
+
     /// Generic RPC call for any method
     pub async fn call_method(&self, method: &str, params: Option<Value>) -> Result<Value> {
         self.call_rpc(method, params).await
@@ -851,15 +908,37 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// A fake spdk-tgt: answers one newline-delimited JSON-RPC request per
-    /// connection and records each method with its params, in order.
-    /// `controllers` is bdev_nvme_get_controllers' answer (None: an error);
-    /// `refuse_options` answers bdev_nvme_set_options as SPDK does once a
-    /// controller exists.
+    /// `spdk_get_version`'s answer from a target at `major.minor` + `suffix`.
+    fn version(major: i64, minor: i64, suffix: &str) -> Value {
+        json!({"version": format!("SPDK v{major}.{minor:02}{suffix}"),
+               "fields": {"major": major, "minor": minor, "patch": 0, "suffix": suffix}})
+    }
+
+    /// [`fake_tgt_at`] a v26.05 target, the one whose attach takes no
+    /// `disable_sq_flow_control`.
     async fn fake_tgt(
         name: &str,
         controllers: Option<Value>,
         refuse_options: bool,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, Option<Value>)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        fake_tgt_at(name, controllers, refuse_options, Some(version(26, 5, ""))).await
+    }
+
+    /// A fake spdk-tgt: answers one newline-delimited JSON-RPC request per
+    /// connection and records each method with its params, in order.
+    /// `controllers` is bdev_nvme_get_controllers' answer (None: an error);
+    /// `refuse_options` answers bdev_nvme_set_options as SPDK does once a
+    /// controller exists; `version` is spdk_get_version's answer (None: an
+    /// error).
+    async fn fake_tgt_at(
+        name: &str,
+        controllers: Option<Value>,
+        refuse_options: bool,
+        version: Option<Value>,
     ) -> (
         String,
         std::sync::Arc<std::sync::Mutex<Vec<(String, Option<Value>)>>>,
@@ -888,6 +967,11 @@ mod tests {
                         Some(c) => json!({"jsonrpc": "2.0", "id": req["id"], "result": c}),
                         None => json!({"jsonrpc": "2.0", "id": req["id"],
                                        "error": {"code": -32601, "message": "Method not found"}}),
+                    },
+                    "spdk_get_version" => match &version {
+                        Some(v) => json!({"jsonrpc": "2.0", "id": req["id"], "result": v}),
+                        None => json!({"jsonrpc": "2.0", "id": req["id"],
+                                       "error": {"code": -32603, "message": "Internal error"}}),
                     },
                     "bdev_nvme_set_options" if refuse_options => {
                         json!({"jsonrpc": "2.0", "id": req["id"],
@@ -920,7 +1004,12 @@ mod tests {
         spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await.unwrap();
         assert_eq!(
             methods(&calls),
-            ["bdev_nvme_get_controllers", "bdev_nvme_set_options", "bdev_nvme_attach_controller"]
+            [
+                "bdev_nvme_get_controllers",
+                "bdev_nvme_set_options",
+                "spdk_get_version",
+                "bdev_nvme_attach_controller"
+            ]
         );
         let opts = calls.lock().unwrap()[1].1.clone().unwrap();
         assert_eq!(
@@ -936,7 +1025,14 @@ mod tests {
             fake_tgt("beside", Some(json!([{"name": "nvme_other"}])), false).await;
         let spdk = SpdkNative::new(Some(sock)).await.unwrap();
         spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await.unwrap();
-        assert_eq!(methods(&calls), ["bdev_nvme_get_controllers", "bdev_nvme_attach_controller"]);
+        assert_eq!(
+            methods(&calls),
+            [
+                "bdev_nvme_get_controllers",
+                "spdk_get_version",
+                "bdev_nvme_attach_controller"
+            ]
+        );
         task.abort();
     }
 
@@ -948,7 +1044,12 @@ mod tests {
         assert_eq!(attached.unwrap(), json!(["nvme0n1"]));
         assert_eq!(
             methods(&calls),
-            ["bdev_nvme_get_controllers", "bdev_nvme_set_options", "bdev_nvme_attach_controller"]
+            [
+                "bdev_nvme_get_controllers",
+                "bdev_nvme_set_options",
+                "spdk_get_version",
+                "bdev_nvme_attach_controller"
+            ]
         );
         task.abort();
     }
@@ -958,7 +1059,14 @@ mod tests {
         let (sock, calls, task) = fake_tgt("unlistable", None, false).await;
         let spdk = SpdkNative::new(Some(sock)).await.unwrap();
         spdk.call_method("bdev_nvme_attach_controller", Some(attach_params())).await.unwrap();
-        assert_eq!(methods(&calls), ["bdev_nvme_get_controllers", "bdev_nvme_attach_controller"]);
+        assert_eq!(
+            methods(&calls),
+            [
+                "bdev_nvme_get_controllers",
+                "spdk_get_version",
+                "bdev_nvme_attach_controller"
+            ]
+        );
         task.abort();
     }
 
@@ -972,5 +1080,126 @@ mod tests {
             .unwrap();
         assert_eq!(methods(&calls), ["bdev_get_bdevs", "bdev_nvme_detach_controller"]);
         task.abort();
+    }
+
+    /// The attach params a target received, by the attach's position.
+    fn attach_sent(calls: &std::sync::Mutex<Vec<(String, Option<Value>)>>) -> Value {
+        let calls = calls.lock().unwrap();
+        let (_, p) = calls
+            .iter()
+            .find(|(m, _)| m == "bdev_nvme_attach_controller")
+            .unwrap();
+        p.clone().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_tcp_attach_to_a_2609_target_asks_to_disable_sq_flow_control() {
+        let (sock, calls, task) = fake_tgt_at(
+            "sqfc-2609",
+            Some(json!([])),
+            false,
+            Some(version(26, 9, "")),
+        )
+        .await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        spdk.call_method("bdev_nvme_attach_controller", Some(attach_params()))
+            .await
+            .unwrap();
+        let mut want = attach_params();
+        want["disable_sq_flow_control"] = json!(true);
+        assert_eq!(attach_sent(&calls), want);
+        task.abort();
+    }
+
+    /// v26.05 refuses an attach naming a parameter it does not decode.
+    #[tokio::test]
+    async fn a_2605_target_is_never_sent_the_parameter() {
+        let (sock, calls, task) = fake_tgt("sqfc-2605", Some(json!([])), false).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        spdk.call_method("bdev_nvme_attach_controller", Some(attach_params()))
+            .await
+            .unwrap();
+        assert_eq!(attach_sent(&calls), attach_params());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_failed_version_probe_attaches_as_before() {
+        let (sock, calls, task) = fake_tgt_at("sqfc-noversion", Some(json!([])), false, None).await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        let attached = spdk
+            .call_method("bdev_nvme_attach_controller", Some(attach_params()))
+            .await;
+        assert_eq!(attached.unwrap(), json!(["nvme0n1"]));
+        assert_eq!(attach_sent(&calls), attach_params());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_callers_own_value_is_kept_and_nothing_is_asked() {
+        let (sock, calls, task) = fake_tgt_at(
+            "sqfc-caller",
+            Some(json!([])),
+            false,
+            Some(version(26, 9, "")),
+        )
+        .await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        let mut params = attach_params();
+        params["disable_sq_flow_control"] = json!(false);
+        spdk.call_method("bdev_nvme_attach_controller", Some(params.clone()))
+            .await
+            .unwrap();
+        assert!(!methods(&calls).iter().any(|m| m == "spdk_get_version"));
+        assert_eq!(attach_sent(&calls), params);
+        task.abort();
+    }
+
+    /// A local PCIe attach has no fabric connect to ask on.
+    #[tokio::test]
+    async fn a_pcie_attach_is_not_asked() {
+        let (sock, calls, task) = fake_tgt_at(
+            "sqfc-pcie",
+            Some(json!([])),
+            false,
+            Some(version(26, 9, "")),
+        )
+        .await;
+        let spdk = SpdkNative::new(Some(sock)).await.unwrap();
+        let params = json!({"name": "nvme_local", "trtype": "PCIe", "traddr": "0000:00:1f.0"});
+        spdk.call_method("bdev_nvme_attach_controller", Some(params.clone()))
+            .await
+            .unwrap();
+        assert!(!methods(&calls).iter().any(|m| m == "spdk_get_version"));
+        assert_eq!(attach_sent(&calls), params);
+        task.abort();
+    }
+
+    #[test]
+    fn the_parameter_exists_from_v26_09_on() {
+        assert!(!knows_sq_flow_control_request(&version(26, 5, "")));
+        assert!(
+            !knows_sq_flow_control_request(&version(26, 9, "-pre")),
+            "26.09-pre predates d6945b55a"
+        );
+        assert!(knows_sq_flow_control_request(&version(26, 9, "")));
+        assert!(knows_sq_flow_control_request(&version(26, 10, "")));
+        assert!(knows_sq_flow_control_request(&version(27, 1, "-pre")));
+        assert!(!knows_sq_flow_control_request(&json!(true)));
+        assert!(!knows_sq_flow_control_request(
+            &json!({"version": "SPDK v26.09"})
+        ));
+    }
+
+    #[test]
+    fn only_a_tcp_attach_without_the_field_wants_it() {
+        assert!(wants_sq_flow_control_request(&attach_params()));
+        assert!(wants_sq_flow_control_request(&json!({"trtype": "tcp"})));
+        assert!(!wants_sq_flow_control_request(&json!({"trtype": "RDMA"})));
+        assert!(!wants_sq_flow_control_request(&json!({"trtype": "PCIe"})));
+        assert!(!wants_sq_flow_control_request(&json!({"name": "x"})));
+        assert!(!wants_sq_flow_control_request(
+            &json!({"trtype": "TCP", "disable_sq_flow_control": false})
+        ));
     }
 }

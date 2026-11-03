@@ -16,10 +16,10 @@ Formerly spdk-csi-driver/blob-recovery-batched.patch.
  1 file changed, 163 insertions(+), 11 deletions(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 08b79153d..85569bd21 100644
+index 6e852f11f..8801c8467 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -3947,6 +3947,13 @@ struct spdk_bs_load_ctx {
+@@ -3963,6 +3963,13 @@ struct spdk_bs_load_ctx {
  
  	bool					force_recover;
  
@@ -33,7 +33,7 @@ index 08b79153d..85569bd21 100644
  	/* These fields are used in the spdk_bs_dump path. */
  	bool					dumping;
  	FILE					*fp;
-@@ -4800,13 +4807,37 @@ bs_load_write_used_md(struct spdk_bs_load_ctx *ctx)
+@@ -4816,13 +4823,37 @@ bs_load_write_used_md(struct spdk_bs_load_ctx *ctx)
  }
  
  static void
@@ -72,7 +72,7 @@ index 08b79153d..85569bd21 100644
  	do {
  		ctx->page_index++;
  	} while (spdk_bit_array_get(ctx->bs->used_md_pages, ctx->page_index) == true);
-@@ -4815,15 +4846,7 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
+@@ -4831,15 +4862,7 @@ bs_load_replay_md_chain_cpl(struct spdk_bs_load_ctx *ctx)
  		ctx->cur_page = ctx->page_index;
  		bs_load_replay_cur_md_page(ctx);
  	} else {
@@ -89,7 +89,7 @@ index 08b79153d..85569bd21 100644
  	}
  }
  
-@@ -4936,6 +4959,131 @@ bs_load_replay_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -4952,6 +4975,131 @@ bs_load_replay_md_cpl(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  	bs_load_replay_md_chain_cpl(ctx);
  }
  
@@ -221,7 +221,7 @@ index 08b79153d..85569bd21 100644
  static void
  bs_load_replay_cur_md_page(struct spdk_bs_load_ctx *ctx)
  {
-@@ -4959,7 +5107,11 @@ bs_load_replay_md(struct spdk_bs_load_ctx *ctx)
+@@ -4975,7 +5123,11 @@ bs_load_replay_md(struct spdk_bs_load_ctx *ctx)
  		bs_load_ctx_fail(ctx, -ENOMEM);
  		return;
  	}

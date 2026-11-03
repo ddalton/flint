@@ -29,10 +29,10 @@ Upstream candidate (with the previous patch), not filed. New in the series
  2 files changed, 185 insertions(+), 4 deletions(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 720628380..493d039b5 100644
+index 64db70caa..5a3433ad6 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -2752,6 +2752,10 @@ struct spdk_blob_copy_cluster_ctx {
+@@ -2768,6 +2768,10 @@ struct spdk_blob_copy_cluster_ctx {
  	spdk_bs_sequence_t *seq;
  	struct spdk_blob_md_page *new_cluster_page;
  	struct spdk_bs_cluster_alloc_slot *slot;
@@ -43,7 +43,7 @@ index 720628380..493d039b5 100644
  };
  
  struct spdk_blob_free_cluster_ctx {
-@@ -2898,7 +2902,11 @@ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
+@@ -2914,7 +2918,11 @@ blob_allocate_and_copy_cluster_cpl(void *cb_arg, int bserrno)
  	while (!TAILQ_EMPTY(&requests)) {
  		op = TAILQ_FIRST(&requests);
  		TAILQ_REMOVE(&requests, op, link);
@@ -56,7 +56,7 @@ index 720628380..493d039b5 100644
  			bs_user_op_execute(op);
  		} else {
  			bs_user_op_abort(op, bserrno);
-@@ -3030,6 +3038,9 @@ blob_insert_cluster_cpl(void *cb_arg, int bserrno)
+@@ -3046,6 +3054,9 @@ blob_insert_cluster_cpl(void *cb_arg, int bserrno)
  		blob_insert_cluster_revert(ctx);
  	}
  
@@ -66,7 +66,7 @@ index 720628380..493d039b5 100644
  	bs_sequence_finish(ctx->seq, bserrno);
  }
  
-@@ -3091,6 +3102,57 @@ blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_
+@@ -3107,6 +3118,57 @@ blob_copy(struct spdk_blob_copy_cluster_ctx *ctx, spdk_bs_user_op_t *op, uint64_
  			     blob_write_copy_cpl, ctx);
  }
  
@@ -124,7 +124,7 @@ index 720628380..493d039b5 100644
  static void
  bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  			     struct spdk_io_channel *_ch,
-@@ -3218,9 +3280,14 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -3234,9 +3296,14 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  		}
  
  	} else if (bs_zero_new_clusters()) {

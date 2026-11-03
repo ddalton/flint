@@ -22,12 +22,19 @@ module can come from the distribution's package unpacked into a scratch
 directory: `apt-get download python3-tabulate && dpkg-deb -x python3-tabulate_*.deb DIR`,
 then `PYTHONPATH=DIR/usr/lib/python3/dist-packages`.
 
-Upgrading SPDK is `tree /path/spdk v26.09`. `git am -3` merges a patch
+Upgrading SPDK is `tree /path/spdk <tag>`. `git am -3` merges a patch
 whose surrounding code moved and stops on a real conflict (resolve it, then
 `git -C /path/spdk am --continue`). A patch that upstream has merged comes
 out empty (`git -C /path/spdk am --skip`) and drops out of the series. Then
 `test`, `export`, review the diff of this directory, and run the release
 gates (the restart gate and the EC2 drills) on the new image.
+
+The base moved from v26.05 to v26.09 on 2026-11-02. Only 0006 stopped:
+v26.09 generates its RPC decoders from `schema/schema.yaml`, so the patch's
+hand-written decoders became schema entries (its raid code is unchanged).
+The other eleven applied with their changed lines identical. 0013 is new
+with v26.09. The assessment behind the move is
+[`docs/spdk-2609-upgrade/README.md`](../docs/spdk-2609-upgrade/README.md).
 
 Any change here changes the spdk-tgt image: `scripts/release.sh` refuses a
 release whose chart still pins an spdk-tgt tag older than the last change
@@ -49,6 +56,7 @@ to this directory or the Dockerfile.
 | 0010 | blob: zero a cluster before mapping it unwritten | fix (data exposure) | candidate, not filed |
 | 0011 | bdev/uring: WRITE_ZEROES through the kernel's zeroout | performance | candidate, not filed; see Gerrit 28716 |
 | 0012 | blob: a write that covers a new cluster is the cluster's only write | performance (0010's cost) | candidate with 0010, not filed |
+| 0013 | bdev: lvol and raid bdevs report a volatile write cache | fix (v26.09 hosts stop sending FLUSH) | Flint only |
 
 The order is the order the patches were written in. Several touch
 `lib/blob/blobstore.c` and depend on the ones before them, so the numbers
@@ -62,6 +70,7 @@ old file. The conversion was checked byte for byte: v26.05 plus `git apply`
 of this series gives the same tree as v26.05 plus `patch -p1` of the old
 files.
 
-`test/unit/lib/nvmf/ctrlr.c/ctrlr_ut` does not link with 0001 (it needs a
-`spdk_nvme_transport_id_trtype_str` stub). The image is built without unit
-tests, and `spdk-patches.sh test` does not run that suite.
+`test/unit/lib/nvmf/ctrlr.c/ctrlr_ut` did not link with 0001 until
+2026-11-02, when 0001 gained the `spdk_nvme_transport_id_trtype_str` stub it
+needs (the image builds no unit tests, so nothing noticed);
+`spdk-patches.sh test` runs it now.

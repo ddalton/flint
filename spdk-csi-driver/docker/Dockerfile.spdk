@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     python3-pyelftools \
     python3-jinja2 \
     python3-tabulate \
+    python3-yaml \
     git \
     wget \
     meson \
@@ -47,9 +48,11 @@ WORKDIR /spdk
 COPY spdk-patches/ /tmp/spdk-patches/
 
 # Clone, configure, and build SPDK with full NVMe-oF and ublk support.
-# v26.05 is required for `bdev_raid_delete clear_sb` (phase 0 superblock
-# hygiene — see docs/incremental-replica-rebuild.md §3/§9 and
-# docs/phase0-hazard-repro-2026-06-10.md). `git apply` is strict: a patch
+# The base must be v26.05 or later for `bdev_raid_delete clear_sb` (phase 0
+# superblock hygiene — see docs/incremental-replica-rebuild.md §3/§9 and
+# docs/phase0-hazard-repro-2026-06-10.md); it is v26.09 since 2026-11-02,
+# whose build generates every RPC decoder from schema/schema.yaml with
+# scripts/genrpc.py (hence python3-yaml above). `git apply` is strict: a patch
 # that no longer applies exactly fails the build instead of applying with
 # fuzz (the old `patch -p1` would have).
 RUN git clone https://github.com/spdk/spdk.git . && \
@@ -181,7 +184,7 @@ RUN mkdir -p /etc/spdk && \
 RUN printf '#!/bin/bash\n\
 echo "SPDK Pre-start cleanup..."\n\
 rm -f /var/tmp/spdk.sock\n\
-echo "Starting SPDK v26.05 (PID: $$)"\n\
+echo "Starting SPDK v26.09 (PID: $$)"\n\
 echo "SPDK will receive SIGTERM directly from Kubernetes for graceful shutdown"\n\
 FLINT_SPDK_LOG_FLAGS="${FLINT_SPDK_LOG_FLAGS:-}"\n\
 LOGARGS=""\n\

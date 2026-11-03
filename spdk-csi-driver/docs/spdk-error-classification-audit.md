@@ -12,6 +12,16 @@ Every shape claim below is **verified against SPDK source v26.05.1-pre**
 (`~/github/spdk` @ `bb2b757ac`) — the generation flint ships. File:line
 references are to that tree.
 
+**Re-verified on v26.09 (2026-11-02), live** — each shape below and the
+other duplicate/absent answers the driver meets, sent to the v26.09 image
+and to spdk-tgt 1.7.3 (v26.05) and diffed. One answer changed:
+`nvmf_delete_subsystem` of an absent NQN is still `-32602`, but its message
+is now `Subsystem with NQN '<nqn>' not found` instead of
+`Invalid parameters`. No classifier depends on it: the node agent probes
+`nvmf_get_subsystems` on any delete error (§2), and the other callers ignore
+the error or return it. Everything else, Family A and B and the initiator
+attach, is unchanged.
+
 ## 1. The two shape families
 
 **Family A — errno-mapped (matchable).** The bdev/lvol/raid RPC handlers
@@ -30,7 +40,7 @@ the classification before it reaches the wire:
 | `nvmf_create_subsystem` (dup) | `-32603 "Unable to create subsystem X"` | `nvmf_rpc.c:465` (F48, live) |
 | `nvmf_subsystem_add_host` (dup) | `-EINVAL` internally → **bare** `-32603 "Internal error"` | `subsystem.c` `add_host_ext` + `nvmf_rpc.c` handler (F54, live) |
 | `nvmf_subsystem_add_listener` (dup) | `-32602 "Invalid parameters"` (the ERRLOG says "Listener already exists"; the *response* doesn't) | `nvmf_rpc.c` `nvmf_rpc_listen_paused` |
-| `nvmf_delete_subsystem` (absent) | `goto invalid` → `-32602 "Invalid parameters"` | `nvmf_rpc.c` `rpc_nvmf_delete_subsystem` |
+| `nvmf_delete_subsystem` (absent) | `goto invalid` → `-32602 "Invalid parameters"` (v26.09: `-32602 "Subsystem with NQN '<nqn>' not found"`) | `nvmf_rpc.c` `rpc_nvmf_delete_subsystem` |
 
 The add_host case is the strongest possible argument for probing: the
 duplicate is collapsed to `-EINVAL` **inside the library**, so the
