@@ -3047,12 +3047,26 @@ and decided by the user:
       write, the barrier, the majority release, the `get_bdevs` field and
       the two RPCs, with raid unit tests for the barrier (a completion is
       never delivered before its stamp) and the chain (a survivor whose
-      stamp write fails is failed). The stamp hook on the shared removal
+      stamp write fails is failed). The barrier holds every operation
+      the raid's quiesce holds, not writes alone: on SPDK v26.09 the
+      quiesce also gates flush, compare and seek (upstream `73b7888d9`;
+      on v26.05 they bypassed it), so a flush or a compare completes
+      between a stamp and its release no more than a write does, with a
+      unit test per operation class. The stamp hook on the shared removal
       path (`_raid_bdev_remove_base_bdev`), so a planned removal begins
       the hold at the RPC and stamps and holds like a loss, with a unit
       test that no write acknowledges between a planned removal's stamp
       and its quiesce; line numbers checked against the carried series,
-      not upstream.
+      not upstream. On the v26.09 series (main `45ff773c`, 2026-11-02;
+      the raid code of the carried skip-rebuild patch byte-identical to
+      the shipped one) flint-91 read the path: the function keeps its
+      name, signature and callers (the RPC, the fail-base path, the
+      process-finish removal, the two skip-rebuild sites), its definition
+      at `bdev_raid.c:2317`, 25 lines above the v26.05 series, and the
+      one v26.09 change in the area (`ef1a810a9`, the reset-before-remove
+      step dropped) lies below it, so a hook at the entry still sees
+      every removal. The quiesce, superblock, deconfigure, unquiesce
+      sequence in step 2 above is the v26.09 one exactly.
 - [ ] Driver: lvols one cluster larger; `bdev_raid_create` with `seq`
       from the assembly write; the stage's stamp read and steps 1 to 5;
       the tie's conjunct; F36c's writer set and gate from the read.
