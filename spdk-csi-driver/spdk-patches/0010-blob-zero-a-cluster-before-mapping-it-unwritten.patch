@@ -24,10 +24,10 @@ Formerly spdk-csi-driver/blob-zero-new-clusters.patch.
  2 files changed, 262 insertions(+), 5 deletions(-)
 
 diff --git a/lib/blob/blobstore.c b/lib/blob/blobstore.c
-index 69fbd3f8d..64db70caa 100644
+index 82b45e0a7..76f4785d1 100644
 --- a/lib/blob/blobstore.c
 +++ b/lib/blob/blobstore.c
-@@ -1836,6 +1836,37 @@ bs_super_set_defaults_if_unset(struct spdk_bs_super_block *super)
+@@ -1901,6 +1901,37 @@ bs_super_set_defaults_if_unset(struct spdk_bs_super_block *super)
  	}
  }
  
@@ -65,7 +65,7 @@ index 69fbd3f8d..64db70caa 100644
  static int
  bs_super_validate(struct spdk_bs_super_block *super, struct spdk_blob_store *bs)
  {
-@@ -2500,6 +2531,64 @@ blob_persist_write_extent_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
+@@ -2565,6 +2596,64 @@ blob_persist_write_extent_pages(spdk_bs_sequence_t *seq, void *cb_arg, int bserr
  	blob_persist_generate_new_md(ctx);
  }
  
@@ -130,7 +130,7 @@ index 69fbd3f8d..64db70caa 100644
  static void
  blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  {
-@@ -2521,6 +2610,18 @@ blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
+@@ -2586,6 +2675,18 @@ blob_persist_start(spdk_bs_sequence_t *seq, void *cb_arg, int bserrno)
  
  	}
  
@@ -149,7 +149,7 @@ index 69fbd3f8d..64db70caa 100644
  	if (blob->clean.num_clusters < blob->active.num_clusters) {
  		/* Blob was resized up */
  		assert(blob->clean.num_extent_pages <= blob->active.num_extent_pages);
-@@ -3132,6 +3233,10 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
+@@ -3203,6 +3304,10 @@ bs_allocate_and_copy_cluster(struct spdk_blob *blob,
  						blob_write_copy, ctx);
  		}
  
@@ -161,10 +161,10 @@ index 69fbd3f8d..64db70caa 100644
  		blob_insert_cluster_on_md_thread(ctx->blob, cluster_number, ctx->new_cluster,
  						 ctx->new_extent_page, ctx->new_cluster_page, blob_insert_cluster_cpl, ctx);
 diff --git a/test/unit/lib/blob/blob.c/blob_ut.c b/test/unit/lib/blob/blob.c/blob_ut.c
-index 3ed17a70c..91e540868 100644
+index 1361f0d5e..7ac8b39fb 100644
 --- a/test/unit/lib/blob/blob.c/blob_ut.c
 +++ b/test/unit/lib/blob/blob.c/blob_ut.c
-@@ -4918,8 +4918,10 @@ blob_thin_prov_rw(void)
+@@ -5128,8 +5128,10 @@ blob_thin_prov_rw(void)
  	CU_ASSERT(free_clusters - 1 == spdk_bs_free_cluster_count(bs));
  	CU_ASSERT(spdk_blob_get_num_allocated_clusters(blob) == 1);
  	/* For thin-provisioned blob we need to write 20 io_units plus one page metadata and
@@ -177,7 +177,7 @@ index 3ed17a70c..91e540868 100644
  	if (g_use_extent_table) {
  		/* Add one more page for EXTENT_PAGE write */
  		expected_bytes += spdk_bs_get_page_size(bs);
-@@ -5033,6 +5035,8 @@ blob_thin_prov_write_count_io(void)
+@@ -5243,6 +5245,8 @@ blob_thin_prov_write_count_io(void)
  			 */
  			expected_bytes = io_unit_size + 2 * spdk_bs_get_page_size(bs);
  		}
@@ -186,7 +186,7 @@ index 3ed17a70c..91e540868 100644
  		CU_ASSERT((g_dev_write_bytes - write_bytes) == expected_bytes);
  
  		/* The write should have synced the metadata already.  Do another sync here
-@@ -5064,8 +5068,9 @@ blob_thin_prov_write_count_io(void)
+@@ -5274,8 +5278,9 @@ blob_thin_prov_write_count_io(void)
  		/*
  		 * For legacy metadata, we should have written the I/O and the primary metadata page.
  		 * For extent table metadata, we should have written the I/O and the extent metadata page.
@@ -197,7 +197,7 @@ index 3ed17a70c..91e540868 100644
  		CU_ASSERT((g_dev_write_bytes - write_bytes) == expected_bytes);
  
  		/* Send unmap aligned to the whole cluster - should free it up */
-@@ -5414,8 +5419,8 @@ blob_thin_prov_rle(void)
+@@ -5624,8 +5629,8 @@ blob_thin_prov_rle(void)
  	CU_ASSERT(g_bserrno == 0);
  	CU_ASSERT(free_clusters - 1 == spdk_bs_free_cluster_count(bs));
  	/* For thin-provisioned blob we need to write 10 pages plus one page metadata and
@@ -208,8 +208,8 @@ index 3ed17a70c..91e540868 100644
  	if (g_use_extent_table) {
  		/* Add one more page for EXTENT_PAGE write */
  		expected_bytes += spdk_bs_get_page_size(bs);
-@@ -6155,6 +6160,152 @@ blob_alloc_window_keeps_write_order(void)
- 	poll_threads();
+@@ -6508,6 +6513,152 @@ blob_alloc_window_other_channel_waits(void)
+ 	free(b);
  }
  
 +/* Leave n free clusters holding a deleted blob's data: a thick blob filled
@@ -361,10 +361,10 @@ index 3ed17a70c..91e540868 100644
  static void
  blob_cow_same_cluster_waits(void)
  {
-@@ -11345,6 +11496,7 @@ main(int argc, char **argv)
- 		CU_ADD_TEST(suite_bs, blob_insert_cluster_after_snapshot_enospc);
- 		CU_ADD_TEST(suite_bs, blob_write_extent_page_refuses_md0);
+@@ -11700,6 +11851,7 @@ main(int argc, char **argv)
+ 		CU_ADD_TEST(suite_bs, blob_snapshot_waits_for_cluster_insert);
  		CU_ADD_TEST(suite_bs, blob_alloc_window_keeps_write_order);
+ 		CU_ADD_TEST(suite_bs, blob_alloc_window_other_channel_waits);
 +		CU_ADD_TEST(suite_bs, blob_new_clusters_read_zeroes);
  		CU_ADD_TEST(suite_bs, blob_thin_prov_rw);
  		CU_ADD_TEST(suite, blob_thin_prov_write_count_io);

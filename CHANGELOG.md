@@ -44,6 +44,33 @@ covered by the stability guarantee.
 - `scripts/spdk-patches.sh test` also runs the nvmf controller unit test,
   which links again: patch 0001 gained the stub it needed.
 
+### Fixed
+
+- **spdk-tgt: a snapshot no longer races a cluster allocation, and a write
+  is acknowledged only once its new cluster's mapping is on disk**
+  (2026-11-03; `spdk-csi-driver/spdk-patches/` 0008 and 0009). These are
+  two findings from an automated review of the SPDK changes we filed
+  (Gerrit 29555 and 29556). Both were reproduced against our own patches
+  on v26.09, and both have been in every spdk-tgt since 1.7.1.
+  - A snapshot taken while a cluster allocation's extent page write was in
+    flight swapped the volume's cluster map out from under it. If that
+    write then failed, the volume's allocated-cluster count wrapped to
+    2^64-1, and the cluster was freed while the snapshot's in-memory map
+    still held it. The live volume reads through that map, until the next
+    restart. A freeze now waits for the volume's in-flight allocations, so
+    the swap cannot happen mid-allocation.
+  - A write from a second SPDK thread to a cluster being allocated was
+    acknowledged before the cluster's mapping was on disk, and a FLUSH at
+    that moment was acknowledged too. A crash then lost the acknowledged,
+    flushed write. A new cluster is now mapped only once its extent page is
+    on disk, so such a write waits and lands in the same cluster. Flint's
+    default single reactor has one ublk thread and one NVMe-oF thread per
+    node, and no path was found where both write one volume; a reactor mask
+    in `spdkTarget.extraArgs` would have made it reachable.
+
+  No published image has the fixes yet: the chart still pins spdk-tgt
+  1.7.3.
+
 ### Security
 
 - **A release now refuses a stale Chainguard base pin** (2026-11-02,
