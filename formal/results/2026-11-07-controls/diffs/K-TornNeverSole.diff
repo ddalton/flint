@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-TornNeverSole/FlintCatchupSProof.tla
+@@ -29 +29 @@
+-  /\ EvenVouch = "decree" /\ TornExcluded = TRUE /\ TornNeverSole = TRUE /\ ZombiePreStampLegal = TRUE
++  /\ EvenVouch = "decree" /\ TornExcluded = TRUE /\ TornNeverSole = FALSE /\ ZombiePreStampLegal = TRUE

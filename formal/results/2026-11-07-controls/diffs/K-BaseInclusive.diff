@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-BaseInclusive/FlintCatchupSProof.tla
+@@ -23 +23 @@
+-  /\ WriteQuorum = 1 /\ AssemblyQuorum = 1 /\ BaseInclusive = TRUE
++  /\ WriteQuorum = 1 /\ AssemblyQuorum = 1 /\ BaseInclusive = FALSE

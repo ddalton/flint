@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-RelView/FlintCatchupSProof.tla
+@@ -28 +28 @@
+-  /\ MonitorSkipsHold = FALSE /\ DecreeGated = TRUE /\ DecreeSparesLast = TRUE /\ RelView = TRUE
++  /\ MonitorSkipsHold = FALSE /\ DecreeGated = TRUE /\ DecreeSparesLast = TRUE /\ RelView = FALSE

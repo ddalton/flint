@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-MajorityRead/FlintCatchupSProof.tla
+@@ -27 +27 @@
+-  /\ Stamp = TRUE /\ RecordUp = TRUE /\ MajorityRead = "count" /\ Decree = TRUE /\ DeferExpires = FALSE
++  /\ Stamp = TRUE /\ RecordUp = TRUE /\ MajorityRead = "off" /\ Decree = TRUE /\ DeferExpires = FALSE

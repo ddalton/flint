@@ -2978,6 +2978,11 @@ without the rule, and a HOLD on the data beside it.
 | z4 | the same with the triple (rev 17 `61ae6829`, the drain off, cfg `5ee58d31`); identity at rev 16 and rev 17 | all four rule knobs and `ZombieTriple` | the four above | no violation to depth 16 (184,876,790 states, the 1,800 s cap; c31, tla-mc 0.2.2 compiled), five levels past rev 16's trace; the identities at rev 16 and rev 17 exact (7,286,102, depth 36) (tables-r17.md) | the literal rule removes the trace, bounded |
 | g17 | three replicas, lost mark; crash; zombie move, on the final setting (rev 17 `61ae6829`: the rule, the drain with its stamp, the triple; three failures; cfgs `9513f4ac`, `99c1d563`, `93162dde`; c31, tla-mc 0.2.2 compiled) | all | `Inv_NoNewLoss` with `Inv_AckedHeld`, `Inv_MembersHold`, `Inv_RaidHolds`, `Inv_AckStamped` | no violation to depths 19, 18 and 17 (178,807,970; 191,925,993; 171,150,282 states; the 1,800 s cap), bounded; with the drain off (c33b, tla-mc 0.2.1) depths 19, 19 and 17, the lost-mark and zombie counts equal to rev 16's exactly (tables-r17.md) | the three-replica rows rechecked on the final setting, bounded; the full three-replica passes remain c27's on rev 12 |
 | g17 | four replicas, zombie move, three failures, on the final setting (cfg `0bb5829f`, with `Inv_TornJunkMarked`) | all | the five | no violation to depth 13 (178,880,279 states, the 1,800 s cap), bounded | the four-replica rerun that replaces the EC2 session's cut arm |
+| vc | symmetry over the replica ids, validated at two replicas (rev 17 `61ae6829` under the proof's `ASSUME Full`, one failure, sizes one block, `MaxVer` 1, `MaxEpoch` 2, `Retain` 1, `MaxAsm` 3; wrapper `FlintCatchupSSym.tla` `9f274f80` with model-value ids, `Perms` and `Inv_ReadUnique`; tla-mc 0.3.0 compiled; tables-vc-local.md `4d05d888`) | all | the four safety invariants, `Inv_ReadUnique` | model-value ids without symmetry reproduce the natural-id spaces exactly (zombie move 26,146,988 states, depth 35); with `SYMMETRY` every arm holds at the same depth on about half the states (lost mark 2,110,114; crash 2,959,746; zombie 13,074,324; crash and zombie together 17,928,321); a VIEW without the three write-only ghosts (`vouched`, `tornMarked`, `tornServed`; `FlintCatchupSSymV.tla` `35a7ec38`) changes no verdict and takes the zombie arm to 10,546,420 | the reduction is exact where it can be compared; the read is blind to the ids wherever it is reached |
+| vc | the read's uniqueness at three replicas: c29's first form, the newest view unique (`Inv_ViewUnique`), against the restated form, every maximal view agreeing on seq, gen, size and members (`Inv_ReadUnique`) | all | `Inv_ViewUnique` | VIOLATED at depth 6 (27,696 states): two attached in-sync legs both newest, r3's valid majority stamp (1, 1, 3, {r1, r3}) and r1's unconfirmed (1, 2, 3, {r1}) read through its released view (1, 1, 3, {r1, r3}), equal on every field the read uses and different only in the released view; `Inv_ReadUnique` holds in every three-replica pass below | c29's correction confirmed on rev 17: the strict form is too strict, the restated one is what symmetry needs |
+| vc | three replicas, two failures, on the final setting, under `SYMMETRY` (the sizes above; on-prem cluster vc01NN, 24 to 25 nodes of 40 threads, tla-mc 0.3.0 `-cluster` compiled, 2026-11-07; tables-vc.md `bb03b501`): lost mark; crash; zombie move (with the VIEW); zombie move with the expiry on (with the VIEW) | all; the expiry on in the last | the four safety invariants and `Inv_ReadUnique`; for the expiry `Inv_LossMarked`, `Inv_TornJunkMarked`, `Inv_AckStamped`, `Inv_ReadUnique` | HOLD over the full space: 1,287,740,129 states, depth 45 (307 s of search); 1,894,073,451, depth 46 (465 s); 10,548,632,461, depth 49 (4,092 s); 12,527,517,379, depth 49 (4,388 s) | the three-replica zombie arm as a full pass on the final setting, beside the stamp proof; at these sizes, not c27's (whose constants were not on main to reproduce), one fault shape per run, crash and zombie together not run at three replicas |
+| vc | the monitor-skips question, three replicas, two failures, zombie move, natural ids, rev 17 under `Full` with the pre-stamp write legal: the ungated decree with the monitor marking (control); the ungated decree with the monitor skipping held legs (`MonitorSkipsHold`) | all but `DecreeGated`; the skip in the second | `Inv_NoNewLoss` | VIOLATED at depth 11 in both (4,039,299 and 3,945,774 states): a leg fails out of the raid and stays record-`in_sync` (its mark not yet written), a write is acknowledged on the other two, the drain takes the second (`OperatorMark`), the zombie move comes during the hold and the ungated decree marks the last member stale, leaving only the leg without the write `in_sync`; neither trace uses the monitor | the skip does not stand in for the decree's gate: §12's gated decree is required on the final setting; the patch has it |
+| vc | the same pair with the drain off; the gated decree with the skip; the final setting | as named | `Inv_NoNewLoss` and the three others | no violation: with the drain off, the skip to depth 30 (4,621,198,827 states) and the control to depth 26 (3,161,089,549, stopped by a full disk); the gated decree with the skip and the final setting to depth 23 (2,280,470,439 and 2,441,743,734), each bounded, stopped by the per-node memory guard | without the drain the strand needs more than these depths, if it exists; the gated arms hold as deep as the cluster reached without symmetry |
 
 What the table claims. At two replicas every arm under the full rule set
 is a full pass, and each safety rule has a control that fails without it
@@ -3120,7 +3125,7 @@ and decided by the user:
          every input's md5, with its thirteen controls (§5). Done
          2026-10-31: all 7,673 proved; twelve controls fail at their
          premise's steps, one proves without its rule; cited in §5.
-   - [ ] A TLAPS proof of the stamp rule itself, on FlintCatchupS. None
+   - [x] A TLAPS proof of the stamp rule itself, on FlintCatchupS. None
          exists: the proved rules are FlintCatchup and FlintCatchupT. To
          add anything over the trust proof it must run with the crash
          and the zombie move on, in c27's setting (rev 12, trust, the
@@ -3195,7 +3200,45 @@ and decided by the user:
          proof: c31 ran 19:51Z to 00:39Z (about $8.80), c33 and c33b
          about $1.55; zero sets verified, nothing left running; the
          day's total about $10.40.
-   - [ ] The three-replica zombie arm as a full pass (c27 bounded it at
+         **Controls done (2026-11-07, on-prem cluster vc0101-vc0113,
+         not EC2; `formal/results/2026-11-07-controls/RESULTS.txt`
+         `8e71cb5a`, table `controls-table.txt` `2cb881b2`):** all 27
+         flips run as sixteen fresh-cache ranges each (448 jobs,
+         17:49Z to 22:49Z), every job asserting the proof `9ed5580a`,
+         the Ind `c70f9660` and the model `61ae6829` before tlapm ran.
+         tlapm `bfa9468` was rebuilt from source (the pinned tarball
+         was not on hand; new sha256 `1453bd21`, `lsp` and `jsonrpc`
+         pinned at 1.24.0, tlapm's own test suite not run green for
+         want of `/usr/bin/time`). Isabelle works once its tree sits
+         at the build's absolute path on every node: the install is
+         not relocatable, its heaps hard-coding the build tree, which
+         is very likely the EC2 failure. So nothing is set aside: the
+         unflipped validation gives 5,432 proved, 13,584 trivial and 0
+         failed of 19,016, the c31 record with 131:5 and 1262:3 now
+         proved, and neither step fails under any flip. Twenty-three
+         controls are killed, each at named steps: `Stamp` (29
+         steps, through the type, drain, stage and zombie lemmas),
+         `StageOracle` (12), `TornExcluded` (5), `PinRetention` (4),
+         `BaseInclusive`, `LocalLegGuard`, `TornNeverSole`,
+         `ZombieTriple` (3 each), and `MajorityRead`, `DecreeGated`,
+         `RelView`, `DrainStamps`, `InWriteGuard`, `MonitorGuard`,
+         `WholeMark`, `ZombiePreStampLegal`, `M-DemoteReverts` (2
+         each), `DecreeSparesLast`, `CutStampsAll`, `RaidFailsAtDrop`,
+         `M-SourceTrust`, `M-CutGone`, `M-BulkBelowTgt` (1 each).
+         Four prove without their rule: `Decree`, `RecordUp`,
+         `EvenVouch` and `M-BaseBelowTgt`. The proof needs the
+         decree's gate, not the decree, which only lets a stage go
+         ahead; `RecordUp` is liveness (c28's record-down lassos);
+         the even-size vouch lets a stage serve where it would wait;
+         the select-time base bound repeats T's result. None of the
+         four is shown unnecessary, only unused for safety. Open on
+         the table: a failed step was taken as tlapm reported it and
+         not re-tried for a timeout under load; 3639:3 and 7970:22
+         fail under more than one flip and are the first to rerun
+         alone with more time. Memory differed from the record: the
+         range at lines 7980-8872 peaked at 59 to 87 GB here, against
+         13.6 GB on c31.
+   - [x] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
          states, about 20 GB of fingerprints, growing by half per level,
@@ -3233,6 +3276,25 @@ and decided by the user:
          as uniqueness of the read fields and the three-replica pair is
          rerunning. No symmetry result for the three-replica zombie is
          cited until that holds.
+         **Done (2026-11-07, the vc rows; tables-vc.md `bb03b501`):** the
+         wrapper was rebuilt (`FlintCatchupSSym.tla` `9f274f80`, since
+         `34243d06` is not on main) with the restated invariant
+         (`Inv_ReadUnique`) and checked on rev 17 under the proof's
+         `Full`: at two replicas the reduction reproduces the
+         natural-id spaces and keeps every verdict; at three replicas
+         the strict form fails at depth 6 as c29 found, the restated
+         one holds in every pass, and the zombie arm is a full pass,
+         10,548,632,461 states to depth 49, beside the lost mark
+         (1,287,740,129), the crash (1,894,073,451) and the expiry form
+         (12,527,517,379), each with two failures. The zombie and
+         expiry passes also take a VIEW without three write-only
+         ghosts (`FlintCatchupSSymV.tla` `35a7ec38`, no verdict changed
+         at two replicas). Its limits: the sizes are this batch's, not
+         c27's; one fault shape per run (crash and zombie together not
+         run at three replicas); the reduction rests on the read's
+         uniqueness and on no other use of replica order (`First` only
+         with `CoverageWalk` off), checked by count at two replicas,
+         not at three; safety only.
    - [x] Liveness: `Prop_BarrierEnds` as a full pass with its control
          (c21's arm reached no verdict). Two replicas done (c28,
          2026-10-31, rev 12, the full rule set, tla-mc 0.2.1): the lost
@@ -3316,12 +3378,24 @@ and decided by the user:
          hours on the box at two replicas full and three bounded. If
          excluded, the code refuses expansion of a stamped volume, and
          that refusal ships with its callers.
-   - [ ] The monitor-skips question classed by a rev 10 or later arm
+   - [x] The monitor-skips question classed by a rev 10 or later arm
          with the pre-stamp write legal (c21's arm neither confirms nor
          refutes it); a follow-up unless the patch adopts the ungated
          decree with the monitor skipping held legs in place of §12's
          gated decree, which is what the rows cover. About an hour on
          the box at two replicas, then bounded at three.
+         **Classed (2026-11-07, the vc rows; tables-vc.md `bb03b501`):**
+         on rev 17 under `Full` (the pre-stamp write legal), three
+         replicas, two failures, the ungated decree with the monitor
+         skipping held legs fails `Inv_NoNewLoss` at depth 11, as its
+         control with the monitor marking does; neither trace uses
+         the monitor: a leg out of the raid is still record-`in_sync`,
+         the drain takes the second member, and the decree, ungated,
+         marks the last one stale during the zombie's hold. The skip
+         does not replace the gate; the gated decree in §12 stays,
+         and the patch has it. At two replicas all four arms hold
+         (tables-vc-local.md `4d05d888`); with the drain off the skip
+         holds to depth 30, bounded.
    - [ ] The model files pushed by PR at the user's word, so every md5
          the table cites is on main: FlintCatchupT with its modules,
          inductive invariant, proof and cfgs; FlintCatchupS for each

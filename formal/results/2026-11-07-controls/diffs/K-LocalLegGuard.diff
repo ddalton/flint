@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-LocalLegGuard/FlintCatchupSProof.tla
+@@ -25 +25 @@
+-  /\ Backoff = TRUE /\ CoverageWalk = TRUE /\ MarkGate = TRUE /\ ReadFails = FALSE /\ LocalLegGuard = TRUE
++  /\ Backoff = TRUE /\ CoverageWalk = TRUE /\ MarkGate = TRUE /\ ReadFails = FALSE /\ LocalLegGuard = FALSE

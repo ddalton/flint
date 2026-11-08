@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-ZombieTriple/FlintCatchupSProof.tla
+@@ -35 +35 @@
+-  /\ ZombieTriple = TRUE
++  /\ ZombieTriple = FALSE

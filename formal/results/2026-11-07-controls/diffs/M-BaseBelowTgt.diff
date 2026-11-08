@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupS.tla
++++ M-BaseBelowTgt/FlintCatchupS.tla
+@@ -832 +832 @@
+-     CASE Policy = "trust" -> e \in tr[r] /\ e <= Tgt     \* never above the target (rev 15)
++     CASE Policy = "trust" -> e \in tr[r]      \* never above the target (rev 15)

@@ -1,0 +1,170 @@
+FlintCatchupS controls (gate item 2), on-prem cluster vc0101..vc0113, 2026-11-07 -- 27 controls on the final setting,
+each a full run of all 19,016 obligations of FlintCatchupSProof.tla on a fresh cache.  23 KILLED, 4 NOT KILLED.
+
+RUN WINDOW (UTC): first job dispatched 2026-11-07T17:49:46Z; last job done 2026-11-07T22:49:30Z (driver RUN END);
+processes stopped 22:50:02Z.  (The tlapm install tarball was made at ~17:25Z; the build attempts took the hours before.)
+HOSTS: vc0101..vc0113 (13 nodes, 40 cores, ~125 GB each, shared with other users; Rocky 9.7, no root).  vc0112 was also the
+build host.  vc0114 not used.  Jobs: 448 = 28 runs (BASE + 27 controls) x the 16 ranges of the c31 record
+(2026-10-31-c31-ec2/RESULTS.txt), each `tlapm --toolbox B E --cleanfp --stretch 5 --threads 5 FlintCatchupSProof.tla`
+in its own directory (fresh .tlacache).  driver.py is the one script (it ships job.py to the nodes; job.py asserts the
+proof, Ind and model md5 before tlapm runs and prints them).  All 448 done.json carry the md5 expected for their control
+(0 mismatches; logs/input-md5.json).  Raw logs: logs/ (generated; to be gitignored).
+
+== 1. THE TLAPM BUILD ==
+  tlapm commit bfa9468b64b782be05458b7f41e3732d99d9a50b (bfa9468), built from source on vc0112 (user space: micromamba
+  toolchain + opam 5.1.0, no root).  Backends in it: Zenon 0.8.4, LS4, Isabelle2025 (Poly/ML 5.9.1 heaps), Z3 4.8.9, SMT.
+  Install tarball (tlapm/ = _build/tlapm after `dune install --relocatable`, then `tar -czf`):
+    sha256 1453bd214f4360e51d59d0392220ac9eab8b7925b08b6255917753f4ec8aa526   (47,850,477 bytes)
+  THE ORIGINAL PIN 5eaf3aa705b69250afdd53e073ec145c49dfd771d77784a6315fd7d05bad4e44 IS UNAVAILABLE (the EC2 tlaps.tgz is gone);
+  the sha256 above is this run's pin.  Same commit bfa9468 as the record, but not the same bytes.
+  How it differs from a plain `make release`:
+   - the lsp/jsonrpc opam packages were pinned to 1.24.0 (1.28.1 breaks lsp/test/test_utils.ml: Initialized expects 1 arg).
+   - `make release` built and installed, but its final smoke test (test/TOOLS/do_tests fast/basic) reported 14/14 FAILED
+     because /usr/bin/time does not exist on Rocky 9 (log: "do_tests: line 34: /usr/bin/time: No such file").  I ran the
+     tests' content by hand (true, isa_true, isa_false, ...: isa_true proved by isabelle, isa_false failed) and made the
+     tarball with the Makefile's own `tar -czf` line.  The suite itself was not run green.
+  ISABELLE STATUS: WORKS, with one condition.  The install is NOT relocatable: the Isabelle heaps (Options, TLA+)
+  hard-code the build tree's absolute paths (_build/default/deps/isabelle/Isabelle/{heaps,src,etc}); on a node without that tree
+  Isabelle answers "false" in ~1 s (status failed, time-used 1.0) -- exactly the EC2 symptom; very likely that was the EC2 cause too.
+  Fix, no change to the proof setup: the Isabelle tree (without contrib/) is shipped with the install to every node and
+  unpacked at the same absolute path /home/ddalton/flintcg/build/tlapm/_build/default/deps/isabelle/Isabelle:
+    isa-tree.tgz sha256 114daa03920af8d5e2425c5915983fc81b1a3a8ed0697ae89e21642b34784c2a (354,031,477 bytes), verified on each node.
+  Smoke test on vc0101 (a node that is not the build host), baseline file, ranges 122-139 and 1250-1263: "All 23 obligations proved"
+  and "All 5 obligations proved"; 131:5 and 1262:3 proved by isabelle.  (Before the tree was shipped: 1/23 and 1/5 failed.)
+  Install sha256 verified on all 13 nodes (driver prep log): all equal 1453bd21...  Dynamic libs: tlapm/zenon/ls4 link libz/libzstd, resolved
+  to /lib64 on the other nodes (no conda libs there; the conda RPATH exists only on vc0112).
+
+== 2. VALIDATION (BASE: the unflipped proof, model and Ind; md5 9ed5580a / c70f9660 / 61ae6829, asserted and printed by job.py) ==
+  Per obligation id (sproof/tlapm-tally.py over the 16 ranges): 5,432 proved, 13,584 trivial, 0 failed = 19,016.
+  The record on EC2: 5,430 / 13,584 / 2 failed (131:5, 1262:3).  Here Isabelle proves those two, so 5,432 and 0 failed:
+  the expected result for a working Isabelle.  The ids per range are in tables.json.  BASE window 17:49:48Z-18:44:06Z (slowest range 3,258 s).
+
+== 3. CONTROLS (T-record CONTROLS format: the flip; failing lemma and step "<line>:<col> <lemma> <step>"; counts per id; wall; peak RSS) ==
+  KILLED = at least one step that uses the flipped line fails (the failing step lines are lines of FlintCatchupSProof.tla;
+  the flips of the ASSUME Full block do not change the line count, so the control's line = the baseline line.  The model
+  controls keep the baseline proof file and edit a copy of the model; the lines are the baseline proof's lines).  Each diff:
+  diffs/<control>.diff.  NOT KILLED = it proves without the rule (all 19,016: 5,432 proved + 13,584 trivial).
+  In no control did 131:5 or 1262:3 fail (Isabelle works), so nothing had to be set aside.
+  "wall" = slowest range / sum of the 16 ranges (seconds, 5 threads each); "peak RSS" = the largest range's tlapm+backend tree /
+  the sum of the 16 range peaks, per job.py.  The cluster is shared and the runs went up to 6 per node, so the walls are not
+  comparable with the EC2 walls.
+
+BASE | validation: the unflipped proof, model and Ind | VALIDATION
+   counts {"proved": 5432, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 0 (-) | 131:5/1262:3 failed: 0
+   wall: slowest range 3258 s, sum of ranges 25127 s | peak RSS: largest range 73.6 GB, sum of range peaks 204.6 GB | window 2026-11-07T17:49:48Z - 2026-11-07T18:44:06Z | hosts vc0103,vc0104,vc0107,vc0108,vc0109,vc0110,vc0111,vc0112,vc0113
+K-Stamp | Stamp = TRUE -> FALSE | KILLED
+   counts {"failed": 29, "proved": 5403, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 29 (1680:3 S_TyZombieMove <1>m [failed]; 1803:3 ZB_TyNewAsm <1>1 [failed]; 1824:21 S_TyStage <1>3 [failed]; 1825:37 S_TyStage <1>4 [failed]; 1839:21 S_TyStageAdmit <1>4 [failed]; 1840:39 S_TyStageAdmit <1>5 [failed]; 2389:56 S_StageRead <1>m [failed]; 2708:22 I_Complete <1>nh [failed]; 3133:3 I_Drop <1>hd [failed]; 3536:12 I_FaultOut <2> [failed]; 3780:35 I_Drain <1>h [failed]; 3784:3 I_Drain <1>s [failed]; 4010:88 I_DrainAll <1>s [failed]; 7617:34 I_Stage <1>g [failed]; 7647:3 I_Stage <1>n [failed]; 7869:53 ZU_StageV7 <1>g [failed]; 7896:3 ZU_StageV7 <1>n [failed]; 7970:22 ZU_StageV7 <2>1 [failed]; 8015:34 ZU_StageZ4 <1>g [failed]; 8030:3 ZU_StageZ4 <1>e [failed]; 8280:22 I_StageAdmitAll <1>cs [failed]; 8301:65 I_StageAdmitAll <2>1 [failed]; 8357:34 I_StageAdmitAll <2>1 [failed]; 8358:12 I_StageAdmitAll <2> [failed]; 8797:29 I_StageAdmitAll <3>2 [failed]; 9025:38 I_ZombieAll <2>1 [failed]; 9212:37 I_ZombieAll <3>2 [failed]; 9524:3 I_ZombieMoveAll <1>m [failed]; 9593:31 I_ZombieMoveAll <2>0 [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3139 s, sum of ranges 28249 s | peak RSS: largest range 87.4 GB, sum of range peaks 228.9 GB | window 2026-11-07T18:14:08Z - 2026-11-07T20:48:38Z | hosts vc0102,vc0103,vc0104,vc0105,vc0107,vc0108,vc0109,vc0110,vc0111,vc0113
+K-RecordUp | RecordUp = TRUE -> FALSE | NOT KILLED
+   counts {"proved": 5432, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 0 (-) | 131:5/1262:3 failed: 0
+   wall: slowest range 3279 s, sum of ranges 27946 s | peak RSS: largest range 63.1 GB, sum of range peaks 193.9 GB | window 2026-11-07T18:14:10Z - 2026-11-07T19:53:41Z | hosts vc0101,vc0102,vc0103,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0111
+K-MajorityRead | MajorityRead = "count" -> "off" | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (2425:20 S_StageRead <3>5 [failed]; 10775:49 I_StageDecreeAll <4>1 [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3107 s, sum of ranges 27738 s | peak RSS: largest range 59.8 GB, sum of range peaks 215.2 GB | window 2026-11-07T18:14:12Z - 2026-11-07T20:22:59Z | hosts vc0101,vc0103,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0111,vc0112,vc0113
+K-Decree | Decree = TRUE -> FALSE | NOT KILLED
+   counts {"proved": 5432, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 0 (-) | 131:5/1262:3 failed: 0
+   wall: slowest range 3124 s, sum of ranges 28136 s | peak RSS: largest range 59.3 GB, sum of range peaks 190.9 GB | window 2026-11-07T18:14:14Z - 2026-11-07T20:21:07Z | hosts vc0101,vc0102,vc0103,vc0104,vc0105,vc0106,vc0110,vc0111,vc0112,vc0113
+K-DecreeGated | DecreeGated = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (2441:14 S_StageRead <3> [failed]; 10749:3 I_StageDecreeAll <1>d [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2995 s, sum of ranges 27400 s | peak RSS: largest range 59.8 GB, sum of range peaks 190.8 GB | window 2026-11-07T18:15:41Z - 2026-11-07T20:22:42Z | hosts vc0101,vc0103,vc0106,vc0107,vc0108,vc0109,vc0110,vc0111,vc0112,vc0113
+K-DecreeSparesLast | DecreeSparesLast = TRUE -> FALSE | KILLED
+   counts {"failed": 1, "proved": 5431, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 1 (10749:3 I_StageDecreeAll <1>d [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2872 s, sum of ranges 26840 s | peak RSS: largest range 59.7 GB, sum of range peaks 191.2 GB | window 2026-11-07T18:27:31Z - 2026-11-07T20:51:08Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0112
+K-RelView | RelView = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (9784:33 I_ZombieStampAll <4>1 [failed]; 10566:3 I_StampLandAll <1>vn [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2887 s, sum of ranges 26334 s | peak RSS: largest range 59.5 GB, sum of range peaks 190.5 GB | window 2026-11-07T18:35:07Z - 2026-11-07T20:55:11Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0109,vc0111,vc0112
+K-EvenVouch | EvenVouch = "decree" -> "off" | NOT KILLED
+   counts {"proved": 5432, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 0 (-) | 131:5/1262:3 failed: 0
+   wall: slowest range 2860 s, sum of ranges 26469 s | peak RSS: largest range 59.7 GB, sum of range peaks 190.8 GB | window 2026-11-07T18:40:13Z - 2026-11-07T21:07:18Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0111,vc0112
+K-TornExcluded | TornExcluded = TRUE -> FALSE | KILLED
+   counts {"failed": 5, "proved": 5427, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 5 (2386:65 S_StageRead <1>g [failed]; 2389:56 S_StageRead <1>m [failed]; 7970:22 ZU_StageV7 <2>1 [failed]; 8796:25 I_StageAdmitAll <3>1 [failed]; 8797:29 I_StageAdmitAll <3>2 [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3246 s, sum of ranges 26398 s | peak RSS: largest range 59.7 GB, sum of range peaks 191.5 GB | window 2026-11-07T18:53:10Z - 2026-11-07T19:52:29Z | hosts vc0102,vc0103,vc0104,vc0107,vc0108,vc0109,vc0110,vc0112,vc0113
+K-TornNeverSole | TornNeverSole = TRUE -> FALSE | KILLED
+   counts {"failed": 3, "proved": 5429, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 3 (2386:65 S_StageRead <1>g [failed]; 7970:22 ZU_StageV7 <2>1 [failed]; 8796:25 I_StageAdmitAll <3>1 [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2863 s, sum of ranges 26659 s | peak RSS: largest range 60.0 GB, sum of range peaks 191.8 GB | window 2026-11-07T18:58:23Z - 2026-11-07T21:09:22Z | hosts vc0101,vc0102,vc0103,vc0104,vc0105,vc0106,vc0107,vc0110,vc0111,vc0112,vc0113
+K-ZombiePreStampLegal | ZombiePreStampLegal = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (9025:38 I_ZombieAll <2>1 [failed]; 9212:37 I_ZombieAll <3>2 [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2891 s, sum of ranges 26672 s | peak RSS: largest range 59.8 GB, sum of range peaks 236.6 GB | window 2026-11-07T18:59:36Z - 2026-11-07T21:11:20Z | hosts vc0101,vc0102,vc0103,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0112
+K-WholeMark | WholeMark = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (3641:3 I_MarkStale <1>a [failed]; 3985:3 I_MarkStaleAll <1>a [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3228 s, sum of ranges 26679 s | peak RSS: largest range 59.8 GB, sum of range peaks 193.2 GB | window 2026-11-07T19:04:56Z - 2026-11-07T21:36:38Z | hosts vc0101,vc0102,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0111,vc0113
+K-InWriteGuard | InWriteGuard = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (3777:3 I_Drain <1>p [failed]; 4008:70 I_DrainAll <1>p [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2899 s, sum of ranges 26403 s | peak RSS: largest range 59.9 GB, sum of range peaks 194.7 GB | window 2026-11-07T19:12:12Z - 2026-11-07T21:39:42Z | hosts vc0101,vc0103,vc0104,vc0105,vc0106,vc0108,vc0109,vc0110,vc0111,vc0112,vc0113
+K-MonitorGuard | MonitorGuard = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (3639:3 I_MarkStale <1>p [failed]; 3983:47 I_MarkStaleAll <1>p [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2880 s, sum of ranges 26514 s | peak RSS: largest range 59.4 GB, sum of range peaks 190.5 GB | window 2026-11-07T19:19:30Z - 2026-11-07T21:43:22Z | hosts vc0103,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0110,vc0111,vc0112,vc0113
+K-DrainStamps | DrainStamps = TRUE -> FALSE | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (3779:16 I_Drain <1>L [failed]; 4009:16 I_DrainAll <1>L [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2866 s, sum of ranges 25707 s | peak RSS: largest range 59.9 GB, sum of range peaks 191.3 GB | window 2026-11-07T19:26:03Z - 2026-11-07T21:55:26Z | hosts vc0101,vc0102,vc0104,vc0106,vc0107,vc0109,vc0112,vc0113
+K-ZombieTriple | ZombieTriple = TRUE -> FALSE | KILLED
+   counts {"failed": 3, "proved": 5429, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 3 (8914:1 ZZ_FZRel ? [failed]; 9593:31 I_ZombieMoveAll <2>0 [failed]; 10487:24 I_RecordConfirmAll <2>4 [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2899 s, sum of ranges 25915 s | peak RSS: largest range 59.4 GB, sum of range peaks 211.0 GB | window 2026-11-07T19:30:37Z - 2026-11-07T21:57:54Z | hosts vc0101,vc0102,vc0103,vc0104,vc0105,vc0106,vc0107,vc0108,vc0109,vc0111,vc0112
+K-CutStampsAll | CutStampsAll = FALSE -> TRUE | KILLED
+   counts {"failed": 1, "proved": 5431, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 1 (4497:3 I_CutRecord <1>p [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2897 s, sum of ranges 26332 s | peak RSS: largest range 59.8 GB, sum of range peaks 191.3 GB | window 2026-11-07T19:37:17Z - 2026-11-07T21:59:56Z | hosts vc0101,vc0102,vc0103,vc0105,vc0106,vc0107,vc0110,vc0111,vc0112
+K-RaidFailsAtDrop | RaidFailsAtDrop = TRUE -> FALSE | KILLED
+   counts {"failed": 1, "proved": 5431, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 1 (3123:3 I_Drop <1>p [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3320 s, sum of ranges 26620 s | peak RSS: largest range 59.8 GB, sum of range peaks 192.5 GB | window 2026-11-07T19:47:02Z - 2026-11-07T22:25:11Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0110,vc0113
+K-BaseInclusive | BaseInclusive = TRUE -> FALSE | KILLED
+   counts {"failed": 3, "proved": 5429, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 3 (911:70 StageAdmitFacts <1>1 [failed]; 6935:58 I_BulkCopy <1>lo [failed]; 7199:60 I_Chase <2>lo [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2930 s, sum of ranges 26939 s | peak RSS: largest range 59.8 GB, sum of range peaks 190.3 GB | window 2026-11-07T19:59:21Z - 2026-11-07T22:28:41Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0108,vc0110
+K-PinRetention | PinRetention = TRUE -> FALSE | KILLED
+   counts {"failed": 4, "proved": 5428, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 4 (4420:3 I_Retire <1>p [failed]; 5476:3 I_SelectBase <1>s [failed]; 6911:3 I_BulkCopy <1>s [failed]; 7186:5 I_Chase <2>s [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3112 s, sum of ranges 26952 s | peak RSS: largest range 59.4 GB, sum of range peaks 193.5 GB | window 2026-11-07T20:10:28Z - 2026-11-07T22:31:20Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0109,vc0110
+K-StageOracle | StageOracle = FALSE -> TRUE | KILLED
+   counts {"failed": 12, "proved": 5420, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 12 (2322:30 ZU_Newest <1>0 [failed]; 3639:3 I_MarkStale <1>p [failed]; 7622:19 I_Stage <1>z [failed]; 7626:46 I_Stage <2>2 [failed]; 7874:19 ZU_StageV7 <1>z [failed]; 7878:46 ZU_StageV7 <2>2 [failed]; 7964:14 ZU_StageV7 <3> [failed]; 8018:19 ZU_StageZ4 <1>z [failed]; 8022:46 ZU_StageZ4 <2>2 [failed]; 8294:21 I_StageAdmitAll <2>3 [failed]; 8302:38 I_StageAdmitAll <2>2 [failed]; 10755:78 I_StageDecreeAll <2>a [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2986 s, sum of ranges 26835 s | peak RSS: largest range 60.6 GB, sum of range peaks 193.0 GB | window 2026-11-07T20:20:37Z - 2026-11-07T22:40:46Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0110,vc0111
+K-LocalLegGuard | LocalLegGuard = TRUE -> FALSE | KILLED
+   counts {"failed": 3, "proved": 5429, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 3 (5526:18 I_SelectBase <3>1 [failed]; 7115:3 I_Chase <1>g [failed]; 7376:3 I_ChaseX <1>g [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 3150 s, sum of ranges 26762 s | peak RSS: largest range 59.8 GB, sum of range peaks 194.5 GB | window 2026-11-07T20:27:24Z - 2026-11-07T22:45:25Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0110
+M-SourceTrust | model: Covers drops "Policy = trust => t \in tr[s]" | KILLED
+   counts {"failed": 1, "proved": 5431, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 1 (6212:10 ZY_CoverSetFacts <1> [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2921 s, sum of ranges 26751 s | peak RSS: largest range 59.8 GB, sum of range peaks 190.7 GB | window 2026-11-07T20:37:01Z - 2026-11-07T22:43:01Z | hosts vc0102,vc0104,vc0105,vc0106,vc0110,vc0111
+M-CutGone | model: CutOne drops "r \notin cutGone" | KILLED
+   counts {"failed": 1, "proved": 5431, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 1 (4617:3 I_CutOne <1>p [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2890 s, sum of ranges 26503 s | peak RSS: largest range 59.8 GB, sum of range peaks 192.9 GB | window 2026-11-07T20:49:23Z - 2026-11-07T22:43:56Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0107,vc0110,vc0111
+M-BaseBelowTgt | model: BaseCandidates drops "e <= Tgt" | NOT KILLED
+   counts {"proved": 5432, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 0 (-) | 131:5/1262:3 failed: 0
+   wall: slowest range 3073 s, sum of ranges 26096 s | peak RSS: largest range 66.6 GB, sum of range peaks 197.4 GB | window 2026-11-07T20:59:29Z - 2026-11-07T22:46:59Z | hosts vc0101,vc0102,vc0104,vc0105,vc0106,vc0110,vc0111
+M-BulkBelowTgt | model: BulkCopy drops "Policy = trust => sb[r] <= Tgt" | KILLED
+   counts {"failed": 1, "proved": 5431, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 1 (6905:3 I_BulkCopy <1>g [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2875 s, sum of ranges 26123 s | peak RSS: largest range 59.3 GB, sum of range peaks 191.4 GB | window 2026-11-07T21:10:35Z - 2026-11-07T22:46:00Z | hosts vc0101,vc0102,vc0103,vc0104,vc0106,vc0110,vc0111
+M-DemoteReverts | model: Demote keeps reverted (no reset to -1) | KILLED
+   counts {"failed": 2, "proved": 5430, "trivial": 13584} total 19016 | failed outside 131:5/1262:3: 2 (764:83 T_Chase <2>2 [failed]; 7130:5 I_Chase <2>c [failed]) | 131:5/1262:3 failed: 0
+   wall: slowest range 2936 s, sum of ranges 25501 s | peak RSS: largest range 59.9 GB, sum of range peaks 192.4 GB | window 2026-11-07T21:16:58Z - 2026-11-07T22:49:23Z | hosts vc0102,vc0104,vc0105,vc0106,vc0110,vc0111,vc0112
+
+table md5 (md5 of the table above, controls-table.txt): 2cb881b281b78f01e2f5058a2be70696
+
+== 4. ANYTHING THAT DID NOT MATCH THE RECORD / WHAT HAPPENED ==
+  - Isabelle: see section 1.  131:5 and 1262:3 proved here (5,432 / 0 failed, against 5,430 / 2 failed on EC2).
+  - Memory is not what the record says.  Range fb12 (7980-8872) peaks at 59-87 GB here (z3 blow-ups: single z3 processes at
+    23-28 GB), BASE fb12 73.6 GB, K-Stamp 87.4 GB; the record has 13.6 GB.  fb1 peaks at 13 GB (record 5.6).  The 59-60 GB
+    plateau in most controls (fb12) is not a limit I set.  I ran fb12 alone on a node (6 nodes kept for it while other ranges
+    waited), and a watchdog killed the job on a node under 6 GB MemAvailable.
+  - Scheduling accidents (all re-run from scratch, not counted in the table; every table row is a complete, md5-checked set of 16
+    rows each with rc 0): (a) the first driver's ssh dispatch hung on the nohup child's pipes (main spotted it): fixed with
+    setsid + a subshell, no duplicate jobs; (b) at ~18:58Z I killed by hand all fb12 jobs of the controls (two nodes were at 0-1 GB
+    free) and re-queued them; (c) the watchdog killed K-Stamp fb12 on vc0111 at 19:31Z (MemAvailable 5.6 GB), re-queued;
+    (d) the first estimates (the record's peaks x1.3) were replaced by the observed BASE peaks.  Nodes never ran out of memory
+    (as far as I saw: lowest MemAvailable seen 0-1 GB on vc0113 and vc0103 at ~18:50Z, before (b)); I did not see an OOM kill
+    of anyone else's process but I did not check the other users' logs.
+  - I did not check that each failed step is a logical failure and not a timeout under load: 'failed' is what tlapm-tally
+    reports; the failed steps are the ones the flipped line is expected to feed (e.g. WholeMark: I_MarkStale/I_MarkStaleAll
+    <1>a; MonitorGuard: <1>p of the same; DrainStamps: I_Drain/I_DrainAll <1>L).  3639:3 I_MarkStale <1>p fails under both
+    MonitorGuard and StageOracle, and 7970:22 ZU_StageV7 <2>1 under Stamp, TornExcluded and TornNeverSole; I did not look why.
+  - NOT KILLED: K-RecordUp, K-Decree, K-EvenVouch, M-BaseBelowTgt (all 19,016 prove without the rule).  T's record had one
+    not-killed too; whether each of these four is a premise the proof does not use (a dead premise) or a gap in the control is for
+    the proof's owner to decide.
+  - The user's list of "about 27": it is 27 here: the 11 stamp rules (K-Stamp, RecordUp, MajorityRead, Decree, DecreeGated,
+    DecreeSparesLast, RelView, EvenVouch, TornExcluded, TornNeverSole, ZombiePreStampLegal), the user's 10-31 rules (WholeMark,
+    InWriteGuard, MonitorGuard, DrainStamps, ZombieTriple), T's carried premises (CutStampsAll, RaidFailsAtDrop,
+    BaseInclusive, PinRetention, StageOracle, LocalLegGuard) and T's five model rules (M-SourceTrust, M-CutGone,
+    M-BaseBelowTgt, M-BulkBelowTgt, M-DemoteReverts).  K-MajorityRead flips "count" -> "off", K-EvenVouch "decree" -> "off".
+
+== 5. WHERE THINGS ARE ==
+  Each node: ~/flintcg/run/ (tlaps/ the install, tlaps.tgz, isa-tree.tgz, inputs/, jobs/<control>__<fbN>/ with the raw tlapm output,
+  job.py), and the Isabelle tree at ~/flintcg/build/tlapm/_build/default/deps/isabelle/Isabelle.  vc0112 also has the full build
+  (~/flintcg/build/tlapm, mamba env, opam root, logs/build*.log, build-tlapm.sh).  On the workstation: logs/ here (driver*.out, jobs/,
+  tlaps.tgz, isa-tree.tgz).  All my processes on vc0101..vc0113 are stopped (checked: none left).
+  Files here: driver.py, diffs/ (27), controls-table.txt, tables.json, RESULTS.txt.

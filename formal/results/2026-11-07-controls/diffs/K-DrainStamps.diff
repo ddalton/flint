@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-DrainStamps/FlintCatchupSProof.tla
+@@ -33 +33 @@
+-  /\ OperatorMark = TRUE /\ DrainStamps = TRUE
++  /\ OperatorMark = TRUE /\ DrainStamps = FALSE

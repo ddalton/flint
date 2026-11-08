@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupS.tla
++++ M-DemoteReverts/FlintCatchupS.tla
+@@ -944 +944 @@
+-  /\ reverted' = IF Policy = "trust" THEN [reverted EXCEPT ![r] = -1] ELSE reverted
++  /\ reverted' = reverted

@@ -1,0 +1,4 @@
+--- baseline/FlintCatchupS.tla
++++ M-BulkBelowTgt/FlintCatchupS.tla
+@@ -912 +911,0 @@
+-  /\ Policy = "trust" => sb[r] <= Tgt

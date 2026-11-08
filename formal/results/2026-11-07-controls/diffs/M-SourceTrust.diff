@@ -1,0 +1,4 @@
+--- baseline/FlintCatchupS.tla
++++ M-SourceTrust/FlintCatchupS.tla
+@@ -550 +549,0 @@
+-  /\ Policy = "trust" => t \in tr[s]

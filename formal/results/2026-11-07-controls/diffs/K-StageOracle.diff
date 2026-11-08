@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-StageOracle/FlintCatchupSProof.tla
+@@ -22 +22 @@
+-  /\ ZombieWhere = "colocated" /\ RaidFailsAtDrop = TRUE /\ StageOracle = FALSE
++  /\ ZombieWhere = "colocated" /\ RaidFailsAtDrop = TRUE /\ StageOracle = TRUE

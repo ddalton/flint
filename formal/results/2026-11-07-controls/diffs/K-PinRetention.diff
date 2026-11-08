@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-PinRetention/FlintCatchupSProof.tla
+@@ -24 +24 @@
+-  /\ CutStampsAll = FALSE /\ PinRetention = TRUE
++  /\ CutStampsAll = FALSE /\ PinRetention = FALSE

@@ -1,0 +1,5 @@
+--- baseline/FlintCatchupSProof.tla
++++ K-MonitorGuard/FlintCatchupSProof.tla
+@@ -32 +32 @@
+-  /\ LastFails = TRUE /\ WholeMark = TRUE /\ InWriteGuard = TRUE /\ MonitorGuard = TRUE
++  /\ LastFails = TRUE /\ WholeMark = TRUE /\ InWriteGuard = TRUE /\ MonitorGuard = FALSE

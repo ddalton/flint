@@ -1,0 +1,4 @@
+--- baseline/FlintCatchupS.tla
++++ M-CutGone/FlintCatchupS.tla
+@@ -734 +733,0 @@
+-  /\ r \notin cutGone
