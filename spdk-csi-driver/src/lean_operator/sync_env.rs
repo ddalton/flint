@@ -64,6 +64,11 @@ pub fn sync_env(ws: &FlintLeanWorkspace, root: &str) -> Vec<(String, String)> {
         // One of the only two labels any series carries (D15).
         p("FLINT_SYNC_WORKSPACE", ws.name_any()),
     ];
+    // Only when the CR names one, so an S3 workspace's launch list is
+    // what it was before providers existed.
+    if let Some(provider) = &s.provider {
+        env.push(p("FLINT_SYNC_PROVIDER", provider.clone()));
+    }
     if let Some(endpoint) = &s.endpoint {
         env.push(p("FLINT_SYNC_ENDPOINT", endpoint.clone()));
     }
@@ -135,6 +140,22 @@ mod tests {
             .unwrap(),
         );
         assert!(!sync_env(&ws, "/workspace").iter().any(|(k, _)| k == "FLINT_SYNC_REGION"));
+    }
+
+    /// The provider is stamped only when the CR names one, so an S3
+    /// workspace's launch list is the one it had before providers existed.
+    #[test]
+    fn the_provider_is_stamped_only_when_named() {
+        assert!(!sync_env(&ws(), "/workspace").iter().any(|(k, _)| k == "FLINT_SYNC_PROVIDER"));
+        let ws = FlintLeanWorkspace::new(
+            "proj3",
+            serde_json::from_value::<FlintLeanWorkspaceSpec>(serde_json::json!({
+                "projectId": "team-a/proj3", "bucket": "agentws", "keyPrefix": "tenants/proj3", "provider": "azure",
+            }))
+            .unwrap(),
+        );
+        let env = sync_env(&ws, "/workspace");
+        assert_eq!(env.iter().find(|(k, _)| k == "FLINT_SYNC_PROVIDER").map(|(_, v)| v.as_str()), Some("azure"));
     }
 
     /// Budget grows with the inventory and never drops below the floor.

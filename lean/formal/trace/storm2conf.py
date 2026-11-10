@@ -27,9 +27,11 @@ choice is a linearisation the constraints allow; the free ones commute in
 the model -- a writer's local steps). Constraints that cannot all hold are
 a contradiction in the run itself, reported, never forced.
 
-THE JOIN. An agent's write is named by the MD5 of its bytes (agent.sh's
-`md5`), a plain PUT's etag on S3 and MinIO: so `conf_agent_write`'s etag is
-the one every upload, consume and surface of those bytes logs.
+THE JOIN. An agent's write is named by the ETag its bytes get, which every
+upload, consume and surface of those bytes logs. On S3 and MinIO that is the
+MD5 (agent.sh's `md5`), a plain PUT's etag. On Azure (`meta.json`'s
+`store`: `azurite` or `azure`) it is flint-store's content ETag, the first
+128 bits of the bytes' SHA-256 (agent.sh's `sha256`).
 
 What it does not do yet (refused, with the reason): the UI actor (the
 gateway logs no seq), a writer that restarted (a second `start`), a move
@@ -45,7 +47,17 @@ class Refused(Exception):
     pass
 
 
-def load_writer(d: Path):
+def etag_join(run: Path):
+    """The journal field an agent's write is joined by, and the ETag it
+    names, for the store the run used (`meta.json`; MinIO when absent)."""
+    meta = run / "meta.json"
+    store = json.loads(meta.read_text()).get("store", "minio") if meta.exists() else "minio"
+    if store in ("azurite", "azure"):
+        return "sha256", lambda o: f'"{o["sha256"][:32]}"'
+    return "md5", lambda o: f'"{o["md5"]}"'
+
+
+def load_writer(d: Path, field: str = "md5"):
     evs = []
     for line in (d / "sync.log").read_text(errors="replace").splitlines():
         if line.startswith('{"ts_ms":'):
@@ -65,13 +77,13 @@ def load_writer(d: Path):
                 continue
             if o["op"] == "mv":
                 raise Refused(f"{d.name}: an agent move (op {o['n']}): not supported yet")
-            if o["op"] == "write" and not o.get("md5"):
-                raise Refused(f"{d.name}: agent write {o['n']} has no md5 (agent.sh before the join)")
+            if o["op"] == "write" and not o.get(field):
+                raise Refused(f"{d.name}: agent write {o['n']} has no {field} (agent.sh before the join)")
             ops.append(o)
     return holders.pop(), evs, ops
 
 
-def writer_stream(name, holder, evs, ops):
+def writer_stream(name, holder, evs, ops, etag=lambda o: f'"{o["md5"]}"'):
     """The writer's events and its agent's ops, in one list of
     (ts_ms, record). The incarnation's `start` and the store probe are
     dropped: the checkout is conf_start's step."""
@@ -82,7 +94,7 @@ def writer_stream(name, holder, evs, ops):
         out.append((e["ts_ms"], 0, k, e))
     for o in ops:
         if o["op"] == "write":
-            r = {"ev": "conf_agent_write", "writer": name, "path": o["path"], "etag": f'"{o["md5"]}"'}
+            r = {"ev": "conf_agent_write", "writer": name, "path": o["path"], "etag": etag(o)}
         else:
             r = {"ev": "conf_agent_delete", "writer": name, "path": o["path"]}
         r["ts_ms"] = o["t_ms"]
@@ -191,12 +203,13 @@ def main():
         if (run / "ui").exists():
             raise Refused("a UI actor (the gateway logs no seq): not supported yet")
         streams, holders = {}, {}
+        field, etag = etag_join(run)
         for d in sorted(run.glob("w*")):
             if not (d / "sync.log").exists():
                 continue
-            holder, evs, ops = load_writer(d)
+            holder, evs, ops = load_writer(d, field)
             holders[d.name] = holder
-            streams[d.name] = writer_stream(d.name, holder, evs, ops)
+            streams[d.name] = writer_stream(d.name, holder, evs, ops, etag)
         out = merge(streams)
     except Refused as e:
         print(f"REFUSED {run.name}: {e}")

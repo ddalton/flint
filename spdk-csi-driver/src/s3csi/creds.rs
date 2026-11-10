@@ -139,6 +139,31 @@ pub fn static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, Str
     Ok(Materialized { env, files: vec![] })
 }
 
+/// The store a lean worker's launch list names (`FLINT_SYNC_PROVIDER`,
+/// from the CR's `provider`). A passthrough mount has no launch list and
+/// is S3; so is a workspace that names none.
+pub fn provider_of(launch: Option<&BTreeMap<String, String>>) -> Result<crate::tier::store::Provider, String> {
+    crate::tier::store::Provider::parse(launch.and_then(|l| l.get("FLINT_SYNC_PROVIDER")).map(String::as_str).unwrap_or(""))
+}
+
+/// The keys a `nodePublishSecretRef` Secret carries for an Azure
+/// workspace, verbatim as the Azure tools name them: the account, and its
+/// key or a SAS token.
+pub fn azure_static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, String> {
+    let get = |k: &str| secrets.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let account = get("AZURE_STORAGE_ACCOUNT")
+        .ok_or("nodePublishSecretRef Secret has no AZURE_STORAGE_ACCOUNT — an azure workspace's keys are AZURE_STORAGE_* verbatim")?;
+    let mut env = BTreeMap::from([("AZURE_STORAGE_ACCOUNT".to_string(), account)]);
+    match (get("AZURE_STORAGE_KEY"), get("AZURE_STORAGE_SAS_TOKEN")) {
+        (Some(key), _) => env.insert("AZURE_STORAGE_KEY".into(), key),
+        (None, Some(sas)) => env.insert("AZURE_STORAGE_SAS_TOKEN".into(), sas),
+        (None, None) => {
+            return Err("nodePublishSecretRef Secret has neither AZURE_STORAGE_KEY nor AZURE_STORAGE_SAS_TOKEN".into())
+        }
+    };
+    Ok(Materialized { env, files: vec![] })
+}
+
 // ── stsSecret: a controller-fed, expiring credential ─────────────────
 //
 // The Secret a controller (awc-docs PR #136's receiver, or anything that
@@ -898,6 +923,31 @@ mod tests {
 
 
 
+
+    #[test]
+    fn the_azure_static_arm_takes_the_account_and_a_key_or_a_sas() {
+        let s = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+        let e = azure_static_arm(&s(&[("AZURE_STORAGE_KEY", "k")])).unwrap_err();
+        assert!(e.contains("AZURE_STORAGE_ACCOUNT"), "{e}");
+        let e = azure_static_arm(&s(&[("AZURE_STORAGE_ACCOUNT", "a")])).unwrap_err();
+        assert!(e.contains("AZURE_STORAGE_KEY") && e.contains("SAS"), "{e}");
+        let m = azure_static_arm(&s(&[("AZURE_STORAGE_ACCOUNT", "a"), ("AZURE_STORAGE_KEY", "k"), ("AWS_ACCESS_KEY_ID", "x")])).unwrap();
+        assert_eq!(m.env.keys().collect::<Vec<_>>(), ["AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_KEY"], "AWS keys stay behind");
+        let m = azure_static_arm(&s(&[("AZURE_STORAGE_ACCOUNT", "a"), ("AZURE_STORAGE_SAS_TOKEN", "sv=1&sig=x")])).unwrap();
+        assert_eq!(m.env.get("AZURE_STORAGE_SAS_TOKEN").map(String::as_str), Some("sv=1&sig=x"));
+    }
+
+    #[test]
+    fn a_launch_list_names_its_provider_and_none_is_s3() {
+        use crate::tier::store::Provider;
+        assert_eq!(provider_of(None), Ok(Provider::S3));
+        let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "azure".to_string())]);
+        assert_eq!(provider_of(Some(&l)), Ok(Provider::Azure));
+        let l = BTreeMap::from([("FLINT_SYNC_ROOT".to_string(), "/w".to_string())]);
+        assert_eq!(provider_of(Some(&l)), Ok(Provider::S3));
+        let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "gcp".to_string())]);
+        assert!(provider_of(Some(&l)).is_err());
+    }
 
     #[test]
     fn static_arm_needs_both_keys_and_passes_region() {

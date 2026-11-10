@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# storm-local.sh — a multi-writer storm on ONE host, against a MinIO
-# container: the run a replay against the model (formal/trace/storm2conf.py)
-# is developed on before an S3 leg (storm.sh). No AWS, no cluster.
+# storm-local.sh — a multi-writer storm on ONE host, against a MinIO or an
+# Azurite container: the run a replay against the model
+# (formal/trace/storm2conf.py) is developed on before an S3 leg (storm.sh).
+# No AWS, no Azure account, no cluster.
 #
 #   storm-local.sh <leg>
 #
@@ -17,7 +18,10 @@
 #
 # Environment: BIN (flint-sync), GATEWAY_BIN (UI=1), RIG (this directory),
 #   ROOT (/mnt/nvme/storm-local), WRITERS (3), MODE (hot), UI (0), FLOOR (5),
-#   LOAD_SECS (60), IDLE_SECS (30), MINIO_PORT (19000), KEEP_MINIO (0)
+#   LOAD_SECS (60), IDLE_SECS (30), MINIO_PORT (19000), KEEP_MINIO (0),
+#   STORE (minio; or azurite: Microsoft's Azure Blob emulator, a fresh
+#   account and key per leg, and binaries built with the `azure` feature),
+#   AZURITE_PORT (19010)
 set -uo pipefail
 
 LEG=${1:?usage: storm-local.sh <leg>}
@@ -32,18 +36,32 @@ FLOOR=${FLOOR:-5}
 LOAD_SECS=${LOAD_SECS:-60}
 IDLE_SECS=${IDLE_SECS:-30}
 MINIO_PORT=${MINIO_PORT:-19000}
+STORE=${STORE:-minio}
+AZURITE_PORT=${AZURITE_PORT:-19010}
 GW_PORT=${GW_PORT:-18093}
 GW_TOKEN=${GW_TOKEN:-storm-local-token-0123456789abcdef}
 BUCKET=agentws
 PFX="storm/$LEG"
 RUN="$ROOT/$LEG"
-CTR="storm-local-minio-$LEG"
+CTR="storm-local-$STORE-$LEG"
 
 rm -rf "$RUN"; mkdir -p "$RUN"
 log() { echo "storm-local[$LEG] $(date -u +%H:%M:%S) $*" | tee -a "$RUN/storm.log" >&2; }
 
-export AWS_ACCESS_KEY_ID=stormlocal AWS_SECRET_ACCESS_KEY=stormlocal-secret-0123 AWS_REGION=us-east-1
-ENDPOINT="http://127.0.0.1:$MINIO_PORT"
+case "$STORE" in
+  minio)
+    PROVIDER=s3
+    export AWS_ACCESS_KEY_ID=stormlocal AWS_SECRET_ACCESS_KEY=stormlocal-secret-0123 AWS_REGION=us-east-1
+    ENDPOINT="http://127.0.0.1:$MINIO_PORT" ;;
+  azurite)
+    PROVIDER=azure
+    # A fresh account and key per leg (AZURITE_ACCOUNTS): nothing published.
+    AZURE_STORAGE_ACCOUNT=stormlocal
+    AZURE_STORAGE_KEY=$(openssl rand -base64 64 | tr -d '\n')
+    export AZURE_STORAGE_ACCOUNT AZURE_STORAGE_KEY
+    ENDPOINT="http://127.0.0.1:$AZURITE_PORT/$AZURE_STORAGE_ACCOUNT" ;;
+  *) echo "storm-local: STORE=$STORE: want minio or azurite" >&2; exit 2 ;;
+esac
 
 cleanup() {
   for f in "$RUN"/w*/agent.pid "$RUN"/w*/sync.pid "$RUN"/gateway.pid "$RUN"/ui.pid; do
@@ -55,16 +73,27 @@ trap cleanup EXIT
 
 # ── the store ───────────────────────────────────────────────────────────
 docker rm -f "$CTR" >/dev/null 2>&1 || true
-docker run -d --name "$CTR" -p "127.0.0.1:$MINIO_PORT:9000" \
-  -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
-  cgr.dev/chainguard/minio:latest server /data > "$RUN/minio.id" || { log "minio did not start"; exit 1; }
-for _ in $(seq 1 60); do curl -s -o /dev/null "$ENDPOINT/minio/health/live" && break; sleep 0.5; done
-docker run --rm --network host -e MC_HOST_l="http://$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY@127.0.0.1:$MINIO_PORT" \
-  cgr.dev/chainguard/minio-client:latest mb "l/$BUCKET" >> "$RUN/storm.log" 2>&1 || { log "no bucket"; exit 1; }
+if [ "$STORE" = azurite ]; then
+  docker run -d --name "$CTR" -p "127.0.0.1:$AZURITE_PORT:10000" \
+    -e AZURITE_ACCOUNTS="$AZURE_STORAGE_ACCOUNT:$AZURE_STORAGE_KEY" \
+    mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5 \
+    azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --inMemoryPersistence > "$RUN/azurite.id" \
+    || { log "azurite did not start"; exit 1; }
+  for _ in $(seq 1 60); do curl -s -o /dev/null "http://127.0.0.1:$AZURITE_PORT/" && break; sleep 0.5; done
+  python3 "$RIG/azure_container.py" "$ENDPOINT" "$AZURE_STORAGE_ACCOUNT" "$AZURE_STORAGE_KEY" "$BUCKET" \
+    >> "$RUN/storm.log" 2>&1 || { log "no container"; exit 1; }
+else
+  docker run -d --name "$CTR" -p "127.0.0.1:$MINIO_PORT:9000" \
+    -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
+    cgr.dev/chainguard/minio:latest server /data > "$RUN/minio.id" || { log "minio did not start"; exit 1; }
+  for _ in $(seq 1 60); do curl -s -o /dev/null "$ENDPOINT/minio/health/live" && break; sleep 0.5; done
+  docker run --rm --network host -e MC_HOST_l="http://$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY@127.0.0.1:$MINIO_PORT" \
+    cgr.dev/chainguard/minio-client:latest mb "l/$BUCKET" >> "$RUN/storm.log" 2>&1 || { log "no bucket"; exit 1; }
+fi
 
 cat > "$RUN/meta.json" <<EOF
 {"leg":"$LEG","writers":$WRITERS,"mode":"$MODE","ui":$UI,"floor":$FLOOR,"load_secs":$LOAD_SECS,
- "idle_secs":$IDLE_SECS,"prefix":"$PFX","store":"minio","host":"$(hostname)",
+ "idle_secs":$IDLE_SECS,"prefix":"$PFX","store":"$STORE","host":"$(hostname)",
  "bin_sha256":"$(sha256sum "$BIN" | cut -d' ' -f1)","started_ms":$(date +%s%3N)}
 EOF
 
@@ -72,6 +101,7 @@ agent_name() { echo "w$1"; }
 start_writer() { # <i>
   local w="$RUN/w$1"; mkdir -p "$w/tree"
   ( exec env FLINT_SYNC_BUCKET="$BUCKET" FLINT_SYNC_PREFIX="$PFX" FLINT_SYNC_ROOT="$w/tree" \
+      FLINT_SYNC_PROVIDER="$PROVIDER" \
       FLINT_SYNC_ENDPOINT="$ENDPOINT" FLINT_SYNC_FLOOR_SECS="$FLOOR" FLINT_SYNC_EVENT_TRACE=1 \
       "$BIN" run >> "$w/sync.stdout" 2>> "$w/sync.log" ) &
   echo $! > "$w/sync.pid"
@@ -100,7 +130,7 @@ for i in $(seq 0 $((WRITERS - 1))); do start_agent "$i"; done
 if [ "$UI" = 1 ]; then
   : "${GATEWAY_BIN:?GATEWAY_BIN is required with UI=1}"
   mkdir -p "$RUN/ui"
-  ( exec env FLINT_LEAN_GW_ENDPOINT="$ENDPOINT" FLINT_LEAN_GW_LISTEN="127.0.0.1:$GW_PORT" \
+  ( exec env FLINT_LEAN_GW_PROVIDER="$PROVIDER" FLINT_LEAN_GW_ENDPOINT="$ENDPOINT" FLINT_LEAN_GW_LISTEN="127.0.0.1:$GW_PORT" \
       FLINT_LEAN_GW_BUCKET="$BUCKET" FLINT_LEAN_GW_TOKEN="$GW_TOKEN" FLINT_LEAN_GW_WORKSPACES="storm=$PFX" \
       "$GATEWAY_BIN" >> "$RUN/gateway.log" 2>&1 ) &
   echo $! > "$RUN/gateway.pid"

@@ -35,6 +35,12 @@ else
     date_of() { date -r "$1" "$2"; }
 fi
 
+# Whether a lean binary was built with the Azure backend: the backend's own
+# message for a missing account is in the binary only then. A build that
+# left `--features azure` off would otherwise stage cleanly and ship lean
+# that refuses `provider: azure` at start.
+has_azure() { LC_ALL=C grep -q -a "azure: AZURE_STORAGE_ACCOUNT is not set" "$1"; }
+
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
 dest="$crate/docker/prebuilt"
@@ -289,13 +295,17 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         src="$lean_crate/target/$triple/release/$b"
         if [ ! -f "$src" ]; then
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
-            echo "            (cd lean/syncer && cargo zigbuild --release --features s3 \\" >&2
+            echo "            (cd lean/syncer && cargo zigbuild --release --features s3,azure \\" >&2
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
         m=$(stat_m "$src")
         if [ "$m" -lt "$lean_mtime" ]; then
             echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the lean source" >&2
+            stale=1; continue
+        fi
+        if ! has_azure "$src"; then
+            echo "  ✗ NO AZURE $arch/$b — built without --features azure (lean on Azure Blob)" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
@@ -305,13 +315,17 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         src="$gw_crate/target/$triple/release/$b"
         if [ ! -f "$src" ]; then
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
-            echo "            (cd lean/gateway && cargo zigbuild --release --features s3 \\" >&2
+            echo "            (cd lean/gateway && cargo zigbuild --release --features s3,azure \\" >&2
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
         m=$(stat_m "$src")
         if [ "$m" -lt "$gw_mtime" ]; then
             echo "  ✗ STALE   $arch/$b built $(date_of "$m" '+%m-%d %H:%M') — older than the gateway source" >&2
+            stale=1; continue
+        fi
+        if ! has_azure "$src"; then
+            echo "  ✗ NO AZURE $arch/$b — built without --features azure (lean on Azure Blob)" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"

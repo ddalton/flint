@@ -850,7 +850,26 @@ impl S3Node {
         st: &mut VolumeState,
         secrets: &HashMap<String, String>,
     ) -> Result<Materialized, Status> {
+        // An Azure workspace takes only the static arm: every other arm
+        // mints or finds AWS credentials. The operator refuses the CR
+        // first (`validate_spec`); this is the node's own check.
+        let provider = creds::provider_of(st.sync_env.as_ref()).map_err(Status::failed_precondition)?;
+        if provider == crate::tier::store::Provider::Azure && mode != CredentialMode::Static {
+            return Err(Status::failed_precondition(format!(
+                "provider azure takes identity.mode static; {} mints AWS credentials",
+                mode.as_str()
+            )));
+        }
         match mode {
+            CredentialMode::Static if provider == crate::tier::store::Provider::Azure => {
+                if secrets.is_empty() {
+                    return Err(Status::failed_precondition(
+                        "identity.mode is static, but the pod's volume names no nodePublishSecretRef (a Secret \
+                         in the pod's namespace with AZURE_STORAGE_* keys verbatim)",
+                    ));
+                }
+                creds::azure_static_arm(secrets).map_err(Status::failed_precondition)
+            }
             CredentialMode::Static => {
                 if secrets.is_empty() {
                     return Err(Status::failed_precondition(

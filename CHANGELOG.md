@@ -14,6 +14,30 @@ covered by the stability guarantee.
 
 ### Added
 
+- **A lean workspace can live in Azure Blob Storage** (2026-11-10; phase 2
+  of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
+  - **The CR:** `FlintLeanWorkspace` gains `provider` (`s3`, the default,
+    or `azure`; `gcs` is refused as not built yet). On Azure, `bucket` is
+    the container and `endpoint` the blob endpoint.
+  - **Refused on Azure, by name:** every `identity.mode` but `static`,
+    because the others mint AWS credentials, and the S3-only `region`
+    and `rawReads`. The pod's `nodePublishSecretRef` carries
+    `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY` or
+    `AZURE_STORAGE_SAS_TOKEN` verbatim. The node plugin refuses any other
+    arm for an Azure workspace as well.
+  - **Operator and gateway:** the operator connects per provider. The
+    gateway takes `gateway.provider`, and its credentials Secret carries
+    the same keys.
+  - **Builds:** the syncer, gateway and operator are built with the
+    `azure` feature, and staging refuses a lean binary built without it.
+  - **Tests:** local multi-writer storms against Azurite
+    (`storm-local.sh` `STORE=azurite`) ran healthy in every mode, the
+    gateway's UI writes included, and every writer's store probe found
+    conditional PUT and DELETE enforced. The `hot` leg's trace replays
+    against LeanP1 (`storm-check.sh`, 693 steps), and every mutation of
+    it is rejected. The replay joins an agent's write to its upload by
+    the store's ETag, which on Azure is the first 128 bits of the bytes'
+    SHA-256.
 - **flint-store has an Azure Blob backend** (2026-11-10; phase 1 of
   `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`), behind the
   `azure` feature. It speaks the Blob REST API by hand on the stack the

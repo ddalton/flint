@@ -47,9 +47,10 @@ struct Ctx {
     client: Client,
     identity: String,
     recorder: kube::runtime::events::Recorder,
-    /// One store client per (bucket, endpoint) — the OPERATOR principal
-    /// (ambient credentials), never a workspace's syncer secret.
-    stores: Mutex<BTreeMap<(String, Option<String>), Arc<dyn ObjectStore>>>,
+    /// One store client per (provider, bucket, endpoint) — the OPERATOR
+    /// principal (ambient credentials: the AWS chain, or AZURE_STORAGE_*
+    /// for an azure workspace), never a workspace's syncer secret.
+    stores: Mutex<BTreeMap<(Provider, String, Option<String>), Arc<dyn ObjectStore>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,14 +61,13 @@ enum Error {
     Store(String),
 }
 
-async fn store_for(ctx: &Ctx, bucket: &str, endpoint: Option<&str>) -> Result<Arc<dyn ObjectStore>, Error> {
-    let key = (bucket.to_string(), endpoint.map(|s| s.to_string()));
+async fn store_for(ctx: &Ctx, provider: Provider, bucket: &str, endpoint: Option<&str>) -> Result<Arc<dyn ObjectStore>, Error> {
+    let key = (provider, bucket.to_string(), endpoint.map(|s| s.to_string()));
     let mut stores = ctx.stores.lock().await;
     if let Some(s) = stores.get(&key) {
         return Ok(s.clone());
     }
-    // S3 until the CRD names a provider (plan phase 2).
-    let spec = StoreSpec::new(Provider::S3, bucket).endpoint(endpoint.map(|s| s.to_string()));
+    let spec = StoreSpec::new(provider, bucket).endpoint(endpoint.map(|s| s.to_string()));
     let s = spdk_csi_driver::tier::store::connect::connect(&spec)
         .await
         .map_err(|e| Error::Store(e.to_string()))?;
@@ -78,7 +78,10 @@ async fn store_for(ctx: &Ctx, bucket: &str, endpoint: Option<&str>) -> Result<Ar
 async fn reconcile(ws: Arc<FlintLeanWorkspace>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let ns = ws.namespace().unwrap_or_default();
     let name = ws.name_any();
-    let store = store_for(&ctx, &ws.spec.bucket, ws.spec.endpoint.as_deref()).await?;
+    // An unparseable provider is the spec verdict's to report; until then
+    // the store is S3's, as it was before the field existed.
+    let provider = Provider::parse(ws.spec.provider.as_deref().unwrap_or("")).unwrap_or_default();
+    let store = store_for(&ctx, provider, &ws.spec.bucket, ws.spec.endpoint.as_deref()).await?;
 
     let generation = ws.metadata.generation;
     // Two cadences (see `full_pass`): the posture — claim, MPU sweep,

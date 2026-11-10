@@ -29,6 +29,9 @@ spec:
             - { name: FLINT_LEAN_GW_BUCKET, value: {{ .Values.gateway.bucket | quote }} }
             - { name: FLINT_LEAN_GW_WORKSPACES, value: {{ .Values.gateway.workspaces | quote }} }
             - { name: FLINT_LEAN_GW_MAX_PUT_MB, value: {{ .Values.gateway.maxPutMB | quote }} }
+{{- if .Values.gateway.provider }}
+            - { name: FLINT_LEAN_GW_PROVIDER, value: {{ .Values.gateway.provider | quote }} }
+{{- end }}
 {{- if .Values.gateway.endpoint }}
             - { name: FLINT_LEAN_GW_ENDPOINT, value: {{ .Values.gateway.endpoint | quote }} }
 {{- end }}

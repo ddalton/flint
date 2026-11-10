@@ -57,7 +57,43 @@ pub fn validate_spec(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
             format!("sentinels {:?} is not auto|off|force", spec.sentinels),
         ));
     }
-    Ok(())
+    validate_provider(spec)
+}
+
+/// The store `provider` names, and what that store cannot honour. Every
+/// refusal names the field, so the condition says what to change.
+fn validate_provider(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
+    use crate::tier::store::Provider;
+    let provider = Provider::parse(spec.provider.as_deref().unwrap_or(""))
+        .map_err(|e| refuse("InvalidProvider", format!("provider: {e}")))?;
+    match provider {
+        Provider::S3 => Ok(()),
+        Provider::Gcs => Err(refuse(
+            "ProviderNotBuilt",
+            "provider gcs: the GCS backend is not built yet; s3 and azure are".into(),
+        )),
+        Provider::Azure => {
+            if spec.region.is_some() {
+                return Err(refuse("S3OnlySetting", "region is an S3 setting; an azure workspace names its account in the credential".into()));
+            }
+            if spec.raw_reads {
+                return Err(refuse("S3OnlySetting", "rawReads is an S3 setting (it signs SigV4 by hand)".into()));
+            }
+            let mode = spec.identity.as_ref().map(|i| i.mode.as_str()).unwrap_or("");
+            match crate::s3csi::policy::CredentialMode::parse(mode) {
+                Ok(crate::s3csi::policy::CredentialMode::Static) => Ok(()),
+                _ => Err(refuse(
+                    "UnsupportedIdentity",
+                    format!(
+                        "provider azure takes identity.mode static (a nodePublishSecretRef Secret with \
+                         AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY or AZURE_STORAGE_SAS_TOKEN); {:?} mints AWS \
+                         credentials",
+                        if mode.is_empty() { "the default (broker)" } else { mode }
+                    ),
+                )),
+            }
+        }
+    }
 }
 
 /// `AccessIsolation` (per-user access design §4.3): does the BUCKET hold
@@ -272,6 +308,40 @@ mod tests {
             validate_spec(&spec(serde_json::json!({"sentinels": "sometimes"}))).unwrap_err().reason,
             "InvalidSentinelMode"
         );
+    }
+
+    /// `provider`: absent and `s3` are today's workspace; `azure` takes the
+    /// static identity only and refuses the S3-only knobs, by name; `gcs`
+    /// is not built and a typo is not guessed.
+    #[test]
+    fn the_provider_is_validated_with_what_its_store_cannot_honour() {
+        let reason = |extra| validate_spec(&spec(extra)).err().map(|r| r.reason);
+        let azure = |more: serde_json::Value| {
+            let mut v = serde_json::json!({"provider": "azure", "identity": {"mode": "static"}});
+            for (k, val) in more.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            v
+        };
+        assert_eq!(reason(serde_json::json!({"provider": "s3"})), None);
+        assert_eq!(reason(azure(serde_json::json!({}))), None);
+        assert_eq!(reason(azure(serde_json::json!({"endpoint": "http://azurite:10000/acct"}))), None);
+        assert_eq!(reason(azure(serde_json::json!({"region": "us-east-1"}))).as_deref(), Some("S3OnlySetting"));
+        assert_eq!(reason(azure(serde_json::json!({"rawReads": true}))).as_deref(), Some("S3OnlySetting"));
+        for mode in ["broker", "webIdentity", "stsSecret", "ambient"] {
+            assert_eq!(
+                reason(azure(serde_json::json!({"identity": {"mode": mode}}))).as_deref(),
+                Some("UnsupportedIdentity"),
+                "{mode}"
+            );
+        }
+        assert_eq!(
+            reason(serde_json::json!({"provider": "azure"})).as_deref(),
+            Some("UnsupportedIdentity"),
+            "no identity is the broker"
+        );
+        assert_eq!(reason(serde_json::json!({"provider": "gcs"})).as_deref(), Some("ProviderNotBuilt"));
+        assert_eq!(reason(serde_json::json!({"provider": "gcp"})).as_deref(), Some("InvalidProvider"));
     }
 
     /// The derived grace is what the worker pod carries, and it must never

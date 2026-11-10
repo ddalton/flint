@@ -17,7 +17,7 @@ pub const MAX_KEY_BYTES: usize = 1024;
 pub const AZURE_MAX_SEGMENTS: usize = 254;
 
 /// The object store behind a bucket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum Provider {
     /// Amazon S3, and every store that speaks its API (MinIO, Ozone's
     /// S3 gateway, Ceph RGW) through an endpoint override.

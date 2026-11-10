@@ -42,7 +42,8 @@ spec:
               bucket:
                 description: |-
                   Bucket and subtree prefix (the proxy's tenancy boundary —
-                  project-granular per plan §9 Q6).
+                  project-granular per plan §9 Q6). On Azure, `bucket` is the
+                  container.
                 type: string
               consumers:
                 description: |-
@@ -244,6 +245,18 @@ spec:
                   carries (plan P1). Stable across CR delete/recreate — NEVER the
                   CR UID. Equal identity on a standing claim ⇒ adopt (DR, GitOps,
                   cross-cluster moves); different ⇒ the CR is Refused.
+                type: string
+              provider:
+                description: |-
+                  The object store `bucket` lives in: `s3` (the default, and any
+                  store that speaks S3's API through `endpoint`) or `azure` (Azure
+                  Blob Storage). `gcs` is not built yet and is refused. On Azure the
+                  account comes from the credential (`AZURE_STORAGE_ACCOUNT`),
+                  `endpoint` is the blob endpoint (unset: the account's own,
+                  `https://<account>.blob.core.windows.net`), `identity.mode` must be
+                  `static`, and `region` and `rawReads` are refused
+                  (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md, phase 2).
+                nullable: true
                 type: string
               rawReads:
                 default: false
