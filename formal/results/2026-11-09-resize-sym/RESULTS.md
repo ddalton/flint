@@ -51,8 +51,20 @@ The planted bugs and design arms under SymV each fail their intended invariant a
 | `Design_NoRetryRun` | `Inv_VacatedZero` | 4 (4) |
 | `Design_AckAfterGrow` | `Inv_FsRangeClean` | 6 (6) |
 
-## Three replicas: on the cluster, not yet run
+## Three replicas, on the cluster
 
-`R3_SymV_{lost,crash,zombie}_r3f1a3`: the `Res3` arms under SymV. With natural ids on 2026-11-07 they
-were bounded only: lost clean through depth 27 (4.51 B), crash through depth 27 (5.79 B), zombie through
-depth 23 (3.59 B), each level still about 1.4 to 1.6 times the one before.
+`R3_SymV_{lost,crash,zombie}_r3f1a3`: the `Res3` arms under SymV (3 replicas, 1 failure, MaxVer 1,
+MaxEpoch 2, MaxAsm 3), every invariant of the 2026-11-07 arms plus `Inv_ReadUnique`. tla-mc 0.3.0
+`-cluster`, compiled, 40 workers a node, on 37 nodes (vc0140 node 0; `drive.sh`, `drive.out`), capped
+at 4 hours each. With natural ids on 2026-11-07 they were bounded only: lost clean through depth 27
+(4.51 B), crash through depth 27 (5.79 B), zombie through depth 23 (3.59 B).
+
+| Arm | Verdict | Distinct states | Generated | Depth | Checked in |
+|---|---|---:|---:|---:|---:|
+| lost | **full pass** | 6,317,146,257 | 42,154,217,149 | 55 | 2,074 s |
+| crash | running | | | | |
+| zombie | queued | | | | |
+
+- **Lost:** symmetry cuts the depth-22 queue 5.96 times against the natural-id run (35.6 M against
+  212 M), close to the 6 permutations. The levels peaked at depth 33 (a 610 M queue) and shrank from
+  there to depth 55.
