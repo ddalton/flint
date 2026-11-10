@@ -14,6 +14,31 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Lean on Azure and GCS without a stored key: workload identity**
+  (2026-11-10; phase 4 of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
+  - **`identity.mode: webIdentity`** on an `azure` or `gcs` workspace hands
+    the worker the pod's own ServiceAccount token, minted by kubelet for
+    the provider's audience and refreshed at every republish. The worker
+    trades it as the identity the CR names: `identity.azure.tenantId` and
+    `clientId` (Entra ID's federated credential), or `identity.gcp.audience`
+    and an optional `serviceAccount` (Workload Identity Federation, then
+    impersonation). List the provider's audience in the flint-s3-csi
+    chart's new `driver.extraTokenAudiences`.
+  - **`identity.mode: ambient`** uses the worker's own identity: the VM's
+    managed identity on Azure, the metadata server on GKE or GCE.
+  - **Refused, by name:** a webIdentity workspace missing its provider
+    block, an Azure workspace with a token but no `endpoint` to name its
+    account, and a provider block for another provider.
+  - **flint-store** authorizes Azure with Entra ID tokens (client
+    assertion, or the instance metadata service) and GCS with
+    `external_account` configs or the metadata server, each picked from
+    the environment in its SDK's order. The operator and the gateway use
+    the same chain, so they too can run on their pod's identity.
+  - **Tests:** the store contract passes on Azurite over HTTPS with OAuth
+    (a token for another audience is refused) and on storage-testbench;
+    the real syncer, configured only by the environment a worker gets,
+    publishes and checks out through each flow against stand-in identity
+    providers. Real AKS and GKE clusters are not tested yet.
 - **A lean workspace can live in Google Cloud Storage** (2026-11-10;
   phase 3 of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
   - **The backend:** flint-store's `gcs` feature speaks the JSON API by

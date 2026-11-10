@@ -33,6 +33,13 @@ spec:
   tokenRequests:
     - audience: {{ include "flint-s3-csi.driverName" . }}
       expirationSeconds: 3600
+  # driver.extraTokenAudiences: a lean workspace's own cloud federation
+  # (identity.mode webIdentity on Azure or GCS), the same pod-bound token
+  # for that provider's audience.
+{{- range .Values.driver.extraTokenAudiences }}
+    - audience: {{ . | quote }}
+      expirationSeconds: 3600
+{{- end }}
   # FUSE mounts carry no SELinux context to relabel.
   seLinuxMount: false
 {{- if .Values.driver.serviceAccountTokenInSecrets }}

@@ -127,8 +127,64 @@ pub struct Identity {
     /// worker's door and replaced in place on republish under the
     /// generation rules (`creds::sts_replace_decision`).
     /// `ambient`: nothing; the worker's own AWS chain.
+    ///
+    /// On a lean workspace in Azure or GCS (`provider`), only `static`,
+    /// `webIdentity` and `ambient` are taken. `webIdentity` there hands the
+    /// worker the pod's own token for the provider's audience, which it
+    /// trades for a storage token as the identity named below; `ambient`
+    /// is the worker's own: a VM's managed identity on Azure, the metadata
+    /// server on GKE or GCE.
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// Azure workload identity, for `mode: webIdentity` on an `azure`
+    /// workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure: Option<AzureWorkloadIdentity>,
+    /// GCP Workload Identity Federation, for `mode: webIdentity` on a
+    /// `gcs` workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp: Option<GcpWorkloadIdentity>,
+}
+
+/// The Entra ID identity a pod's token stands for: an app registration or
+/// a user-assigned managed identity whose federated credential trusts the
+/// pod's ServiceAccount (issuer: the cluster's; subject:
+/// `system:serviceaccount:<namespace>:<name>`; audience
+/// `api://AzureADTokenExchange`). It needs a data role on the container
+/// (Storage Blob Data Contributor, or Reader for read-only consumers).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureWorkloadIdentity {
+    pub tenant_id: String,
+    pub client_id: String,
+    /// Entra ID's host in another cloud; unset: the public cloud's,
+    /// `https://login.microsoftonline.com`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_host: Option<String>,
+}
+
+/// The Workload Identity Federation provider a pod's token is traded at.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GcpWorkloadIdentity {
+    /// The provider, as the STS names it:
+    /// `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
+    pub audience: String,
+    /// The audience of the pod's token: one the provider allows. Unset:
+    /// the provider's default, `https:` and then `audience`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_audience: Option<String>,
+    /// A service account to impersonate (its email). Unset: the
+    /// federated principal itself holds the bucket's role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+}
+
+impl GcpWorkloadIdentity {
+    /// The audience kubelet must mint the pod's token for.
+    pub fn token_audience(&self) -> String {
+        self.token_audience.clone().unwrap_or_else(|| format!("https:{}", self.audience))
+    }
 }
 
 fn default_mode() -> String {
@@ -229,6 +285,22 @@ mod tests {
         assert_eq!(serde_json::from_str::<Reg>("{}").unwrap().access, Access::ReadWrite);
         assert_eq!(serde_json::from_str::<Reg>(r#"{"access":"read"}"#).unwrap().access, Access::Read);
         assert_eq!(serde_json::to_string(&Access::ReadWrite).unwrap(), r#""readWrite""#);
+    }
+
+    #[test]
+    fn a_workload_identity_block_reads_and_defaults_its_token_audience() {
+        let i: Identity = serde_json::from_str(
+            r#"{"mode":"webIdentity","gcp":{"audience":"//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k"}}"#,
+        )
+        .unwrap();
+        let g = i.gcp.unwrap();
+        assert_eq!(g.token_audience(), "https://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k");
+        let g = GcpWorkloadIdentity { token_audience: Some("my-aud".into()), ..g };
+        assert_eq!(g.token_audience(), "my-aud");
+        let i: Identity = serde_json::from_str(r#"{"mode":"webIdentity","azure":{"tenantId":"t","clientId":"c"}}"#).unwrap();
+        assert_eq!(i.azure.unwrap().client_id, "c");
+        // Neither block is written back when absent.
+        assert_eq!(serde_json::to_string(&Identity { mode: "static".into(), ..Default::default() }).unwrap(), r#"{"mode":"static"}"#);
     }
 
     #[test]

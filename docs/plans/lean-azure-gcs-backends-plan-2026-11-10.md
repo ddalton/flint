@@ -4,9 +4,10 @@ Scope: lean only, which covers the syncer, the gateway, the operator, and
 lean volumes through the s3csi node plugin. Forge, the block tier and
 passthrough are out of scope.
 
-**Status, 2026-11-10:** phases 0 to 3 are built and checked against the
-emulators (Azurite, storage-testbench). Real accounts (D4), workload
-identity (phase 4) and the docs (phase 5) remain. Where the build departs
+**Status, 2026-11-10:** phases 0 to 4 are built and checked against the
+emulators (Azurite, storage-testbench), phase 4 with stand-in identity
+providers. Real accounts and clusters (D4, phase 4's exit) and the docs
+(phase 5) remain. Where the build departs
 from this plan, the plan below says so, marked *As built*.
 
 ## 1. Verdict
@@ -288,6 +289,32 @@ All builds and tests run on the Linux box.
   Today the credential is the AWS tuple (`s3csi/creds.rs:46-54`), served
   through the container-credentials door (`creds.rs:320-329`).
 - **Exit:** a lean volume on AKS and on GKE with no static secret.
+
+*As built:*
+- **The CR.** `identity.mode: webIdentity` on an Azure or GCS workspace
+  names the identity in a provider block: `identity.azure` (tenantId,
+  clientId, authorityHost) or `identity.gcp` (audience, tokenAudience,
+  serviceAccount). `ambient` is the worker's own identity: a VM's managed
+  identity on Azure, the metadata server on GKE or GCE. An Azure workspace
+  with either names its account by `endpoint`.
+- **The node plugin.** kubelet mints the pod's token for every audience
+  the CSIDriver lists (the s3csi chart's `driver.extraTokenAudiences`).
+  For webIdentity the plugin writes the provider's into the worker's
+  `comm` dir, with the AKS webhook's variables (Azure) or an
+  `external_account` credential config (GCS), and rewrites it at every
+  republish that brings a fresh one. No broker is involved; the names
+  travel in the launch list (`FLINT_SYNC_AZURE_*`, `FLINT_SYNC_GCP_*`).
+- **The stores.** Azure: client-assertion grants and the instance
+  metadata service, besides Shared Key and SAS, in the Azure SDK's order.
+  GCS: `external_account` configs with a file source (STS, then
+  impersonation) and the metadata server, besides service-account keys,
+  in Google's order. A token the service refuses (401) is dropped and
+  fetched again.
+- **Checked without a cluster:** the contract on Azurite over HTTPS with
+  `--oauth basic` (a token for another audience is refused), and on
+  storage-testbench; the real flint-sync, configured only by the
+  environment a worker gets, publishing and checking out through each
+  flow against stand-in identity providers.
 
 ### Phase 5: docs and release
 

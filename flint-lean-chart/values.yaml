@@ -63,6 +63,10 @@ resources:
 # AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY (or AZURE_STORAGE_SAS_TOKEN)
 # verbatim; a CR's `endpoint` is its blob endpoint. For `provider: gcs`,
 # it carries FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key.
+# Left empty on Azure or GCS, the operator and the gateway use their own
+# pod's identity: AZURE_FEDERATED_TOKEN_FILE and friends where the AKS
+# workload identity webhook set them, else the VM's managed identity; on
+# GCS, GOOGLE_APPLICATION_CREDENTIALS, else the metadata server (GKE).
 operatorCredentialsSecret: ""
 endpoint: ""            # S3 endpoint override for the operator (MinIO rigs)
 

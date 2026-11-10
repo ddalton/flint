@@ -63,9 +63,18 @@ pub fn validate_spec(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
 /// The store `provider` names, and what that store cannot honour. Every
 /// refusal names the field, so the condition says what to change.
 fn validate_provider(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
+    use crate::s3csi::policy::CredentialMode;
     use crate::tier::store::Provider;
     let provider = Provider::parse(spec.provider.as_deref().unwrap_or(""))
         .map_err(|e| refuse("InvalidProvider", format!("provider: {e}")))?;
+    let identity = spec.identity.clone().unwrap_or_default();
+    // A provider block names the identity of one store; on another it
+    // would be read by nothing.
+    for (block, set, owner) in [("identity.azure", identity.azure.is_some(), Provider::Azure), ("identity.gcp", identity.gcp.is_some(), Provider::Gcs)] {
+        if set && provider != owner {
+            return Err(refuse("IdentityForAnotherProvider", format!("{block} is for provider {owner}, and this workspace's is {provider}")));
+        }
+    }
     // What the static Secret carries, for the refusal that names it.
     let secret = match provider {
         Provider::S3 => return Ok(()),
@@ -84,15 +93,56 @@ fn validate_provider(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
     if spec.raw_reads {
         return Err(refuse("S3OnlySetting", "rawReads is an S3 setting (it signs SigV4 by hand)".into()));
     }
-    let mode = spec.identity.as_ref().map(|i| i.mode.as_str()).unwrap_or("");
-    match crate::s3csi::policy::CredentialMode::parse(mode) {
-        Ok(crate::s3csi::policy::CredentialMode::Static) => Ok(()),
-        _ => Err(refuse(
+    let mode = CredentialMode::parse(&identity.mode).map_err(|e| refuse("UnsupportedIdentity", e))?;
+    match mode {
+        CredentialMode::Static => Ok(()),
+        CredentialMode::WebIdentity | CredentialMode::Ambient => {
+            // A token names no account: the endpoint must.
+            if provider == Provider::Azure && spec.endpoint.is_none() {
+                return Err(refuse(
+                    "MissingEndpoint",
+                    format!(
+                        "provider azure with identity.mode {} names its account by endpoint \
+                         (https://<account>.blob.core.windows.net): no key carries it",
+                        mode.as_str()
+                    ),
+                ));
+            }
+            if mode == CredentialMode::Ambient {
+                return Ok(());
+            }
+            match provider {
+                Provider::Azure => match &identity.azure {
+                    Some(a) if !a.tenant_id.trim().is_empty() && !a.client_id.trim().is_empty() => Ok(()),
+                    _ => Err(refuse(
+                        "MissingWorkloadIdentity",
+                        "provider azure with identity.mode webIdentity needs identity.azure.tenantId and \
+                         identity.azure.clientId: the Entra ID identity whose federated credential trusts the pod's \
+                         ServiceAccount"
+                            .into(),
+                    )),
+                },
+                _ => match &identity.gcp {
+                    Some(g) if g.audience.starts_with("//iam.googleapis.com/") => Ok(()),
+                    Some(g) => Err(refuse(
+                        "MissingWorkloadIdentity",
+                        format!("identity.gcp.audience {:?} is not a provider's name (//iam.googleapis.com/projects/...)", g.audience),
+                    )),
+                    None => Err(refuse(
+                        "MissingWorkloadIdentity",
+                        "provider gcs with identity.mode webIdentity needs identity.gcp.audience: the Workload Identity \
+                         Federation provider the pod's token is traded at"
+                            .into(),
+                    )),
+                },
+            }
+        }
+        CredentialMode::Broker | CredentialMode::StsSecret => Err(refuse(
             "UnsupportedIdentity",
             format!(
-                "provider {provider} takes identity.mode static (a nodePublishSecretRef Secret with {secret}); \
-                 {:?} mints AWS credentials",
-                if mode.is_empty() { "the default (broker)" } else { mode }
+                "provider {provider} takes identity.mode static (a nodePublishSecretRef Secret with {secret}), \
+                 webIdentity or ambient; {:?} mints AWS credentials",
+                if identity.mode.is_empty() { "the default (broker)" } else { identity.mode.as_str() }
             ),
         )),
     }
@@ -313,37 +363,57 @@ mod tests {
     }
 
     /// `provider`: absent and `s3` are today's workspace; `azure` and
-    /// `gcs` take the static identity only and refuse the S3-only knobs,
-    /// by name; a typo is not guessed.
+    /// `gcs` take the static, webIdentity and ambient identities, refuse
+    /// the S3-only knobs, and need what each identity names, by name; a
+    /// typo is not guessed.
     #[test]
     fn the_provider_is_validated_with_what_its_store_cannot_honour() {
         let reason = |extra| validate_spec(&spec(extra)).err().map(|r| r.reason);
+        let with = |provider: &str, identity: serde_json::Value, more: serde_json::Value| {
+            let mut v = serde_json::json!({"provider": provider, "identity": identity});
+            for (k, val) in more.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            v
+        };
+        let none = serde_json::json!({});
+        let ep = serde_json::json!({"endpoint": "https://acct.blob.core.windows.net"});
         assert_eq!(reason(serde_json::json!({"provider": "s3"})), None);
         for provider in ["azure", "gcs"] {
-            let with = |more: serde_json::Value| {
-                let mut v = serde_json::json!({"provider": provider, "identity": {"mode": "static"}});
-                for (k, val) in more.as_object().unwrap() {
-                    v[k] = val.clone();
-                }
-                v
-            };
-            assert_eq!(reason(with(serde_json::json!({}))), None, "{provider}");
-            assert_eq!(reason(with(serde_json::json!({"endpoint": "http://emulator:10000/acct"}))), None, "{provider}");
-            assert_eq!(reason(with(serde_json::json!({"region": "us-east-1"}))).as_deref(), Some("S3OnlySetting"), "{provider}");
-            assert_eq!(reason(with(serde_json::json!({"rawReads": true}))).as_deref(), Some("S3OnlySetting"), "{provider}");
-            for mode in ["broker", "webIdentity", "stsSecret", "ambient"] {
-                assert_eq!(
-                    reason(with(serde_json::json!({"identity": {"mode": mode}}))).as_deref(),
-                    Some("UnsupportedIdentity"),
-                    "{provider} {mode}"
-                );
+            let st = serde_json::json!({"mode": "static"});
+            assert_eq!(reason(with(provider, st.clone(), none.clone())), None, "{provider}");
+            assert_eq!(reason(with(provider, st.clone(), serde_json::json!({"endpoint": "http://emulator:10000/acct"}))), None, "{provider}");
+            assert_eq!(reason(with(provider, st.clone(), serde_json::json!({"region": "us-east-1"}))).as_deref(), Some("S3OnlySetting"), "{provider}");
+            assert_eq!(reason(with(provider, st, serde_json::json!({"rawReads": true}))).as_deref(), Some("S3OnlySetting"), "{provider}");
+            for mode in ["broker", "stsSecret"] {
+                assert_eq!(reason(with(provider, serde_json::json!({"mode": mode}), ep.clone())).as_deref(), Some("UnsupportedIdentity"), "{provider} {mode}");
             }
-            assert_eq!(
-                reason(serde_json::json!({"provider": provider})).as_deref(),
-                Some("UnsupportedIdentity"),
-                "{provider}: no identity is the broker"
-            );
+            assert_eq!(reason(serde_json::json!({"provider": provider})).as_deref(), Some("UnsupportedIdentity"), "{provider}: no identity is the broker");
+            assert_eq!(reason(with(provider, serde_json::json!({"mode": "ambient"}), ep.clone())), None, "{provider} ambient");
+            assert_eq!(reason(with(provider, serde_json::json!({"mode": "webIdentity"}), ep.clone())).as_deref(), Some("MissingWorkloadIdentity"), "{provider}");
         }
+        // Azure: a token names no account.
+        assert_eq!(reason(with("azure", serde_json::json!({"mode": "ambient"}), none.clone())).as_deref(), Some("MissingEndpoint"));
+        let az = serde_json::json!({"mode": "webIdentity", "azure": {"tenantId": "t", "clientId": "c"}});
+        assert_eq!(reason(with("azure", az.clone(), ep.clone())), None);
+        assert_eq!(reason(with("azure", az, none.clone())).as_deref(), Some("MissingEndpoint"));
+        assert_eq!(
+            reason(with("azure", serde_json::json!({"mode": "webIdentity", "azure": {"tenantId": "t", "clientId": " "}}), ep.clone())).as_deref(),
+            Some("MissingWorkloadIdentity")
+        );
+        // GCS: the audience is the provider's name.
+        let aud = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k";
+        assert_eq!(reason(with("gcs", serde_json::json!({"mode": "webIdentity", "gcp": {"audience": aud}}), none.clone())), None);
+        assert_eq!(
+            reason(with("gcs", serde_json::json!({"mode": "webIdentity", "gcp": {"audience": "projects/1"}}), none.clone())).as_deref(),
+            Some("MissingWorkloadIdentity")
+        );
+        // A block for another provider is refused, S3 included.
+        assert_eq!(
+            reason(with("gcs", serde_json::json!({"mode": "static", "azure": {"tenantId": "t", "clientId": "c"}}), none.clone())).as_deref(),
+            Some("IdentityForAnotherProvider")
+        );
+        assert_eq!(reason(serde_json::json!({"identity": {"mode": "broker", "gcp": {"audience": aud}}})).as_deref(), Some("IdentityForAnotherProvider"));
         let msg = validate_spec(&spec(serde_json::json!({"provider": "gcs"}))).unwrap_err().message;
         assert!(msg.contains("FLINT_GCS_SERVICE_ACCOUNT_JSON"), "the refusal names the Secret's key: {msg}");
         assert_eq!(reason(serde_json::json!({"provider": "gcp"})).as_deref(), Some("InvalidProvider"));

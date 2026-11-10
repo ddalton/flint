@@ -161,6 +161,52 @@ spec:
                 description: 'CSI delivery: how the syncer gets its credential (design §4.4).'
                 nullable: true
                 properties:
+                  azure:
+                    description: |-
+                      Azure workload identity, for `mode: webIdentity` on an `azure`
+                      workspace.
+                    nullable: true
+                    properties:
+                      authorityHost:
+                        description: |-
+                          Entra ID's host in another cloud; unset: the public cloud's,
+                          `https://login.microsoftonline.com`.
+                        nullable: true
+                        type: string
+                      clientId:
+                        type: string
+                      tenantId:
+                        type: string
+                    required:
+                    - clientId
+                    - tenantId
+                    type: object
+                  gcp:
+                    description: |-
+                      GCP Workload Identity Federation, for `mode: webIdentity` on a
+                      `gcs` workspace.
+                    nullable: true
+                    properties:
+                      audience:
+                        description: |-
+                          The provider, as the STS names it:
+                          `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
+                        type: string
+                      serviceAccount:
+                        description: |-
+                          A service account to impersonate (its email). Unset: the
+                          federated principal itself holds the bucket's role.
+                        nullable: true
+                        type: string
+                      tokenAudience:
+                        description: |-
+                          The audience of the pod's token: one the provider allows. Unset:
+                          the provider's default, `https:` and then `audience`.
+                        nullable: true
+                        type: string
+                    required:
+                    - audience
+                    type: object
                   mode:
                     default: broker
                     description: |-
@@ -177,6 +223,13 @@ spec:
                       worker's door and replaced in place on republish under the
                       generation rules (`creds::sts_replace_decision`).
                       `ambient`: nothing; the worker's own AWS chain.
+
+                      On a lean workspace in Azure or GCS (`provider`), only `static`,
+                      `webIdentity` and `ambient` are taken. `webIdentity` there hands the
+                      worker the pod's own token for the provider's audience, which it
+                      trades for a storage token as the identity named below; `ambient`
+                      is the worker's own: a VM's managed identity on Azure, the metadata
+                      server on GKE or GCE.
                     type: string
                 type: object
               image:

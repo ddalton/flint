@@ -220,6 +220,14 @@ driver:
   # because an older API server silently DROPS the unknown field, which
   # would look like a no-op rather than an error.
   serviceAccountTokenInSecrets: false
+  # More audiences kubelet mints the pod-bound token for, beside the
+  # driver's own. A lean workspace on Azure or GCS with identity.mode
+  # webIdentity trades the token for ITS provider's audience:
+  #   Azure: "api://AzureADTokenExchange"
+  #   GCS:   the workspace's identity.gcp.tokenAudience, by default
+  #          "https://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"
+  # Every audience listed is minted for every volume of this driver.
+  extraTokenAudiences: []
 
 # ── Worker pods ──────────────────────────────────────────────────────
 

@@ -542,18 +542,18 @@ mod tests {
             sharing: Some(SharingSpec { read_only: true }),
             image: None,
             consumers: None,
-            identity: Some(crate::s3csi::policy::Identity { mode: "static".into() }),
+            identity: Some(crate::s3csi::policy::Identity { mode: "static".into(), ..Default::default() }),
         };
         assert!(!MountSpec { sharing: None, ..s.clone() }.shares_read_only());
         assert!(!MountSpec { sharing: Some(SharingSpec { read_only: false }), ..s.clone() }.shares_read_only());
         assert!(s.shares_read_only());
         let e = s.validate().expect_err("static + sharing must be refused");
         assert!(e.contains("static") && e.contains("sharing"), "{e}");
-        s.identity = Some(crate::s3csi::policy::Identity { mode: "stsSecret".into() });
+        s.identity = Some(crate::s3csi::policy::Identity { mode: "stsSecret".into(), ..Default::default() });
         let e = s.validate().expect_err("stsSecret + sharing must be refused");
         assert!(e.contains("stsSecret") && e.contains("sharing"), "{e}");
         for mode in ["broker", "ambient"] {
-            s.identity = Some(crate::s3csi::policy::Identity { mode: mode.into() });
+            s.identity = Some(crate::s3csi::policy::Identity { mode: mode.into(), ..Default::default() });
             assert!(s.validate().is_ok(), "{mode} may share");
         }
         s.identity = None;
@@ -611,7 +611,7 @@ mod tests {
                 service_accounts: vec!["a".into()],
                 read_only_service_accounts: vec!["r".into()],
             }),
-            identity: Some(crate::s3csi::policy::Identity { mode: "broker".into() }),
+            identity: Some(crate::s3csi::policy::Identity { mode: "broker".into(), ..Default::default() }),
         };
         let value = serde_json::to_value(&all).unwrap();
         let in_struct: BTreeSet<String> =

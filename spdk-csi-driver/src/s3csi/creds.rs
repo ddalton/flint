@@ -185,6 +185,82 @@ pub fn gcs_static_arm(secrets: &HashMap<String, String>) -> Result<Materialized,
     Ok(Materialized { env: BTreeMap::from([(KEY.to_string(), json)]), files: vec![] })
 }
 
+// ── workload identity on Azure and GCS ───────────────────────────────
+//
+// `identity.mode: webIdentity` on an Azure or GCS workspace: the pod's
+// own token, minted by kubelet for the provider's audience, goes into the
+// worker's `comm` dir (and is rewritten there at every republish that
+// brings a fresh one); the worker trades it itself, as the identity the
+// CR names (`FLINT_SYNC_AZURE_*`, `FLINT_SYNC_GCP_*` in the launch list).
+
+/// The audience Entra ID's federated credentials take.
+pub const AZURE_TOKEN_AUDIENCE: &str = "api://AzureADTokenExchange";
+/// The worker's Google credential config, beside its token.
+pub const GCP_CREDENTIALS_FILE: &str = "gcp-credentials.json";
+
+/// The audience the pod's token must carry for `provider`'s federation.
+pub fn federated_audience(
+    provider: crate::tier::store::Provider,
+    launch: Option<&BTreeMap<String, String>>,
+) -> Result<String, String> {
+    use crate::tier::store::Provider;
+    match provider {
+        Provider::Azure => Ok(AZURE_TOKEN_AUDIENCE.into()),
+        Provider::Gcs => launch
+            .and_then(|l| l.get("FLINT_SYNC_GCP_TOKEN_AUDIENCE"))
+            .filter(|a| !a.is_empty())
+            .cloned()
+            .ok_or_else(|| "the workspace names no identity.gcp.audience".into()),
+        Provider::S3 => Err("an S3 workspace's webIdentity goes through the broker".into()),
+    }
+}
+
+fn launch_get<'a>(launch: Option<&'a BTreeMap<String, String>>, k: &str) -> Option<&'a String> {
+    launch.and_then(|l| l.get(k)).filter(|v| !v.is_empty())
+}
+
+/// What the Azure SDKs and flint-store read for workload identity, the
+/// variables the AKS webhook would have set: the identity, and the token
+/// file the plugin keeps fresh.
+pub fn azure_federated_arm(launch: Option<&BTreeMap<String, String>>, token: &str) -> Result<Materialized, String> {
+    let need = |k: &str, field: &str| launch_get(launch, k).cloned().ok_or_else(|| format!("the workspace names no identity.azure.{field}"));
+    let mut env = BTreeMap::from([
+        ("AZURE_TENANT_ID".to_string(), need("FLINT_SYNC_AZURE_TENANT_ID", "tenantId")?),
+        ("AZURE_CLIENT_ID".to_string(), need("FLINT_SYNC_AZURE_CLIENT_ID", "clientId")?),
+        ("AZURE_FEDERATED_TOKEN_FILE".to_string(), format!("{COMM_MOUNT}/{TOKEN_FILE}")),
+    ]);
+    if let Some(host) = launch_get(launch, "FLINT_SYNC_AZURE_AUTHORITY_HOST") {
+        env.insert("AZURE_AUTHORITY_HOST".into(), host.clone());
+    }
+    Ok(Materialized { env, files: vec![CommFile { name: TOKEN_FILE.into(), bytes: token.as_bytes().to_vec(), mode: 0o600 }] })
+}
+
+/// Google's `external_account` credential config, as `gcloud iam
+/// workload-identity-pools create-cred-config --credential-source-file`
+/// writes it, pointing at the token file the plugin keeps fresh.
+pub fn gcs_federated_arm(launch: Option<&BTreeMap<String, String>>, token: &str) -> Result<Materialized, String> {
+    let audience = launch_get(launch, "FLINT_SYNC_GCP_AUDIENCE").ok_or("the workspace names no identity.gcp.audience")?;
+    let mut config = serde_json::json!({
+        "type": "external_account",
+        "audience": audience,
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": "https://sts.googleapis.com/v1/token",
+        "credential_source": { "file": format!("{COMM_MOUNT}/{TOKEN_FILE}"), "format": { "type": "text" } },
+    });
+    if let Some(sa) = launch_get(launch, "FLINT_SYNC_GCP_SERVICE_ACCOUNT") {
+        config["service_account_impersonation_url"] = serde_json::Value::String(format!(
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa}:generateAccessToken"
+        ));
+    }
+    Ok(Materialized {
+        env: BTreeMap::from([("GOOGLE_APPLICATION_CREDENTIALS".to_string(), format!("{COMM_MOUNT}/{GCP_CREDENTIALS_FILE}"))]),
+        files: vec![
+            CommFile { name: TOKEN_FILE.into(), bytes: token.as_bytes().to_vec(), mode: 0o600 },
+            CommFile { name: GCP_CREDENTIALS_FILE.into(), bytes: serde_json::to_vec_pretty(&config).expect("json"), mode: 0o600 },
+        ],
+    })
+}
+
 // ── stsSecret: a controller-fed, expiring credential ─────────────────
 //
 // The Secret a controller (awc-docs PR #136's receiver, or anything that
@@ -973,6 +1049,40 @@ mod tests {
         let m = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", key), ("AWS_SECRET_ACCESS_KEY", "x")])).unwrap();
         assert_eq!(m.env.keys().collect::<Vec<_>>(), ["FLINT_GCS_SERVICE_ACCOUNT_JSON"], "AWS keys stay behind");
         assert!(m.files.is_empty());
+    }
+
+    #[test]
+    fn the_federated_arms_hand_the_worker_its_token_and_whom_to_trade_it_as() {
+        use crate::tier::store::Provider;
+        let launch = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+        let az = launch(&[("FLINT_SYNC_AZURE_TENANT_ID", "t"), ("FLINT_SYNC_AZURE_CLIENT_ID", "c")]);
+        let m = azure_federated_arm(Some(&az), "pod-token").unwrap();
+        assert_eq!(m.env["AZURE_TENANT_ID"], "t");
+        assert_eq!(m.env["AZURE_CLIENT_ID"], "c");
+        assert_eq!(m.env["AZURE_FEDERATED_TOKEN_FILE"], "/comm/token");
+        assert!(!m.env.contains_key("AZURE_AUTHORITY_HOST"));
+        assert_eq!((m.files[0].name.as_str(), m.files[0].bytes.as_slice(), m.files[0].mode), ("token", &b"pod-token"[..], 0o600));
+        assert!(azure_federated_arm(Some(&launch(&[("FLINT_SYNC_AZURE_TENANT_ID", "t")])), "x").unwrap_err().contains("clientId"));
+        assert_eq!(federated_audience(Provider::Azure, None).unwrap(), "api://AzureADTokenExchange");
+
+        let aud = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k";
+        let g = launch(&[("FLINT_SYNC_GCP_AUDIENCE", aud), ("FLINT_SYNC_GCP_TOKEN_AUDIENCE", "https:x"), ("FLINT_SYNC_GCP_SERVICE_ACCOUNT", "lean@p.iam.gserviceaccount.com")]);
+        assert_eq!(federated_audience(Provider::Gcs, Some(&g)).unwrap(), "https:x");
+        assert!(federated_audience(Provider::Gcs, None).is_err());
+        let m = gcs_federated_arm(Some(&g), "ksa-token").unwrap();
+        assert_eq!(m.env["GOOGLE_APPLICATION_CREDENTIALS"], "/comm/gcp-credentials.json");
+        assert_eq!(m.files[0].bytes, b"ksa-token");
+        let config: serde_json::Value = serde_json::from_slice(&m.files[1].bytes).unwrap();
+        assert_eq!(config["type"], "external_account");
+        assert_eq!(config["audience"], aud);
+        assert_eq!(config["credential_source"]["file"], "/comm/token");
+        assert_eq!(
+            config["service_account_impersonation_url"],
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/lean@p.iam.gserviceaccount.com:generateAccessToken"
+        );
+        let direct = gcs_federated_arm(Some(&launch(&[("FLINT_SYNC_GCP_AUDIENCE", aud)])), "t").unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&direct.files[1].bytes).unwrap();
+        assert!(config.get("service_account_impersonation_url").is_none());
     }
 
     #[test]

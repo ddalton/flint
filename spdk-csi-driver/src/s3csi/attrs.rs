@@ -79,7 +79,12 @@ pub struct PublishRequest {
     pub pod_namespace: String,
     pub pod_uid: String,
     pub service_account: String,
+    /// The token for OUR audience (the broker's).
     pub token: Option<SaToken>,
+    /// Every audience's token kubelet minted, ours included. A lean
+    /// workspace on Azure or GCS with `identity.mode: webIdentity` hands
+    /// its provider the one for that provider's audience.
+    pub tokens: std::collections::BTreeMap<String, SaToken>,
     /// `chert.us/on-behalf-of`, validated for length and control
     /// characters (it lands in log lines), otherwise verbatim.
     pub on_behalf_of: Option<String>,
@@ -177,20 +182,34 @@ pub fn parse(ctx: &HashMap<String, String>) -> Result<PublishRequest, String> {
     let pod_namespace = need(K_POD_NAMESPACE)?;
     let pod_uid = need(K_POD_UID)?;
     let service_account = need(K_SA_NAME)?;
-    let token = match ctx.get(K_SA_TOKENS) {
-        None => None,
+    let (token, tokens) = match ctx.get(K_SA_TOKENS) {
+        None => (None, Default::default()),
         Some(raw) => parse_tokens(raw)?,
     };
-    Ok(PublishRequest { selector, uid, gid, pod_name, pod_namespace, pod_uid, service_account, token, on_behalf_of })
+    Ok(PublishRequest { selector, uid, gid, pod_name, pod_namespace, pod_uid, service_account, token, tokens, on_behalf_of })
 }
 
 /// `{"<audience>": {"token": "...", "expirationTimestamp": "..."}}`
-/// (kubelet `csi_mounter.go`). We want OUR audience.
-fn parse_tokens(raw: &str) -> Result<Option<SaToken>, String> {
+/// (kubelet `csi_mounter.go`): OUR audience's token, refused when it is
+/// empty, and every audience's that carries one.
+#[allow(clippy::type_complexity)]
+fn parse_tokens(raw: &str) -> Result<(Option<SaToken>, std::collections::BTreeMap<String, SaToken>), String> {
     let v: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("{K_SA_TOKENS} is not JSON: {e}"))?;
+    let all = v
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(aud, e)| {
+                    let token = e.get("token")?.as_str().filter(|t| !t.is_empty())?.to_string();
+                    let expiration = e.get("expirationTimestamp").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+                    Some((aud.clone(), SaToken { token, expiration }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let Some(entry) = v.get(DRIVER_NAME) else {
-        return Ok(None);
+        return Ok((None, all));
     };
     let token = entry
         .get("token")
@@ -202,7 +221,7 @@ fn parse_tokens(raw: &str) -> Result<Option<SaToken>, String> {
         .and_then(|t| t.as_str())
         .unwrap_or_default()
         .to_string();
-    Ok(Some(SaToken { token: token.to_string(), expiration }))
+    Ok((Some(SaToken { token: token.to_string(), expiration }), all))
 }
 
 #[cfg(test)]
@@ -319,8 +338,12 @@ mod tests {
         let t = r.token.clone().unwrap();
         assert_eq!(t.token, "eyJ.secret");
         assert!(!format!("{r:?}").contains("secret"), "Debug must redact the token");
-        ctx.insert(K_SA_TOKENS.into(), r#"{"other":{"token":"zzz"}}"#.into());
-        assert!(parse(&ctx).unwrap().token.is_none());
+        assert_eq!(r.tokens.keys().collect::<Vec<_>>(), ["other", "s3.csi.chert.us"], "every audience is kept");
+        assert_eq!(r.tokens["other"].token, "zzz");
+        ctx.insert(K_SA_TOKENS.into(), r#"{"other":{"token":"zzz"},"api://AzureADTokenExchange":{"token":""}}"#.into());
+        let r = parse(&ctx).unwrap();
+        assert!(r.token.is_none());
+        assert_eq!(r.tokens.keys().collect::<Vec<_>>(), ["other"], "an audience with no token is not kept");
         ctx.insert(K_SA_TOKENS.into(), "not json".into());
         assert!(parse(&ctx).unwrap_err().contains("not JSON"));
     }
