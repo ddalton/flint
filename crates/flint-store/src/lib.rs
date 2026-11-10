@@ -58,7 +58,11 @@ pub mod s3;
 pub mod rawread;
 #[cfg(feature = "azure")]
 pub mod azure;
-#[cfg_attr(not(feature = "azure"), allow(dead_code))]
+#[cfg(feature = "gcs")]
+pub mod gcs;
+#[cfg(any(feature = "azure", feature = "gcs"))]
+mod rest;
+#[cfg_attr(not(any(feature = "azure", feature = "gcs")), allow(dead_code))]
 mod cell;
 
 use async_trait::async_trait;

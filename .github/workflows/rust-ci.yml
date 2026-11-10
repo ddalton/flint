@@ -95,16 +95,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/flint-store
-      - name: cargo test --lib --features s3,azure
+      - name: cargo test --lib --features s3,azure,gcs
         working-directory: crates/flint-store
-        run: cargo test --lib --features s3,azure
-      - name: the s3 and azure backends must actually have been compiled
+        run: cargo test --lib --features s3,azure,gcs
+      - name: the s3, azure and gcs backends must actually have been compiled
         working-directory: crates/flint-store
         # Anti-vacuity: if a feature ever stops pulling in its module, the
         # step above goes green having tested the memory double only.
         run: |
-          cargo test --lib --features s3,azure -- --list > /tmp/store-tests.txt
-          for m in s3 azure; do
+          cargo test --lib --features s3,azure,gcs -- --list > /tmp/store-tests.txt
+          for m in s3 azure gcs; do
             n=$(grep -c "^$m::" /tmp/store-tests.txt || true)
             echo "$m-module tests discovered: $n"
             test "$n" -ge 1 || {
@@ -116,7 +116,7 @@ jobs:
         working-directory: crates/flint-store
         # `--lib` above does not build `tests/`. The live-store legs of the
         # same file are `#[ignore]` and need an endpoint.
-        run: cargo test --features s3,azure --test contract
+        run: cargo test --features s3,azure,gcs --test contract
       - name: the store contract, on Azurite (Microsoft's Azure Blob emulator)
         working-directory: crates/flint-store
         # A fresh account and key every run (AZURITE_ACCOUNTS), so no key
@@ -130,6 +130,17 @@ jobs:
           for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
           FLINT_CONTRACT_AZURE_ENDPOINT=http://127.0.0.1:10000/flintci FLINT_CONTRACT_AZURE_ACCOUNT=flintci \
             FLINT_CONTRACT_AZURE_KEY="$KEY" cargo test --features azure --test contract a_live_azure -- --ignored --nocapture
+      - name: the store contract, on storage-testbench (Google's GCS emulator)
+        working-directory: crates/flint-store
+        # The emulator Google's own client libraries test against. It
+        # authorizes nothing, so this leg has no wrong-credential control;
+        # it checks the conditions, the checksums and the composes.
+        run: |
+          docker run -d --name gcs-testbench -p 127.0.0.1:9023:9000 \
+            gcr.io/cloud-devrel-public-resources/storage-testbench:v0.67.0@sha256:06729d407e8bba055798707dccfffd1f792ea818937954c56a776811116ede5c
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:9023/ && break; sleep 1; done
+          FLINT_CONTRACT_GCS_ENDPOINT=http://127.0.0.1:9023 FLINT_CONTRACT_GCS_EMULATOR=1 \
+            cargo test --features gcs --test contract a_live_gcs -- --ignored --nocapture
 
   authz-drill:
     runs-on: ubuntu-latest

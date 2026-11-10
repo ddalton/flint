@@ -3,8 +3,8 @@
 //!
 //! The memory double runs it on every `cargo test`. A live store runs it
 //! when asked (`#[ignore]`, like `presign_live.rs`): S3 or anything that
-//! speaks its API, now; Azure and GCS, against their emulators first and
-//! real accounts after, once their backends exist.
+//! speaks its API, Azure Blob and GCS, against their emulators first and
+//! real accounts after.
 //!
 //! FLINT_CONTRACT_ENDPOINT=http://host:port FLINT_CONTRACT_BUCKET=b \
 //! FLINT_CONTRACT_KEY=... FLINT_CONTRACT_SECRET=... [FLINT_CONTRACT_REGION=us-east-1] \
@@ -186,17 +186,25 @@ async fn c4_list(s: &dyn ObjectStore, base: &str) {
 }
 
 /// C6: a copy keeps the bytes and the CRC, and takes the stamps it was
-/// given rather than the source's.
+/// given rather than the source's: a stamp only the source carries is not
+/// carried over.
 async fn c6_copy(s: &dyn ObjectStore, base: &str) {
     let src = format!("{base}c6/src");
     let dst = format!("{base}c6/dst");
-    let a = put(s, &src, b"copied bytes", &PutCondition::IfNoneMatchAny).await.unwrap();
+    let body = b"copied bytes";
+    let src_stamps = GenerationStamps { boundary_source: Some("source-only".into()), ..stamps("the-source") };
+    let a = s
+        .put_whole(&src, Bytes::from_static(body), &PutCondition::IfNoneMatchAny, &src_stamps, crc64_nvme(body))
+        .await
+        .unwrap();
     let c = s.copy_object(&src, Some(&a.etag), &dst, &PutCondition::IfNoneMatchAny, &stamps("the-copy")).await.unwrap();
-    assert_eq!(c.crc64_b64.as_deref(), Some(crc64_to_b64(crc64_nvme(b"copied bytes")).as_str()), "C6: the copy's CRC");
+    assert_eq!(c.crc64_b64.as_deref(), Some(crc64_to_b64(crc64_nvme(body)).as_str()), "C6: the copy's CRC");
     let head = s.head(&dst).await.unwrap();
     assert_eq!(head.crc64_b64, c.crc64_b64, "C6: HEAD disagrees with the copy on the CRC");
-    assert_eq!(GenerationStamps::from_meta(&head.meta).map(|g| g.flush_uuid), Some("the-copy".into()), "C6: the copy's stamps");
-    assert_eq!(s.get_whole(&dst, Some(&c.etag)).await.unwrap().1, Bytes::from_static(b"copied bytes"));
+    let got = GenerationStamps::from_meta(&head.meta).expect("C6: the copy carries stamps");
+    assert_eq!(got.flush_uuid, "the-copy", "C6: the copy's stamps");
+    assert_eq!(got.boundary_source, None, "C6: a stamp only the source had was carried over");
+    assert_eq!(s.get_whole(&dst, Some(&c.etag)).await.unwrap().1, Bytes::from_static(body));
 }
 
 /// C7: every object a flint client writes carries its full CRC-64/NVME,
@@ -504,6 +512,92 @@ async fn a_live_azure_store_meets_the_contract() {
         let _ = store.delete(&o.key).await;
     }
     eprintln!("contract: passed against azure container {} (skipped {skip:?})", store.container());
+}
+
+/// A live GCS bucket: storage-testbench first, a real bucket after.
+///
+/// FLINT_CONTRACT_GCS_ENDPOINT=http://127.0.0.1:9023 FLINT_CONTRACT_GCS_EMULATOR=1 \
+/// [FLINT_CONTRACT_GCS_BUCKET=contract] [FLINT_CONTRACT_SKIP=...] \
+///   cargo test -p flint-store --features gcs --test contract a_live_gcs -- --ignored --nocapture
+///
+/// Without `FLINT_CONTRACT_GCS_EMULATOR` the credentials come from the
+/// environment as a deployment's do (`GcsStore::from_env`), and a wrong
+/// token must be refused. An emulator authorizes nothing, so it has no
+/// such control. The bucket is created on an emulator; everything written
+/// is under one fresh prefix, deleted at the end.
+#[cfg(feature = "gcs")]
+#[tokio::test]
+#[ignore]
+async fn a_live_gcs_store_meets_the_contract() {
+    use flint_store::gcs::GcsStore;
+    let bucket = std::env::var("FLINT_CONTRACT_GCS_BUCKET").unwrap_or_else(|_| "contract".into());
+    let endpoint = std::env::var("FLINT_CONTRACT_GCS_ENDPOINT").ok();
+    let emulator = std::env::var("FLINT_CONTRACT_GCS_EMULATOR").is_ok_and(|v| v == "1");
+    let base = format!("flint-contract/{}/", uuid::Uuid::new_v4());
+    let open = || -> GcsStore {
+        let s = if emulator {
+            GcsStore::emulator(endpoint.clone().expect("FLINT_CONTRACT_GCS_ENDPOINT is not set"), bucket.clone())
+        } else {
+            GcsStore::from_env(bucket.clone(), endpoint.clone())
+        };
+        s.unwrap().with_scratch_root(base.clone())
+    };
+    let store = open();
+    if emulator {
+        store.ensure_bucket("flint-contract").await.expect("the bucket");
+    } else {
+        let wrong = GcsStore::with_token("flint-contract-wrong-token", bucket.clone(), endpoint.clone()).unwrap();
+        let refused = wrong.list("").await;
+        assert!(matches!(refused, Err(StoreError::Auth(_))), "a wrong token was not refused: {refused:?}");
+    }
+    assert_eq!(store.provider(), flint_store::Provider::Gcs);
+    let skip_env = std::env::var("FLINT_CONTRACT_SKIP").unwrap_or_default();
+    let skip: Vec<&str> = skip_env.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let second = open();
+    run_contract_with(&store, Some(&second), &base, &skip).await;
+    gcs_composes_nest_and_leave_no_parts(&store, &base).await;
+    for o in store.list(&base).await.unwrap() {
+        let _ = store.delete(&o.key).await;
+    }
+    eprintln!("contract: passed against gcs bucket {bucket} (skipped {skip:?}{})", if emulator { ", emulator" } else { "" });
+}
+
+/// GCS assembles a large object from part objects: past 32 parts the
+/// compose nests, and whatever happens the parts are gone after. The
+/// upload sweep sees a crashed compose's parts and removes them.
+#[cfg(feature = "gcs")]
+async fn gcs_composes_nest_and_leave_no_parts(s: &flint_store::gcs::GcsStore, base: &str) {
+    let part = 1000u64;
+    let n = 70u64;
+    let body: Vec<u8> = (0..part * n).map(|i| (i * 7 % 253) as u8).collect();
+    let mut f = tempfile::tempfile().unwrap();
+    f.write_all(&body).unwrap();
+    let file = Arc::new(f);
+    let key = format!("{base}gcs/nested");
+    let spec = ComposeSpec {
+        parts: (0..n).map(|i| PartSource::Local { offset: i * part, len: part }).collect(),
+        ..compose(&key, &file, body.len() as u64, s)
+    };
+    let before = s.request_counts().unwrap();
+    let made = s.compose_generation(&spec).await.expect("a 70-part compose");
+    let after = s.request_counts().unwrap();
+    // 70 part uploads; three composes of at most 32, then the one that lands.
+    assert_eq!((after.put - before.put, after.multipart - before.multipart), (70, 4), "the compose did not nest");
+    assert_eq!(made.crc64_b64.as_deref(), Some(crc64_to_b64(crc64_nvme(&body)).as_str()));
+    assert_eq!(s.get_whole(&key, Some(&made.etag)).await.unwrap().1, Bytes::from(body.clone()), "the nested compose's bytes");
+    // The same parts again, create-only over it: refused, and its parts gone too.
+    assert!(lost_race(&s.compose_generation(&spec).await), "a create-only compose over an object landed");
+    assert!(s.list_uploads(base).await.unwrap().is_empty(), "a compose left parts behind");
+    // A crashed compose's part, as the sweep finds it.
+    let stray = format!("{base}{}0123456789abcdef/00000", flint_store::gcs::PARTS_DIR);
+    put(s, &stray, b"half a file", &PutCondition::IfNoneMatchAny).await.unwrap();
+    let pending = s.list_uploads(base).await.unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0].upload_id, "0123456789abcdef");
+    assert!(pending[0].initiated_unix.is_some(), "a part with no date is never swept");
+    assert!(s.abort_upload(&format!("{base}gcs/"), "0123456789abcdef").await.is_err(), "an abort outside a parts directory");
+    s.abort_upload(&pending[0].key, &pending[0].upload_id).await.unwrap();
+    assert!(s.list_uploads(base).await.unwrap().is_empty(), "the abort left the part");
 }
 
 /// A live S3-API store, MinIO and Ozone included. Everything it writes is

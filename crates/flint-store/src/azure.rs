@@ -37,19 +37,18 @@ use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use http::{HeaderMap, Method, Request};
 use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
 use sha2::{Digest, Sha256};
 
 use crate::counters::{RequestCounter, RequestKind};
+use crate::rest::{
+    base64_decode, content_hash, encode, foreign_token, https_client, jitter, presented, quoted, read_local,
+    HttpsClient,
+};
 use crate::{
     base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, EpochLease,
     EpochState, GenerationStamps, ListedObject, ObjectMeta, ObjectStore, PartSource, PendingUpload, Provider,
     PutCondition, RequestCounts, StoreError, StoreResult,
 };
-
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 /// The REST version every request names. One Azurite takes, and late
 /// enough for every operation here.
@@ -223,7 +222,7 @@ impl AzureStore {
         };
         let opts = AzureOptions::default();
         Ok(AzureStore {
-            client: Self::build_client(&opts)?,
+            client: https_client(opts.connect_timeout, "azure")?,
             account,
             auth,
             origin: format!("{scheme}://{authority}"),
@@ -234,26 +233,6 @@ impl AzureStore {
             upload_gate: None,
             tokens: Mutex::new(HashMap::new()),
         })
-    }
-
-    fn build_client(opts: &AzureOptions) -> StoreResult<HttpsClient> {
-        let mut http = HttpConnector::new();
-        http.enforce_http(false);
-        http.set_nodelay(true);
-        http.set_connect_timeout(Some(opts.connect_timeout));
-        // aws-lc-rs, the provider the rest of this crate uses: two in one
-        // binary and rustls refuses to guess.
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_provider_and_native_roots(rustls::crypto::aws_lc_rs::default_provider())
-            .map_err(|e| StoreError::Other(format!("azure: TLS roots: {e}")))?
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(http);
-        Ok(Client::builder(TokioExecutor::new())
-            .pool_idle_timeout(Duration::from_secs(60))
-            .pool_max_idle_per_host(1024)
-            .pool_timer(TokioTimer::new())
-            .build(https))
     }
 
     /// Bound the bytes the upload path holds at once (`gate.rs`). `0` = no gate.
@@ -419,7 +398,7 @@ impl AzureStore {
     async fn token_for(&self, key: &str, want: &str, fresh: bool) -> StoreResult<String> {
         let want = quoted(want);
         if let Some(t) = foreign_token(key, &want)? {
-            return Ok(t);
+            return Ok(quoted(&t));
         }
         if !fresh {
             if let Some((c, t)) = self.tokens.lock().unwrap().get(key) {
@@ -464,7 +443,7 @@ impl AzureStore {
         }
         if let Some(want) = if_match {
             if let Some(token) = foreign_token(key, &quoted(want))? {
-                req = req.header("if-match", token);
+                req = req.header("if-match", quoted(&token));
             }
         }
         let resp = self.send(req).await?;
@@ -508,10 +487,6 @@ fn header<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
     h.get(name).and_then(|v| v.to_str().ok())
 }
 
-fn quoted(etag: &str) -> String {
-    format!("\"{}\"", etag.trim().trim_matches('"'))
-}
-
 /// A blob's metadata, by the names Azure stored (`x-ms-meta-` stripped).
 fn raw_meta(h: &HeaderMap) -> HashMap<String, String> {
     h.iter()
@@ -544,39 +519,6 @@ fn meta_headers(stamps: &GenerationStamps, hash: &str, crc_b64: &str) -> Vec<(St
     v
 }
 
-/// The ETag lean sees for a blob: its content hash, or an outside
-/// writer's form when it carries none.
-fn presented(key: &str, hash: Option<&str>, token: &str) -> String {
-    match hash {
-        Some(h) => format!("\"{h}\""),
-        None => format!("\"x-{}-{}\"", key_digest(key), token.trim().trim_matches('"')),
-    }
-}
-
-/// The Azure ETag inside an outside writer's form, for THIS key; a form
-/// minted for another key is a precondition failure, not a token.
-fn foreign_token(key: &str, etag: &str) -> StoreResult<Option<String>> {
-    let Some(rest) = etag.trim_matches('"').strip_prefix("x-") else { return Ok(None) };
-    match rest.split_once('-') {
-        Some((digest, token)) if digest == key_digest(key) => Ok(Some(format!("\"{token}\""))),
-        _ => Err(StoreError::PreconditionFailed(format!("{key}: {etag} names another blob"))),
-    }
-}
-
-fn key_digest(key: &str) -> String {
-    hex(&Sha256::digest(key.as_bytes())[..8])
-}
-
-/// The content ETag's digits: 128 bits of SHA-256, as lean's chunk
-/// addresses are.
-fn content_hash(digest: &[u8]) -> String {
-    hex(&digest[..16])
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 fn seen(key: &str, h: &HeaderMap, size: u64) -> StoreResult<Seen> {
     let token = header(h, "etag").map(quoted).ok_or_else(|| StoreError::Other(format!("{key}: no ETag in the response")))?;
     let raw = raw_meta(h);
@@ -599,33 +541,28 @@ fn unix_of(http_date: &str) -> Option<u64> {
     httpdate::parse_http_date(http_date).ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
-fn jitter(cap: Duration) -> Duration {
-    let ms = cap.as_millis() as u64;
-    if ms == 0 {
-        return Duration::ZERO;
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
     }
-    Duration::from_millis((uuid::Uuid::new_v4().as_u128() % (ms as u128 + 1)) as u64)
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A block id: one per compose (so two composes of one key never mix
 /// blocks), then the part's index. Every id of a blob has one length.
 fn block_id(nonce: &str, i: usize) -> String {
     base64_std(format!("{nonce}{i:08}").as_bytes())
-}
-
-/// Read one part from the descriptor the caller opened (never a path:
-/// see `ComposeSpec::local`).
-async fn read_local(file: &Arc<std::fs::File>, offset: u64, len: u64) -> StoreResult<Bytes> {
-    let f = file.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<Bytes> {
-        use std::os::unix::fs::FileExt;
-        let mut buf = vec![0u8; len as usize];
-        f.read_exact_at(&mut buf, offset)?;
-        Ok(Bytes::from(buf))
-    })
-    .await
-    .map_err(|e| StoreError::Other(format!("local read join: {e}")))?
-    .map_err(|e| StoreError::Other(format!("local read [{offset}, +{len}): {e}")))
 }
 
 // ── Shared Key ───────────────────────────────────────────────────────
@@ -697,65 +634,6 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     }
     let inner = Sha256::new().chain_update(ipad).chain_update(msg).finalize();
     Sha256::new().chain_update(opad).chain_update(inner).finalize().into()
-}
-
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    fn val(c: u8) -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32)
-    }
-    let s = s.trim_end_matches('=').as_bytes();
-    if s.len() % 4 == 1 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    for chunk in s.chunks(4) {
-        let mut n = 0u32;
-        for (i, &c) in chunk.iter().enumerate() {
-            n |= val(c)? << (18 - 6 * i);
-        }
-        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
-        out.extend_from_slice(&bytes[..chunk.len() - 1]);
-    }
-    Some(out)
-}
-
-/// Percent-encode everything but the unreserved characters, and `/` when
-/// `path` (a blob name's separators stay separators).
-fn encode(s: &str, path: bool) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') || (path && b == b'/') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ── XML, just enough ─────────────────────────────────────────────────
@@ -994,7 +872,7 @@ impl ObjectStore for AzureStore {
             crc.update(&bytes);
             sha.update(&bytes);
             let id = block_id(&nonce, i);
-            let req = Req::new("put_block", RequestKind::Multipart, Method::PUT, Some(spec.key))
+            let req = Req::new("put_block", RequestKind::Put, Method::PUT, Some(spec.key))
                 .query("comp", "block")
                 .query("blockid", id.clone())
                 .body(bytes);
@@ -1205,6 +1083,7 @@ impl ObjectStore for AzureStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rest::hex;
 
     #[test]
     fn hmac_sha256_meets_rfc_4231_case_2() {
@@ -1213,22 +1092,6 @@ mod tests {
         // A key longer than the block is hashed first (case 6).
         let mac = hmac_sha256(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First");
         assert_eq!(hex(&mac), "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
-    }
-
-    #[test]
-    fn base64_decode_inverts_the_crates_encoder() {
-        for s in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", &[0u8, 255, 128, 7]] {
-            assert_eq!(base64_decode(&base64_std(s)).as_deref(), Some(s), "{s:?}");
-        }
-        assert_eq!(base64_decode("not base64!"), None);
-    }
-
-    #[test]
-    fn a_blob_name_is_encoded_with_its_slashes_kept() {
-        assert_eq!(encode("p/files/a b+c@u", true), "p/files/a%20b%2Bc%40u");
-        assert_eq!(encode("a/b", false), "a%2Fb");
-        assert_eq!(encode("é", true), "%C3%A9");
-        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
     }
 
     /// The layout Microsoft documents: verb, eleven standard headers, the
@@ -1274,22 +1137,18 @@ mod tests {
     }
 
     #[test]
-    fn an_outside_writers_etag_names_its_own_blob_only() {
-        let e = presented("p/a", None, "\"0x8DC1\"");
-        assert!(e.starts_with("\"x-") && e.ends_with("-0x8DC1\""), "{e}");
-        assert_eq!(foreign_token("p/a", &e).unwrap(), Some("\"0x8DC1\"".to_string()));
-        assert!(matches!(foreign_token("p/b", &e), Err(StoreError::PreconditionFailed(_))));
-        assert_eq!(foreign_token("p/a", "\"0123abcd\"").unwrap(), None, "a content ETag is not a token");
-        assert_eq!(presented("p/a", Some("ab12"), "\"0x8DC1\""), "\"ab12\"");
-    }
-
-    #[test]
     fn block_ids_have_one_length_and_differ_by_compose() {
         let a: Vec<String> = (0..3).map(|i| block_id("0123456789abcdef", i)).collect();
         let b = block_id("fedcba9876543210", 0);
         assert!(a.iter().all(|id| id.len() == a[0].len()) && b.len() == a[0].len());
         assert_ne!(a[0], b);
         assert!(!a[0].ends_with('='), "24 bytes encode without padding");
+    }
+
+    #[test]
+    fn an_encoded_blob_name_decodes() {
+        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
+        assert_eq!(percent_decode("p/%C3%A9%"), "p/é%");
     }
 
     #[test]

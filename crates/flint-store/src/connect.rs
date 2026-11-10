@@ -29,6 +29,11 @@ pub struct StoreSpec {
     /// S3 only: route GETs and HEADs through the raw read path
     /// (`rawread.rs`), which signs SigV4 by hand.
     pub raw_reads: bool,
+    /// Where a backend that assembles a large object from temporary ones
+    /// keeps them (GCS: `<root>.flint/lean/parts/`): lean's workspace
+    /// prefix, with its `/`. S3 and Azure assemble inside the object and
+    /// have no use for it. `None` is the bucket's root.
+    pub scratch_root: Option<String>,
 }
 
 impl StoreSpec {
@@ -41,6 +46,7 @@ impl StoreSpec {
             upload_inflight_max_bytes: None,
             copy_whole_max: None,
             raw_reads: false,
+            scratch_root: None,
         }
     }
 
@@ -76,7 +82,7 @@ pub async fn connect(spec: &StoreSpec) -> StoreResult<Arc<dyn ObjectStore>> {
     match spec.provider {
         Provider::S3 => connect_s3(spec).await,
         Provider::Azure => connect_azure(spec).await,
-        p @ Provider::Gcs => Err(not_built(p)),
+        Provider::Gcs => connect_gcs(spec).await,
     }
 }
 
@@ -97,6 +103,28 @@ async fn connect_azure(_: &StoreSpec) -> StoreResult<Arc<dyn ObjectStore>> {
     Err(not_built(Provider::Azure))
 }
 
+/// The credentials come from the environment (`GcsStore::from_env`): a
+/// service account's key, or an emulator's host.
+#[cfg(feature = "gcs")]
+async fn connect_gcs(spec: &StoreSpec) -> StoreResult<Arc<dyn ObjectStore>> {
+    let mut s = crate::gcs::GcsStore::from_env(spec.bucket.clone(), spec.endpoint.clone())?
+        .with_part_parallelism(spec.part_parallelism);
+    if let Some(n) = spec.upload_inflight_max_bytes {
+        s = s.with_upload_inflight_max_bytes(n);
+    }
+    if let Some(root) = &spec.scratch_root {
+        s = s.with_scratch_root(root.clone());
+    }
+    Ok(Arc::new(s))
+}
+
+#[cfg(not(feature = "gcs"))]
+async fn connect_gcs(_: &StoreSpec) -> StoreResult<Arc<dyn ObjectStore>> {
+    Err(not_built(Provider::Gcs))
+}
+
+// Every backend built: nothing calls it.
+#[cfg_attr(all(feature = "s3", feature = "azure", feature = "gcs"), allow(dead_code))]
 fn not_built(p: Provider) -> StoreError {
     StoreError::Other(format!("the {p} backend is not built into this binary"))
 }
@@ -156,8 +184,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_backend_this_binary_lacks_says_so() {
-        let lacking: &[Provider] = if cfg!(feature = "azure") { &[Provider::Gcs] } else { &[Provider::Azure, Provider::Gcs] };
-        for &p in lacking {
+        let lacking: Vec<Provider> = [(Provider::Azure, cfg!(feature = "azure")), (Provider::Gcs, cfg!(feature = "gcs"))]
+            .into_iter()
+            .filter(|(_, built)| !built)
+            .map(|(p, _)| p)
+            .collect();
+        for p in lacking {
             match connect(&StoreSpec::new(p, "b")).await {
                 Err(StoreError::Other(m)) => assert!(m.contains(&format!("the {p} backend is not built")), "{m}"),
                 Err(e) => panic!("{p}: {e}"),
