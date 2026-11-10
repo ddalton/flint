@@ -62,9 +62,12 @@ at 4 hours each. With natural ids on 2026-11-07 they were bounded only: lost cle
 | Arm | Verdict | Distinct states | Generated | Depth | Checked in |
 |---|---|---:|---:|---:|---:|
 | lost | **full pass** | 6,317,146,257 | 42,154,217,149 | 55 | 2,074 s |
-| crash | running | | | | |
-| zombie | queued | | | | |
+| crash | **bounded**: stopped by hand at the day's pause, no violation seen | 5,509,586,077 seen | 35 (open) | 1,562 s at the last progress line |
+| zombie | not run | | | | |
 
 - **Lost:** symmetry cuts the depth-22 queue 5.96 times against the natural-id run (35.6 M against
   212 M), close to the 6 permutations. The levels peaked at depth 33 (a 610 M queue) and shrank from
   there to depth 55.
+- **Crash:** the same shape as lost, a little larger: the levels peaked at depth 33 (a 671 M queue) and
+  were shrinking (0.89 times at depth 35) when the run was stopped for the day at 17:43, about ten minutes
+  short of its likely end (lost's tail from the same point took 500 s). Rerun it to completion.
