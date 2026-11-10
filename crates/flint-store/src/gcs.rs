@@ -1,7 +1,10 @@
 //! The Google Cloud Storage backend (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md,
 //! phase 3): the JSON API by hand, on the same hyper/rustls stack as the
 //! Azure backend, authorized by a service account's key (an OAuth2 token
-//! from a signed JWT), a bearer token, or nothing for an emulator.
+//! from a signed JWT), a bearer token, nothing for an emulator, or (phase
+//! 4) workload identity: Workload Identity Federation (a workload's token
+//! traded at Google's STS, then optionally for a service account's), or
+//! the metadata server GKE and GCE run.
 //!
 //! **Content ETags (plan §3, C3).** A generation names a write of one
 //! object name, not the bytes, and lean compares the ETags of different
@@ -43,12 +46,12 @@
 //! backoff.
 //!
 //! Not here yet: server-side copies of byte ranges (`PartSource::BaseCopy`),
-//! batch delete, presigned URLs, version and lifecycle operations,
-//! workload identity (phase 4), a count of 429s.
+//! batch delete, presigned URLs, version and lifecycle operations, a
+//! count of 429s.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -60,8 +63,8 @@ use sha2::{Digest, Sha256};
 
 use crate::counters::{RequestCounter, RequestKind};
 use crate::rest::{
-    base64_decode, content_hash, encode, foreign_token, https_client, jitter, presented, quoted, read_local,
-    HttpsClient,
+    base64_decode, content_hash, encode, expires_in, foreign_token, form, https_client, jitter, presented, quoted,
+    read_local, refusal, token_request, HttpsClient, TokenCache,
 };
 use crate::{
     base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, EpochLease,
@@ -94,20 +97,46 @@ const DELETE_PARALLELISM: usize = 16;
 /// Read and write objects; nothing on the bucket itself.
 const SCOPE: &str = "https://www.googleapis.com/auth/devstorage.read_write";
 const TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
+/// What a federated token is asked for: enough to impersonate a service
+/// account, which then narrows it to [`SCOPE`].
+const FEDERATED_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+const STS_URL: &str = "https://sts.googleapis.com/v1/token";
+/// The metadata server, as GKE and GCE answer it; `GCE_METADATA_HOST`
+/// (Google's convention) names another.
+pub const METADATA_HOST: &str = "169.254.169.254";
 
 enum Auth {
     /// An emulator: no Authorization header at all.
     None,
     Bearer(String),
     ServiceAccount(ServiceAccount),
+    /// The metadata server at `host`: the identity GKE's workload identity
+    /// or a GCE VM gives the caller.
+    Metadata { host: String, cache: TokenCache },
+    External(ExternalAccount),
 }
 
 struct ServiceAccount {
     email: String,
     key: Arc<dyn rustls::sign::SigningKey>,
     token_uri: String,
-    /// The access token, and when to stop using it.
-    cached: tokio::sync::Mutex<Option<(String, Instant)>>,
+    cache: TokenCache,
+}
+
+/// Workload Identity Federation, as Google's `external_account`
+/// credential config describes it: the workload's own token (from a file
+/// its platform keeps fresh), traded at the STS for a federated token,
+/// then, when the config names a service account, for one of its tokens.
+struct ExternalAccount {
+    audience: String,
+    subject_token_type: String,
+    token_url: String,
+    subject_file: std::path::PathBuf,
+    /// The field holding the token when the file is JSON; `None`: the
+    /// file is the token.
+    subject_field: Option<String>,
+    impersonation_url: Option<String>,
+    cache: TokenCache,
 }
 
 /// Timeouts and retries. More attempts than Azure's: GCS answers a second
@@ -233,6 +262,30 @@ impl GcsStore {
         Self::build(Auth::Bearer(token.to_string()), bucket.into(), endpoint)
     }
 
+    /// Authorize from a credential config, by its `type`: a service
+    /// account's key, or an `external_account` (Workload Identity
+    /// Federation) whose subject token is read from a file.
+    pub fn with_credentials_json(json: &str, bucket: impl Into<String>, endpoint: Option<String>) -> StoreResult<Self> {
+        let v: Value =
+            serde_json::from_str(json).map_err(|e| StoreError::Other(format!("gcs: the credential config is not JSON: {e}")))?;
+        match v["type"].as_str() {
+            Some("service_account") => Self::with_service_account_json(json, bucket, endpoint),
+            Some("external_account") => Self::build(Auth::External(external_account(&v)?), bucket.into(), endpoint),
+            other => Err(StoreError::Other(format!(
+                "gcs: a credential config of type {:?}: this client takes service_account and external_account",
+                other.unwrap_or("")
+            ))),
+        }
+    }
+
+    /// Authorize as whoever the metadata server says the caller is: GKE's
+    /// workload identity, or a GCE VM's service account. `host` is
+    /// `host[:port]`; `None` is [`METADATA_HOST`].
+    pub fn with_metadata_server(host: Option<String>, bucket: impl Into<String>, endpoint: Option<String>) -> StoreResult<Self> {
+        let host = host.unwrap_or_else(|| METADATA_HOST.into());
+        Self::build(Auth::Metadata { host, cache: TokenCache::default() }, bucket.into(), endpoint)
+    }
+
     /// No authorization at all: an emulator (storage-testbench,
     /// fake-gcs-server) at `endpoint`.
     pub fn emulator(endpoint: impl Into<String>, bucket: impl Into<String>) -> StoreResult<Self> {
@@ -243,9 +296,13 @@ impl GcsStore {
     /// - `FLINT_GCS_ACCESS_TOKEN`: a bearer token;
     /// - `FLINT_GCS_SERVICE_ACCOUNT_JSON`: a service account's JSON key,
     ///   inline (a Secret delivered as a variable);
-    /// - `GOOGLE_APPLICATION_CREDENTIALS`: the path of one;
+    /// - `GOOGLE_APPLICATION_CREDENTIALS`: the path of a credential config,
+    ///   a service account's key or an `external_account` (Workload
+    ///   Identity Federation);
     /// - `STORAGE_EMULATOR_HOST` (Google's own convention): an emulator,
-    ///   unauthorized; `endpoint` wins over it when both are set.
+    ///   unauthorized; `endpoint` wins over it when both are set;
+    /// - otherwise the metadata server (`GCE_METADATA_HOST`, or GKE's and
+    ///   GCE's own), asked at the first request.
     pub fn from_env(bucket: impl Into<String>, endpoint: Option<String>) -> StoreResult<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let bucket = bucket.into();
@@ -258,7 +315,7 @@ impl GcsStore {
         if let Some(path) = var("GOOGLE_APPLICATION_CREDENTIALS") {
             let j = std::fs::read_to_string(&path)
                 .map_err(|e| StoreError::Other(format!("gcs: GOOGLE_APPLICATION_CREDENTIALS {path}: {e}")))?;
-            return Self::with_service_account_json(&j, bucket, endpoint);
+            return Self::with_credentials_json(&j, bucket, endpoint);
         }
         if let Some(host) = var("STORAGE_EMULATOR_HOST") {
             let ep = endpoint.unwrap_or_else(|| {
@@ -270,11 +327,7 @@ impl GcsStore {
             });
             return Self::emulator(ep, bucket);
         }
-        Err(StoreError::Other(
-            "gcs: no credentials: set FLINT_GCS_SERVICE_ACCOUNT_JSON, GOOGLE_APPLICATION_CREDENTIALS or \
-             FLINT_GCS_ACCESS_TOKEN (STORAGE_EMULATOR_HOST for an emulator)"
-                .into(),
-        ))
+        Self::with_metadata_server(var("GCE_METADATA_HOST"), bucket, endpoint)
     }
 
     fn build(auth: Auth, bucket: String, endpoint: Option<String>) -> StoreResult<Self> {
@@ -354,23 +407,99 @@ impl GcsStore {
     // ── requests ─────────────────────────────────────────────────────
 
     async fn authorization(&self) -> StoreResult<Option<String>> {
+        let token = match &self.auth {
+            Auth::None => return Ok(None),
+            Auth::Bearer(t) => t.clone(),
+            Auth::ServiceAccount(sa) => sa.cache.get(|| self.fetch_token(sa)).await?,
+            Auth::Metadata { host, cache } => cache.get(|| self.metadata_token(host)).await?,
+            Auth::External(ea) => ea.cache.get(|| self.external_token(ea)).await?,
+        };
+        Ok(Some(format!("Bearer {token}")))
+    }
+
+    /// Forget a token the service refused, so the next request fetches one.
+    async fn refused(&self) {
         match &self.auth {
-            Auth::None => Ok(None),
-            Auth::Bearer(t) => Ok(Some(format!("Bearer {t}"))),
-            Auth::ServiceAccount(sa) => {
-                let mut cached = sa.cached.lock().await;
-                if let Some((t, until)) = &*cached {
-                    if Instant::now() < *until {
-                        return Ok(Some(format!("Bearer {t}")));
-                    }
-                }
-                let (t, ttl) = self.fetch_token(sa).await?;
-                // A minute early, so no request carries a token that
-                // expires on the way.
-                *cached = Some((t.clone(), Instant::now() + ttl.saturating_sub(Duration::from_secs(60))));
-                Ok(Some(format!("Bearer {t}")))
-            }
+            Auth::ServiceAccount(sa) => sa.cache.clear().await,
+            Auth::Metadata { cache, .. } => cache.clear().await,
+            Auth::External(ea) => ea.cache.clear().await,
+            Auth::None | Auth::Bearer(_) => {}
         }
+    }
+
+    /// The metadata server's token for the caller's service account.
+    async fn metadata_token(&self, host: &str) -> StoreResult<(String, Duration)> {
+        let url = format!("http://{host}/computeMetadata/v1/instance/service-accounts/default/token");
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(&url)
+            .header("metadata-flavor", "Google")
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| StoreError::Other(format!("gcs token: build request: {e}")))?;
+        let (status, v) = token_request(&self.client, req, self.opts.first_byte_timeout, "gcs token").await.map_err(|e| {
+            StoreError::Auth(format!(
+                "gcs: no credentials: set FLINT_GCS_SERVICE_ACCOUNT_JSON, GOOGLE_APPLICATION_CREDENTIALS or \
+                 FLINT_GCS_ACCESS_TOKEN, or run where a metadata server answers (GKE, GCE): {e}"
+            ))
+        })?;
+        if status != 200 {
+            return Err(StoreError::Auth(format!("gcs: the metadata server at {host} refused: {status} {}", refusal(&v))));
+        }
+        bearer_of(&v, "access_token", "the metadata server").map(|t| (t, expires_in(&v)))
+    }
+
+    /// Workload Identity Federation: the subject token traded at the STS,
+    /// then for the named service account's token when there is one.
+    async fn external_token(&self, ea: &ExternalAccount) -> StoreResult<(String, Duration)> {
+        let raw = tokio::fs::read_to_string(&ea.subject_file)
+            .await
+            .map_err(|e| StoreError::Auth(format!("gcs: the subject token {}: {e}", ea.subject_file.display())))?;
+        let subject = match &ea.subject_field {
+            None => raw.trim().to_string(),
+            Some(field) => serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|v| v[field.as_str()].as_str().map(str::to_string))
+                .ok_or_else(|| StoreError::Auth(format!("gcs: the subject token file has no {field:?}")))?,
+        };
+        let body = form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+            ("audience", &ea.audience),
+            ("scope", FEDERATED_SCOPE),
+            ("requested_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+            ("subject_token", &subject),
+            ("subject_token_type", &ea.subject_token_type),
+        ]);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&ea.token_url)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("content-length", body.len().to_string())
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| StoreError::Other(format!("gcs token: build request: {e}")))?;
+        let wait = self.opts.first_byte_timeout;
+        let (status, v) = token_request(&self.client, req, wait, "gcs sts").await?;
+        if status != 200 {
+            return Err(StoreError::Auth(format!("gcs: the STS refused the subject token for {}: {status} {}", ea.audience, refusal(&v))));
+        }
+        let federated = bearer_of(&v, "access_token", "the STS")?;
+        let Some(url) = &ea.impersonation_url else { return Ok((federated, expires_in(&v))) };
+        let body = json!({ "scope": [SCOPE], "lifetime": "3600s" }).to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(url)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {federated}"))
+            .header("content-length", body.len().to_string())
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|e| StoreError::Other(format!("gcs token: build request: {e}")))?;
+        let (status, v) = token_request(&self.client, req, wait, "gcs impersonation").await?;
+        if status != 200 {
+            return Err(StoreError::Auth(format!("gcs: impersonation refused at {url}: {status} {}", refusal(&v))));
+        }
+        let token = bearer_of(&v, "accessToken", "impersonation")?;
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let ttl = v["expireTime"].as_str().and_then(unix_of_rfc3339).map(|t| t.saturating_sub(now)).unwrap_or(3600);
+        Ok((token, Duration::from_secs(ttl)))
     }
 
     /// The OAuth2 JWT-bearer grant (RFC 7523): a JWT the key signs, traded
@@ -378,38 +507,19 @@ impl GcsStore {
     async fn fetch_token(&self, sa: &ServiceAccount) -> StoreResult<(String, Duration)> {
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let assertion = jwt(sa, now)?;
-        let form = format!(
-            "grant_type={}&assertion={}",
-            encode("urn:ietf:params:oauth:grant-type:jwt-bearer", false),
-            encode(&assertion, false)
-        );
+        let body = form(&[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &assertion)]);
         let req = Request::builder()
             .method(Method::POST)
             .uri(&sa.token_uri)
             .header("content-type", "application/x-www-form-urlencoded")
-            .header("content-length", form.len().to_string())
-            .body(Full::new(Bytes::from(form)))
+            .header("content-length", body.len().to_string())
+            .body(Full::new(Bytes::from(body)))
             .map_err(|e| StoreError::Other(format!("gcs token: build request: {e}")))?;
-        let resp = tokio::time::timeout(self.opts.first_byte_timeout, self.client.request(req))
-            .await
-            .map_err(|_| StoreError::Other(format!("gcs token: no response from {}", sa.token_uri)))?
-            .map_err(|e| StoreError::Other(format!("gcs token: {}: {e}", sa.token_uri)))?;
-        let status = resp.status();
-        let body = tokio::time::timeout(self.opts.body_stall_timeout, resp.into_body().collect())
-            .await
-            .map_err(|_| StoreError::Other("gcs token: body stalled".into()))?
-            .map_err(|e| StoreError::Other(format!("gcs token: body: {e}")))?
-            .to_bytes();
-        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if !status.is_success() {
-            let why = v["error_description"].as_str().or(v["error"].as_str()).unwrap_or("");
-            return Err(StoreError::Auth(format!("gcs token: {} for {}: {why}", status.as_u16(), sa.email)));
+        let (status, v) = token_request(&self.client, req, self.opts.first_byte_timeout, "gcs token").await?;
+        if status != 200 {
+            return Err(StoreError::Auth(format!("gcs token: {status} for {}: {}", sa.email, refusal(&v))));
         }
-        let token = v["access_token"]
-            .as_str()
-            .ok_or_else(|| StoreError::Auth(format!("gcs token: no access_token for {}", sa.email)))?;
-        let ttl = Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600));
-        Ok((token.to_string(), ttl))
+        bearer_of(&v, "access_token", "the token endpoint").map(|t| (t, expires_in(&v)))
     }
 
     /// Send with the retry budget.
@@ -476,6 +586,11 @@ impl GcsStore {
         }
         if status.is_success() {
             return Ok(Resp { headers: parts.headers, body: all.freeze() });
+        }
+        if status.as_u16() == 401 {
+            // The service refused the token itself: the next request
+            // fetches another.
+            self.refused().await;
         }
         classify(status.as_u16(), &String::from_utf8_lossy(&all), req.ctx)
     }
@@ -920,7 +1035,57 @@ fn service_account(json_key: &str) -> StoreResult<ServiceAccount> {
         email: field("client_email")?.to_string(),
         key,
         token_uri: v["token_uri"].as_str().filter(|s| !s.is_empty()).unwrap_or(TOKEN_URI).to_string(),
-        cached: tokio::sync::Mutex::new(None),
+        cache: TokenCache::default(),
+    })
+}
+
+/// The token a token endpoint answered with, under `field`.
+fn bearer_of(v: &Value, field: &str, who: &str) -> StoreResult<String> {
+    v[field]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| StoreError::Auth(format!("gcs: {who} answered with no {field}")))
+}
+
+/// An `external_account` credential config whose subject token is a file
+/// (what `gcloud iam workload-identity-pools create-cred-config
+/// --credential-source-file` writes). A URL, an executable or an AWS
+/// source is refused by name.
+fn external_account(v: &Value) -> StoreResult<ExternalAccount> {
+    let field = |k: &str| {
+        v[k].as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| StoreError::Other(format!("gcs: the external account config has no {k}")))
+    };
+    let source = &v["credential_source"];
+    let Some(file) = source["file"].as_str().filter(|f| !f.is_empty()) else {
+        return Err(StoreError::Other(
+            "gcs: the external account's credential_source must be a file; this client reads no url, executable \
+             or AWS source"
+                .into(),
+        ));
+    };
+    let subject_field = match source["format"]["type"].as_str() {
+        None | Some("text") => None,
+        Some("json") => Some(
+            source["format"]["subject_token_field_name"]
+                .as_str()
+                .filter(|f| !f.is_empty())
+                .ok_or_else(|| StoreError::Other("gcs: a json credential_source names no subject_token_field_name".into()))?
+                .to_string(),
+        ),
+        Some(other) => return Err(StoreError::Other(format!("gcs: credential_source format {other:?} is not text or json"))),
+    };
+    Ok(ExternalAccount {
+        audience: field("audience")?,
+        subject_token_type: field("subject_token_type")?,
+        token_url: v["token_url"].as_str().filter(|s| !s.is_empty()).unwrap_or(STS_URL).to_string(),
+        subject_file: file.into(),
+        subject_field,
+        impersonation_url: v["service_account_impersonation_url"].as_str().filter(|s| !s.is_empty()).map(str::to_string),
+        cache: TokenCache::default(),
     })
 }
 
@@ -1479,7 +1644,7 @@ mod tests {
             email: "lean@p.iam.gserviceaccount.com".into(),
             key: Arc::new(DigestKey),
             token_uri: token_uri.into(),
-            cached: tokio::sync::Mutex::new(None),
+            cache: TokenCache::default(),
         }
     }
 
@@ -1547,6 +1712,121 @@ mod tests {
         let body = seen_body.lock().unwrap().clone();
         assert!(body.starts_with("POST /token "), "{body}");
         assert!(body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion="), "{body}");
+    }
+
+    fn external(v: Value) -> GcsStore {
+        GcsStore::build(Auth::External(external_account(&v).unwrap()), "b".into(), None).unwrap()
+    }
+
+    #[test]
+    fn an_external_account_config_reads_a_file_source_and_refuses_the_rest() {
+        let base = json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "credential_source": { "file": "/comm/token" },
+        });
+        let ea = external_account(&base).unwrap();
+        assert_eq!((ea.token_url.as_str(), ea.subject_field.as_deref(), ea.impersonation_url.as_deref()), (STS_URL, None, None));
+        let mut json_source = base.clone();
+        json_source["credential_source"]["format"] = json!({ "type": "json", "subject_token_field_name": "id_token" });
+        assert_eq!(external_account(&json_source).unwrap().subject_field.as_deref(), Some("id_token"));
+        let refused = |v: Value| match external_account(&v) {
+            Err(StoreError::Other(m)) => m,
+            Err(e) => panic!("{e}"),
+            Ok(_) => panic!("accepted {v}"),
+        };
+        let mut url = base.clone();
+        url["credential_source"] = json!({ "url": "http://169.254.169.254/token" });
+        assert!(refused(url).contains("must be a file"));
+        let mut aws = base.clone();
+        aws["credential_source"] = json!({ "environment_id": "aws1" });
+        assert!(refused(aws).contains("must be a file"));
+        let mut no_aud = base.clone();
+        no_aud.as_object_mut().unwrap().remove("audience");
+        assert!(refused(no_aud).contains("audience"));
+        // The dispatcher refuses a type it does not take, by name.
+        match GcsStore::with_credentials_json(r#"{"type":"authorized_user"}"#, "b", None) {
+            Err(StoreError::Other(m)) => assert!(m.contains("authorized_user"), "{m}"),
+            other => panic!("{:?}", other.err()),
+        }
+    }
+
+    /// Workload Identity Federation: the subject token goes to the STS
+    /// as a token exchange; the federated token is the bearer of the
+    /// impersonation, whose token is the one kept.
+    #[tokio::test]
+    async fn a_federated_token_is_exchanged_then_impersonates_and_is_kept() {
+        let idp = crate::rest::mock::start(|r| match r.target.as_str() {
+            "/v1/token" => (200, r#"{"access_token":"sts-1","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600}"#.into()),
+            t if t.ends_with(":generateAccessToken") => {
+                if r.header("authorization") != Some("Bearer sts-1") {
+                    return (401, r#"{"error":{"message":"no federated bearer"}}"#.into());
+                }
+                (200, r#"{"accessToken":"sa-1","expireTime":"2099-01-01T00:00:00Z"}"#.into())
+            }
+            _ => (404, "{}".into()),
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "ksa-token\n").unwrap();
+        let s = external(json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": format!("{}/v1/token", idp.base),
+            "credential_source": { "file": file },
+            "service_account_impersonation_url": format!("{}/v1/projects/-/serviceAccounts/lean@p.iam.gserviceaccount.com:generateAccessToken", idp.base),
+        }));
+        assert_eq!(s.authorization().await.unwrap().as_deref(), Some("Bearer sa-1"));
+        assert_eq!(s.authorization().await.unwrap().as_deref(), Some("Bearer sa-1"));
+        let seen = idp.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "one exchange and one impersonation, then kept: {seen:?}");
+        assert_eq!((seen[0].method.as_str(), seen[1].method.as_str()), ("POST", "POST"));
+        for want in [
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange",
+            "audience=%2F%2Fiam.googleapis.com%2Fprojects%2F1%2Flocations%2Fglobal%2FworkloadIdentityPools%2Fp%2Fproviders%2Fk",
+            "requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token",
+            "subject_token=ksa-token",
+            "subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Ajwt",
+            "scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform",
+        ] {
+            assert!(seen[0].body.split('&').any(|kv| kv == want), "{want} not in {}", seen[0].body);
+        }
+        let asked: Value = serde_json::from_str(&seen[1].body).unwrap();
+        assert_eq!(asked["scope"], json!([SCOPE]));
+        // Without a service account, the federated token is the bearer.
+        let direct = external(json!({
+            "type": "external_account",
+            "audience": "//iam.googleapis.com/x",
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+            "token_url": format!("{}/v1/token", idp.base),
+            "credential_source": { "file": file },
+        }));
+        assert_eq!(direct.authorization().await.unwrap().as_deref(), Some("Bearer sts-1"));
+    }
+
+    /// The metadata server: asked with `Metadata-Flavor: Google`; one
+    /// that is not there is a failure naming everything that was tried.
+    #[tokio::test]
+    async fn the_metadata_server_is_asked_with_its_header() {
+        let md = crate::rest::mock::start(|r| {
+            if r.header("metadata-flavor") != Some("Google") {
+                return (403, "{}".into());
+            }
+            (200, r#"{"access_token":"md-1","expires_in":3599,"token_type":"Bearer"}"#.into())
+        })
+        .await;
+        let host = md.base.trim_start_matches("http://").to_string();
+        let s = GcsStore::with_metadata_server(Some(host), "b", None).unwrap();
+        assert_eq!(s.authorization().await.unwrap().as_deref(), Some("Bearer md-1"));
+        assert_eq!(md.seen.lock().unwrap()[0].target, "/computeMetadata/v1/instance/service-accounts/default/token");
+        let none = GcsStore::with_metadata_server(Some("127.0.0.1:1".into()), "b", None).unwrap();
+        match none.authorization().await {
+            Err(StoreError::Auth(m)) => assert!(m.contains("gcs: no credentials: set FLINT_GCS_SERVICE_ACCOUNT_JSON"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]

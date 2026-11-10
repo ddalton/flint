@@ -3,10 +3,11 @@
 //! Neither carries a provider SDK (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md, D1).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http_body_util::Full;
+use http::Request;
+use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
@@ -140,6 +141,88 @@ pub(crate) fn encode(s: &str, path: bool) -> String {
     out
 }
 
+// ── access tokens (Entra ID, Google OAuth2) ───────────────────────────
+
+/// An access token, kept until a minute before it expires and then
+/// fetched again by whichever request asks first.
+#[derive(Default)]
+pub(crate) struct TokenCache(tokio::sync::Mutex<Option<(String, Instant)>>);
+
+impl TokenCache {
+    /// The kept token, or one from `fetch` (a token and its lifetime).
+    pub(crate) async fn get<F, Fut>(&self, fetch: F) -> StoreResult<String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = StoreResult<(String, Duration)>>,
+    {
+        let mut kept = self.0.lock().await;
+        if let Some((t, until)) = &*kept {
+            if Instant::now() < *until {
+                return Ok(t.clone());
+            }
+        }
+        let (t, ttl) = fetch().await?;
+        // A minute early, so no request carries a token that expires on
+        // the way.
+        *kept = Some((t.clone(), Instant::now() + ttl.saturating_sub(Duration::from_secs(60))));
+        Ok(t)
+    }
+
+    /// Forget the token: the service refused it.
+    pub(crate) async fn clear(&self) {
+        *self.0.lock().await = None;
+    }
+}
+
+/// `application/x-www-form-urlencoded`.
+pub(crate) fn form(pairs: &[(&str, &str)]) -> String {
+    pairs.iter().map(|(k, v)| format!("{}={}", encode(k, false), encode(v, false))).collect::<Vec<_>>().join("&")
+}
+
+/// One request to a token endpoint: its status, and its body as JSON
+/// (`Null` when it is not). No retries: the caller's request retries.
+pub(crate) async fn token_request(
+    client: &HttpsClient,
+    req: Request<Full<Bytes>>,
+    timeout: Duration,
+    ctx: &str,
+) -> StoreResult<(u16, serde_json::Value)> {
+    let uri = req.uri().to_string();
+    let resp = tokio::time::timeout(timeout, client.request(req))
+        .await
+        .map_err(|_| StoreError::Auth(format!("{ctx}: no response from {uri} within {timeout:?}")))?
+        .map_err(|e| StoreError::Auth(format!("{ctx}: {uri}: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = tokio::time::timeout(timeout, resp.into_body().collect())
+        .await
+        .map_err(|_| StoreError::Auth(format!("{ctx}: {uri}: the body stalled")))?
+        .map_err(|e| StoreError::Auth(format!("{ctx}: {uri}: body: {e}")))?
+        .to_bytes();
+    Ok((status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)))
+}
+
+/// A token's lifetime as the endpoint gave it: `expires_in`, a number or
+/// (Azure's instance metadata) a string of one. An hour when it gave none.
+pub(crate) fn expires_in(v: &serde_json::Value) -> Duration {
+    let secs = match &v["expires_in"] {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    };
+    Duration::from_secs(secs.unwrap_or(3600))
+}
+
+/// What a token endpoint said when it refused: OAuth2's
+/// `error_description` or `error`, or Google's `error.message`.
+pub(crate) fn refusal(v: &serde_json::Value) -> String {
+    let s = v["error_description"]
+        .as_str()
+        .or(v["error"]["message"].as_str())
+        .or(v["error"].as_str())
+        .unwrap_or("");
+    s.chars().take(300).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +251,117 @@ mod tests {
         assert!(matches!(foreign_token("p/b", &e), Err(StoreError::PreconditionFailed(_))));
         assert_eq!(foreign_token("p/a", "\"0123abcd\"").unwrap(), None, "a content ETag is not a token");
         assert_eq!(presented("p/a", Some("ab12"), "\"0x8DC1\""), "\"ab12\"");
+    }
+
+    #[test]
+    fn a_form_encodes_its_values_and_lifetimes_read_as_either_type() {
+        assert_eq!(form(&[("a", "x y"), ("b", "c:d/e")]), "a=x%20y&b=c%3Ad%2Fe");
+        let v = |j: &str| serde_json::from_str::<serde_json::Value>(j).unwrap();
+        assert_eq!(expires_in(&v(r#"{"expires_in":3599}"#)), Duration::from_secs(3599));
+        assert_eq!(expires_in(&v(r#"{"expires_in":"86399"}"#)), Duration::from_secs(86399));
+        assert_eq!(expires_in(&v("{}")), Duration::from_secs(3600));
+        assert_eq!(refusal(&v(r#"{"error":"invalid_client","error_description":"AADSTS700016"}"#)), "AADSTS700016");
+        assert_eq!(refusal(&v(r#"{"error":{"code":403,"message":"Permission denied"}}"#)), "Permission denied");
+    }
+
+    #[tokio::test]
+    async fn a_kept_token_is_fetched_once_until_it_is_cleared() {
+        let cache = TokenCache::default();
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let fetch = || async {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(("t".to_string(), Duration::from_secs(3600)))
+        };
+        assert_eq!(cache.get(fetch).await.unwrap(), "t");
+        assert_eq!(cache.get(fetch).await.unwrap(), "t");
+        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+        cache.clear().await;
+        cache.get(fetch).await.unwrap();
+        // A token with under a minute left is not kept at all.
+        let short = TokenCache::default();
+        let m = std::sync::atomic::AtomicUsize::new(0);
+        let fetch_short = || async {
+            m.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(("s".to_string(), Duration::from_secs(30)))
+        };
+        short.get(fetch_short).await.unwrap();
+        short.get(fetch_short).await.unwrap();
+        assert_eq!((n.load(std::sync::atomic::Ordering::SeqCst), m.load(std::sync::atomic::Ordering::SeqCst)), (2, 2));
+    }
+}
+
+/// A local HTTP server for the token endpoints' tests: it records every
+/// request and answers each with what `answer` returns.
+#[cfg(test)]
+pub(crate) mod mock {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct Seen {
+        pub method: String,
+        /// Path and query, as sent.
+        pub target: String,
+        /// Lowercase names.
+        pub headers: Vec<(String, String)>,
+        pub body: String,
+    }
+
+    impl Seen {
+        pub fn header(&self, name: &str) -> Option<&str> {
+            self.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        }
+    }
+
+    pub(crate) struct Server {
+        pub base: String,
+        pub seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    pub(crate) async fn start(answer: impl Fn(&Seen) -> (u16, String) + Send + Sync + 'static) -> Server {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (log, answer) = (seen.clone(), Arc::new(answer));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let (log, answer) = (log.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 16 * 1024];
+                    let req = loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+                        let mut lines = head.lines();
+                        let mut first = lines.next().unwrap_or("").split(' ');
+                        let (method, target) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
+                        let headers: Vec<(String, String)> = lines
+                            .filter_map(|l| l.split_once(':'))
+                            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+                            .collect();
+                        let len: usize =
+                            headers.iter().find(|(k, _)| k == "content-length").and_then(|(_, v)| v.parse().ok()).unwrap_or(0);
+                        if body.len() >= len {
+                            break Seen { method, target, headers, body: body.to_string() };
+                        }
+                    };
+                    let (status, reply) = answer(&req);
+                    log.lock().unwrap().push(req);
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Server { base, seen }
     }
 }

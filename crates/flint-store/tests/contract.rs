@@ -600,6 +600,219 @@ async fn gcs_composes_nest_and_leave_no_parts(s: &flint_store::gcs::GcsStore, ba
     assert!(s.list_uploads(base).await.unwrap().is_empty(), "the abort left the part");
 }
 
+/// A local HTTP server standing in for a token endpoint (Entra ID, the
+/// instance metadata service, Google's metadata server, STS): it answers
+/// every request with `answer(method and target, body)` and counts them.
+#[cfg(any(feature = "azure", feature = "gcs"))]
+mod idp {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    pub struct Idp {
+        pub base: String,
+        pub asked: Arc<AtomicUsize>,
+    }
+
+    impl Idp {
+        pub fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
+        }
+    }
+
+    pub async fn start(answer: impl Fn(&str, &str) -> (u16, String) + Send + Sync + 'static) -> Idp {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let (count, answer) = (asked.clone(), Arc::new(answer));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                let (count, answer) = (count.clone(), answer.clone());
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 16 * 1024];
+                    let (line, body) = loop {
+                        let n = sock.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if body.len() >= len {
+                            break (head.lines().next().unwrap_or("").to_string(), body.to_string());
+                        }
+                    };
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let (status, reply) = answer(&line, &body);
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Idp { base, asked }
+    }
+
+    /// An Entra-shaped access token Azurite's `--oauth basic` takes: it
+    /// checks the issuer, the audience and the lifetime, not the signature.
+    #[cfg(feature = "azure")]
+    pub fn entra_jwt(audience: &str) -> String {
+        let b64 = |b: &[u8]| flint_store::base64_std(b).trim_end_matches('=').replace('+', "-").replace('/', "_");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let claims = serde_json::json!({
+            "aud": audience, "iss": "https://sts.windows.net/00000000-0000-0000-0000-000000000001/",
+            "iat": now - 60, "nbf": now - 60, "exp": now + 3600, "oid": "flint-contract",
+        });
+        format!("{}.{}.{}", b64(br#"{"alg":"RS256","typ":"JWT"}"#), b64(claims.to_string().as_bytes()), b64(b"unsigned"))
+    }
+}
+
+/// A live Azure container reached with Entra ID tokens: Azurite over
+/// HTTPS with `--oauth basic`, the token endpoint a local stand-in. The
+/// federated arm runs the whole contract; the managed identity's runs one
+/// round trip. Each has its control: a token for another audience is
+/// refused, or Azurite was not checking tokens at all.
+///
+/// FLINT_CONTRACT_AZURE_ENDPOINT=https://127.0.0.1:10443/acct FLINT_CONTRACT_AZURE_ACCOUNT=acct \
+/// SSL_CERT_FILE=<the CA Azurite's certificate chains to> \
+///   cargo test -p flint-store --features azure --test contract a_live_azure_store_takes_entra -- --ignored --nocapture
+#[cfg(feature = "azure")]
+#[tokio::test]
+#[ignore]
+async fn a_live_azure_store_takes_entra_tokens() {
+    use flint_store::azure::{AzureStore, EntraSource};
+    let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is not set"));
+    let (account, endpoint) = (env("FLINT_CONTRACT_AZURE_ACCOUNT"), env("FLINT_CONTRACT_AZURE_ENDPOINT"));
+    assert!(endpoint.starts_with("https://"), "Azurite takes tokens over HTTPS only");
+    let container = std::env::var("FLINT_CONTRACT_AZURE_CONTAINER").unwrap_or_else(|_| "contract-entra".into());
+    let entra = idp::start(|line, body| {
+        assert!(line.starts_with("POST /tenant-a/oauth2/v2.0/token "), "{line}");
+        assert!(body.contains("client_assertion=pod-token") && body.contains("client_id=client-b"), "{body}");
+        (200, serde_json::json!({ "access_token": idp::entra_jwt("https://storage.azure.com"), "expires_in": 3599 }).to_string())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("token"), "pod-token").unwrap();
+    let federated = || EntraSource::Federated {
+        tenant: "tenant-a".into(),
+        client_id: "client-b".into(),
+        token_file: dir.path().join("token"),
+        authority: entra.base.clone(),
+    };
+    let store = AzureStore::with_entra(&account, federated(), &container, Some(endpoint.clone())).unwrap();
+    store.ensure_container().await.expect("the container, with a token");
+    let second = AzureStore::with_entra(&account, federated(), &container, Some(endpoint.clone())).unwrap();
+    let base = format!("flint-contract/{}/", uuid::Uuid::new_v4());
+    run_contract_with(&store, Some(&second), &base, &[]).await;
+    assert_eq!(entra.asked(), 2, "one grant per client, kept for the run");
+
+    // The managed identity, from a stand-in instance metadata service.
+    let imds = idp::start(|line, _| {
+        assert!(line.starts_with("GET /metadata/identity/oauth2/token?api-version=2018-02-01&resource="), "{line}");
+        (200, serde_json::json!({ "access_token": idp::entra_jwt("https://storage.azure.com"), "expires_in": "86399" }).to_string())
+    })
+    .await;
+    let mi = AzureStore::with_entra(
+        &account,
+        EntraSource::ManagedIdentity { client_id: None, endpoint: imds.base.clone() },
+        &container,
+        Some(endpoint.clone()),
+    )
+    .unwrap();
+    let k = format!("{base}mi/obj");
+    let made = put(&mi, &k, b"by managed identity", &PutCondition::IfNoneMatchAny).await.expect("a put with the managed identity's token");
+    assert_eq!(mi.get_whole(&k, Some(&made.etag)).await.unwrap().1, Bytes::from_static(b"by managed identity"));
+    assert_eq!(imds.asked(), 1);
+
+    // The control: a token for another resource is refused.
+    let wrong = idp::start(|_, _| {
+        (200, serde_json::json!({ "access_token": idp::entra_jwt("https://vault.azure.net"), "expires_in": 3599 }).to_string())
+    })
+    .await;
+    let refused = AzureStore::with_entra(
+        &account,
+        EntraSource::ManagedIdentity { client_id: None, endpoint: wrong.base.clone() },
+        &container,
+        Some(endpoint),
+    )
+    .unwrap()
+    .list(&base)
+    .await;
+    assert!(matches!(refused, Err(StoreError::Auth(_))), "a token for another audience was not refused: {refused:?}");
+    for o in store.list(&base).await.unwrap() {
+        let _ = store.delete(&o.key).await;
+    }
+    eprintln!("contract: passed against azure container {container} with Entra tokens (federated, managed identity)");
+}
+
+/// A live GCS bucket reached through workload identity: the metadata
+/// server, and Workload Identity Federation (STS, then impersonation),
+/// each a local stand-in. storage-testbench checks no bearer, so this is
+/// the plumbing: a token fetched by the right flow, kept, and sent.
+///
+/// FLINT_CONTRACT_GCS_ENDPOINT=http://127.0.0.1:9023 \
+///   cargo test -p flint-store --features gcs --test contract a_live_gcs_store_takes_workload -- --ignored --nocapture
+#[cfg(feature = "gcs")]
+#[tokio::test]
+#[ignore]
+async fn a_live_gcs_store_takes_workload_identity() {
+    use flint_store::gcs::GcsStore;
+    let endpoint = std::env::var("FLINT_CONTRACT_GCS_ENDPOINT").expect("FLINT_CONTRACT_GCS_ENDPOINT is not set");
+    let bucket = std::env::var("FLINT_CONTRACT_GCS_BUCKET").unwrap_or_else(|_| "contract".into());
+    GcsStore::emulator(endpoint.clone(), bucket.clone()).unwrap().ensure_bucket("flint-contract").await.unwrap();
+    let base = format!("flint-contract/{}/", uuid::Uuid::new_v4());
+
+    let md = idp::start(|line, _| {
+        assert!(line.starts_with("GET /computeMetadata/v1/instance/service-accounts/default/token "), "{line}");
+        (200, r#"{"access_token":"md-token","expires_in":3599,"token_type":"Bearer"}"#.into())
+    })
+    .await;
+    let host = md.base.trim_start_matches("http://").to_string();
+    let open_md = || GcsStore::with_metadata_server(Some(host.clone()), bucket.clone(), Some(endpoint.clone())).unwrap().with_scratch_root(base.clone());
+    let (a, b) = (open_md(), open_md());
+    run_contract_with(&a, Some(&b), &format!("{base}md/"), &[]).await;
+    assert_eq!(md.asked(), 2, "one token per client, kept for the run");
+
+    let sts = idp::start(|line, body| {
+        if line.starts_with("POST /v1/token ") {
+            assert!(body.contains("subject_token=ksa-token"), "{body}");
+            return (200, r#"{"access_token":"federated","token_type":"Bearer","expires_in":3600}"#.into());
+        }
+        assert!(line.contains(":generateAccessToken "), "{line}");
+        (200, r#"{"accessToken":"impersonated","expireTime":"2099-01-01T00:00:00Z"}"#.into())
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("token"), "ksa-token").unwrap();
+    let config = serde_json::json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": format!("{}/v1/token", sts.base),
+        "credential_source": { "file": dir.path().join("token") },
+        "service_account_impersonation_url": format!("{}/v1/projects/-/serviceAccounts/lean@p.iam.gserviceaccount.com:generateAccessToken", sts.base),
+    })
+    .to_string();
+    let wif = GcsStore::with_credentials_json(&config, bucket.clone(), Some(endpoint.clone())).unwrap().with_scratch_root(base.clone());
+    let k = format!("{base}wif/obj");
+    let made = put(&wif, &k, b"by federation", &PutCondition::IfNoneMatchAny).await.expect("a put with a federated token");
+    assert_eq!(wif.get_whole(&k, Some(&made.etag)).await.unwrap().1, Bytes::from_static(b"by federation"));
+    assert_eq!(sts.asked(), 2, "one exchange and one impersonation");
+    for o in a.list(&base).await.unwrap() {
+        let _ = a.delete(&o.key).await;
+    }
+    eprintln!("contract: passed against gcs bucket {bucket} through the metadata server and federation (stand-ins)");
+}
+
 /// A live S3-API store, MinIO and Ozone included. Everything it writes is
 /// under one fresh prefix, deleted at the end.
 #[cfg(feature = "s3")]

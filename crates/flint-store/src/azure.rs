@@ -1,6 +1,8 @@
 //! The Azure Blob Storage backend (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md,
 //! phase 1): the Blob REST API by hand, on the same hyper/rustls stack as
-//! the raw read path, with Shared Key or SAS authorization.
+//! the raw read path, authorized with Shared Key, a SAS, or an Entra ID
+//! token (phase 4): a workload's federated token traded by client
+//! assertion, or the VM's managed identity.
 //!
 //! **Content ETags (plan §3, C3).** Azure's ETag names a write, not the
 //! bytes, and lean compares the ETags of different objects at one path.
@@ -27,7 +29,7 @@
 //!
 //! Not here yet: server-side copies of byte ranges (`PartSource::BaseCopy`,
 //! the block tier's), batch delete, presigned URLs, version and lifecycle
-//! operations, Entra ID tokens (phase 4).
+//! operations.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,8 +43,8 @@ use sha2::{Digest, Sha256};
 
 use crate::counters::{RequestCounter, RequestKind};
 use crate::rest::{
-    base64_decode, content_hash, encode, foreign_token, https_client, jitter, presented, quoted, read_local,
-    HttpsClient,
+    base64_decode, content_hash, encode, expires_in, foreign_token, form, https_client, jitter, presented, quoted,
+    read_local, refusal, token_request, HttpsClient, TokenCache,
 };
 use crate::{
     base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, EpochLease,
@@ -65,10 +67,35 @@ const META_CRC: &str = "flint_crc64";
 /// Blobs whose Azure ETag the store remembers, before it forgets them all.
 const TOKENS_MAX: usize = 4096;
 
+/// Entra ID's public cloud; `AZURE_AUTHORITY_HOST` names another.
+pub const ENTRA_AUTHORITY: &str = "https://login.microsoftonline.com";
+/// The instance metadata service, where a VM's managed identity answers.
+pub const IMDS: &str = "http://169.254.169.254";
+/// The resource an Entra token for Blob Storage is for.
+const STORAGE_RESOURCE: &str = "https://storage.azure.com";
+
 enum Auth {
     SharedKey(Vec<u8>),
     /// A SAS query string, as issued (already percent-encoded).
     Sas(String),
+    /// A bearer token for Azure Storage, from `source`, kept in `cache`.
+    Entra { source: EntraSource, cache: TokenCache },
+}
+
+/// Where an Entra ID token for Blob Storage comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntraSource {
+    /// Workload identity federation: a token Kubernetes issued the
+    /// workload (`token_file`, re-read at every refresh, since the kubelet
+    /// rotates it), traded at `authority` for an Entra token by client
+    /// assertion, as the app registration or managed identity `client_id`
+    /// in `tenant` whose federated credential trusts it. The variables the
+    /// AKS workload identity webhook sets name all four.
+    Federated { tenant: String, client_id: String, token_file: std::path::PathBuf, authority: String },
+    /// The VM's managed identity, from the instance metadata service at
+    /// `endpoint`: the system-assigned one, or the user-assigned
+    /// `client_id`.
+    ManagedIdentity { client_id: Option<String>, endpoint: String },
 }
 
 /// Timeouts and retries; the raw read path's numbers.
@@ -195,19 +222,65 @@ impl AzureStore {
         Self::build(account.into(), Auth::Sas(sas), container.into(), endpoint)
     }
 
-    /// From the environment the Azure tools use: `AZURE_STORAGE_ACCOUNT`,
-    /// and `AZURE_STORAGE_KEY` or `AZURE_STORAGE_SAS_TOKEN`.
+    /// Authorize with an Entra ID token from `source`. The account only
+    /// names the default endpoint: a token is not signed with it.
+    pub fn with_entra(
+        account: impl Into<String>,
+        source: EntraSource,
+        container: impl Into<String>,
+        endpoint: Option<String>,
+    ) -> StoreResult<Self> {
+        Self::build(account.into(), Auth::Entra { source, cache: TokenCache::default() }, container.into(), endpoint)
+    }
+
+    /// From the environment the Azure tools use, in the Azure SDK's order:
+    /// - `AZURE_STORAGE_KEY`, then `AZURE_STORAGE_SAS_TOKEN`, each with
+    ///   `AZURE_STORAGE_ACCOUNT`;
+    /// - workload identity: `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_CLIENT_ID`
+    ///   and `AZURE_TENANT_ID` (and `AZURE_AUTHORITY_HOST`), as the AKS
+    ///   webhook sets them;
+    /// - otherwise the VM's managed identity (`AZURE_CLIENT_ID` picks a
+    ///   user-assigned one; `AZURE_POD_IDENTITY_AUTHORITY_HOST` moves the
+    ///   metadata endpoint), asked at the first request.
+    ///
+    /// A token names no account, so with one `AZURE_STORAGE_ACCOUNT` may be
+    /// left out when `endpoint` names it.
     pub fn from_env(container: impl Into<String>, endpoint: Option<String>) -> StoreResult<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-        let account = var("AZURE_STORAGE_ACCOUNT")
-            .ok_or_else(|| StoreError::Other("azure: AZURE_STORAGE_ACCOUNT is not set".into()))?;
-        match (var("AZURE_STORAGE_KEY"), var("AZURE_STORAGE_SAS_TOKEN")) {
-            (Some(key), _) => Self::with_shared_key(account, &key, container, endpoint),
-            (None, Some(sas)) => Self::with_sas(account, &sas, container, endpoint),
-            (None, None) => Err(StoreError::Other(
-                "azure: neither AZURE_STORAGE_KEY nor AZURE_STORAGE_SAS_TOKEN is set".into(),
-            )),
+        let named = var("AZURE_STORAGE_ACCOUNT");
+        let account = || named.clone().ok_or_else(|| StoreError::Other("azure: AZURE_STORAGE_ACCOUNT is not set".into()));
+        if let Some(key) = var("AZURE_STORAGE_KEY") {
+            return Self::with_shared_key(account()?, &key, container, endpoint);
         }
+        if let Some(sas) = var("AZURE_STORAGE_SAS_TOKEN") {
+            return Self::with_sas(account()?, &sas, container, endpoint);
+        }
+        let account = match named.or_else(|| endpoint.as_deref().and_then(account_of_endpoint)) {
+            Some(a) => a,
+            None => {
+                return Err(StoreError::Other(
+                    "azure: AZURE_STORAGE_ACCOUNT is not set, and no endpoint names the account".into(),
+                ))
+            }
+        };
+        let source = match (var("AZURE_FEDERATED_TOKEN_FILE"), var("AZURE_CLIENT_ID"), var("AZURE_TENANT_ID")) {
+            (Some(file), Some(client_id), Some(tenant)) => EntraSource::Federated {
+                tenant,
+                client_id,
+                token_file: file.into(),
+                authority: var("AZURE_AUTHORITY_HOST").unwrap_or_else(|| ENTRA_AUTHORITY.into()),
+            },
+            (Some(_), _, _) => {
+                return Err(StoreError::Other(
+                    "azure: AZURE_FEDERATED_TOKEN_FILE is set, but AZURE_CLIENT_ID or AZURE_TENANT_ID is not".into(),
+                ))
+            }
+            (None, client_id, _) => EntraSource::ManagedIdentity {
+                client_id,
+                endpoint: var("AZURE_POD_IDENTITY_AUTHORITY_HOST").unwrap_or_else(|| IMDS.into()),
+            },
+        };
+        Self::with_entra(account, source, container, endpoint)
     }
 
     fn build(account: String, auth: Auth, container: String, endpoint: Option<String>) -> StoreResult<Self> {
@@ -278,8 +351,83 @@ impl AzureStore {
         u
     }
 
-    /// Sign `req` and give back the request hyper sends.
-    fn signed(&self, req: &Req) -> StoreResult<Request<Full<Bytes>>> {
+    /// The bearer token, when this store is authorized by one.
+    async fn bearer(&self) -> StoreResult<Option<String>> {
+        let Auth::Entra { source, cache } = &self.auth else { return Ok(None) };
+        cache.get(|| self.entra_token(source)).await.map(Some)
+    }
+
+    /// One Entra ID token for Blob Storage, and its lifetime.
+    async fn entra_token(&self, source: &EntraSource) -> StoreResult<(String, Duration)> {
+        let wait = self.opts.first_byte_timeout;
+        let (status, v) = match source {
+            EntraSource::Federated { tenant, client_id, token_file, authority } => {
+                // Re-read every time: the kubelet rotates the file.
+                let assertion = tokio::fs::read_to_string(token_file)
+                    .await
+                    .map_err(|e| StoreError::Auth(format!("azure: the federated token {}: {e}", token_file.display())))?;
+                let scope = format!("{STORAGE_RESOURCE}/.default");
+                let body = form(&[
+                    ("grant_type", "client_credentials"),
+                    ("client_id", client_id),
+                    ("scope", &scope),
+                    ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+                    ("client_assertion", assertion.trim()),
+                ]);
+                let url = format!("{}/{}/oauth2/v2.0/token", authority.trim_end_matches('/'), encode(tenant, false));
+                let req = Request::builder()
+                    .method(Method::POST)
+                    .uri(&url)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("content-length", body.len().to_string())
+                    .body(Full::new(Bytes::from(body)))
+                    .map_err(|e| StoreError::Other(format!("azure token: build request: {e}")))?;
+                let (status, v) = token_request(&self.client, req, wait, "azure token").await?;
+                if status != 200 {
+                    return Err(StoreError::Auth(format!(
+                        "azure: Entra ID refused the federated token for client {client_id}: {status} {}",
+                        refusal(&v)
+                    )));
+                }
+                (status, v)
+            }
+            EntraSource::ManagedIdentity { client_id, endpoint } => {
+                let mut url = format!(
+                    "{}/metadata/identity/oauth2/token?api-version=2018-02-01&resource={}",
+                    endpoint.trim_end_matches('/'),
+                    encode(&format!("{STORAGE_RESOURCE}/"), false)
+                );
+                if let Some(c) = client_id {
+                    url.push_str(&format!("&client_id={}", encode(c, false)));
+                }
+                let req = Request::builder()
+                    .method(Method::GET)
+                    .uri(&url)
+                    .header("metadata", "true")
+                    .body(Full::new(Bytes::new()))
+                    .map_err(|e| StoreError::Other(format!("azure token: build request: {e}")))?;
+                let (status, v) = token_request(&self.client, req, wait, "azure token").await.map_err(|e| {
+                    StoreError::Auth(format!(
+                        "azure: no credentials: AZURE_STORAGE_KEY, AZURE_STORAGE_SAS_TOKEN and \
+                         AZURE_FEDERATED_TOKEN_FILE are unset, and the managed identity endpoint did not answer: {e}"
+                    ))
+                })?;
+                if status != 200 {
+                    return Err(StoreError::Auth(format!("azure: the managed identity endpoint refused: {status} {}", refusal(&v))));
+                }
+                (status, v)
+            }
+        };
+        let token = v["access_token"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| StoreError::Auth(format!("azure: the token endpoint answered {status} with no access_token")))?;
+        Ok((token.to_string(), expires_in(&v)))
+    }
+
+    /// Sign `req` and give back the request hyper sends. `bearer`: the
+    /// Entra token, when that is how this store is authorized.
+    fn signed(&self, req: &Req, bearer: Option<&str>) -> StoreResult<Request<Full<Bytes>>> {
         let path = self.url_path(req.key.as_deref());
         let mut headers = req.headers.clone();
         headers.push(("x-ms-date".into(), httpdate::fmt_http_date(SystemTime::now())));
@@ -292,6 +440,10 @@ impl AzureStore {
                 headers.push(("authorization".into(), format!("SharedKey {}:{sig}", self.account)));
             }
             Auth::Sas(sas) => query.push(sas.clone()),
+            Auth::Entra { .. } => {
+                let t = bearer.ok_or_else(|| StoreError::Other(format!("{}: no Entra token to send", req.ctx)))?;
+                headers.push(("authorization".into(), format!("Bearer {t}")));
+            }
         }
         let mut uri = format!("{}{path}", self.origin);
         if !query.is_empty() {
@@ -329,7 +481,8 @@ impl AzureStore {
     }
 
     async fn attempt(&self, req: &Req) -> Result<Resp, Failure> {
-        let http_req = self.signed(req).map_err(Failure::Final)?;
+        let bearer = self.bearer().await.map_err(Failure::Final)?;
+        let http_req = self.signed(req, bearer.as_deref()).map_err(Failure::Final)?;
         let mib = (req.body.len() as u64).div_ceil(1 << 20) as u32;
         let wait = self.opts.first_byte_timeout + self.opts.per_mib_sent * mib;
         let resp = match tokio::time::timeout(wait, self.client.request(http_req)).await {
@@ -365,6 +518,13 @@ impl AzureStore {
             .or_else(|| tag_body(&String::from_utf8_lossy(&all), "Code").map(xml_unescape))
             .unwrap_or_default();
         let msg = format!("{}: {} {code}", req.ctx, status.as_u16());
+        if status.as_u16() == 401 {
+            // The service refused the token itself (expired early,
+            // revoked): the next request fetches another.
+            if let Auth::Entra { cache, .. } = &self.auth {
+                cache.clear().await;
+            }
+        }
         classify(status.as_u16(), &code, msg)
     }
 
@@ -557,6 +717,20 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The account an endpoint names: the first label of
+/// `<account>.blob.core.windows.net` (any cloud's), or the first path
+/// segment of an emulator's `http://127.0.0.1:10000/<account>`.
+fn account_of_endpoint(endpoint: &str) -> Option<String> {
+    let uri: http::Uri = endpoint.parse().ok()?;
+    let host = uri.host()?;
+    if let Some((first, rest)) = host.split_once('.') {
+        if rest.starts_with("blob.") && !first.is_empty() {
+            return Some(first.to_string());
+        }
+    }
+    uri.path().trim_matches('/').split('/').next().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 /// A block id: one per compose (so two composes of one key never mix
@@ -1143,6 +1317,117 @@ mod tests {
         assert!(a.iter().all(|id| id.len() == a[0].len()) && b.len() == a[0].len());
         assert_ne!(a[0], b);
         assert!(!a[0].ends_with('='), "24 bytes encode without padding");
+    }
+
+    #[test]
+    fn an_endpoint_names_its_account() {
+        assert_eq!(account_of_endpoint("https://acct.blob.core.windows.net").as_deref(), Some("acct"));
+        assert_eq!(account_of_endpoint("https://acct.blob.core.chinacloudapi.cn/").as_deref(), Some("acct"));
+        assert_eq!(account_of_endpoint("http://127.0.0.1:10000/devstoreaccount1").as_deref(), Some("devstoreaccount1"));
+        assert_eq!(account_of_endpoint("https://proxy.example.com"), None);
+        assert_eq!(account_of_endpoint("not a url"), None);
+    }
+
+    fn entra(source: EntraSource) -> AzureStore {
+        AzureStore::with_entra("acct", source, "c", Some("http://127.0.0.1:1/acct".into())).unwrap()
+    }
+
+    /// The client-assertion grant: the workload's token, re-read from its
+    /// file, traded at the tenant's token endpoint for a storage token,
+    /// which is kept, and sent as a bearer with no Shared Key.
+    #[tokio::test]
+    async fn a_federated_token_is_traded_by_client_assertion_and_kept() {
+        let idp = crate::rest::mock::start(|_| (200, r#"{"access_token":"entra-1","expires_in":3599,"token_type":"Bearer"}"#.into())).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("token");
+        std::fs::write(&file, "pod-token-1\n").unwrap();
+        let s = entra(EntraSource::Federated {
+            tenant: "tenant-a".into(),
+            client_id: "client-b".into(),
+            token_file: file.clone(),
+            authority: idp.base.clone(),
+        });
+        assert_eq!(s.bearer().await.unwrap().as_deref(), Some("entra-1"));
+        assert_eq!(s.bearer().await.unwrap().as_deref(), Some("entra-1"));
+        let seen = idp.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "the token was not kept");
+        assert_eq!((seen[0].method.as_str(), seen[0].target.as_str()), ("POST", "/tenant-a/oauth2/v2.0/token"));
+        let body = &seen[0].body;
+        for want in [
+            "grant_type=client_credentials",
+            "client_id=client-b",
+            "scope=https%3A%2F%2Fstorage.azure.com%2F.default",
+            "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer",
+            "client_assertion=pod-token-1",
+        ] {
+            assert!(body.split('&').any(|kv| kv == want), "{want} not in {body}");
+        }
+        let req = Req::new("t", RequestKind::Get, Method::GET, Some("k"));
+        let signed = s.signed(&req, Some("entra-1")).unwrap();
+        assert_eq!(signed.headers().get("authorization").unwrap(), "Bearer entra-1");
+        assert!(signed.uri().query().is_none(), "no SAS on a bearer request");
+        // A rotated file is what the next grant sends.
+        std::fs::write(&file, "pod-token-2").unwrap();
+        if let Auth::Entra { cache, .. } = &s.auth {
+            cache.clear().await;
+        }
+        s.bearer().await.unwrap();
+        assert!(idp.seen.lock().unwrap()[1].body.contains("client_assertion=pod-token-2"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_assertion_is_an_auth_failure_naming_the_client() {
+        let idp = crate::rest::mock::start(|_| {
+            (400, r#"{"error":"invalid_client","error_description":"AADSTS700213: No matching federated identity record found"}"#.into())
+        })
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t"), "x").unwrap();
+        let s = entra(EntraSource::Federated {
+            tenant: "t".into(),
+            client_id: "client-b".into(),
+            token_file: dir.path().join("t"),
+            authority: idp.base.clone(),
+        });
+        match s.bearer().await {
+            Err(StoreError::Auth(m)) => assert!(m.contains("client-b") && m.contains("AADSTS700213"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        // A missing token file is named, not sent.
+        let gone = entra(EntraSource::Federated {
+            tenant: "t".into(),
+            client_id: "c".into(),
+            token_file: dir.path().join("absent"),
+            authority: idp.base.clone(),
+        });
+        assert!(matches!(gone.bearer().await, Err(StoreError::Auth(m)) if m.contains("absent")));
+    }
+
+    /// The managed identity: the metadata service, asked with
+    /// `Metadata: true` for a storage token, its lifetime a string.
+    #[tokio::test]
+    async fn a_managed_identity_asks_the_metadata_service() {
+        let imds = crate::rest::mock::start(|r| {
+            if r.header("metadata") != Some("true") {
+                return (400, r#"{"error":"invalid_request","error_description":"Required metadata header not specified"}"#.into());
+            }
+            (200, r#"{"access_token":"mi-1","expires_in":"86399","expires_on":"1794400000","resource":"https://storage.azure.com/","token_type":"Bearer"}"#.into())
+        })
+        .await;
+        let s = entra(EntraSource::ManagedIdentity { client_id: Some("uami-1".into()), endpoint: imds.base.clone() });
+        assert_eq!(s.bearer().await.unwrap().as_deref(), Some("mi-1"));
+        let seen = imds.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].method, "GET");
+        assert_eq!(
+            seen[0].target,
+            "/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F&client_id=uami-1"
+        );
+        // Nobody answering is a failure that names the whole chain.
+        let none = entra(EntraSource::ManagedIdentity { client_id: None, endpoint: "http://127.0.0.1:1".into() });
+        match none.bearer().await {
+            Err(StoreError::Auth(m)) => assert!(m.contains("azure: no credentials") && m.contains("AZURE_FEDERATED_TOKEN_FILE"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
