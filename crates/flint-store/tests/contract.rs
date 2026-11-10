@@ -146,6 +146,25 @@ async fn c3_etags_name_bytes(s: &dyn ObjectStore, base: &str, seen: &mut Seen) {
     }
 }
 
+/// C3 across two clients of one store: a client whose last sight of an
+/// object is stale is still answered by the bytes. The other client
+/// rewrote it, then put the first bytes back; If-Match on the first ETag
+/// must land, and If-Match on bytes that are gone must not. One client
+/// alone never reaches this: its own writes keep whatever it caches fresh.
+async fn c3_across_clients(a: &dyn ObjectStore, b: &dyn ObjectStore, base: &str) {
+    let k = format!("{base}c3x/obj");
+    let first = put(a, &k, b"first", &PutCondition::IfNoneMatchAny).await.unwrap();
+    let other = put(b, &k, b"other", &PutCondition::IfMatch(first.etag.clone())).await.expect("C3x: b over a's write");
+    put(b, &k, b"first", &PutCondition::IfMatch(other.etag.clone())).await.expect("C3x: b puts the first bytes back");
+    put(a, &k, b"after", &PutCondition::IfMatch(first.etag.clone()))
+        .await
+        .expect("C3x: a stale client's If-Match on bytes that came back was refused");
+    assert!(
+        lost_race(&put(b, &k, b"never", &PutCondition::IfMatch(other.etag.clone())).await),
+        "C3x: If-Match on bytes that are gone landed"
+    );
+}
+
 /// C4: LIST is consistent with what was just written and deleted, and
 /// carries the ETag HEAD gives (lean passes one to the other's
 /// If-Match) and a last-modified time.
@@ -282,9 +301,14 @@ fn compose<'a>(key: &'a str, file: &Arc<std::fs::File>, len: u64, s: &dyn Object
     }
 }
 
-async fn run_contract(s: &dyn ObjectStore, base: &str, skip: &[&str]) {
+/// The contract, with a second client of the same store for the checks
+/// that need two.
+async fn run_contract_with(s: &dyn ObjectStore, second: Option<&dyn ObjectStore>, base: &str, skip: &[&str]) {
     let mut seen = Seen::default();
     let on = |c: &str| !skip.contains(&c);
+    if let (Some(b), true) = (second, on("c3x")) {
+        c3_across_clients(s, b, base).await;
+    }
     if on("c1") {
         c1_conditional_put(s, base, &mut seen).await;
     }
@@ -319,7 +343,7 @@ async fn the_memory_double_meets_the_contract() {
     // S3's part floor, so the composes take the shape they take live.
     let mut mem = MemoryStore::new();
     mem.min_part = 5 * 1024 * 1024;
-    run_contract(&mem, "contract/", &[]).await;
+    run_contract_with(&mem, Some(&mem), "contract/", &[]).await;
 }
 
 /// The control: a double that answers If-Match by the PUT it last saw
@@ -430,6 +454,58 @@ impl ObjectStore for WriteEtags {
     }
 }
 
+/// A live Azure Blob container: Azurite first, a real account after.
+///
+/// FLINT_CONTRACT_AZURE_ENDPOINT=http://127.0.0.1:10000/devstoreaccount1 \
+/// FLINT_CONTRACT_AZURE_ACCOUNT=devstoreaccount1 FLINT_CONTRACT_AZURE_KEY=<Azurite's published key> \
+/// [FLINT_CONTRACT_AZURE_CONTAINER=contract] [FLINT_CONTRACT_SKIP=...] \
+///   cargo test -p flint-store --features azure --test contract a_live_azure -- --ignored --nocapture
+///
+/// No endpoint is the account's own service. The container is created
+/// when missing; everything written is under one fresh prefix, deleted at
+/// the end.
+#[cfg(feature = "azure")]
+#[tokio::test]
+#[ignore]
+async fn a_live_azure_store_meets_the_contract() {
+    let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} is not set"));
+    let store = flint_store::azure::AzureStore::with_shared_key(
+        env("FLINT_CONTRACT_AZURE_ACCOUNT"),
+        &env("FLINT_CONTRACT_AZURE_KEY"),
+        std::env::var("FLINT_CONTRACT_AZURE_CONTAINER").unwrap_or_else(|_| "contract".into()),
+        std::env::var("FLINT_CONTRACT_AZURE_ENDPOINT").ok(),
+    )
+    .unwrap();
+    store.ensure_container().await.expect("the container");
+    assert_eq!(store.provider(), flint_store::Provider::Azure);
+    // The control: the service checks the signature. A wrong key is
+    // refused, or everything below passed without authorization at all.
+    let wrong = flint_store::azure::AzureStore::with_shared_key(
+        env("FLINT_CONTRACT_AZURE_ACCOUNT"),
+        "d3Jvbmcga2V5IHdyb25nIGtleSB3cm9uZyBrZXkgd3Jvbmcga2V5IHdyb25nIGtleQ==",
+        store.container(),
+        std::env::var("FLINT_CONTRACT_AZURE_ENDPOINT").ok(),
+    )
+    .unwrap();
+    let refused = wrong.list("").await;
+    assert!(matches!(refused, Err(flint_store::StoreError::Auth(_))), "a wrong key was not refused: {refused:?}");
+    let skip_env = std::env::var("FLINT_CONTRACT_SKIP").unwrap_or_default();
+    let skip: Vec<&str> = skip_env.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let second = flint_store::azure::AzureStore::with_shared_key(
+        env("FLINT_CONTRACT_AZURE_ACCOUNT"),
+        &env("FLINT_CONTRACT_AZURE_KEY"),
+        store.container(),
+        std::env::var("FLINT_CONTRACT_AZURE_ENDPOINT").ok(),
+    )
+    .unwrap();
+    let base = format!("flint-contract/{}/", uuid::Uuid::new_v4());
+    run_contract_with(&store, Some(&second), &base, &skip).await;
+    for o in store.list(&base).await.unwrap() {
+        let _ = store.delete(&o.key).await;
+    }
+    eprintln!("contract: passed against azure container {} (skipped {skip:?})", store.container());
+}
+
 /// A live S3-API store, MinIO and Ozone included. Everything it writes is
 /// under one fresh prefix, deleted at the end.
 #[cfg(feature = "s3")]
@@ -447,8 +523,16 @@ async fn a_live_s3_store_meets_the_contract() {
     .unwrap();
     let skip_env = std::env::var("FLINT_CONTRACT_SKIP").unwrap_or_default();
     let skip: Vec<&str> = skip_env.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let second = flint_store::s3::S3Store::with_credentials(
+        env("FLINT_CONTRACT_BUCKET"),
+        env("FLINT_CONTRACT_ENDPOINT"),
+        std::env::var("FLINT_CONTRACT_REGION").unwrap_or_else(|_| "us-east-1".into()),
+        env("FLINT_CONTRACT_KEY"),
+        env("FLINT_CONTRACT_SECRET"),
+    )
+    .unwrap();
     let base = format!("flint-contract/{}/", uuid::Uuid::new_v4());
-    run_contract(&store, &base, &skip).await;
+    run_contract_with(&store, Some(&second), &base, &skip).await;
     for o in store.list(&base).await.unwrap() {
         let _ = store.delete(&o.key).await;
     }

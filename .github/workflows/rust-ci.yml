@@ -95,26 +95,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/flint-store
-      - name: cargo test --lib --features s3
+      - name: cargo test --lib --features s3,azure
         working-directory: crates/flint-store
-        run: cargo test --lib --features s3
-      - name: the s3 backend must actually have been compiled
+        run: cargo test --lib --features s3,azure
+      - name: the s3 and azure backends must actually have been compiled
         working-directory: crates/flint-store
-        # Anti-vacuity: if the feature ever stops pulling in the module,
-        # the step above goes green having tested the memory double only.
+        # Anti-vacuity: if a feature ever stops pulling in its module, the
+        # step above goes green having tested the memory double only.
         run: |
-          cargo test --lib --features s3 -- --list > /tmp/store-tests.txt
-          n=$(grep -c '^s3::' /tmp/store-tests.txt || true)
-          echo "s3-module tests discovered: $n"
-          test "$n" -ge 1 || {
-            echo "::error::no s3:: tests were compiled — the feature did not take"
-            exit 1
-          }
+          cargo test --lib --features s3,azure -- --list > /tmp/store-tests.txt
+          for m in s3 azure; do
+            n=$(grep -c "^$m::" /tmp/store-tests.txt || true)
+            echo "$m-module tests discovered: $n"
+            test "$n" -ge 1 || {
+              echo "::error::no $m:: tests were compiled — the feature did not take"
+              exit 1
+            }
+          done
       - name: the store contract, on the memory double
         working-directory: crates/flint-store
         # `--lib` above does not build `tests/`. The live-store legs of the
         # same file are `#[ignore]` and need an endpoint.
-        run: cargo test --features s3 --test contract
+        run: cargo test --features s3,azure --test contract
+      - name: the store contract, on Azurite (Microsoft's Azure Blob emulator)
+        working-directory: crates/flint-store
+        # A fresh account and key every run (AZURITE_ACCOUNTS), so no key
+        # is committed. The leg includes its control: a wrong key must be
+        # refused, or the emulator was not checking signatures.
+        run: |
+          KEY=$(openssl rand -base64 64 | tr -d '\n')
+          docker run -d --name azurite -p 127.0.0.1:10000:10000 -e AZURITE_ACCOUNTS="flintci:$KEY" \
+            mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5 \
+            azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --inMemoryPersistence
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
+          FLINT_CONTRACT_AZURE_ENDPOINT=http://127.0.0.1:10000/flintci FLINT_CONTRACT_AZURE_ACCOUNT=flintci \
+            FLINT_CONTRACT_AZURE_KEY="$KEY" cargo test --features azure --test contract a_live_azure -- --ignored --nocapture
 
   authz-drill:
     runs-on: ubuntu-latest

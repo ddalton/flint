@@ -56,6 +56,10 @@ pub use readonly::ReadOnly;
 pub mod s3;
 #[cfg(feature = "s3")]
 pub mod rawread;
+#[cfg(feature = "azure")]
+pub mod azure;
+#[cfg_attr(not(feature = "azure"), allow(dead_code))]
+mod cell;
 
 use async_trait::async_trait;
 use bytes::Bytes;

@@ -14,6 +14,24 @@ covered by the stability guarantee.
 
 ### Added
 
+- **flint-store has an Azure Blob backend** (2026-11-10; phase 1 of
+  `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`), behind the
+  `azure` feature. It speaks the Blob REST API by hand on the stack the
+  raw read path uses (hyper and rustls, no Azure SDK), and authorizes with
+  Shared Key or SAS.
+  - **Content ETags:** the ETags it hands out are content hashes (128 bits
+    of SHA-256, kept in blob metadata), so equal ETags mean equal bytes, as
+    lean assumes (C3). Azure's own ETag carries every condition, and a 412
+    is re-checked against the bytes before it is reported.
+  - **CRC:** the CRC-64/NVME rides in metadata, since Azure keeps none.
+  - **Lease:** the epoch cell is a compare-and-swap on its body, not an
+    Azure blob lease.
+  - **Not yet:** byte-range server-side copies, batch delete, presigned
+    URLs and Entra ID tokens. Lean does not select it yet (phase 2).
+  - **Tests:** it passes the store contract against Azurite 3.37.0 with no
+    skips. That run includes a second client holding stale tokens, and a
+    control that a wrong key is refused. CI now runs that leg against an
+    account it creates with a fresh key on each run.
 - **Lean names its object store** (2026-11-10; phase 0 of
   `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`). The syncer
   and the gateway take `FLINT_SYNC_PROVIDER` / `FLINT_LEAN_GW_PROVIDER`
