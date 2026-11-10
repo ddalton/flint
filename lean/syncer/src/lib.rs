@@ -280,6 +280,10 @@ pub struct LeanConfig {
     pub sole_writer: bool,
     /// Read or read-write (`Access`). Default read-write.
     pub access: Access,
+    /// The store the bucket lives in (`ObjectStore::provider`), which
+    /// decides the object names `key_fits` accepts beyond the length.
+    /// Default S3; a binary sets it from the store it connected.
+    pub provider: flint_store::Provider,
     /// Whole-object ceiling; larger files use multipart compose.
     pub whole_put_max: u64,
     /// Entries per manifest chunk, in expectation, and the floor and
@@ -573,8 +577,8 @@ pub fn ui_flush(added_unix: u64) -> String {
 pub const MAX_FLUSH_LEN: usize = "ui-".len() + 20 + "-".len() + 36;
 
 /// The longest key the stores lean runs on take: 1,024 bytes of UTF-8 on
-/// S3 (`KeyTooLongError`) and on GCS.
-pub const MAX_KEY_BYTES: usize = 1024;
+/// S3 (`KeyTooLongError`) and on GCS, 1,024 characters on Azure.
+pub const MAX_KEY_BYTES: usize = flint_store::MAX_KEY_BYTES;
 
 /// The `added_unix` a UI flush id carries; `None` for any other flush.
 pub fn ui_flush_added(flush: &str) -> Option<u64> {
@@ -611,6 +615,7 @@ impl LeanConfig {
             // whose bytes should win. Only a published mirror sets it.
             sole_writer: false,
             access: Access::ReadWrite,
+            provider: flint_store::Provider::S3,
             whole_put_max: WHOLE_PUT_MAX,
             chunked: true,
             orphan_grace_secs: manifest::ORPHAN_GRACE_SECS,
@@ -690,8 +695,15 @@ impl LeanConfig {
     /// file whose path does not fit is HELD by the barrier (as a name that
     /// is not UTF-8 is), and the gateway refuses to save or move one
     /// there: the PUT would fail on S3 at every attempt.
+    ///
+    /// And whether the store's own naming rules take the path's bare
+    /// key (`Provider::key_ok`: on S3 the length is the only rule). The
+    /// bare key, because it ends where the path does — as a draft's key
+    /// and an outside writer's object do — where a handle's ends in its
+    /// flush id.
     pub fn key_fits(&self, path: &str) -> bool {
         self.handle_key(path, "").len() + MAX_FLUSH_LEN <= MAX_KEY_BYTES
+            && self.provider.key_ok(&self.file_key(path))
     }
     /// The files namespace this workspace's handles and ingress objects
     /// live under, with its trailing slash — what a sweep lists.

@@ -21,6 +21,8 @@
 //! Environment:
 //!   FLINT_LEAN_GW_LISTEN       default 0.0.0.0:8091
 //!   FLINT_LEAN_GW_BUCKET       (required)
+//!   FLINT_LEAN_GW_PROVIDER     s3 (default), azure or gcs (only s3 is
+//!                              built so far)
 //!   FLINT_LEAN_GW_ENDPOINT     S3 endpoint override (MinIO/proxy)
 //!   FLINT_LEAN_GW_TOKEN        (required, ≥16 bytes) inbound bearer
 //!   FLINT_LEAN_GW_WORKSPACES   (required) comma list of id=prefix
@@ -31,8 +33,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use flint_lean_gateway::http::{routes, GatewayCore};
-use flint_store::s3::S3Store;
-use flint_store::ObjectStore;
+use flint_store::{Provider, StoreSpec};
 
 fn env_req(name: &str) -> String {
     match std::env::var(name) {
@@ -93,8 +94,12 @@ async fn main() {
         * 1024;
 
     let endpoint = std::env::var("FLINT_LEAN_GW_ENDPOINT").ok();
-    let store = match S3Store::connect(bucket, endpoint).await {
-        Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
+    let provider = Provider::parse(&std::env::var("FLINT_LEAN_GW_PROVIDER").unwrap_or_default()).unwrap_or_else(|e| {
+        eprintln!("flint-lean-gateway: FLINT_LEAN_GW_PROVIDER: {e}");
+        std::process::exit(2);
+    });
+    let store = match flint_store::connect::connect(&StoreSpec::new(provider, bucket).endpoint(endpoint)).await {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("flint-lean-gateway: store connect: {e}");
             std::process::exit(1);

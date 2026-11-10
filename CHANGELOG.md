@@ -12,6 +12,23 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **Lean names its object store** (2026-11-10; phase 0 of
+  `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`). The syncer
+  and the gateway take `FLINT_SYNC_PROVIDER` / `FLINT_LEAN_GW_PROVIDER`
+  (`s3`, the default, `azure` or `gcs`), and they and the lean operator
+  build their store through one factory in flint-store. Only S3 is built:
+  `azure` or `gcs` refuses at start, by name. On S3 nothing changes. Each
+  store's object-name rules now decide which paths lean publishes: a path
+  the store would refuse is held by the barrier and refused by the
+  gateway, as one too long for a key already was (L-145). S3's only rule
+  is still the length. `crates/flint-store/tests/contract.rs` holds the
+  store contract lean relies on (C1-C8) as tests: the memory double passes
+  it, and so does MinIO, except `If-Match` on DELETE (known) and
+  `If-None-Match` on a copy's destination (found here; lean does not
+  rest on either).
+
 ### Changed
 
 - **spdk-tgt is built on SPDK v26.09** (2026-11-02;

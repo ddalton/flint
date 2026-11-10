@@ -3950,6 +3950,41 @@ async fn a_path_too_long_for_a_key_is_held_and_the_rest_publishes() {
     assert!(keys.iter().all(|k| k.len() <= super::MAX_KEY_BYTES), "{:?}", keys.iter().map(|k| k.len()).max());
 }
 
+/// C8 (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md): a path the
+/// store's own naming rules refuse is held like one too long for a key,
+/// and the rest of the tree publishes. On S3 the same tree publishes
+/// whole: the control, since the rules are the store's and not lean's.
+#[tokio::test]
+async fn a_path_the_stores_naming_rules_refuse_is_held_and_s3_takes_it() {
+    use flint_store::Provider;
+    for (provider, bad) in [(Provider::Azure, "dir./a.txt"), (Provider::Azure, "notes."), (Provider::Gcs, "line\nbreak.txt")] {
+        for on in [provider, Provider::S3] {
+            let mut mem = MemoryStore::new();
+            mem.provider = on;
+            let store = Arc::new(mem);
+            let dir = tempfile::tempdir().unwrap();
+            let mut a = syncer(&store, dir.path()).await;
+            // As the binary does: the config takes the store's provider.
+            a.cfg.provider = store.provider();
+            a.checkout().await.unwrap();
+            write(dir.path(), bad, "named against the store's rules");
+            write(dir.path(), "plain.txt", "plain");
+            let r = a.run_barrier().await.unwrap_or_else(|e| panic!("{on}: {bad:?} failed the barrier: {e}"));
+            let m = manifest::load(store.as_ref(), &a.cfg).await.unwrap().unwrap().manifest;
+            let published: Vec<String> = m.entries.keys().cloned().collect();
+            if on == Provider::S3 {
+                assert!(r.held.is_empty(), "{on}: {r:?}");
+                let mut want = vec![bad.to_string(), "plain.txt".to_string()];
+                want.sort();
+                assert_eq!(published, want, "{on}");
+            } else {
+                assert_eq!(r.held, [bad.to_string()], "{on}: {r:?}");
+                assert_eq!(published, ["plain.txt"], "{on}");
+            }
+        }
+    }
+}
+
 /// L-146: a materialised file gets its mode AFTER its bytes, so setuid,
 /// and setgid with group-execute, survive the write that would clear them.
 /// A checkout, whole or ranged, and a consume keep 4755 and 2755, and the

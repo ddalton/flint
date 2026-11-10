@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flint_lean_gateway::{
-    crc64_nvme, crc64_to_b64, Bytes, LeanEntry, LeanManifest, MemoryStore, ObjectStore, PutFile,
+    crc64_nvme, crc64_to_b64, Bytes, LeanEntry, LeanManifest, MemoryStore, ObjectStore, Provider, PutFile,
     StoreError, VerbError, Workspace,
 };
 
@@ -334,6 +334,41 @@ async fn a_path_too_long_for_a_key_is_refused_and_the_longest_that_fits_is_taken
     let keys: Vec<String> = s.list(PREFIX).await.unwrap().into_iter().map(|o| o.key).collect();
     assert!(keys.iter().all(|k| k.len() <= flint_lean::MAX_KEY_BYTES), "{:?}", keys.iter().map(|k| k.len()).max());
     assert!(!keys.iter().any(|k| k.contains(&long)), "something landed under the long path");
+}
+
+/// C8 (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md): a path the
+/// store's own naming rules refuse is refused at the door like one too
+/// long for a key, for a save, a rename's destination and a draft. The
+/// workspace takes the rules from its store, and on S3 the same paths are
+/// taken: the control.
+#[tokio::test]
+async fn a_path_the_stores_naming_rules_refuse_is_refused_and_s3_takes_it() {
+    for (provider, bad) in [(Provider::Azure, "dir./a.txt"), (Provider::Azure, "notes."), (Provider::Gcs, "line\nbreak.txt")] {
+        for on in [provider, Provider::S3] {
+            let mut mem = MemoryStore::new();
+            mem.provider = on;
+            let s: Arc<dyn ObjectStore> = Arc::new(mem);
+            let w = ws(&s);
+            assert_eq!(w.config().provider, on, "the workspace takes its store's provider");
+            w.put_file("plain.txt", Bytes::from("plain"), &PutFile::default()).await.unwrap();
+            let saved = w.put_file(bad, Bytes::from("x"), &PutFile::default()).await;
+            let renamed = w.rename_file("plain.txt", bad, None).await;
+            let drafted = w.put_draft("alice", bad, Bytes::from("x"), None, None).await;
+            if on == Provider::S3 {
+                saved.unwrap_or_else(|e| panic!("S3 refused {bad:?}: {e}"));
+                drafted.unwrap_or_else(|e| panic!("S3 refused a draft at {bad:?}: {e}"));
+                // The destination exists now; that refusal is not the naming rule.
+                assert!(!matches!(renamed, Err(VerbError::BadPath(_))), "{renamed:?}");
+            } else {
+                for (verb, r) in [("save", saved.map(|_| ())), ("rename", renamed.map(|_| ())), ("draft", drafted.map(|_| ()))] {
+                    let err = r.expect_err(&format!("{on} took a {verb} at {bad:?}"));
+                    assert!(matches!(err, VerbError::BadPath(_)), "{on} {verb}: {err}");
+                }
+                let keys: Vec<String> = s.list(PREFIX).await.unwrap().into_iter().map(|o| o.key).collect();
+                assert!(!keys.iter().any(|k| k.contains(bad)), "{on}: something landed under {bad:?}: {keys:?}");
+            }
+        }
+    }
 }
 
 /// L-148: the syncer's two directories are reserved at the workspace root

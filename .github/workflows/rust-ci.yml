@@ -110,6 +110,11 @@ jobs:
             echo "::error::no s3:: tests were compiled — the feature did not take"
             exit 1
           }
+      - name: the store contract, on the memory double
+        working-directory: crates/flint-store
+        # `--lib` above does not build `tests/`. The live-store legs of the
+        # same file are `#[ignore]` and need an endpoint.
+        run: cargo test --features s3 --test contract
 
   authz-drill:
     runs-on: ubuntu-latest

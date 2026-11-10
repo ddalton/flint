@@ -24,10 +24,17 @@ pub use crate::workspace::{
     Workspace,
 };
 pub use flint_lean::{LeanConfig, LeanError, LEAN_DIR};
-pub use flint_store::{crc64_nvme, crc64_to_b64, memory::MemoryStore, ObjectStore, ReadOnly, StoreError};
+pub use flint_store::{crc64_nvme, crc64_to_b64, memory::MemoryStore, ObjectStore, Provider, ReadOnly, StoreError, StoreSpec};
 
 #[cfg(feature = "s3")]
 pub use flint_store::s3::S3Store;
+
+/// Connect to the store `spec` names, whichever provider it is
+/// (`flint_store::connect::connect`). [`connect`] is the S3 case with
+/// nothing else set.
+pub async fn connect_to(spec: &StoreSpec) -> Result<std::sync::Arc<dyn ObjectStore>, StoreError> {
+    flint_store::connect::connect(spec).await
+}
 
 /// Connect to a bucket with the ambient AWS environment (the SDK's
 /// credential chain, `AWS_REGION`, `AWS_ENDPOINT_URL`). `endpoint`

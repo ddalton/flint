@@ -1795,6 +1795,10 @@ impl ObjectStore for S3Store {
     fn request_counts(&self) -> Option<crate::RequestCounts> {
         Some(self.requests.snapshot())
     }
+
+    fn provider(&self) -> crate::Provider {
+        crate::Provider::S3
+    }
 }
 
 impl S3Store {

@@ -252,6 +252,10 @@ impl<S: ObjectStore + ?Sized> ObjectStore for ReadOnly<S> {
     fn request_counts(&self) -> Option<RequestCounts> {
         self.inner.request_counts()
     }
+
+    fn provider(&self) -> crate::Provider {
+        self.inner.provider()
+    }
 }
 
 #[cfg(test)]
@@ -270,12 +274,13 @@ mod tests {
         "epoch_handoff",
     ];
 
-    /// The trait's reads, and the four methods that describe the store
+    /// The trait's reads, and the five methods that describe the store
     /// without sending anything. Each must reach the inner store.
     const READS: &[&str] = &[
         "head", "get_whole", "get_range", "get_range_segments", "list", "head_version",
         "get_version", "list_versions", "presign_get", "lifecycle_rules", "list_uploads",
         "epoch_read", "min_part_size", "max_parts", "upload_gate", "request_counts",
+        "provider",
     ];
 
     /// The `fn` names declared in the block whose opening LINE is exactly
@@ -512,6 +517,10 @@ mod tests {
             self.saw("request_counts");
             self.inner.request_counts()
         }
+        fn provider(&self) -> crate::Provider {
+            self.saw("provider");
+            self.inner.provider()
+        }
     }
 
     fn stamps() -> GenerationStamps {
@@ -530,6 +539,7 @@ mod tests {
         let mut mem = MemoryStore::new().with_upload_inflight_max_bytes(1 << 20);
         mem.min_part = 7;
         mem.max_parts = 9;
+        mem.provider = crate::Provider::Azure;
         mem.plant_lifecycle_rule(LifecycleView {
             id: "customer".into(),
             enabled: true,
@@ -652,6 +662,8 @@ mod tests {
         assert_eq!(counts, rec.inner.request_counts().unwrap());
         assert!(counts.get > 0 && counts.put == 0, "{counts:?}");
         reached("request_counts");
+        assert_eq!(ro.provider(), crate::Provider::Azure);
+        reached("provider");
         assert_eq!(forwarded, READS, "every read, and only the reads, were exercised");
 
         // Reads never write either.

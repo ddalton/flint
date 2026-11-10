@@ -42,6 +42,8 @@
 //!   FLINT_SYNC_BUCKET    (required) bucket name
 //!   FLINT_SYNC_PREFIX    (required) subtree key prefix
 //!   FLINT_SYNC_ROOT      (required) workspace root
+//!   FLINT_SYNC_PROVIDER  s3 (default), azure or gcs: the store the bucket
+//!                        lives in (only s3 is built so far)
 //!   FLINT_SYNC_ENDPOINT  S3 endpoint override (MinIO/proxy rigs)
 //!   FLINT_SYNC_RAW_READS "true" routes every GET/HEAD through the raw
 //!                        HTTP/1.1 read path (flint-store `rawread.rs`):
@@ -137,7 +139,6 @@
 //!   FLINT_SYNC_METRICS_PORT                default 9847
 //!   FLINT_SYNC_WORKSPACE/_NAMESPACE        the only two metric labels
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use flint_lean::state::SyncerState;
@@ -145,8 +146,7 @@ use flint_lean::conformance;
 use flint_lean::lease;
 use flint_lean::verbs;
 use flint_lean::{Access, LeanConfig, LeanError, Syncer, SentinelMode};
-use flint_store::s3::S3Store;
-use flint_store::ObjectStore;
+use flint_store::{Provider, StoreSpec};
 use warp::Filter;
 
 fn env_req(name: &str) -> String {
@@ -212,12 +212,19 @@ async fn main() {
     let prefix = env_req("FLINT_SYNC_PREFIX");
     let root = env_req("FLINT_SYNC_ROOT");
     let endpoint = std::env::var("FLINT_SYNC_ENDPOINT").ok();
+    let provider = Provider::parse(&std::env::var("FLINT_SYNC_PROVIDER").unwrap_or_default()).unwrap_or_else(|e| {
+        eprintln!("flint-sync: FLINT_SYNC_PROVIDER: {e}");
+        std::process::exit(2);
+    });
     // Which store a cached conformance verdict belongs to. A workspace
-    // re-pointed at another endpoint, bucket or prefix is a different
-    // store and is asked again rather than inheriting an answer about
-    // the old one.
-    let store_identity =
-        format!("{}|{bucket}|{prefix}", endpoint.as_deref().unwrap_or("aws"));
+    // re-pointed at another provider, endpoint, bucket or prefix is a
+    // different store and is asked again rather than inheriting an
+    // answer about the old one. An S3 store keeps the identity it had
+    // before providers existed, so its cached verdict still applies.
+    let store_identity = match provider {
+        Provider::S3 => format!("{}|{bucket}|{prefix}", endpoint.as_deref().unwrap_or("aws")),
+        p => format!("{p}:{}|{bucket}|{prefix}", endpoint.as_deref().unwrap_or("default")),
+    };
 
     // Parts of ONE object uploaded concurrently. `fanout` already
     // spreads uploads ACROSS objects, so this only moves a tree whose
@@ -244,29 +251,28 @@ async fn main() {
     // drive the MPU + UploadPartCopy arm without a 5 GiB fixture: that
     // arm has never executed anywhere, and an arm only a 5 GiB object
     // can reach is an arm nothing reaches.
-    let copy_whole_max = env_u64("FLINT_SYNC_COPY_WHOLE_MAX_MB", 5 * 1024) * 1024 * 1024;
+    // Unset is the backend's own ceiling (S3's 5 GiB).
+    let copy_whole_max =
+        std::env::var("FLINT_SYNC_COPY_WHOLE_MAX_MB").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb * 1024 * 1024);
     let raw_reads = std::env::var("FLINT_SYNC_RAW_READS")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
-    let store = match S3Store::connect(bucket, endpoint).await {
-        Ok(s) => match s
-            .with_part_parallelism(part_par)
-            .with_upload_inflight_max_bytes(upload_inflight)
-            .with_copy_whole_max(copy_whole_max)
-            .with_raw_reads(raw_reads)
-        {
-            Ok(s) => Arc::new(s) as Arc<dyn ObjectStore>,
-            Err(e) => {
-                eprintln!("flint-sync: raw reads: {e}");
-                std::process::exit(1);
-            }
-        },
+    let spec = StoreSpec {
+        part_parallelism: part_par,
+        upload_inflight_max_bytes: Some(upload_inflight),
+        copy_whole_max,
+        raw_reads,
+        ..StoreSpec::new(provider, bucket).endpoint(endpoint)
+    };
+    let store = match flint_store::connect::connect(&spec).await {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("flint-sync: store connect: {e}");
             std::process::exit(1);
         }
     };
     let mut cfg = LeanConfig::new(&prefix, &root);
+    cfg.provider = store.provider();
     cfg.floor_secs = env_u64("FLINT_SYNC_FLOOR_SECS", 60);
     cfg.scan_threads = env_u64("FLINT_SYNC_SCAN_THREADS", cfg.scan_threads as u64).max(1) as usize;
     cfg.sole_writer = std::env::var("FLINT_SYNC_SOLE_WRITER")
@@ -463,10 +469,12 @@ async fn main() {
         // dozen bytes, so any ceiling above zero takes the single-request
         // CopyObject path — and a run that reported PASS while silently
         // repeating the arm you already tested is worse than no run.
+        // Unset is S3's own ceiling, 5 GiB.
+        let ceiling = copy_whole_max.unwrap_or(5 * 1024 * 1024 * 1024);
         eprintln!(
             "flint-sync: probe-copy ceiling={} bytes -> the {} arm",
-            copy_whole_max,
-            if copy_whole_max == 0 { "MPU + UploadPartCopy" } else { "CopyObject (payload is tiny)" }
+            ceiling,
+            if ceiling == 0 { "MPU + UploadPartCopy" } else { "CopyObject (payload is tiny)" }
         );
         match flint_store::probe::probe_cross_key_copy(sc.store.as_ref(), &key).await {
             Ok(()) => {

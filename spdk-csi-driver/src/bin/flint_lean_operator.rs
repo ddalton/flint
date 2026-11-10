@@ -30,8 +30,7 @@ use tracing::{info, warn};
 
 use spdk_csi_driver::lean_operator::crd::{FlintLeanWorkspace, FlintLeanWorkspaceStatus};
 use spdk_csi_driver::lean_operator::reconcile::full_pass;
-use spdk_csi_driver::tier::store::s3::S3Store;
-use spdk_csi_driver::tier::store::ObjectStore;
+use spdk_csi_driver::tier::store::{ObjectStore, Provider, StoreSpec};
 
 /// How often the expensive posture half runs (claim, sweep, probe,
 /// lifecycle). Answers questions that change on the timescale of a
@@ -67,10 +66,11 @@ async fn store_for(ctx: &Ctx, bucket: &str, endpoint: Option<&str>) -> Result<Ar
     if let Some(s) = stores.get(&key) {
         return Ok(s.clone());
     }
-    let s = S3Store::connect(bucket.to_string(), endpoint.map(|s| s.to_string()))
+    // S3 until the CRD names a provider (plan phase 2).
+    let spec = StoreSpec::new(Provider::S3, bucket).endpoint(endpoint.map(|s| s.to_string()));
+    let s = spdk_csi_driver::tier::store::connect::connect(&spec)
         .await
         .map_err(|e| Error::Store(e.to_string()))?;
-    let s: Arc<dyn ObjectStore> = Arc::new(s);
     stores.insert(key, s.clone());
     Ok(s)
 }

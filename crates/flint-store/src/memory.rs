@@ -249,6 +249,10 @@ pub struct MemoryStore {
     /// one: the same charge at the same points as the S3 backend, so a
     /// test can read the bound off the gate's high-water mark.
     upload_gate: Option<std::sync::Arc<crate::gate::ByteGate>>,
+    /// The store this double stands in for (`ObjectStore::provider`):
+    /// S3 by default; a test sets another to see lean apply that
+    /// store's naming rules.
+    pub provider: crate::Provider,
 }
 
 /// Leaves the in-flight count on drop, so an early `return` still
@@ -326,6 +330,7 @@ impl MemoryStore {
             max_parts: 10_000,
             part_parallelism: 1,
             upload_gate: None,
+            provider: crate::Provider::S3,
         }
     }
 
@@ -1507,6 +1512,10 @@ impl ObjectStore for MemoryStore {
 
     fn upload_gate(&self) -> Option<std::sync::Arc<crate::gate::ByteGate>> {
         self.upload_gate.clone()
+    }
+
+    fn provider(&self) -> crate::Provider {
+        self.provider
     }
 }
 

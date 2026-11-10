@@ -806,7 +806,8 @@ impl Syncer {
         let mut baseline = self.state.take_baseline()?;
         clock.lap("baseline_load");
         let mut scanned = scan::scan_with(&self.cfg.root, self.cfg.scan_threads)?;
-        // A path too long for a store key has none either (L-145): held,
+        // A path too long for a store key has none either (L-145), nor
+        // one the store's naming rules refuse (`Provider::key_ok`): held,
         // as a name that is not UTF-8 is, before anything reads the scan.
         // Its PUT used to fail on S3 at every barrier.
         let unkeyed: Vec<String> = scanned.entries.keys().filter(|p| !self.cfg.key_fits(p)).cloned().collect();
