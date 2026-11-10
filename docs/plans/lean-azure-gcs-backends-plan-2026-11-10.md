@@ -4,6 +4,11 @@ Scope: lean only, which covers the syncer, the gateway, the operator, and
 lean volumes through the s3csi node plugin. Forge, the block tier and
 passthrough are out of scope.
 
+**Status, 2026-11-10:** phases 0 to 3 are built and checked against the
+emulators (Azurite, storage-testbench). Real accounts (D4), workload
+identity (phase 4) and the docs (phase 5) remain. Where the build departs
+from this plan, the plan below says so, marked *As built*.
+
 ## 1. Verdict
 
 There is **no protocol change, no model change and no proof change**, on one
@@ -161,7 +166,8 @@ All builds and tests run on the Linux box.
     metadata.
   - `copy_object`: Copy Blob From URL with `x-ms-source-if-match`. Above its
     synchronous size limit, use Put Block From URL per range, then Put Block
-    List.
+    List. *As built:* Copy Blob, with `x-ms-source-if-match`, polled while
+    it is pending; within one account it completes in the request.
   - Reads: head, get, ranged get, and list with `include=metadata`. Normalize
     ETags, because LIST returns them unquoted while HEAD quotes them.
   - Deletes: delete, and `delete_many` through Blob Batch (256 per request).
@@ -219,7 +225,9 @@ All builds and tests run on the Linux box.
   `ifSourceGenerationMatch`, and `ifGenerationMatch=0` for create-only.
 - **compose:**
   - each part is uploaded as its own object, create-only and
-    CRC32C-checked, under `<prefix>/.flint/lean/parts/<flush>/<n>`;
+    CRC32C-checked, under `<prefix>/.flint/lean/parts/<flush>/<n>`
+    (*as built:* `<nonce>/<n>`, one nonce per compose, and at most 1,024
+    parts, two levels of 32);
   - then compose: at most 32 sources per call, nested above that, with
     `ifGenerationMatch=0` on the destination, each source pinned by its
     generation, and the CRC-64, the hash and the stamps as metadata in the compose
@@ -230,11 +238,19 @@ All builds and tests run on the Linux box.
   - The parts live under the reserved `.flint/lean/` namespace, which the
     sweeps don't list (they list `files/`, `manifests/` and `chunks/`). The
     operator's upload sweep deletes stale parts by age, in place of
-    `list_uploads`/`abort_upload`.
+    `list_uploads`/`abort_upload`. *As built:* through them:
+    `list_uploads(<prefix>)` reports each parts directory dated by its
+    oldest part, and `abort_upload` deletes it, so the operator's sweep is
+    unchanged. The syncer names its prefix as the store's scratch root.
 - **put_whole:** one request with `crc32c`, which the server checks. The
   CRC-64 and the hash go in metadata.
-- **copy_object:** `objects.rewrite`, looping on `rewriteToken`.
-- **delete_many:** a JSON batch, 100 per request.
+- **copy_object:** `objects.rewrite`, looping on `rewriteToken`. *As
+  built:* a one-source compose, the source pinned by its generation. A
+  compose takes the destination's metadata as given, so a copy never
+  carries a stamp only its source had (C6); storage-testbench merges the
+  source's metadata into a rewrite's. It is also one request at any size.
+- **delete_many:** a JSON batch, 100 per request. *As built:* not yet;
+  the trait's one-by-one default.
 - **Key rule:** no CR or LF.
 - **bootstrap:** a bucket GET; versioning, lifecycle and uniform access are
   reported as notes.
