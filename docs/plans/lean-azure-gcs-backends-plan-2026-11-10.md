@@ -187,9 +187,11 @@ All builds and tests run on the Linux box.
   - 401/403, clock skew included → `Auth`;
   - `ServerBusy` (503) and other 5xx → retried, with the same classes as
     the S3 path.
-- **Tests:** the contract suite against Azurite (CI) and against a real
-  storage account (ignored; D4). Check Azurite's handling of conditions
-  against the real account before trusting it in CI.
+- **Tests:** emulator first. The contract suite runs against Azurite,
+  Microsoft's emulator, in CI and on the box. Only once it is green there
+  does it run against a real storage account (ignored; D4). Where Azurite
+  and the account disagree, the account wins, and the difference is
+  written down beside the test.
 - **Exit:** the contract suite is green on a real account, and the hash cost
   is measured on a multi-GiB file.
 
@@ -247,8 +249,11 @@ All builds and tests run on the Linux box.
   429s are retried with backoff and counted (`request_counts`). Measure with
   the writers drill at 1, 3 and 6 writers plus gateway saves, recording the
   429 count and the commit-section time.
-- **Tests:** the contract suite against fake-gcs-server (check how faithfully
-  it handles preconditions first) and against a real bucket (D4).
+- **Tests:** emulator first: Google's `storage-testbench` (the emulator
+  Google's own client libraries test against), in CI and on the box; then
+  a real bucket (D4). `fake-gcs-server` is the fallback if the testbench
+  lacks an operation. Check how faithfully the emulator handles
+  preconditions before trusting it.
 - **Exit:**
   - phase 2's exit, on GCS;
   - the rate-limit numbers recorded;
@@ -296,6 +301,8 @@ Decided by the user on 2026-11-10:
 - **D2: SHA-256, truncated to 128 bits**, for content ETags (§3.1), not MD5.
   MD5 collisions can be made on demand; SHA-256's cannot.
 - **D3: Azure first**, then GCS.
+- **Emulators first:** Azurite for Azure and `storage-testbench` for GCS,
+  before any real account.
 
 Still open:
 
