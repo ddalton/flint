@@ -29,9 +29,10 @@ a contradiction in the run itself, reported, never forced.
 
 THE JOIN. An agent's write is named by the ETag its bytes get, which every
 upload, consume and surface of those bytes logs. On S3 and MinIO that is the
-MD5 (agent.sh's `md5`), a plain PUT's etag. On Azure (`meta.json`'s
-`store`: `azurite` or `azure`) it is flint-store's content ETag, the first
-128 bits of the bytes' SHA-256 (agent.sh's `sha256`).
+MD5 (agent.sh's `md5`), a plain PUT's etag. On Azure and GCS (`meta.json`'s
+`store`: `azurite`, `azure`, `testbench` or `gcs`) it is flint-store's
+content ETag, the first 128 bits of the bytes' SHA-256 (agent.sh's
+`sha256`).
 
 What it does not do yet (refused, with the reason): the UI actor (the
 gateway logs no seq), a writer that restarted (a second `start`), a move
@@ -52,7 +53,7 @@ def etag_join(run: Path):
     names, for the store the run used (`meta.json`; MinIO when absent)."""
     meta = run / "meta.json"
     store = json.loads(meta.read_text()).get("store", "minio") if meta.exists() else "minio"
-    if store in ("azurite", "azure"):
+    if store in ("azurite", "azure", "testbench", "gcs"):
         return "sha256", lambda o: f'"{o["sha256"][:32]}"'
     return "md5", lambda o: f'"{o["md5"]}"'
 

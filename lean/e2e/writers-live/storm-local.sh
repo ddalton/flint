@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# storm-local.sh — a multi-writer storm on ONE host, against a MinIO or an
-# Azurite container: the run a replay against the model
-# (formal/trace/storm2conf.py) is developed on before an S3 leg (storm.sh).
-# No AWS, no Azure account, no cluster.
+# storm-local.sh — a multi-writer storm on ONE host, against a MinIO, an
+# Azurite or a storage-testbench container: the run a replay against the
+# model (formal/trace/storm2conf.py) is developed on before an S3 leg
+# (storm.sh). No AWS, no Azure or Google account, no cluster.
 #
 #   storm-local.sh <leg>
 #
@@ -20,8 +20,10 @@
 #   ROOT (/mnt/nvme/storm-local), WRITERS (3), MODE (hot), UI (0), FLOOR (5),
 #   LOAD_SECS (60), IDLE_SECS (30), MINIO_PORT (19000), KEEP_MINIO (0),
 #   STORE (minio; or azurite: Microsoft's Azure Blob emulator, a fresh
-#   account and key per leg, and binaries built with the `azure` feature),
-#   AZURITE_PORT (19010)
+#   account and key per leg, and binaries built with the `azure` feature;
+#   or testbench: Google's GCS emulator, which authorizes nothing, and
+#   binaries built with the `gcs` feature), AZURITE_PORT (19010),
+#   TESTBENCH_PORT (19020)
 set -uo pipefail
 
 LEG=${1:?usage: storm-local.sh <leg>}
@@ -38,6 +40,7 @@ IDLE_SECS=${IDLE_SECS:-30}
 MINIO_PORT=${MINIO_PORT:-19000}
 STORE=${STORE:-minio}
 AZURITE_PORT=${AZURITE_PORT:-19010}
+TESTBENCH_PORT=${TESTBENCH_PORT:-19020}
 GW_PORT=${GW_PORT:-18093}
 GW_TOKEN=${GW_TOKEN:-storm-local-token-0123456789abcdef}
 BUCKET=agentws
@@ -60,7 +63,12 @@ case "$STORE" in
     AZURE_STORAGE_KEY=$(openssl rand -base64 64 | tr -d '\n')
     export AZURE_STORAGE_ACCOUNT AZURE_STORAGE_KEY
     ENDPOINT="http://127.0.0.1:$AZURITE_PORT/$AZURE_STORAGE_ACCOUNT" ;;
-  *) echo "storm-local: STORE=$STORE: want minio or azurite" >&2; exit 2 ;;
+  testbench)
+    PROVIDER=gcs
+    ENDPOINT="http://127.0.0.1:$TESTBENCH_PORT"
+    # Google's convention for an emulator: no credentials at all.
+    export STORAGE_EMULATOR_HOST="$ENDPOINT" ;;
+  *) echo "storm-local: STORE=$STORE: want minio, azurite or testbench" >&2; exit 2 ;;
 esac
 
 cleanup() {
@@ -82,6 +90,14 @@ if [ "$STORE" = azurite ]; then
   for _ in $(seq 1 60); do curl -s -o /dev/null "http://127.0.0.1:$AZURITE_PORT/" && break; sleep 0.5; done
   python3 "$RIG/azure_container.py" "$ENDPOINT" "$AZURE_STORAGE_ACCOUNT" "$AZURE_STORAGE_KEY" "$BUCKET" \
     >> "$RUN/storm.log" 2>&1 || { log "no container"; exit 1; }
+elif [ "$STORE" = testbench ]; then
+  docker run -d --name "$CTR" -p "127.0.0.1:$TESTBENCH_PORT:9000" \
+    gcr.io/cloud-devrel-public-resources/storage-testbench:v0.67.0@sha256:06729d407e8bba055798707dccfffd1f792ea818937954c56a776811116ede5c \
+    > "$RUN/testbench.id" || { log "storage-testbench did not start"; exit 1; }
+  for _ in $(seq 1 60); do curl -s -o /dev/null "$ENDPOINT/" && break; sleep 0.5; done
+  curl -sf -X POST -H 'content-type: application/json' -d "{\"name\":\"$BUCKET\"}" \
+    "$ENDPOINT/storage/v1/b?project=storm-local" >> "$RUN/storm.log" 2>&1 || { log "no bucket"; exit 1; }
+  echo >> "$RUN/storm.log"
 else
   docker run -d --name "$CTR" -p "127.0.0.1:$MINIO_PORT:9000" \
     -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \

@@ -262,6 +262,13 @@ async fn main() {
         upload_inflight_max_bytes: Some(upload_inflight),
         copy_whole_max,
         raw_reads,
+        // A GCS compose keeps its parts under the workspace, where the
+        // operator's upload sweep (`list_uploads(<prefix>/)`) finds a
+        // crashed one's. The operator names the prefix the same way.
+        scratch_root: Some(match prefix.trim_end_matches('/') {
+            "" => String::new(),
+            p => format!("{p}/"),
+        }),
         ..StoreSpec::new(provider, bucket).endpoint(endpoint)
     };
     let store = match flint_store::connect::connect(&spec).await {

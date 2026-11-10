@@ -27,6 +27,8 @@ default = ["s3", "http", "fastalloc"]
 s3 = ["flint-lean/s3", "flint-store/s3"]
 # The Azure Blob backend, chosen at run time by FLINT_LEAN_GW_PROVIDER=azure.
 azure = ["flint-lean/azure", "flint-store/azure"]
+# The GCS backend, chosen at run time by FLINT_LEAN_GW_PROVIDER=gcs.
+gcs = ["flint-lean/gcs", "flint-store/gcs"]
 # The HTTP router (`http::routes`) and the binary. A backend on another
 # web stack turns it off and never compiles warp.
 http = ["dep:warp"]

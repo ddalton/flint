@@ -164,6 +164,27 @@ pub fn azure_static_arm(secrets: &HashMap<String, String>) -> Result<Materialize
     Ok(Materialized { env, files: vec![] })
 }
 
+/// The key a `nodePublishSecretRef` Secret carries for a GCS workspace: a
+/// service account's JSON key, inline (`kubectl create secret generic
+/// <name> --from-file=FLINT_GCS_SERVICE_ACCOUNT_JSON=key.json`). The JSON
+/// is checked for its shape here, so a wrong file fails the mount by name
+/// rather than the worker's first request.
+pub fn gcs_static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, String> {
+    const KEY: &str = "FLINT_GCS_SERVICE_ACCOUNT_JSON";
+    let json = secrets.get(KEY).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).ok_or(
+        "nodePublishSecretRef Secret has no FLINT_GCS_SERVICE_ACCOUNT_JSON — a gcs workspace's Secret holds a \
+         service account's JSON key under that name",
+    )?;
+    let v: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("FLINT_GCS_SERVICE_ACCOUNT_JSON is not JSON: {e}"))?;
+    if v["type"].as_str() != Some("service_account") || v["client_email"].as_str().is_none() || v["private_key"].as_str().is_none() {
+        return Err("FLINT_GCS_SERVICE_ACCOUNT_JSON is not a service account's key (type service_account, \
+                    client_email, private_key)"
+            .into());
+    }
+    Ok(Materialized { env: BTreeMap::from([(KEY.to_string(), json)]), files: vec![] })
+}
+
 // ── stsSecret: a controller-fed, expiring credential ─────────────────
 //
 // The Secret a controller (awc-docs PR #136's receiver, or anything that
@@ -938,11 +959,30 @@ mod tests {
     }
 
     #[test]
+    fn the_gcs_static_arm_takes_a_service_accounts_key_and_nothing_else() {
+        let s = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+        let e = gcs_static_arm(&s(&[("AWS_ACCESS_KEY_ID", "x")])).unwrap_err();
+        assert!(e.contains("FLINT_GCS_SERVICE_ACCOUNT_JSON"), "{e}");
+        let e = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", "{not json")])).unwrap_err();
+        assert!(e.contains("not JSON"), "{e}");
+        let user = r#"{"type":"authorized_user","client_id":"c"}"#;
+        let e = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", user)])).unwrap_err();
+        assert!(e.contains("service account"), "{e}");
+        // The shape only; the key itself is the store's to parse.
+        let key = r#"{"type":"service_account","client_email":"a@p.iam.gserviceaccount.com","private_key":"(a PEM key)"}"#;
+        let m = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", key), ("AWS_SECRET_ACCESS_KEY", "x")])).unwrap();
+        assert_eq!(m.env.keys().collect::<Vec<_>>(), ["FLINT_GCS_SERVICE_ACCOUNT_JSON"], "AWS keys stay behind");
+        assert!(m.files.is_empty());
+    }
+
+    #[test]
     fn a_launch_list_names_its_provider_and_none_is_s3() {
         use crate::tier::store::Provider;
         assert_eq!(provider_of(None), Ok(Provider::S3));
         let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "azure".to_string())]);
         assert_eq!(provider_of(Some(&l)), Ok(Provider::Azure));
+        let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "gcs".to_string())]);
+        assert_eq!(provider_of(Some(&l)), Ok(Provider::Gcs));
         let l = BTreeMap::from([("FLINT_SYNC_ROOT".to_string(), "/w".to_string())]);
         assert_eq!(provider_of(Some(&l)), Ok(Provider::S3));
         let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "gcp".to_string())]);

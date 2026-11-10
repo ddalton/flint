@@ -31,7 +31,8 @@ spec:
             - { name: RUST_LOG, value: "info" }
 {{- if .Values.operatorCredentialsSecret }}
           envFrom:
-            # Keys must be AWS_* VERBATIM (the ambient credential chain).
+            # Keys must be AWS_* VERBATIM (the ambient credential chain), or
+            # AZURE_STORAGE_* / FLINT_GCS_SERVICE_ACCOUNT_JSON for those stores.
             - secretRef: { name: {{ .Values.operatorCredentialsSecret | quote }} }
 {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}

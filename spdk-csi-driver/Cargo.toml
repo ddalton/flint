@@ -262,7 +262,7 @@ aws-sdk-s3 = { version = "1.141.0", default-features = false, features = ["rt-to
 # The extracted store layer (ObjectStore + stamps + memory double + S3
 # backend); re-exported at the old path via `tier::store`. flint-lean
 # depends on the same crate WITHOUT this crate's build.
-flint-store = { path = "../crates/flint-store", features = ["s3", "azure"] }
+flint-store = { path = "../crates/flint-store", features = ["s3", "azure", "gcs"] }
 # The forge syncer's own crate. The operator depends on it for ONE
 # thing: `policy::Policy`, the document `pre-receive` and the syncer
 # both read. Rendering the CR into that type rather than into hand-built

@@ -61,7 +61,8 @@ resources:
 # verbatim, or leave empty to use the pod's ambient chain (IRSA, etc).
 # For workspaces with `provider: azure`, the same Secret carries
 # AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY (or AZURE_STORAGE_SAS_TOKEN)
-# verbatim; a CR's `endpoint` is its blob endpoint.
+# verbatim; a CR's `endpoint` is its blob endpoint. For `provider: gcs`,
+# it carries FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key.
 operatorCredentialsSecret: ""
 endpoint: ""            # S3 endpoint override for the operator (MinIO rigs)
 
@@ -77,10 +78,12 @@ gateway:
   replicaCount: 2
   port: 8091
   bucket: ""
-  # s3 (default) or azure. For azure, `bucket` is the container,
+  # s3 (default), azure or gcs. For azure, `bucket` is the container,
   # `endpoint` the blob endpoint (empty: the account's own), and
   # credentialsSecret carries AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY
-  # or AZURE_STORAGE_SAS_TOKEN verbatim.
+  # or AZURE_STORAGE_SAS_TOKEN verbatim. For gcs, `endpoint` is the JSON
+  # API's (empty: Google's), and credentialsSecret carries
+  # FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key.
   provider: ""
   endpoint: ""
   # id=prefix pairs, e.g. "proj1=tenants/proj1,proj2=tenants/proj2"

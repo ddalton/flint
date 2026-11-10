@@ -66,33 +66,35 @@ fn validate_provider(spec: &FlintLeanWorkspaceSpec) -> Result<(), Refusal> {
     use crate::tier::store::Provider;
     let provider = Provider::parse(spec.provider.as_deref().unwrap_or(""))
         .map_err(|e| refuse("InvalidProvider", format!("provider: {e}")))?;
-    match provider {
-        Provider::S3 => Ok(()),
-        Provider::Gcs => Err(refuse(
-            "ProviderNotBuilt",
-            "provider gcs: the GCS backend is not built yet; s3 and azure are".into(),
+    // What the static Secret carries, for the refusal that names it.
+    let secret = match provider {
+        Provider::S3 => return Ok(()),
+        Provider::Azure => "AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY or AZURE_STORAGE_SAS_TOKEN",
+        Provider::Gcs => "FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key",
+    };
+    if spec.region.is_some() {
+        return Err(refuse(
+            "S3OnlySetting",
+            format!("region is an S3 setting; a {provider} workspace's location is its {}", match provider {
+                Provider::Gcs => "bucket's",
+                _ => "account's",
+            }),
+        ));
+    }
+    if spec.raw_reads {
+        return Err(refuse("S3OnlySetting", "rawReads is an S3 setting (it signs SigV4 by hand)".into()));
+    }
+    let mode = spec.identity.as_ref().map(|i| i.mode.as_str()).unwrap_or("");
+    match crate::s3csi::policy::CredentialMode::parse(mode) {
+        Ok(crate::s3csi::policy::CredentialMode::Static) => Ok(()),
+        _ => Err(refuse(
+            "UnsupportedIdentity",
+            format!(
+                "provider {provider} takes identity.mode static (a nodePublishSecretRef Secret with {secret}); \
+                 {:?} mints AWS credentials",
+                if mode.is_empty() { "the default (broker)" } else { mode }
+            ),
         )),
-        Provider::Azure => {
-            if spec.region.is_some() {
-                return Err(refuse("S3OnlySetting", "region is an S3 setting; an azure workspace names its account in the credential".into()));
-            }
-            if spec.raw_reads {
-                return Err(refuse("S3OnlySetting", "rawReads is an S3 setting (it signs SigV4 by hand)".into()));
-            }
-            let mode = spec.identity.as_ref().map(|i| i.mode.as_str()).unwrap_or("");
-            match crate::s3csi::policy::CredentialMode::parse(mode) {
-                Ok(crate::s3csi::policy::CredentialMode::Static) => Ok(()),
-                _ => Err(refuse(
-                    "UnsupportedIdentity",
-                    format!(
-                        "provider azure takes identity.mode static (a nodePublishSecretRef Secret with \
-                         AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY or AZURE_STORAGE_SAS_TOKEN); {:?} mints AWS \
-                         credentials",
-                        if mode.is_empty() { "the default (broker)" } else { mode }
-                    ),
-                )),
-            }
-        }
     }
 }
 
@@ -310,37 +312,40 @@ mod tests {
         );
     }
 
-    /// `provider`: absent and `s3` are today's workspace; `azure` takes the
-    /// static identity only and refuses the S3-only knobs, by name; `gcs`
-    /// is not built and a typo is not guessed.
+    /// `provider`: absent and `s3` are today's workspace; `azure` and
+    /// `gcs` take the static identity only and refuse the S3-only knobs,
+    /// by name; a typo is not guessed.
     #[test]
     fn the_provider_is_validated_with_what_its_store_cannot_honour() {
         let reason = |extra| validate_spec(&spec(extra)).err().map(|r| r.reason);
-        let azure = |more: serde_json::Value| {
-            let mut v = serde_json::json!({"provider": "azure", "identity": {"mode": "static"}});
-            for (k, val) in more.as_object().unwrap() {
-                v[k] = val.clone();
-            }
-            v
-        };
         assert_eq!(reason(serde_json::json!({"provider": "s3"})), None);
-        assert_eq!(reason(azure(serde_json::json!({}))), None);
-        assert_eq!(reason(azure(serde_json::json!({"endpoint": "http://azurite:10000/acct"}))), None);
-        assert_eq!(reason(azure(serde_json::json!({"region": "us-east-1"}))).as_deref(), Some("S3OnlySetting"));
-        assert_eq!(reason(azure(serde_json::json!({"rawReads": true}))).as_deref(), Some("S3OnlySetting"));
-        for mode in ["broker", "webIdentity", "stsSecret", "ambient"] {
+        for provider in ["azure", "gcs"] {
+            let with = |more: serde_json::Value| {
+                let mut v = serde_json::json!({"provider": provider, "identity": {"mode": "static"}});
+                for (k, val) in more.as_object().unwrap() {
+                    v[k] = val.clone();
+                }
+                v
+            };
+            assert_eq!(reason(with(serde_json::json!({}))), None, "{provider}");
+            assert_eq!(reason(with(serde_json::json!({"endpoint": "http://emulator:10000/acct"}))), None, "{provider}");
+            assert_eq!(reason(with(serde_json::json!({"region": "us-east-1"}))).as_deref(), Some("S3OnlySetting"), "{provider}");
+            assert_eq!(reason(with(serde_json::json!({"rawReads": true}))).as_deref(), Some("S3OnlySetting"), "{provider}");
+            for mode in ["broker", "webIdentity", "stsSecret", "ambient"] {
+                assert_eq!(
+                    reason(with(serde_json::json!({"identity": {"mode": mode}}))).as_deref(),
+                    Some("UnsupportedIdentity"),
+                    "{provider} {mode}"
+                );
+            }
             assert_eq!(
-                reason(azure(serde_json::json!({"identity": {"mode": mode}}))).as_deref(),
+                reason(serde_json::json!({"provider": provider})).as_deref(),
                 Some("UnsupportedIdentity"),
-                "{mode}"
+                "{provider}: no identity is the broker"
             );
         }
-        assert_eq!(
-            reason(serde_json::json!({"provider": "azure"})).as_deref(),
-            Some("UnsupportedIdentity"),
-            "no identity is the broker"
-        );
-        assert_eq!(reason(serde_json::json!({"provider": "gcs"})).as_deref(), Some("ProviderNotBuilt"));
+        let msg = validate_spec(&spec(serde_json::json!({"provider": "gcs"}))).unwrap_err().message;
+        assert!(msg.contains("FLINT_GCS_SERVICE_ACCOUNT_JSON"), "the refusal names the Secret's key: {msg}");
         assert_eq!(reason(serde_json::json!({"provider": "gcp"})).as_deref(), Some("InvalidProvider"));
     }
 

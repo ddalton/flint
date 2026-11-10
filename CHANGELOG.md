@@ -14,6 +14,35 @@ covered by the stability guarantee.
 
 ### Added
 
+- **A lean workspace can live in Google Cloud Storage** (2026-11-10;
+  phase 3 of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
+  - **The backend:** flint-store's `gcs` feature speaks the JSON API by
+    hand on the same stack as the Azure backend (no Google SDK). It
+    authorizes as a service account (a JWT signed with its key, traded for
+    a token), with a bearer token, or not at all against an emulator.
+  - **Content ETags:** as on Azure, the ETag is 128 bits of the bytes'
+    SHA-256, kept in metadata; the generation carries every condition, and
+    a 412 is re-checked against the bytes before it is reported.
+  - **Checksums:** GCS checks the CRC32C of every upload, which the client
+    computes (SSE4.2 when the CPU has it). The CRC-64/NVME lean cites
+    rides in metadata.
+  - **Large files:** each part is uploaded as its own object under
+    `<prefix>/.flint/lean/parts/`, then composed (32 sources a call,
+    nested above that) under the caller's condition, the composite's
+    CRC32C checked against the parts', and the parts deleted. The
+    operator's upload sweep finds a crashed compose's parts by age.
+  - **Copies** are a one-source compose, which sets the copy's metadata
+    outright, so a copy never carries a stamp only its source had.
+  - **The CR:** `provider: gcs` takes `identity.mode` `static` only, with
+    a `nodePublishSecretRef` Secret holding a service account's JSON key
+    as `FLINT_GCS_SERVICE_ACCOUNT_JSON`; `region` and `rawReads` are
+    refused, as on Azure. The operator and the gateway read the same key
+    from their credentials Secrets.
+  - **Builds:** every lean build names `--features s3,azure,gcs`, and
+    staging refuses a lean binary built without `gcs`.
+  - **Also:** the store contract's C6 check now requires that a copy not
+    carry a stamp only its source had, on every backend; an Azure block
+    upload is counted as a `put`, as the counters document.
 - **A lean workspace can live in Azure Blob Storage** (2026-11-10; phase 2
   of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
   - **The CR:** `FlintLeanWorkspace` gains `provider` (`s3`, the default,

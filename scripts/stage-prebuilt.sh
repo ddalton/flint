@@ -35,11 +35,12 @@ else
     date_of() { date -r "$1" "$2"; }
 fi
 
-# Whether a lean binary was built with the Azure backend: the backend's own
-# message for a missing account is in the binary only then. A build that
-# left `--features azure` off would otherwise stage cleanly and ship lean
-# that refuses `provider: azure` at start.
+# Whether a lean binary was built with the Azure and GCS backends: each
+# backend's own message for missing credentials is in the binary only
+# then. A build that left `--features azure` or `gcs` off would otherwise
+# stage cleanly and ship lean that refuses that provider at start.
 has_azure() { LC_ALL=C grep -q -a "azure: AZURE_STORAGE_ACCOUNT is not set" "$1"; }
+has_gcs() { LC_ALL=C grep -q -a "gcs: no credentials: set FLINT_GCS_SERVICE_ACCOUNT_JSON" "$1"; }
 
 here=$(cd "$(dirname "$0")" && pwd)
 crate=$(cd "$here/../spdk-csi-driver" && pwd)
@@ -295,7 +296,7 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         src="$lean_crate/target/$triple/release/$b"
         if [ ! -f "$src" ]; then
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
-            echo "            (cd lean/syncer && cargo zigbuild --release --features s3,azure \\" >&2
+            echo "            (cd lean/syncer && cargo zigbuild --release --features s3,azure,gcs \\" >&2
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
@@ -308,6 +309,10 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
             echo "  ✗ NO AZURE $arch/$b — built without --features azure (lean on Azure Blob)" >&2
             stale=1; continue
         fi
+        if ! has_gcs "$src"; then
+            echo "  ✗ NO GCS  $arch/$b — built without --features gcs (lean on Google Cloud Storage)" >&2
+            stale=1; continue
+        fi
         cp "$src" "$dest/$arch/$b"
         echo "  ✓ staged  $arch/$b  ($(date_of "$m" '+%m-%d %H:%M'), $(( $(stat_z "$src") / 1048576 )) MiB)"
     done
@@ -315,7 +320,7 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         src="$gw_crate/target/$triple/release/$b"
         if [ ! -f "$src" ]; then
             echo "  ✗ MISSING $arch/$b — build it before staging" >&2
-            echo "            (cd lean/gateway && cargo zigbuild --release --features s3,azure \\" >&2
+            echo "            (cd lean/gateway && cargo zigbuild --release --features s3,azure,gcs \\" >&2
             echo "               --target $triple)" >&2
             stale=1; continue
         fi
@@ -326,6 +331,10 @@ for arch_pair in "x86_64:amd64" "aarch64:arm64"; do
         fi
         if ! has_azure "$src"; then
             echo "  ✗ NO AZURE $arch/$b — built without --features azure (lean on Azure Blob)" >&2
+            stale=1; continue
+        fi
+        if ! has_gcs "$src"; then
+            echo "  ✗ NO GCS  $arch/$b — built without --features gcs (lean on Google Cloud Storage)" >&2
             stale=1; continue
         fi
         cp "$src" "$dest/$arch/$b"
