@@ -528,6 +528,9 @@ impl Workspace {
         // syncer's on-disk chunk cache under it: chunks are kept in memory,
         // beside the manifest cache.
         let mut cfg = LeanConfig::new(prefix, "/nonexistent");
+        // The store's naming rules decide which paths a save may name
+        // (`LeanConfig::key_fits`), as they do for the syncer.
+        cfg.provider = store.provider();
         cfg.chunk_cache = Some(manifests.chunks.clone());
         cfg.alias_cache = manifests.aliases.clone();
         Workspace { store, cfg, max_put_bytes: WHOLE_PUT_MAX, read_only: false, manifests }

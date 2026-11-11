@@ -24,6 +24,20 @@ s3 = [
     "dep:http-body-util", "dep:httpdate", "dep:aws-sigv4", "dep:aws-credential-types",
     "dep:aws-smithy-runtime-api",
 ]
+# The Azure Blob backend (`azure.rs`): the Blob REST API by hand on the
+# raw read path's stack (hyper + rustls, aws-lc-rs), Shared Key or SAS.
+# No Azure SDK (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md, D1).
+azure = [
+    "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:http",
+    "dep:http-body-util", "dep:httpdate",
+]
+# The Google Cloud Storage backend (`gcs.rs`): the JSON API by hand on
+# the same stack, a service account's key signed with rustls's aws-lc-rs
+# keys. No Google SDK (the same plan, D1).
+gcs = [
+    "dep:hyper", "dep:hyper-util", "dep:hyper-rustls", "dep:rustls", "dep:http",
+    "dep:http-body-util", "dep:httpdate",
+]
 
 [dependencies]
 libc = "0.2"

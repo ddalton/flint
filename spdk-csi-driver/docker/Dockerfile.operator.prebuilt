@@ -9,7 +9,7 @@
 #       --bin flint-lite-operator --bin flint-hub-gateway --bin flint-nfs-proxy \
 #       --bin flint-nfs-client-identity \
 #       --bin flint-lean-operator
-#     (cd ../lean/gateway && cargo zigbuild --release --features s3 \
+#     (cd ../lean/gateway && cargo zigbuild --release --features s3,azure,gcs \
 #       --target $T-unknown-linux-musl --bin flint-lean-gateway); done
 #   # stage: docker/prebuilt/amd64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy,flint-nfs-client-identity}
 #   #        docker/prebuilt/arm64/{flint-lite-operator,flint-hub-gateway,flint-nfs-proxy,flint-nfs-client-identity}

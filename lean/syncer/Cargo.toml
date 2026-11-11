@@ -36,6 +36,12 @@ categories = ["filesystem"]
 default = ["fastalloc", "http"]
 fastalloc = ["dep:mimalloc"]
 s3 = ["flint-store/s3"]
+# The Azure Blob backend (flint-store's `azure`), chosen at run time by
+# FLINT_SYNC_PROVIDER=azure. The binary still needs `s3` to build.
+azure = ["flint-store/azure"]
+# The GCS backend (flint-store's `gcs`), chosen at run time by
+# FLINT_SYNC_PROVIDER=gcs. The binary still needs `s3` to build.
+gcs = ["flint-store/gcs"]
 # The syncer binary's own HTTP endpoint (`/metrics`, warp). Off, the
 # crate is the protocol and the syncer core with no web stack at all —
 # what `flint-lean-gateway` builds against, so an embedder's backend

@@ -139,6 +139,128 @@ pub fn static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, Str
     Ok(Materialized { env, files: vec![] })
 }
 
+/// The store a lean worker's launch list names (`FLINT_SYNC_PROVIDER`,
+/// from the CR's `provider`). A passthrough mount has no launch list and
+/// is S3; so is a workspace that names none.
+pub fn provider_of(launch: Option<&BTreeMap<String, String>>) -> Result<crate::tier::store::Provider, String> {
+    crate::tier::store::Provider::parse(launch.and_then(|l| l.get("FLINT_SYNC_PROVIDER")).map(String::as_str).unwrap_or(""))
+}
+
+/// The keys a `nodePublishSecretRef` Secret carries for an Azure
+/// workspace, verbatim as the Azure tools name them: the account, and its
+/// key or a SAS token.
+pub fn azure_static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, String> {
+    let get = |k: &str| secrets.get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let account = get("AZURE_STORAGE_ACCOUNT")
+        .ok_or("nodePublishSecretRef Secret has no AZURE_STORAGE_ACCOUNT — an azure workspace's keys are AZURE_STORAGE_* verbatim")?;
+    let mut env = BTreeMap::from([("AZURE_STORAGE_ACCOUNT".to_string(), account)]);
+    match (get("AZURE_STORAGE_KEY"), get("AZURE_STORAGE_SAS_TOKEN")) {
+        (Some(key), _) => env.insert("AZURE_STORAGE_KEY".into(), key),
+        (None, Some(sas)) => env.insert("AZURE_STORAGE_SAS_TOKEN".into(), sas),
+        (None, None) => {
+            return Err("nodePublishSecretRef Secret has neither AZURE_STORAGE_KEY nor AZURE_STORAGE_SAS_TOKEN".into())
+        }
+    };
+    Ok(Materialized { env, files: vec![] })
+}
+
+/// The key a `nodePublishSecretRef` Secret carries for a GCS workspace: a
+/// service account's JSON key, inline (`kubectl create secret generic
+/// <name> --from-file=FLINT_GCS_SERVICE_ACCOUNT_JSON=key.json`). The JSON
+/// is checked for its shape here, so a wrong file fails the mount by name
+/// rather than the worker's first request.
+pub fn gcs_static_arm(secrets: &HashMap<String, String>) -> Result<Materialized, String> {
+    const KEY: &str = "FLINT_GCS_SERVICE_ACCOUNT_JSON";
+    let json = secrets.get(KEY).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).ok_or(
+        "nodePublishSecretRef Secret has no FLINT_GCS_SERVICE_ACCOUNT_JSON — a gcs workspace's Secret holds a \
+         service account's JSON key under that name",
+    )?;
+    let v: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("FLINT_GCS_SERVICE_ACCOUNT_JSON is not JSON: {e}"))?;
+    if v["type"].as_str() != Some("service_account") || v["client_email"].as_str().is_none() || v["private_key"].as_str().is_none() {
+        return Err("FLINT_GCS_SERVICE_ACCOUNT_JSON is not a service account's key (type service_account, \
+                    client_email, private_key)"
+            .into());
+    }
+    Ok(Materialized { env: BTreeMap::from([(KEY.to_string(), json)]), files: vec![] })
+}
+
+// ── workload identity on Azure and GCS ───────────────────────────────
+//
+// `identity.mode: webIdentity` on an Azure or GCS workspace: the pod's
+// own token, minted by kubelet for the provider's audience, goes into the
+// worker's `comm` dir (and is rewritten there at every republish that
+// brings a fresh one); the worker trades it itself, as the identity the
+// CR names (`FLINT_SYNC_AZURE_*`, `FLINT_SYNC_GCP_*` in the launch list).
+
+/// The audience Entra ID's federated credentials take.
+pub const AZURE_TOKEN_AUDIENCE: &str = "api://AzureADTokenExchange";
+/// The worker's Google credential config, beside its token.
+pub const GCP_CREDENTIALS_FILE: &str = "gcp-credentials.json";
+
+/// The audience the pod's token must carry for `provider`'s federation.
+pub fn federated_audience(
+    provider: crate::tier::store::Provider,
+    launch: Option<&BTreeMap<String, String>>,
+) -> Result<String, String> {
+    use crate::tier::store::Provider;
+    match provider {
+        Provider::Azure => Ok(AZURE_TOKEN_AUDIENCE.into()),
+        Provider::Gcs => launch
+            .and_then(|l| l.get("FLINT_SYNC_GCP_TOKEN_AUDIENCE"))
+            .filter(|a| !a.is_empty())
+            .cloned()
+            .ok_or_else(|| "the workspace names no identity.gcp.audience".into()),
+        Provider::S3 => Err("an S3 workspace's webIdentity goes through the broker".into()),
+    }
+}
+
+fn launch_get<'a>(launch: Option<&'a BTreeMap<String, String>>, k: &str) -> Option<&'a String> {
+    launch.and_then(|l| l.get(k)).filter(|v| !v.is_empty())
+}
+
+/// What the Azure SDKs and flint-store read for workload identity, the
+/// variables the AKS webhook would have set: the identity, and the token
+/// file the plugin keeps fresh.
+pub fn azure_federated_arm(launch: Option<&BTreeMap<String, String>>, token: &str) -> Result<Materialized, String> {
+    let need = |k: &str, field: &str| launch_get(launch, k).cloned().ok_or_else(|| format!("the workspace names no identity.azure.{field}"));
+    let mut env = BTreeMap::from([
+        ("AZURE_TENANT_ID".to_string(), need("FLINT_SYNC_AZURE_TENANT_ID", "tenantId")?),
+        ("AZURE_CLIENT_ID".to_string(), need("FLINT_SYNC_AZURE_CLIENT_ID", "clientId")?),
+        ("AZURE_FEDERATED_TOKEN_FILE".to_string(), format!("{COMM_MOUNT}/{TOKEN_FILE}")),
+    ]);
+    if let Some(host) = launch_get(launch, "FLINT_SYNC_AZURE_AUTHORITY_HOST") {
+        env.insert("AZURE_AUTHORITY_HOST".into(), host.clone());
+    }
+    Ok(Materialized { env, files: vec![CommFile { name: TOKEN_FILE.into(), bytes: token.as_bytes().to_vec(), mode: 0o600 }] })
+}
+
+/// Google's `external_account` credential config, as `gcloud iam
+/// workload-identity-pools create-cred-config --credential-source-file`
+/// writes it, pointing at the token file the plugin keeps fresh.
+pub fn gcs_federated_arm(launch: Option<&BTreeMap<String, String>>, token: &str) -> Result<Materialized, String> {
+    let audience = launch_get(launch, "FLINT_SYNC_GCP_AUDIENCE").ok_or("the workspace names no identity.gcp.audience")?;
+    let mut config = serde_json::json!({
+        "type": "external_account",
+        "audience": audience,
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": "https://sts.googleapis.com/v1/token",
+        "credential_source": { "file": format!("{COMM_MOUNT}/{TOKEN_FILE}"), "format": { "type": "text" } },
+    });
+    if let Some(sa) = launch_get(launch, "FLINT_SYNC_GCP_SERVICE_ACCOUNT") {
+        config["service_account_impersonation_url"] = serde_json::Value::String(format!(
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa}:generateAccessToken"
+        ));
+    }
+    Ok(Materialized {
+        env: BTreeMap::from([("GOOGLE_APPLICATION_CREDENTIALS".to_string(), format!("{COMM_MOUNT}/{GCP_CREDENTIALS_FILE}"))]),
+        files: vec![
+            CommFile { name: TOKEN_FILE.into(), bytes: token.as_bytes().to_vec(), mode: 0o600 },
+            CommFile { name: GCP_CREDENTIALS_FILE.into(), bytes: serde_json::to_vec_pretty(&config).expect("json"), mode: 0o600 },
+        ],
+    })
+}
+
 // ── stsSecret: a controller-fed, expiring credential ─────────────────
 //
 // The Secret a controller (awc-docs PR #136's receiver, or anything that
@@ -898,6 +1020,84 @@ mod tests {
 
 
 
+
+    #[test]
+    fn the_azure_static_arm_takes_the_account_and_a_key_or_a_sas() {
+        let s = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+        let e = azure_static_arm(&s(&[("AZURE_STORAGE_KEY", "k")])).unwrap_err();
+        assert!(e.contains("AZURE_STORAGE_ACCOUNT"), "{e}");
+        let e = azure_static_arm(&s(&[("AZURE_STORAGE_ACCOUNT", "a")])).unwrap_err();
+        assert!(e.contains("AZURE_STORAGE_KEY") && e.contains("SAS"), "{e}");
+        let m = azure_static_arm(&s(&[("AZURE_STORAGE_ACCOUNT", "a"), ("AZURE_STORAGE_KEY", "k"), ("AWS_ACCESS_KEY_ID", "x")])).unwrap();
+        assert_eq!(m.env.keys().collect::<Vec<_>>(), ["AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_KEY"], "AWS keys stay behind");
+        let m = azure_static_arm(&s(&[("AZURE_STORAGE_ACCOUNT", "a"), ("AZURE_STORAGE_SAS_TOKEN", "sv=1&sig=x")])).unwrap();
+        assert_eq!(m.env.get("AZURE_STORAGE_SAS_TOKEN").map(String::as_str), Some("sv=1&sig=x"));
+    }
+
+    #[test]
+    fn the_gcs_static_arm_takes_a_service_accounts_key_and_nothing_else() {
+        let s = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<HashMap<_, _>>();
+        let e = gcs_static_arm(&s(&[("AWS_ACCESS_KEY_ID", "x")])).unwrap_err();
+        assert!(e.contains("FLINT_GCS_SERVICE_ACCOUNT_JSON"), "{e}");
+        let e = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", "{not json")])).unwrap_err();
+        assert!(e.contains("not JSON"), "{e}");
+        let user = r#"{"type":"authorized_user","client_id":"c"}"#;
+        let e = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", user)])).unwrap_err();
+        assert!(e.contains("service account"), "{e}");
+        // The shape only; the key itself is the store's to parse.
+        let key = r#"{"type":"service_account","client_email":"a@p.iam.gserviceaccount.com","private_key":"(a PEM key)"}"#;
+        let m = gcs_static_arm(&s(&[("FLINT_GCS_SERVICE_ACCOUNT_JSON", key), ("AWS_SECRET_ACCESS_KEY", "x")])).unwrap();
+        assert_eq!(m.env.keys().collect::<Vec<_>>(), ["FLINT_GCS_SERVICE_ACCOUNT_JSON"], "AWS keys stay behind");
+        assert!(m.files.is_empty());
+    }
+
+    #[test]
+    fn the_federated_arms_hand_the_worker_its_token_and_whom_to_trade_it_as() {
+        use crate::tier::store::Provider;
+        let launch = |kv: &[(&str, &str)]| kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+        let az = launch(&[("FLINT_SYNC_AZURE_TENANT_ID", "t"), ("FLINT_SYNC_AZURE_CLIENT_ID", "c")]);
+        let m = azure_federated_arm(Some(&az), "pod-token").unwrap();
+        assert_eq!(m.env["AZURE_TENANT_ID"], "t");
+        assert_eq!(m.env["AZURE_CLIENT_ID"], "c");
+        assert_eq!(m.env["AZURE_FEDERATED_TOKEN_FILE"], "/comm/token");
+        assert!(!m.env.contains_key("AZURE_AUTHORITY_HOST"));
+        assert_eq!((m.files[0].name.as_str(), m.files[0].bytes.as_slice(), m.files[0].mode), ("token", &b"pod-token"[..], 0o600));
+        assert!(azure_federated_arm(Some(&launch(&[("FLINT_SYNC_AZURE_TENANT_ID", "t")])), "x").unwrap_err().contains("clientId"));
+        assert_eq!(federated_audience(Provider::Azure, None).unwrap(), "api://AzureADTokenExchange");
+
+        let aud = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k";
+        let g = launch(&[("FLINT_SYNC_GCP_AUDIENCE", aud), ("FLINT_SYNC_GCP_TOKEN_AUDIENCE", "https:x"), ("FLINT_SYNC_GCP_SERVICE_ACCOUNT", "lean@p.iam.gserviceaccount.com")]);
+        assert_eq!(federated_audience(Provider::Gcs, Some(&g)).unwrap(), "https:x");
+        assert!(federated_audience(Provider::Gcs, None).is_err());
+        let m = gcs_federated_arm(Some(&g), "ksa-token").unwrap();
+        assert_eq!(m.env["GOOGLE_APPLICATION_CREDENTIALS"], "/comm/gcp-credentials.json");
+        assert_eq!(m.files[0].bytes, b"ksa-token");
+        let config: serde_json::Value = serde_json::from_slice(&m.files[1].bytes).unwrap();
+        assert_eq!(config["type"], "external_account");
+        assert_eq!(config["audience"], aud);
+        assert_eq!(config["credential_source"]["file"], "/comm/token");
+        assert_eq!(
+            config["service_account_impersonation_url"],
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/lean@p.iam.gserviceaccount.com:generateAccessToken"
+        );
+        let direct = gcs_federated_arm(Some(&launch(&[("FLINT_SYNC_GCP_AUDIENCE", aud)])), "t").unwrap();
+        let config: serde_json::Value = serde_json::from_slice(&direct.files[1].bytes).unwrap();
+        assert!(config.get("service_account_impersonation_url").is_none());
+    }
+
+    #[test]
+    fn a_launch_list_names_its_provider_and_none_is_s3() {
+        use crate::tier::store::Provider;
+        assert_eq!(provider_of(None), Ok(Provider::S3));
+        let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "azure".to_string())]);
+        assert_eq!(provider_of(Some(&l)), Ok(Provider::Azure));
+        let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "gcs".to_string())]);
+        assert_eq!(provider_of(Some(&l)), Ok(Provider::Gcs));
+        let l = BTreeMap::from([("FLINT_SYNC_ROOT".to_string(), "/w".to_string())]);
+        assert_eq!(provider_of(Some(&l)), Ok(Provider::S3));
+        let l = BTreeMap::from([("FLINT_SYNC_PROVIDER".to_string(), "gcp".to_string())]);
+        assert!(provider_of(Some(&l)).is_err());
+    }
 
     #[test]
     fn static_arm_needs_both_keys_and_passes_region() {

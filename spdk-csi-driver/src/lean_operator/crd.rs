@@ -43,9 +43,24 @@ pub struct FlintLeanWorkspaceSpec {
     pub project_id: String,
 
     /// Bucket and subtree prefix (the proxy's tenancy boundary —
-    /// project-granular per plan §9 Q6).
+    /// project-granular per plan §9 Q6). On Azure, `bucket` is the
+    /// container.
     pub bucket: String,
     pub key_prefix: String,
+
+    /// The object store `bucket` lives in: `s3` (the default, and any
+    /// store that speaks S3's API through `endpoint`), `azure` (Azure
+    /// Blob Storage) or `gcs` (Google Cloud Storage). On either of the
+    /// last two, `identity.mode` must be `static`, and `region` and
+    /// `rawReads` are refused. On Azure the account comes from the
+    /// credential (`AZURE_STORAGE_ACCOUNT`), and `endpoint` is the blob
+    /// endpoint (unset: the account's own,
+    /// `https://<account>.blob.core.windows.net`). On GCS the credential is
+    /// a service account's JSON key (`FLINT_GCS_SERVICE_ACCOUNT_JSON`), and
+    /// `endpoint` is the JSON API's (unset: `https://storage.googleapis.com`)
+    /// (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md, phases 2 and 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 
     /// S3 endpoint override (the deployment proxy; MinIO rigs). None =
     /// ambient AWS endpoint resolution.

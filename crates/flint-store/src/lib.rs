@@ -9,8 +9,12 @@
 //!   conditional semantics (412/409, stamps, CRC validation, MPU
 //!   state, epoch CAS). Every backend-neutral tier test runs here.
 //! - `s3` — MPU + UploadPartCopy + conditional PUT/Complete per A6/A8.
-//! - Azure Blob (second, per A13): Put Block List with committed-block
-//!   reuse and NATIVE leases for the epoch. GCS later.
+//! - Azure Blob, then GCS: not built yet. Their plan is
+//!   `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`: the epoch
+//!   stays a CAS on the cell's body (not Azure's native leases, whose id
+//!   does not change at a renewal), and each presents content ETags.
+//!   [`Provider`] names the store and the object names it takes;
+//!   [`connect::connect`] builds one from a [`connect::StoreSpec`].
 //!
 //! Contract points the signatures enforce:
 //!
@@ -41,6 +45,10 @@ pub use counters::{RequestCounter, RequestCounts, RequestKind};
 pub mod layout;
 pub mod memory;
 pub mod probe;
+pub mod provider;
+pub use provider::{Provider, MAX_KEY_BYTES};
+pub mod connect;
+pub use connect::StoreSpec;
 pub mod readonly;
 
 pub use readonly::ReadOnly;
@@ -48,6 +56,14 @@ pub use readonly::ReadOnly;
 pub mod s3;
 #[cfg(feature = "s3")]
 pub mod rawread;
+#[cfg(feature = "azure")]
+pub mod azure;
+#[cfg(feature = "gcs")]
+pub mod gcs;
+#[cfg(any(feature = "azure", feature = "gcs"))]
+mod rest;
+#[cfg_attr(not(any(feature = "azure", feature = "gcs")), allow(dead_code))]
+mod cell;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -1028,8 +1044,10 @@ pub trait ObjectStore: Send + Sync {
     /// probes stay under the tier's namespace.
     async fn bootstrap(&self, prefix: &str) -> StoreResult<BootstrapReport>;
 
-    // Epoch (A8). S3 implements CAS re-PUT on the epoch object; Azure
-    // will use native blob leases (strictly better — A13).
+    // Epoch (A8). S3 implements CAS re-PUT on the epoch object, and so
+    // will Azure and GCS: a holder is judged dead when the cell's token
+    // stops changing, and an Azure blob lease keeps one id across its
+    // renewals (A13 proposed native leases; the 2026-11-10 plan, §4).
 
     async fn epoch_read(&self, key: &str) -> StoreResult<Option<EpochState>>;
 
@@ -1119,6 +1137,13 @@ pub trait ObjectStore: Send + Sync {
     /// (`counters.rs`). `None` = a store that does not count.
     fn request_counts(&self) -> Option<RequestCounts> {
         None
+    }
+
+    /// Which store this is: what lean asks before it names an object
+    /// ([`Provider::key_ok`]). A wrapper must forward it, or an Azure
+    /// store behind it is judged by S3's rules.
+    fn provider(&self) -> Provider {
+        Provider::S3
     }
 }
 

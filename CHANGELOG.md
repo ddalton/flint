@@ -12,6 +12,129 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **Faster bulk paths on Azure and GCS** (2026-11-10).
+  - **Bulk deletes** run 32 at a time on both. Neither store has S3's
+    one-request DeleteObjects, and one after another a thousand deletes
+    (what lean's collector does between two lease renewals) could take
+    long enough for a waiter to judge the holder dead.
+  - **Azure large files** upload their blocks `part_parallelism` at a time,
+    as S3 and GCS do, instead of one after another.
+  - **A GCS object a client has not seen yet** is read in one round trip:
+    its metadata and its bytes are asked for at once, and kept only when
+    both name one generation. A seen one is one guarded GET.
+- **Lean on Azure and GCS without a stored key: workload identity**
+  (2026-11-10; phase 4 of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
+  - **`identity.mode: webIdentity`** on an `azure` or `gcs` workspace hands
+    the worker the pod's own ServiceAccount token, minted by kubelet for
+    the provider's audience and refreshed at every republish. The worker
+    trades it as the identity the CR names: `identity.azure.tenantId` and
+    `clientId` (Entra ID's federated credential), or `identity.gcp.audience`
+    and an optional `serviceAccount` (Workload Identity Federation, then
+    impersonation). List the provider's audience in the flint-s3-csi
+    chart's new `driver.extraTokenAudiences`.
+  - **`identity.mode: ambient`** uses the worker's own identity: the VM's
+    managed identity on Azure, the metadata server on GKE or GCE.
+  - **Refused, by name:** a webIdentity workspace missing its provider
+    block, an Azure workspace with a token but no `endpoint` to name its
+    account, and a provider block for another provider.
+  - **flint-store** authorizes Azure with Entra ID tokens (client
+    assertion, or the instance metadata service) and GCS with
+    `external_account` configs or the metadata server, each picked from
+    the environment in its SDK's order. The operator and the gateway use
+    the same chain, so they too can run on their pod's identity.
+  - **Tests:** the store contract passes on Azurite over HTTPS with OAuth
+    (a token for another audience is refused) and on storage-testbench;
+    the real syncer, configured only by the environment a worker gets,
+    publishes and checks out through each flow against stand-in identity
+    providers. Real AKS and GKE clusters are not tested yet.
+- **A lean workspace can live in Google Cloud Storage** (2026-11-10;
+  phase 3 of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
+  - **The backend:** flint-store's `gcs` feature speaks the JSON API by
+    hand on the same stack as the Azure backend (no Google SDK). It
+    authorizes as a service account (a JWT signed with its key, traded for
+    a token), with a bearer token, or not at all against an emulator.
+  - **Content ETags:** as on Azure, the ETag is 128 bits of the bytes'
+    SHA-256, kept in metadata; the generation carries every condition, and
+    a 412 is re-checked against the bytes before it is reported.
+  - **Checksums:** GCS checks the CRC32C of every upload, which the client
+    computes (SSE4.2 when the CPU has it). The CRC-64/NVME lean cites
+    rides in metadata.
+  - **Large files:** each part is uploaded as its own object under
+    `<prefix>/.flint/lean/parts/`, then composed (32 sources a call,
+    nested above that) under the caller's condition, the composite's
+    CRC32C checked against the parts', and the parts deleted. The
+    operator's upload sweep finds a crashed compose's parts by age.
+  - **Copies** are a one-source compose, which sets the copy's metadata
+    outright, so a copy never carries a stamp only its source had.
+  - **The CR:** `provider: gcs` takes `identity.mode` `static` only, with
+    a `nodePublishSecretRef` Secret holding a service account's JSON key
+    as `FLINT_GCS_SERVICE_ACCOUNT_JSON`; `region` and `rawReads` are
+    refused, as on Azure. The operator and the gateway read the same key
+    from their credentials Secrets.
+  - **Builds:** every lean build names `--features s3,azure,gcs`, and
+    staging refuses a lean binary built without `gcs`.
+  - **Also:** the store contract's C6 check now requires that a copy not
+    carry a stamp only its source had, on every backend; an Azure block
+    upload is counted as a `put`, as the counters document.
+- **A lean workspace can live in Azure Blob Storage** (2026-11-10; phase 2
+  of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
+  - **The CR:** `FlintLeanWorkspace` gains `provider` (`s3`, the default,
+    or `azure`; `gcs` is refused as not built yet). On Azure, `bucket` is
+    the container and `endpoint` the blob endpoint.
+  - **Refused on Azure, by name:** every `identity.mode` but `static`,
+    because the others mint AWS credentials, and the S3-only `region`
+    and `rawReads`. The pod's `nodePublishSecretRef` carries
+    `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY` or
+    `AZURE_STORAGE_SAS_TOKEN` verbatim. The node plugin refuses any other
+    arm for an Azure workspace as well.
+  - **Operator and gateway:** the operator connects per provider. The
+    gateway takes `gateway.provider`, and its credentials Secret carries
+    the same keys.
+  - **Builds:** the syncer, gateway and operator are built with the
+    `azure` feature, and staging refuses a lean binary built without it.
+  - **Tests:** local multi-writer storms against Azurite
+    (`storm-local.sh` `STORE=azurite`) ran healthy in every mode, the
+    gateway's UI writes included, and every writer's store probe found
+    conditional PUT and DELETE enforced. The `hot` leg's trace replays
+    against LeanP1 (`storm-check.sh`, 693 steps), and every mutation of
+    it is rejected. The replay joins an agent's write to its upload by
+    the store's ETag, which on Azure is the first 128 bits of the bytes'
+    SHA-256.
+- **flint-store has an Azure Blob backend** (2026-11-10; phase 1 of
+  `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`), behind the
+  `azure` feature. It speaks the Blob REST API by hand on the stack the
+  raw read path uses (hyper and rustls, no Azure SDK), and authorizes with
+  Shared Key or SAS.
+  - **Content ETags:** the ETags it hands out are content hashes (128 bits
+    of SHA-256, kept in blob metadata), so equal ETags mean equal bytes, as
+    lean assumes (C3). Azure's own ETag carries every condition, and a 412
+    is re-checked against the bytes before it is reported.
+  - **CRC:** the CRC-64/NVME rides in metadata, since Azure keeps none.
+  - **Lease:** the epoch cell is a compare-and-swap on its body, not an
+    Azure blob lease.
+  - **Not yet:** byte-range server-side copies, batch delete, presigned
+    URLs and Entra ID tokens. Lean does not select it yet (phase 2).
+  - **Tests:** it passes the store contract against Azurite 3.37.0 with no
+    skips. That run includes a second client holding stale tokens, and a
+    control that a wrong key is refused. CI now runs that leg against an
+    account it creates with a fresh key on each run.
+- **Lean names its object store** (2026-11-10; phase 0 of
+  `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`). The syncer
+  and the gateway take `FLINT_SYNC_PROVIDER` / `FLINT_LEAN_GW_PROVIDER`
+  (`s3`, the default, `azure` or `gcs`), and they and the lean operator
+  build their store through one factory in flint-store. Only S3 is built:
+  `azure` or `gcs` refuses at start, by name. On S3 nothing changes. Each
+  store's object-name rules now decide which paths lean publishes: a path
+  the store would refuse is held by the barrier and refused by the
+  gateway, as one too long for a key already was (L-145). S3's only rule
+  is still the length. `crates/flint-store/tests/contract.rs` holds the
+  store contract lean relies on (C1-C8) as tests: the memory double passes
+  it, and so does MinIO, except `If-Match` on DELETE (known) and
+  `If-None-Match` on a copy's destination (found here; lean does not
+  rest on either).
+
 ### Changed
 
 - **spdk-tgt is built on SPDK v26.09** (2026-11-02;

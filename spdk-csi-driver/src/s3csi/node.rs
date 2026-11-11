@@ -850,7 +850,54 @@ impl S3Node {
         st: &mut VolumeState,
         secrets: &HashMap<String, String>,
     ) -> Result<Materialized, Status> {
+        // An Azure or GCS workspace takes the static, webIdentity and
+        // ambient arms: broker and stsSecret mint or carry AWS credentials.
+        // The operator refuses the CR first (`validate_spec`); this is the
+        // node's own check.
+        use crate::tier::store::Provider;
+        let provider = creds::provider_of(st.sync_env.as_ref()).map_err(Status::failed_precondition)?;
+        if provider != Provider::S3 && matches!(mode, CredentialMode::Broker | CredentialMode::StsSecret) {
+            return Err(Status::failed_precondition(format!(
+                "provider {provider} takes identity.mode static, webIdentity or ambient; {} mints AWS credentials",
+                mode.as_str()
+            )));
+        }
         match mode {
+            // The pod's own token, for the provider's audience: the worker
+            // trades it at Entra ID or Google's STS. No broker.
+            CredentialMode::WebIdentity if provider != Provider::S3 => {
+                let audience = creds::federated_audience(provider, st.sync_env.as_ref()).map_err(Status::failed_precondition)?;
+                let Some(token) = pr.tokens.get(&audience) else {
+                    return Err(Status::failed_precondition(format!(
+                        "identity.mode webIdentity on a {provider} workspace needs the pod's token for audience \
+                         {audience}, and kubelet delivered none — CSIDriver {DRIVER_NAME} must declare it in \
+                         tokenRequests (the flint-s3-csi chart's driver.extraTokenAudiences)"
+                    )));
+                };
+                st.token_expiration = Some(token.expiration.clone());
+                let arm = match provider {
+                    Provider::Gcs => creds::gcs_federated_arm(st.sync_env.as_ref(), &token.token),
+                    _ => creds::azure_federated_arm(st.sync_env.as_ref(), &token.token),
+                };
+                arm.map_err(Status::failed_precondition)
+            }
+            CredentialMode::Static if provider != Provider::S3 => {
+                if secrets.is_empty() {
+                    let keys = match provider {
+                        Provider::Gcs => "FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key",
+                        _ => "AZURE_STORAGE_* keys verbatim",
+                    };
+                    return Err(Status::failed_precondition(format!(
+                        "identity.mode is static, but the pod's volume names no nodePublishSecretRef (a Secret \
+                         in the pod's namespace with {keys})"
+                    )));
+                }
+                let arm = match provider {
+                    Provider::Gcs => creds::gcs_static_arm(secrets),
+                    _ => creds::azure_static_arm(secrets),
+                };
+                arm.map_err(Status::failed_precondition)
+            }
             CredentialMode::Static => {
                 if secrets.is_empty() {
                     return Err(Status::failed_precondition(
@@ -1678,7 +1725,22 @@ impl S3Node {
             // Exhaustive over the mode on purpose: `static` sat under a
             // wildcard here and was the one arm that never refreshed
             // (docs/plans/passthrough-sts-secret-mode.md).
+            let provider = creds::provider_of(st.sync_env.as_ref()).unwrap_or_default();
             match (CredentialMode::parse(&st.credential_mode).unwrap_or(CredentialMode::Ambient), pr.token.as_ref()) {
+                // An Azure or GCS workspace's own federation: the fresh
+                // token for the provider's audience, and no broker.
+                (CredentialMode::WebIdentity, _) if provider != crate::tier::store::Provider::S3 => {
+                    let fresh = creds::federated_audience(provider, st.sync_env.as_ref()).ok().and_then(|a| pr.tokens.get(&a));
+                    if let Some(token) = fresh {
+                        if st.token_expiration.as_deref() != Some(token.expiration.as_str()) {
+                            let f = creds::CommFile { name: creds::TOKEN_FILE.into(), bytes: token.token.as_bytes().to_vec(), mode: 0o600 };
+                            if creds::write_files(&comm, &[f], worker_owner(&st)).is_ok() {
+                                st.token_expiration = Some(token.expiration.clone());
+                                changed = true;
+                            }
+                        }
+                    }
+                }
                 (CredentialMode::WebIdentity, Some(token)) => {
                     let rotated = st.token_expiration.as_deref() != Some(token.expiration.as_str());
                     if rotated {

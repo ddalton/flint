@@ -59,6 +59,14 @@ resources:
 # bucket-wide MPU sweep) run as THIS identity, never as a workspace's
 # scoped syncer credentials. Point it at a Secret with AWS_* keys
 # verbatim, or leave empty to use the pod's ambient chain (IRSA, etc).
+# For workspaces with `provider: azure`, the same Secret carries
+# AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY (or AZURE_STORAGE_SAS_TOKEN)
+# verbatim; a CR's `endpoint` is its blob endpoint. For `provider: gcs`,
+# it carries FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key.
+# Left empty on Azure or GCS, the operator and the gateway use their own
+# pod's identity: AZURE_FEDERATED_TOKEN_FILE and friends where the AKS
+# workload identity webhook set them, else the VM's managed identity; on
+# GCS, GOOGLE_APPLICATION_CREDENTIALS, else the metadata server (GKE).
 operatorCredentialsSecret: ""
 endpoint: ""            # S3 endpoint override for the operator (MinIO rigs)
 
@@ -74,6 +82,13 @@ gateway:
   replicaCount: 2
   port: 8091
   bucket: ""
+  # s3 (default), azure or gcs. For azure, `bucket` is the container,
+  # `endpoint` the blob endpoint (empty: the account's own), and
+  # credentialsSecret carries AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY
+  # or AZURE_STORAGE_SAS_TOKEN verbatim. For gcs, `endpoint` is the JSON
+  # API's (empty: Google's), and credentialsSecret carries
+  # FLINT_GCS_SERVICE_ACCOUNT_JSON, a service account's JSON key.
+  provider: ""
   endpoint: ""
   # id=prefix pairs, e.g. "proj1=tenants/proj1,proj2=tenants/proj2"
   workspaces: ""

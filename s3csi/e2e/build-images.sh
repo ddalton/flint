@@ -34,7 +34,7 @@ echo "building for $ARCH ($TRIPLE), tag $TAG ($OUT)"
 # RELEASED syncer and no change to lean/syncer is visible to the drill
 # at all. That was true until 2026-09-03 and is exactly the kind of
 # silent staleness the stage-prebuilt guard exists to prevent elsewhere.
-( cd lean/syncer && cargo zigbuild --release --target "$TRIPLE" --features s3 --bin flint-sync )
+( cd lean/syncer && cargo zigbuild --release --target "$TRIPLE" --features s3,azure,gcs --bin flint-sync )
 
 STAGE=spdk-csi-driver/docker/prebuilt/$ARCH
 mkdir -p "$STAGE"

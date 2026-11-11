@@ -64,6 +64,32 @@ pub fn sync_env(ws: &FlintLeanWorkspace, root: &str) -> Vec<(String, String)> {
         // One of the only two labels any series carries (D15).
         p("FLINT_SYNC_WORKSPACE", ws.name_any()),
     ];
+    // Only when the CR names one, so an S3 workspace's launch list is
+    // what it was before providers existed.
+    if let Some(provider) = &s.provider {
+        env.push(p("FLINT_SYNC_PROVIDER", provider.clone()));
+    }
+    // The workload identity an Azure or GCS workspace trades its pod's
+    // token as (`identity.mode: webIdentity`): names, not secrets. The
+    // node plugin turns them into the worker's AZURE_* variables or its
+    // Google credential config (`creds::azure_federated_arm`,
+    // `creds::gcs_federated_arm`). Stamped only when the CR names them.
+    if let Some(id) = &s.identity {
+        if let Some(a) = &id.azure {
+            env.push(p("FLINT_SYNC_AZURE_TENANT_ID", a.tenant_id.clone()));
+            env.push(p("FLINT_SYNC_AZURE_CLIENT_ID", a.client_id.clone()));
+            if let Some(host) = &a.authority_host {
+                env.push(p("FLINT_SYNC_AZURE_AUTHORITY_HOST", host.clone()));
+            }
+        }
+        if let Some(g) = &id.gcp {
+            env.push(p("FLINT_SYNC_GCP_AUDIENCE", g.audience.clone()));
+            env.push(p("FLINT_SYNC_GCP_TOKEN_AUDIENCE", g.token_audience()));
+            if let Some(sa) = &g.service_account {
+                env.push(p("FLINT_SYNC_GCP_SERVICE_ACCOUNT", sa.clone()));
+            }
+        }
+    }
     if let Some(endpoint) = &s.endpoint {
         env.push(p("FLINT_SYNC_ENDPOINT", endpoint.clone()));
     }
@@ -135,6 +161,51 @@ mod tests {
             .unwrap(),
         );
         assert!(!sync_env(&ws, "/workspace").iter().any(|(k, _)| k == "FLINT_SYNC_REGION"));
+    }
+
+    /// The provider is stamped only when the CR names one, so an S3
+    /// workspace's launch list is the one it had before providers existed.
+    #[test]
+    fn the_provider_is_stamped_only_when_named() {
+        assert!(!sync_env(&ws(), "/workspace").iter().any(|(k, _)| k == "FLINT_SYNC_PROVIDER"));
+        let ws = FlintLeanWorkspace::new(
+            "proj3",
+            serde_json::from_value::<FlintLeanWorkspaceSpec>(serde_json::json!({
+                "projectId": "team-a/proj3", "bucket": "agentws", "keyPrefix": "tenants/proj3", "provider": "azure",
+            }))
+            .unwrap(),
+        );
+        let env = sync_env(&ws, "/workspace");
+        assert_eq!(env.iter().find(|(k, _)| k == "FLINT_SYNC_PROVIDER").map(|(_, v)| v.as_str()), Some("azure"));
+        assert!(!env.iter().any(|(k, _)| k.starts_with("FLINT_SYNC_AZURE_") || k.starts_with("FLINT_SYNC_GCP_")));
+    }
+
+    /// A workload identity's names ride the launch list, the token's
+    /// audience resolved; a CR that names none adds nothing.
+    #[test]
+    fn a_workload_identity_is_stamped_by_name() {
+        let ws_of = |v: serde_json::Value| {
+            let mut spec = serde_json::json!({"projectId": "team-a/p", "bucket": "b", "keyPrefix": "t/p"});
+            for (k, val) in v.as_object().unwrap() {
+                spec[k] = val.clone();
+            }
+            FlintLeanWorkspace::new("p", serde_json::from_value::<FlintLeanWorkspaceSpec>(spec).unwrap())
+        };
+        let get = |env: &[(String, String)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let env = sync_env(
+            &ws_of(serde_json::json!({"provider": "azure", "identity": {"mode": "webIdentity", "azure": {"tenantId": "t", "clientId": "c"}}})),
+            "/w",
+        );
+        assert_eq!((get(&env, "FLINT_SYNC_AZURE_TENANT_ID").as_deref(), get(&env, "FLINT_SYNC_AZURE_CLIENT_ID").as_deref()), (Some("t"), Some("c")));
+        assert_eq!(get(&env, "FLINT_SYNC_AZURE_AUTHORITY_HOST"), None);
+        let aud = "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k";
+        let env = sync_env(
+            &ws_of(serde_json::json!({"provider": "gcs", "identity": {"mode": "webIdentity", "gcp": {"audience": aud, "serviceAccount": "lean@p.iam.gserviceaccount.com"}}})),
+            "/w",
+        );
+        assert_eq!(get(&env, "FLINT_SYNC_GCP_AUDIENCE").as_deref(), Some(aud));
+        assert_eq!(get(&env, "FLINT_SYNC_GCP_TOKEN_AUDIENCE"), Some(format!("https:{aud}")));
+        assert_eq!(get(&env, "FLINT_SYNC_GCP_SERVICE_ACCOUNT").as_deref(), Some("lean@p.iam.gserviceaccount.com"));
     }
 
     /// Budget grows with the inventory and never drops below the floor.

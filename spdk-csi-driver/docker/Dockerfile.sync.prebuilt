@@ -4,7 +4,7 @@
 # Dockerfile.operator.prebuilt.
 #
 #   for T in x86_64 aarch64; do
-#     (cd ../lean/syncer && cargo zigbuild --release --features s3 \
+#     (cd ../lean/syncer && cargo zigbuild --release --features s3,azure,gcs \
 #       --target $T-unknown-linux-musl --bin flint-sync); done
 #   # stage: docker/prebuilt/{amd64,arm64}/flint-sync
 #   for A in amd64 arm64; do

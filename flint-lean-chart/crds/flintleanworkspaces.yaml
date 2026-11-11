@@ -42,7 +42,8 @@ spec:
               bucket:
                 description: |-
                   Bucket and subtree prefix (the proxy's tenancy boundary —
-                  project-granular per plan §9 Q6).
+                  project-granular per plan §9 Q6). On Azure, `bucket` is the
+                  container.
                 type: string
               consumers:
                 description: |-
@@ -160,6 +161,52 @@ spec:
                 description: 'CSI delivery: how the syncer gets its credential (design §4.4).'
                 nullable: true
                 properties:
+                  azure:
+                    description: |-
+                      Azure workload identity, for `mode: webIdentity` on an `azure`
+                      workspace.
+                    nullable: true
+                    properties:
+                      authorityHost:
+                        description: |-
+                          Entra ID's host in another cloud; unset: the public cloud's,
+                          `https://login.microsoftonline.com`.
+                        nullable: true
+                        type: string
+                      clientId:
+                        type: string
+                      tenantId:
+                        type: string
+                    required:
+                    - clientId
+                    - tenantId
+                    type: object
+                  gcp:
+                    description: |-
+                      GCP Workload Identity Federation, for `mode: webIdentity` on a
+                      `gcs` workspace.
+                    nullable: true
+                    properties:
+                      audience:
+                        description: |-
+                          The provider, as the STS names it:
+                          `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
+                        type: string
+                      serviceAccount:
+                        description: |-
+                          A service account to impersonate (its email). Unset: the
+                          federated principal itself holds the bucket's role.
+                        nullable: true
+                        type: string
+                      tokenAudience:
+                        description: |-
+                          The audience of the pod's token: one the provider allows. Unset:
+                          the provider's default, `https:` and then `audience`.
+                        nullable: true
+                        type: string
+                    required:
+                    - audience
+                    type: object
                   mode:
                     default: broker
                     description: |-
@@ -176,6 +223,13 @@ spec:
                       worker's door and replaced in place on republish under the
                       generation rules (`creds::sts_replace_decision`).
                       `ambient`: nothing; the worker's own AWS chain.
+
+                      On a lean workspace in Azure or GCS (`provider`), only `static`,
+                      `webIdentity` and `ambient` are taken. `webIdentity` there hands the
+                      worker the pod's own token for the provider's audience, which it
+                      trades for a storage token as the identity named below; `ambient`
+                      is the worker's own: a VM's managed identity on Azure, the metadata
+                      server on GKE or GCE.
                     type: string
                 type: object
               image:
@@ -244,6 +298,21 @@ spec:
                   carries (plan P1). Stable across CR delete/recreate — NEVER the
                   CR UID. Equal identity on a standing claim ⇒ adopt (DR, GitOps,
                   cross-cluster moves); different ⇒ the CR is Refused.
+                type: string
+              provider:
+                description: |-
+                  The object store `bucket` lives in: `s3` (the default, and any
+                  store that speaks S3's API through `endpoint`), `azure` (Azure
+                  Blob Storage) or `gcs` (Google Cloud Storage). On either of the
+                  last two, `identity.mode` must be `static`, and `region` and
+                  `rawReads` are refused. On Azure the account comes from the
+                  credential (`AZURE_STORAGE_ACCOUNT`), and `endpoint` is the blob
+                  endpoint (unset: the account's own,
+                  `https://<account>.blob.core.windows.net`). On GCS the credential is
+                  a service account's JSON key (`FLINT_GCS_SERVICE_ACCOUNT_JSON`), and
+                  `endpoint` is the JSON API's (unset: `https://storage.googleapis.com`)
+                  (docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md, phases 2 and 3).
+                nullable: true
                 type: string
               rawReads:
                 default: false
