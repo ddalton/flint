@@ -13,7 +13,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 use sha2::{Digest, Sha256};
 
-use crate::{StoreError, StoreResult};
+use crate::gate::ByteGate;
+use crate::{ComposeSpec, DeleteManyReport, PartSource, StoreError, StoreResult};
 
 pub(crate) type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -141,6 +142,122 @@ pub(crate) fn encode(s: &str, path: bool) -> String {
     out
 }
 
+// ── bulk paths ────────────────────────────────────────────────────────
+
+/// Deletes in flight at once in a `delete_many`: neither store has S3's
+/// one-request DeleteObjects, and lean's collector renews its lease only
+/// between batches of a thousand keys (`DELETE_RENEW_BATCH`), so a
+/// thousand deletes one after another (tens of seconds) would reach the
+/// ~60 s at which a waiter judges the holder dead.
+pub(crate) const DELETE_PARALLELISM: usize = 32;
+
+/// Delete every key, `parallelism` at a time, with `delete`. A key already
+/// gone counts as deleted, as S3's DeleteObjects counts it.
+pub(crate) async fn delete_each<'a, F, Fut>(keys: &'a [String], parallelism: usize, delete: F) -> DeleteManyReport
+where
+    F: Fn(&'a str) -> Fut,
+    Fut: std::future::Future<Output = StoreResult<()>> + 'a,
+{
+    use futures::stream::StreamExt;
+    // The futures are made before anything awaits, so no closure is held
+    // across an await (a stream that maps keys through one is not `Send`
+    // enough for an `async_trait` method).
+    let deletes: Vec<_> = keys
+        .iter()
+        .map(|k| {
+            let f = delete(k);
+            async move { (k, f.await) }
+        })
+        .collect();
+    let results: Vec<(&String, StoreResult<()>)> =
+        futures::stream::iter(deletes).buffer_unordered(parallelism.max(1)).collect().await;
+    let mut report = DeleteManyReport::default();
+    for (k, r) in results {
+        match r {
+            Ok(()) | Err(StoreError::NotFound(_)) => report.deleted += 1,
+            Err(e) => report.failed.push((k.clone(), e.to_string())),
+        }
+    }
+    report
+}
+
+/// Upload the `Local` parts of `spec` `parallelism` at a time, read in the
+/// object's order from the caller's descriptor, each handed to `seen` as
+/// it is read (the streaming sums, which need that order) and then to
+/// `put(index, bytes)`. Every upload started is waited for, so the cleanup
+/// that follows a failure sees every part that landed. The results come
+/// back in the object's order.
+pub(crate) async fn upload_parts<T, F, Fut>(
+    spec: &ComposeSpec<'_>,
+    gate: Option<&Arc<ByteGate>>,
+    parallelism: usize,
+    mut seen: impl FnMut(&[u8]),
+    put: F,
+) -> StoreResult<Vec<T>>
+where
+    F: Fn(usize, Bytes) -> Fut,
+    Fut: std::future::Future<Output = StoreResult<T>>,
+{
+    use futures::stream::{FuturesUnordered, StreamExt};
+    let file = spec
+        .local
+        .as_ref()
+        .ok_or_else(|| StoreError::Other(format!("{}: a Local part with no descriptor", spec.key)))?;
+    let mut done: Vec<Option<T>> = (0..spec.parts.len()).map(|_| None).collect();
+    let mut inflight = FuturesUnordered::new();
+    let mut failed: Option<StoreError> = None;
+    let mut land = |(i, len, r): (usize, u64, StoreResult<T>), failed: &mut Option<StoreError>| match r {
+        Ok(t) => {
+            done[i] = Some(t);
+            spec.note_progress(len);
+        }
+        Err(e) => {
+            failed.get_or_insert(e);
+        }
+    };
+    for (i, part) in spec.parts.iter().enumerate() {
+        let (offset, len) = match part {
+            PartSource::Local { offset, len } => (*offset, *len),
+            PartSource::BaseCopy { .. } => {
+                failed = Some(StoreError::Other(format!("{}: a BaseCopy part where only Local ones go up", spec.key)));
+                break;
+            }
+        };
+        let permit = match gate {
+            Some(g) => Some(g.acquire(len).await),
+            None => None,
+        };
+        let bytes = match read_local(file, offset, len).await {
+            Ok(b) => b,
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        };
+        seen(&bytes);
+        let up = put(i, bytes);
+        inflight.push(async move {
+            let r = up.await;
+            drop(permit);
+            (i, len, r)
+        });
+        while inflight.len() >= parallelism.max(1) {
+            let landed = inflight.next().await.expect("one in flight");
+            land(landed, &mut failed);
+        }
+        if failed.is_some() {
+            break;
+        }
+    }
+    while let Some(landed) = inflight.next().await {
+        land(landed, &mut failed);
+    }
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    Ok(done.into_iter().map(|t| t.expect("every part landed")).collect())
+}
+
 // ── access tokens (Entra ID, Google OAuth2) ───────────────────────────
 
 /// An access token, kept until a minute before it expires and then
@@ -262,6 +379,89 @@ mod tests {
         assert_eq!(expires_in(&v("{}")), Duration::from_secs(3600));
         assert_eq!(refusal(&v(r#"{"error":"invalid_client","error_description":"AADSTS700016"}"#)), "AADSTS700016");
         assert_eq!(refusal(&v(r#"{"error":{"code":403,"message":"Permission denied"}}"#)), "Permission denied");
+    }
+
+    #[tokio::test]
+    async fn deletes_run_side_by_side_and_a_gone_key_counts_as_deleted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (now, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let keys: Vec<String> = (0..100).map(|i| format!("k{i}")).collect();
+        let report = delete_each(&keys, 8, |k| {
+            let (now, peak) = (&now, &peak);
+            async move {
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                now.fetch_sub(1, Ordering::SeqCst);
+                match k {
+                    "k3" => Err(StoreError::NotFound("gone".into())),
+                    "k7" => Err(StoreError::Auth("denied".into())),
+                    _ => Ok(()),
+                }
+            }
+        })
+        .await;
+        assert_eq!(report.deleted, 99);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "k7");
+        assert_eq!(peak.load(Ordering::SeqCst), 8, "the deletes did not overlap, or overlapped past the bound");
+    }
+
+    /// Parts go up side by side, but are read, summed and returned in the
+    /// object's order; a failure waits for every upload already started.
+    #[tokio::test]
+    async fn parts_go_up_side_by_side_and_come_back_in_order() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let body: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let mut f = tempfile::tempfile().unwrap();
+        f.write_all(&body).unwrap();
+        let file = Arc::new(f);
+        let spec = |parts: Vec<PartSource>| ComposeSpec {
+            key: "k",
+            local: Some(file.clone()),
+            parts,
+            base_key: None,
+            base_etag: None,
+            condition: crate::PutCondition::IfNoneMatchAny,
+            stamps: crate::GenerationStamps { generation: 1, epoch: 0, flush_uuid: "f".into(), boundary_source: None, posix: None },
+            crc64: None,
+            progress: None,
+        };
+        let parts: Vec<PartSource> = (0..10).map(|i| PartSource::Local { offset: i * 1000, len: 1000 }).collect();
+        let (now, peak, finished) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+        let mut streamed = Vec::new();
+        let out = upload_parts(&spec(parts.clone()), None, 4, |b| streamed.extend_from_slice(b), |i, b| {
+            let (now, peak, finished) = (&now, &peak, &finished);
+            async move {
+                let n = now.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                // Later parts land first.
+                tokio::time::sleep(Duration::from_millis(20 - 2 * i as u64)).await;
+                now.fetch_sub(1, Ordering::SeqCst);
+                finished.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StoreError>((i, b.len()))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, (0..10).map(|i| (i, 1000)).collect::<Vec<_>>());
+        assert_eq!(streamed, body, "the sums saw the bytes in the object's order");
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        // Part 2 fails: the call fails, and nothing it started is abandoned.
+        let started = AtomicUsize::new(0);
+        let r = upload_parts(&spec(parts), None, 4, |_| {}, |i, _| {
+            let (started, finished) = (&started, &finished);
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                finished.fetch_add(1, Ordering::SeqCst);
+                if i == 2 { Err(StoreError::Other("part 2".into())) } else { Ok(()) }
+            }
+        })
+        .await;
+        assert!(matches!(r, Err(StoreError::Other(m)) if m == "part 2"));
+        assert_eq!(finished.load(Ordering::SeqCst), 10 + started.load(Ordering::SeqCst), "an upload was left running");
     }
 
     #[tokio::test]

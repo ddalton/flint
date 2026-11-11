@@ -91,7 +91,8 @@ pub async fn connect(spec: &StoreSpec) -> StoreResult<Arc<dyn ObjectStore>> {
 /// the endpoint the blob endpoint (Azurite's, for a rig).
 #[cfg(feature = "azure")]
 async fn connect_azure(spec: &StoreSpec) -> StoreResult<Arc<dyn ObjectStore>> {
-    let mut s = crate::azure::AzureStore::from_env(spec.bucket.clone(), spec.endpoint.clone())?;
+    let mut s = crate::azure::AzureStore::from_env(spec.bucket.clone(), spec.endpoint.clone())?
+        .with_part_parallelism(spec.part_parallelism);
     if let Some(n) = spec.upload_inflight_max_bytes {
         s = s.with_upload_inflight_max_bytes(n);
     }

@@ -241,6 +241,21 @@ async fn c7_checksums_and_guarded_reads(s: &dyn ObjectStore, base: &str) {
     assert!(matches!(s.head(&k).await, Err(StoreError::NotFound(_))));
 }
 
+/// Bulk deletes: every key goes, one already gone counts as deleted, and
+/// nothing is reported failed. Lean's collector deletes this way, a
+/// thousand keys between two lease renewals.
+async fn bulk_delete(s: &dyn ObjectStore, base: &str) {
+    let dir = format!("{base}dm/");
+    let mut keys: Vec<String> = (0..40).map(|i| format!("{dir}k{i:02}")).collect();
+    for k in &keys {
+        put(s, k, k.as_bytes(), &PutCondition::IfNoneMatchAny).await.unwrap();
+    }
+    keys.push(format!("{dir}never-written"));
+    let report = s.delete_many(&keys).await.expect("delete_many");
+    assert_eq!((report.deleted, report.failed.len()), (41, 0), "{:?}", report.failed);
+    assert!(s.list(&dir).await.unwrap().is_empty(), "a key outlived delete_many");
+}
+
 /// C8: the longest key every provider takes is taken, built as lean's
 /// keys are, from path segments a filesystem holds (at most 200 bytes
 /// here; MinIO, like a filesystem, refuses a segment over 255).
@@ -343,6 +358,9 @@ async fn run_contract_with(s: &dyn ObjectStore, second: Option<&dyn ObjectStore>
     }
     if on("lease") {
         lease_cell(s, base).await;
+    }
+    if on("bulk-delete") {
+        bulk_delete(s, base).await;
     }
 }
 
@@ -508,6 +526,16 @@ async fn a_live_azure_store_meets_the_contract() {
     .unwrap();
     let base = format!("flint-contract/{}/", uuid::Uuid::new_v4());
     run_contract_with(&store, Some(&second), &base, &skip).await;
+    // Blocks of one compose, four at a time.
+    let wide = flint_store::azure::AzureStore::with_shared_key(
+        env("FLINT_CONTRACT_AZURE_ACCOUNT"),
+        &env("FLINT_CONTRACT_AZURE_KEY"),
+        store.container(),
+        std::env::var("FLINT_CONTRACT_AZURE_ENDPOINT").ok(),
+    )
+    .unwrap()
+    .with_part_parallelism(4);
+    many_part_compose(&wide, &base, 12, (12, 1)).await;
     for o in store.list(&base).await.unwrap() {
         let _ = store.delete(&o.key).await;
     }
@@ -540,7 +568,9 @@ async fn a_live_gcs_store_meets_the_contract() {
         } else {
             GcsStore::from_env(bucket.clone(), endpoint.clone())
         };
-        s.unwrap().with_scratch_root(base.clone())
+        // Four parts at a time: the order the parts land in must not be
+        // the order the object has.
+        s.unwrap().with_scratch_root(base.clone()).with_part_parallelism(4)
     };
     let store = open();
     if emulator {
@@ -556,10 +586,56 @@ async fn a_live_gcs_store_meets_the_contract() {
     let second = open();
     run_contract_with(&store, Some(&second), &base, &skip).await;
     gcs_composes_nest_and_leave_no_parts(&store, &base).await;
+    many_part_compose(&store, &base, 12, (12, 1)).await;
+    gcs_reads_take_one_round_trip(&store, &open(), &base).await;
     for o in store.list(&base).await.unwrap() {
         let _ = store.delete(&o.key).await;
     }
     eprintln!("contract: passed against gcs bucket {bucket} (skipped {skip:?}{})", if emulator { ", emulator" } else { "" });
+}
+
+/// A compose of `n` small parts lands the bytes in the object's order with
+/// their CRC, at the request counts the backend's assembly costs:
+/// `(part puts, assembling requests)`.
+#[cfg(any(feature = "azure", feature = "gcs"))]
+async fn many_part_compose(s: &dyn ObjectStore, base: &str, n: u64, cost: (u64, u64)) {
+    let part = 1000u64;
+    let body: Vec<u8> = (0..part * n).map(|i| (i * 7 % 253) as u8).collect();
+    let mut f = tempfile::tempfile().unwrap();
+    f.write_all(&body).unwrap();
+    let file = Arc::new(f);
+    let key = format!("{base}many/{n}");
+    let spec = ComposeSpec {
+        parts: (0..n).map(|i| PartSource::Local { offset: i * part, len: part }).collect(),
+        ..compose(&key, &file, body.len() as u64, s)
+    };
+    let before = s.request_counts().unwrap();
+    let made = s.compose_generation(&spec).await.unwrap_or_else(|e| panic!("a {n}-part compose: {e}"));
+    let after = s.request_counts().unwrap();
+    assert_eq!((after.put - before.put, after.multipart - before.multipart), cost, "a {n}-part compose's requests");
+    assert_eq!(made.crc64_b64.as_deref(), Some(crc64_to_b64(crc64_nvme(&body)).as_str()));
+    assert_eq!(s.get_whole(&key, Some(&made.etag)).await.unwrap().1, Bytes::from(body), "the {n}-part compose's bytes");
+}
+
+/// A GCS client that has not seen an object reads it in one round trip:
+/// its metadata and its bytes asked for at once. Once seen, a read is one
+/// GET guarded on the generation.
+#[cfg(feature = "gcs")]
+async fn gcs_reads_take_one_round_trip(writer: &dyn ObjectStore, fresh: &dyn ObjectStore, base: &str) {
+    let k = format!("{base}gcs/read");
+    let a = put(writer, &k, b"read me", &PutCondition::IfNoneMatchAny).await.unwrap();
+    let c0 = fresh.request_counts().unwrap();
+    let (meta, body) = fresh.get_whole(&k, Some(&a.etag)).await.unwrap();
+    let c1 = fresh.request_counts().unwrap();
+    assert_eq!((meta.etag.as_str(), &body[..]), (a.etag.as_str(), &b"read me"[..]));
+    assert_eq!((c1.get - c0.get, c1.head - c0.head), (1, 1), "an unseen object: the bytes and the metadata");
+    fresh.get_whole(&k, Some(&a.etag)).await.unwrap();
+    let c2 = fresh.request_counts().unwrap();
+    assert_eq!((c2.get - c1.get, c2.head - c1.head), (1, 0), "a seen object: one guarded GET");
+    // Moved on: the guarded GET fails, and the read asks again, by the bytes.
+    let b = put(writer, &k, b"moved", &PutCondition::IfMatch(a.etag.clone())).await.unwrap();
+    assert!(matches!(fresh.get_whole(&k, Some(&a.etag)).await, Err(StoreError::PreconditionFailed(_))), "a stale ETag read");
+    assert_eq!(fresh.get_whole(&k, Some(&b.etag)).await.unwrap().1, Bytes::from_static(b"moved"));
 }
 
 /// GCS assembles a large object from part objects: past 32 parts the

@@ -14,6 +14,16 @@ covered by the stability guarantee.
 
 ### Added
 
+- **Faster bulk paths on Azure and GCS** (2026-11-10).
+  - **Bulk deletes** run 32 at a time on both. Neither store has S3's
+    one-request DeleteObjects, and one after another a thousand deletes
+    (what lean's collector does between two lease renewals) could take
+    long enough for a waiter to judge the holder dead.
+  - **Azure large files** upload their blocks `part_parallelism` at a time,
+    as S3 and GCS do, instead of one after another.
+  - **A GCS object a client has not seen yet** is read in one round trip:
+    its metadata and its bytes are asked for at once, and kept only when
+    both name one generation. A seen one is one guarded GET.
 - **Lean on Azure and GCS without a stored key: workload identity**
   (2026-11-10; phase 4 of `docs/plans/lean-azure-gcs-backends-plan-2026-11-10.md`).
   - **`identity.mode: webIdentity`** on an `azure` or `gcs` workspace hands

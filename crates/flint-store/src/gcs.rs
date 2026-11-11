@@ -55,7 +55,6 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::stream::{FuturesUnordered, StreamExt};
 use http::{HeaderMap, Method, Request};
 use http_body_util::{BodyExt, Full};
 use serde_json::{json, Value};
@@ -63,12 +62,12 @@ use sha2::{Digest, Sha256};
 
 use crate::counters::{RequestCounter, RequestKind};
 use crate::rest::{
-    base64_decode, content_hash, encode, expires_in, foreign_token, form, https_client, jitter, presented, quoted,
-    read_local, refusal, token_request, HttpsClient, TokenCache,
+    base64_decode, content_hash, delete_each, encode, expires_in, foreign_token, form, https_client, jitter, presented,
+    quoted, refusal, token_request, upload_parts, HttpsClient, TokenCache, DELETE_PARALLELISM,
 };
 use crate::{
-    base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, EpochLease,
-    EpochState, GenerationStamps, ListedObject, ObjectMeta, ObjectStore, PartSource, PendingUpload, Provider,
+    base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, DeleteManyReport,
+    EpochLease, EpochState, GenerationStamps, ListedObject, ObjectMeta, ObjectStore, PartSource, PendingUpload, Provider,
     PutCondition, RequestCounts, StoreError, StoreResult,
 };
 
@@ -92,8 +91,6 @@ const META_HASH: &str = "flint-sha256";
 const META_CRC: &str = "flint-crc64";
 /// Objects whose generation the store remembers, before it forgets them all.
 const TOKENS_MAX: usize = 4096;
-/// Part deletes in flight at once.
-const DELETE_PARALLELISM: usize = 16;
 /// Read and write objects; nothing on the bucket itself.
 const SCOPE: &str = "https://www.googleapis.com/auth/devstorage.read_write";
 const TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -710,26 +707,55 @@ impl GcsStore {
 
     /// GET the whole object, checked against `if_match`: body and metadata
     /// come from one version.
+    ///
+    /// The JSON API's download carries no custom metadata, and the
+    /// metadata is where the content ETag lives. An object the store
+    /// remembers (as the version asked for) is one GET, guarded on its
+    /// generation. One it does not is the metadata and the bytes asked for
+    /// at once, one round trip, kept only when both name one generation.
+    /// (GCS's XML API answers both in one response, but storage-testbench's
+    /// leaves the metadata out, so that waits for a real bucket.)
     async fn get(&self, key: &str, if_match: Option<&str>) -> StoreResult<(ObjectMeta, Bytes)> {
-        let mut fresh = false;
+        let want = if_match.map(quoted);
+        let check = |s: &Seen| match &want {
+            Some(w) if s.meta.etag != *w => Err(StoreError::PreconditionFailed(format!("{key}: is {} not {w}", s.meta.etag))),
+            _ => Ok(()),
+        };
+        // An outside writer's ETag names its generation outright.
+        let foreign = match &want {
+            Some(w) => foreign_token(key, w)?,
+            None => None,
+        };
+        let mut use_memory = true;
         for _ in 0..3 {
-            let guard = match if_match {
-                Some(want) => Some(self.generation_for(key, want, fresh).await?),
-                None => None,
+            let remembered = if use_memory {
+                self.seen.lock().unwrap().get(key).filter(|s| want.as_ref().is_none_or(|w| s.meta.etag == *w)).map(|s| s.generation.clone())
+            } else {
+                None
             };
-            let (g, mg, body) = match self.media(key, None, guard).await {
-                Err(StoreError::PreconditionFailed(_)) if if_match.is_some() => {
-                    fresh = true;
-                    continue;
+            if let Some(g) = foreign.clone().or(remembered) {
+                match self.media(key, None, Some(g)).await {
+                    Ok((g, mg, body)) => {
+                        if let Some(s) = self.metadata_of(key, &g, &mg).await? {
+                            check(&s)?;
+                            return Ok((s.meta, body));
+                        }
+                    }
+                    // The remembered version moved on; an outside writer's
+                    // named one is simply gone.
+                    Err(StoreError::PreconditionFailed(_)) if foreign.is_none() => {}
+                    Err(e) => return Err(e),
                 }
-                r => r?,
-            };
-            let Some(s) = self.metadata_of(key, &g, &mg).await? else { continue };
-            if let Some(want) = if_match {
-                if s.meta.etag != quoted(want) {
-                    return Err(StoreError::PreconditionFailed(format!("{key}: is {} not {}", s.meta.etag, quoted(want))));
-                }
+                use_memory = false;
+                continue;
             }
+            let (meta, media) = tokio::join!(self.metadata(key, None), self.media(key, None, None));
+            let (s, (g, _, body)) = (meta?, media?);
+            if s.generation != g {
+                // It moved between the two: ask again.
+                continue;
+            }
+            check(&s)?;
             return Ok((s.meta, body));
         }
         Err(StoreError::PreconditionFailed(format!("{key}: still moving after three reads")))
@@ -774,26 +800,14 @@ impl GcsStore {
         Ok(seen_of(key, &parse_json(&resp.body, "upload")?)?.generation)
     }
 
-    /// Best effort: whatever is left, the upload sweep finds by age.
-    async fn delete_all(&self, keys: Vec<String>) {
-        futures::stream::iter(keys)
-            .map(|k| async move {
-                let _ = self.delete(&k).await;
-            })
-            .buffer_unordered(DELETE_PARALLELISM)
-            .collect::<Vec<()>>()
-            .await;
-    }
 
-    /// Fold `sources` to at most 32 with intermediate composes under `dir`,
-    /// pushing each into `made` for the cleanup.
-    async fn fold(&self, dir: &str, mut sources: Vec<(String, String)>, made: &mut Vec<String>) -> StoreResult<Vec<(String, String)>> {
+    /// Fold `sources` to at most 32 with intermediate composes under `dir`.
+    async fn fold(&self, dir: &str, mut sources: Vec<(String, String)>) -> StoreResult<Vec<(String, String)>> {
         let mut level = 0;
         while sources.len() > COMPOSE_MAX {
             let mut next = Vec::with_capacity(sources.len().div_ceil(COMPOSE_MAX));
             for (j, group) in sources.chunks(COMPOSE_MAX).enumerate() {
                 let name = format!("{dir}c{level}-{j:04}");
-                made.push(name.clone());
                 let req = self.compose_req(&name, group, &json!({}), Some("0".into()), RequestKind::Multipart);
                 let resp = self.send(req).await?;
                 next.push((name.clone(), seen_of(&name, &parse_json(&resp.body, "compose")?)?.generation));
@@ -804,80 +818,6 @@ impl GcsStore {
         Ok(sources)
     }
 
-    /// Upload the `Local` parts of `spec` under `dir`, in order of the
-    /// object, `part_parallelism` at a time, hashing each as it is read.
-    async fn upload_parts(
-        &self,
-        spec: &ComposeSpec<'_>,
-        dir: &str,
-        started: &mut Vec<String>,
-        sums: &mut Sums,
-    ) -> StoreResult<Vec<(String, String)>> {
-        let file = spec
-            .local
-            .as_ref()
-            .ok_or_else(|| StoreError::Other(format!("{}: a Local part with no descriptor", spec.key)))?;
-        let mut done: Vec<Option<String>> = vec![None; spec.parts.len()];
-        let mut inflight = FuturesUnordered::new();
-        let mut failed: Option<StoreError> = None;
-        for (i, part) in spec.parts.iter().enumerate() {
-            let (offset, len) = match part {
-                PartSource::Local { offset, len } => (*offset, *len),
-                PartSource::BaseCopy { .. } => unreachable!("refused before any part moves"),
-            };
-            let permit = match &self.upload_gate {
-                Some(g) => Some(g.acquire(len).await),
-                None => None,
-            };
-            let bytes = match read_local(file, offset, len).await {
-                Ok(b) => b,
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
-            };
-            sums.update(&bytes);
-            let name = format!("{dir}{i:05}");
-            started.push(name.clone());
-            inflight.push(async move {
-                let r = self.put_part(&name, bytes).await;
-                drop(permit);
-                (i, len, r)
-            });
-            while inflight.len() >= self.part_parallelism {
-                let (i, len, r) = inflight.next().await.expect("one in flight");
-                match r {
-                    Ok(g) => {
-                        done[i] = Some(g);
-                        spec.note_progress(len);
-                    }
-                    Err(e) => {
-                        failed.get_or_insert(e);
-                    }
-                }
-            }
-            if failed.is_some() {
-                break;
-            }
-        }
-        // Every upload started is waited for, so the cleanup that follows a
-        // failure sees every part that landed.
-        while let Some((i, len, r)) = inflight.next().await {
-            match r {
-                Ok(g) => {
-                    done[i] = Some(g);
-                    spec.note_progress(len);
-                }
-                Err(e) => {
-                    failed.get_or_insert(e);
-                }
-            }
-        }
-        if let Some(e) = failed {
-            return Err(e);
-        }
-        Ok(started.iter().cloned().zip(done.into_iter().map(|g| g.expect("every part landed"))).collect())
-    }
 }
 
 /// The three sums a compose takes in its one pass over the parts.
@@ -1301,10 +1241,16 @@ impl ObjectStore for GcsStore {
         }
         let nonce = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
         let dir = format!("{}{PARTS_DIR}{nonce}/", self.scratch_root);
-        let mut made = Vec::new();
         let mut sums = Sums { crc64: Crc64Nvme::new(), sha: Sha256::new(), crc32c: 0, len: 0 };
         let landed = async {
-            let parts = self.upload_parts(spec, &dir, &mut made, &mut sums).await?;
+            let parts = upload_parts(spec, self.upload_gate.as_ref(), self.part_parallelism, |b| sums.update(b), |i, bytes| {
+                let name = format!("{dir}{i:05}");
+                async move {
+                    let g = self.put_part(&name, bytes).await?;
+                    Ok((name, g))
+                }
+            })
+            .await?;
             let crc_v = sums.crc64.clone().finalize();
             if let Some(want) = spec.crc64 {
                 if want != crc_v {
@@ -1316,7 +1262,7 @@ impl ObjectStore for GcsStore {
                     )));
                 }
             }
-            let sources = self.fold(&dir, parts, &mut made).await?;
+            let sources = self.fold(&dir, parts).await?;
             let hash = content_hash(&sums.sha.clone().finalize());
             let metadata = metadata_of_write(&spec.stamps, &hash, &crc64_to_b64(crc_v));
             let build = |g: Option<String>| self.compose_req(spec.key, &sources, &metadata, g, RequestKind::Multipart);
@@ -1325,8 +1271,13 @@ impl ObjectStore for GcsStore {
         }
         .await;
         // The parts go whatever happened: a refused compose leaves nothing
-        // behind (A9).
-        self.delete_all(made).await;
+        // behind (A9). Listed rather than remembered, so a compose that
+        // failed partway is cleaned the same way; what a failed LIST leaves,
+        // the upload sweep finds by age.
+        if let Ok(left) = self.list(&dir).await {
+            let keys: Vec<String> = left.into_iter().map(|o| o.key).collect();
+            delete_each(&keys, DELETE_PARALLELISM, |k| self.delete(k)).await;
+        }
         let seen = landed?;
         // The service's CRC32C of what it assembled, against the one taken
         // over the bytes as they were read.
@@ -1415,6 +1366,14 @@ impl ObjectStore for GcsStore {
         Ok(())
     }
 
+    /// One DELETE per key, side by side: the JSON batch API would save
+    /// round trips, not operations (each inner request is billed as one),
+    /// and lean's collector needs a thousand keys gone well inside a lease
+    /// renewal.
+    async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+        Ok(delete_each(keys, DELETE_PARALLELISM, |k| self.delete(k)).await)
+    }
+
     /// A compose that never finished leaves its parts: one entry per
     /// parts directory under `prefix`, dated by its oldest part.
     async fn list_uploads(&self, prefix: &str) -> StoreResult<Vec<PendingUpload>> {
@@ -1438,8 +1397,8 @@ impl ObjectStore for GcsStore {
         if upload_id.is_empty() || upload_id.contains('/') || !key.ends_with(&format!("{PARTS_DIR}{upload_id}/")) {
             return Err(StoreError::Other(format!("gcs: {key} is not a compose's parts directory")));
         }
-        let keys = self.list(key).await?.into_iter().map(|o| o.key).collect();
-        self.delete_all(keys).await;
+        let keys: Vec<String> = self.list(key).await?.into_iter().map(|o| o.key).collect();
+        delete_each(&keys, DELETE_PARALLELISM, |k| self.delete(k)).await;
         Ok(())
     }
 

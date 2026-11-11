@@ -43,12 +43,12 @@ use sha2::{Digest, Sha256};
 
 use crate::counters::{RequestCounter, RequestKind};
 use crate::rest::{
-    base64_decode, content_hash, encode, expires_in, foreign_token, form, https_client, jitter, presented, quoted,
-    read_local, refusal, token_request, HttpsClient, TokenCache,
+    base64_decode, content_hash, delete_each, encode, expires_in, foreign_token, form, https_client, jitter, presented,
+    quoted, refusal, token_request, upload_parts, HttpsClient, TokenCache, DELETE_PARALLELISM,
 };
 use crate::{
-    base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, EpochLease,
-    EpochState, GenerationStamps, ListedObject, ObjectMeta, ObjectStore, PartSource, PendingUpload, Provider,
+    base64_std, cell, crc64_nvme, crc64_to_b64, gate::ByteGate, BootstrapReport, ComposeSpec, Crc64Nvme, DeleteManyReport,
+    EpochLease, EpochState, GenerationStamps, ListedObject, ObjectMeta, ObjectStore, PartSource, PendingUpload, Provider,
     PutCondition, RequestCounts, StoreError, StoreResult,
 };
 
@@ -139,6 +139,8 @@ pub struct AzureStore {
     opts: AzureOptions,
     requests: Arc<RequestCounter>,
     upload_gate: Option<Arc<ByteGate>>,
+    /// Blocks of one compose uploaded at once.
+    part_parallelism: usize,
     /// key -> (content ETag, Azure ETag), as last read or written.
     tokens: Mutex<HashMap<String, (String, String)>>,
 }
@@ -304,6 +306,7 @@ impl AzureStore {
             opts,
             requests: Default::default(),
             upload_gate: None,
+            part_parallelism: 1,
             tokens: Mutex::new(HashMap::new()),
         })
     }
@@ -311,6 +314,12 @@ impl AzureStore {
     /// Bound the bytes the upload path holds at once (`gate.rs`). `0` = no gate.
     pub fn with_upload_inflight_max_bytes(mut self, n: u64) -> Self {
         self.upload_gate = (n > 0).then(|| Arc::new(ByteGate::new(n)));
+        self
+    }
+
+    /// Blocks of one compose uploaded concurrently. 1 = sequential.
+    pub fn with_part_parallelism(mut self, n: usize) -> Self {
+        self.part_parallelism = n.max(1);
         self
     }
 
@@ -1024,37 +1033,33 @@ impl ObjectStore for AzureStore {
         if spec.parts.len() > MAX_BLOCKS {
             return Err(StoreError::Other(format!("{}: {} parts, Azure takes {MAX_BLOCKS}", spec.key, spec.parts.len())));
         }
-        let file = spec
-            .local
-            .as_ref()
-            .ok_or_else(|| StoreError::Other(format!("{}: a Local part with no descriptor", spec.key)))?;
         let nonce = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
         let mut crc = Crc64Nvme::new();
         let mut sha = Sha256::new();
-        let mut ids = Vec::with_capacity(spec.parts.len());
-        let mut total = 0u64;
-        for (i, part) in spec.parts.iter().enumerate() {
-            let (offset, len) = match part {
-                PartSource::Local { offset, len } => (*offset, *len),
-                PartSource::BaseCopy { .. } => unreachable!("refused above"),
-            };
-            let _permit = match &self.upload_gate {
-                Some(g) => Some(g.acquire(len).await),
-                None => None,
-            };
-            let bytes = read_local(file, offset, len).await?;
-            crc.update(&bytes);
-            sha.update(&bytes);
-            let id = block_id(&nonce, i);
-            let req = Req::new("put_block", RequestKind::Put, Method::PUT, Some(spec.key))
-                .query("comp", "block")
-                .query("blockid", id.clone())
-                .body(bytes);
-            self.send(req).await?;
-            ids.push(id);
-            total += len;
-            spec.note_progress(len);
-        }
+        // Blocks go up side by side, read and summed in the object's order;
+        // the list that commits them names them in that order whatever
+        // order they landed in.
+        let ids: Vec<String> = (0..spec.parts.len()).map(|i| block_id(&nonce, i)).collect();
+        let total: u64 = spec.parts.iter().map(|p| match p {
+            PartSource::Local { len, .. } | PartSource::BaseCopy { len, .. } => *len,
+        }).sum();
+        upload_parts(
+            spec,
+            self.upload_gate.as_ref(),
+            self.part_parallelism,
+            |b| {
+                crc.update(b);
+                sha.update(b);
+            },
+            |i, bytes| {
+                let req = Req::new("put_block", RequestKind::Put, Method::PUT, Some(spec.key))
+                    .query("comp", "block")
+                    .query("blockid", ids[i].clone())
+                    .body(bytes);
+                async move { self.send(req).await.map(|_| ()) }
+            },
+        )
+        .await?;
         let crc_v = crc.finalize();
         if let Some(want) = spec.crc64 {
             if want != crc_v {
@@ -1173,6 +1178,13 @@ impl ObjectStore for AzureStore {
         self.send_conditional(key, &PutCondition::IfMatch(etag.to_string()), &build).await?;
         self.forget(key);
         Ok(())
+    }
+
+    /// One DELETE per key, side by side: Blob Batch would save round trips,
+    /// not requests (each subrequest is billed as one), and lean's
+    /// collector needs a thousand keys gone well inside a lease renewal.
+    async fn delete_many(&self, keys: &[String]) -> StoreResult<DeleteManyReport> {
+        Ok(delete_each(keys, DELETE_PARALLELISM, |k| self.delete(k)).await)
     }
 
     /// Nothing to list: uncommitted blocks are invisible and expire on
