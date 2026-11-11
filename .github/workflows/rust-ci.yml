@@ -129,12 +129,36 @@ jobs:
             azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --inMemoryPersistence
           for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
           FLINT_CONTRACT_AZURE_ENDPOINT=http://127.0.0.1:10000/flintci FLINT_CONTRACT_AZURE_ACCOUNT=flintci \
-            FLINT_CONTRACT_AZURE_KEY="$KEY" cargo test --features azure --test contract a_live_azure -- --ignored --nocapture
+            FLINT_CONTRACT_AZURE_KEY="$KEY" cargo test --features azure --test contract a_live_azure_store_meets -- --ignored --nocapture
+      - name: the store contract, on Azurite over HTTPS with Entra ID tokens
+        working-directory: crates/flint-store
+        # Azurite takes bearer tokens only over HTTPS with --oauth basic, and
+        # checks their issuer, audience and lifetime (not the signature). A
+        # throwaway CA and certificate are made here; the token endpoints
+        # are stand-ins inside the test. Its control: a token for another
+        # audience is refused, or Azurite was not checking tokens.
+        run: |
+          C="$RUNNER_TEMP/azurite-certs"; mkdir -p "$C"
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$C/ca.key" -out "$C/ca.pem" -days 1 -subj /CN=flint-ci-ca \
+            -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign
+          openssl req -newkey rsa:2048 -nodes -keyout "$C/leaf.key" -out "$C/leaf.csr" -subj /CN=127.0.0.1
+          printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' > "$C/ext"
+          openssl x509 -req -in "$C/leaf.csr" -CA "$C/ca.pem" -CAkey "$C/ca.key" -CAcreateserial -out "$C/leaf.pem" -days 1 -extfile "$C/ext"
+          chmod 644 "$C"/*
+          KEY=$(openssl rand -base64 64 | tr -d '\n')
+          docker run -d --name azurite-oauth -p 127.0.0.1:10443:10000 -e AZURITE_ACCOUNTS="flintci:$KEY" -v "$C:/certs:ro" \
+            mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5 \
+            azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --inMemoryPersistence --oauth basic --cert /certs/leaf.pem --key /certs/leaf.key
+          for i in $(seq 1 30); do curl -s -o /dev/null --cacert "$C/ca.pem" https://127.0.0.1:10443/ && break; sleep 1; done
+          FLINT_CONTRACT_AZURE_ENDPOINT=https://127.0.0.1:10443/flintci FLINT_CONTRACT_AZURE_ACCOUNT=flintci SSL_CERT_FILE="$C/ca.pem" \
+            cargo test --features azure --test contract a_live_azure_store_takes_entra -- --ignored --nocapture
       - name: the store contract, on storage-testbench (Google's GCS emulator)
         working-directory: crates/flint-store
         # The emulator Google's own client libraries test against. It
         # authorizes nothing, so this leg has no wrong-credential control;
-        # it checks the conditions, the checksums and the composes.
+        # it checks the conditions, the checksums and the composes, then
+        # the same through the metadata server and federation (stand-ins
+        # inside the test): `a_live_gcs` runs both.
         run: |
           docker run -d --name gcs-testbench -p 127.0.0.1:9023:9000 \
             gcr.io/cloud-devrel-public-resources/storage-testbench:v0.67.0@sha256:06729d407e8bba055798707dccfffd1f792ea818937954c56a776811116ede5c
