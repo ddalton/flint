@@ -10728,6 +10728,15 @@ pub(super) struct Hooks {
     /// answers 412, once: an SDK's retry of a conditional PUT whose first
     /// response was lost meets the object its first attempt wrote.
     put_lands_then_412: std::sync::Mutex<Option<String>>,
+    /// `get_whole` fails for every key containing this, as a store that
+    /// answers 500 does, and counts each one it failed.
+    get_fail_containing: std::sync::Mutex<Option<String>>,
+    gets_failed: std::sync::atomic::AtomicU32,
+    /// `get_whole` and `get_range` hand back a COPY of the bytes, as a
+    /// client reading a socket holds its own. The double otherwise shares
+    /// the stored buffer, so a fetched body costs the process nothing and
+    /// its memory cannot be measured (`tests_bench::bulk_arrival_cost`).
+    copy_bodies: std::sync::atomic::AtomicBool,
 }
 
 pub(super) struct Hooked(pub(super) Arc<MemoryStore>, pub(super) Hooks);
@@ -10745,8 +10754,17 @@ impl Hooked {
     fn before_compose(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_compose.lock().unwrap() = Some((key.to_string(), Box::new(f)));
     }
-    fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
+    pub(super) fn before_get_return(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_get_return.lock().unwrap() = Some((key.to_string(), Box::new(f)));
+    }
+    pub(super) fn fail_gets_containing(&self, needle: Option<&str>) {
+        *self.1.get_fail_containing.lock().unwrap() = needle.map(str::to_string);
+    }
+    pub(super) fn gets_failed(&self) -> u32 {
+        self.1.gets_failed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    pub(super) fn copy_bodies(&self, on: bool) {
+        self.1.copy_bodies.store(on, std::sync::atomic::Ordering::SeqCst);
     }
     pub(super) fn before_delete(&self, key: &str, f: impl Fn() + Send + Sync + 'static) {
         *self.1.before_delete.lock().unwrap() = Some((key.to_string(), Box::new(f)));
@@ -10871,9 +10889,16 @@ impl ObjectStore for Hooked {
         key: &str,
         if_match: Option<&str>,
     ) -> flint_store::StoreResult<(flint_store::ObjectMeta, Bytes)> {
+        if self.1.get_fail_containing.lock().unwrap().as_deref().is_some_and(|needle| key.contains(needle)) {
+            self.1.gets_failed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(flint_store::StoreError::Other(format!("injected: get refused for {key}")));
+        }
         let r = self.0.get_whole(key, if_match).await;
         if let Some(h) = take_hook(&self.1.before_get_return, key) {
             h();
+        }
+        if self.1.copy_bodies.load(std::sync::atomic::Ordering::SeqCst) {
+            return r.map(|(meta, body)| (meta, Bytes::copy_from_slice(&body)));
         }
         r
     }
@@ -10884,7 +10909,11 @@ impl ObjectStore for Hooked {
         len: u64,
         if_match: &str,
     ) -> flint_store::StoreResult<Bytes> {
-        self.0.get_range(key, off, len, if_match).await
+        let r = self.0.get_range(key, off, len, if_match).await;
+        if self.1.copy_bodies.load(std::sync::atomic::Ordering::SeqCst) {
+            return r.map(|body| Bytes::copy_from_slice(&body));
+        }
+        r
     }
     fn min_part_size(&self) -> u64 {
         self.0.min_part_size()

@@ -23,9 +23,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps, StoreError};
+use flint_store::{crc64_nvme, crc64_to_b64, GenerationStamps};
 
 use super::barrier::{mtime_nanos_of, mtime_of};
+use super::checkout::NotTaken;
 use super::state::{BaselineEntry, ConflictRecord};
 use super::{manifest, now_unix, scan, LeanError, LeanResult, Syncer};
 
@@ -259,73 +260,97 @@ impl Syncer {
             report.deleted.push(path.clone());
         }
 
-        // 4. Apply adds/changes (remote differs from the baseline).
-        for (path, (etag, key)) in &remote {
-            let cited_mode = theirs.entries.get(path).map(|e| e.mode);
-            if baseline
-                .entries
-                .get(path)
-                .map(|b| &b.etag == etag && cited_mode.is_none_or(|m| b.cites_mode(m)))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if !held(&baseline, path) {
-                continue;
-            }
-            if !in_scope(path) {
-                // D4: NOT integrated — it stays owed, and the next
-                // barrier's consume takes it.
-                report.out_of_scope_foreign += 1;
-                continue;
-            }
-            if scanned.holds(path) {
-                self.state.append_conflict(&unreadable(path))?;
-                report.conflicts.push(path.clone());
-                dirty_skips.insert(path.clone());
-                continue;
-            }
-            if locally_dirty(path) {
-                // The phantom-conflict rule (§2.2): `sync` saves the
-                // baseline only at the end, so a crash mid-apply
-                // followed by a re-honor makes already-applied paths
-                // scan dirty against the stale baseline. Declaring a
-                // conflict there would report a conflict for a path
-                // whose local bytes ARE the remote bytes, and the path
-                // would then re-publish as a spurious generation bump.
-                // Compare content identity first.
-                // The remote's crc, read off the object we would apply
-                // (the backend's attestation) before the manifest's.
-                // One HEAD, only on the dirty-vs-remote path.
-                let remote_meta = match self.store.head(key).await {
-                    Ok(m) if m.etag == *etag => Some(m),
-                    _ => None,
-                };
-                // The remote's CRC: the backend's attestation when it
-                // offers one, else the writer's for this etag — client-
-                // computed, so it exists on a backend that attests none
-                // (Ozone). Without either the bytes cannot be judged
-                // identical, and the path is a conflict as before.
-                let want: Option<String> = remote_meta.as_ref().and_then(|m| {
-                    m.crc64_b64.clone().or_else(|| remote_crc.get(path).cloned().flatten())
-                });
-                let local_path = self.cfg.root.join(path);
-                let local_crc =
-                    std::fs::read(&local_path).ok().map(|b| crc64_to_b64(crc64_nvme(&b)));
-                let identical = want.is_some() && want == local_crc;
-                if identical {
+        // 4. Apply adds/changes (remote differs from the baseline). What
+        //    each path is owed is decided in path order BEFORE anything is
+        //    fetched; the fetches then run together (`Syncer::take_owed`,
+        //    checkout's fan-out, where this loop made one whole-object GET
+        //    at a time and held each body in memory whatever its size);
+        //    and the outcomes are recorded in path order after them, so
+        //    the report and the records read as they always did. A batch
+        //    of paths at a time (`take_batch`): a bulk arrival is not
+        //    held in memory.
+        enum Owed {
+            /// The syncer may not read the path: neither taken nor removed.
+            Unreadable,
+            /// Dirty against the scan, and its bytes are the remote's.
+            Identical(BaselineEntry),
+            /// Dirty against the scan: the agent's version wins.
+            Dirty,
+            /// Never materialisable here: surfaced, not left owed.
+            Refused(LeanError),
+            /// Clean against this baseline entry: to fetch.
+            Fetch,
+        }
+        let mut entries = theirs.entries.iter();
+        loop {
+            let mut plan: Vec<(&String, &manifest::LeanEntry, Owed)> = Vec::new();
+            let mut fetch: Vec<(&String, &manifest::LeanEntry, Option<BaselineEntry>)> = Vec::new();
+            while plan.len() < self.cfg.take_batch.max(1) {
+                let Some((path, entry)) = entries.next() else { break };
+                let (etag, key) = (&entry.etag, &entry.key);
+                let cited_mode = Some(entry.mode);
+                if baseline
+                    .entries
+                    .get(path)
+                    .map(|b| &b.etag == etag && cited_mode.is_none_or(|m| b.cites_mode(m)))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if !held(&baseline, path) {
+                    continue;
+                }
+                if !in_scope(path) {
+                    // D4: NOT integrated — it stays owed, and the next
+                    // barrier's consume takes it.
+                    report.out_of_scope_foreign += 1;
+                    continue;
+                }
+                if scanned.holds(path) {
+                    plan.push((path, entry, Owed::Unreadable));
+                    continue;
+                }
+                if locally_dirty(path) {
+                    // The phantom-conflict rule (§2.2): `sync` saves the
+                    // baseline only at the end, so a crash mid-apply
+                    // followed by a re-honor makes already-applied paths
+                    // scan dirty against the stale baseline. Declaring a
+                    // conflict there would report a conflict for a path
+                    // whose local bytes ARE the remote bytes, and the path
+                    // would then re-publish as a spurious generation bump.
+                    // Compare content identity first.
+                    // The remote's crc, read off the object we would apply
+                    // (the backend's attestation) before the manifest's.
+                    // One HEAD, only on the dirty-vs-remote path.
+                    let remote_meta = match self.store.head(key).await {
+                        Ok(m) if m.etag == *etag => Some(m),
+                        _ => None,
+                    };
+                    // The remote's CRC: the backend's attestation when it
+                    // offers one, else the writer's for this etag — client-
+                    // computed, so it exists on a backend that attests none
+                    // (Ozone). Without either the bytes cannot be judged
+                    // identical, and the path is a conflict as before.
+                    let want: Option<String> = remote_meta.as_ref().and_then(|m| {
+                        m.crc64_b64.clone().or_else(|| remote_crc.get(path).cloned().flatten())
+                    });
+                    let local_path = self.cfg.root.join(path);
+                    let local_crc =
+                        std::fs::read(&local_path).ok().map(|b| crc64_to_b64(crc64_nvme(&b)));
+                    let identical = want.is_some() && want == local_crc;
+                    if !identical {
+                        plan.push((path, entry, Owed::Dirty));
+                        continue;
+                    }
                     let st = std::fs::metadata(&local_path)?;
-                    let stamps =
-                        remote_meta.as_ref().and_then(|m| GenerationStamps::from_meta(&m.meta));
-                    baseline.entries.insert(
-                        path.clone(),
-                        BaselineEntry {
+                    let stamps = remote_meta.as_ref().and_then(|m| GenerationStamps::from_meta(&m.meta));
+                    plan.push((
+                        path,
+                        entry,
+                        Owed::Identical(BaselineEntry {
                             etag: etag.clone(),
                             key: Some(key.clone()),
-                            generation: stamps
-                                .map(|s| s.generation)
-                                .or_else(|| theirs.entries.get(path).map(|e| e.generation))
-                                .unwrap_or(0),
+                            generation: stamps.map(|s| s.generation).unwrap_or(entry.generation),
                             size: st.len(),
                             mtime_unix: mtime_of(&st),
                             mtime_nanos: Some(mtime_nanos_of(&st)),
@@ -335,132 +360,115 @@ impl Syncer {
                             racy: super::barrier::racy_stat(&st),
                             change: Some(super::scan::ChangeStamp::of(&st)),
                             crc64_b64: local_crc,
-                        },
-                    );
-                        report.applied.push(path.clone());
+                        }),
+                    ));
                     continue;
                 }
-                self.state.append_conflict(&ConflictRecord {
+                // A path this tree can never safely materialise is refused and
+                // NOT left owed (as the consume does), before a byte of it is
+                // fetched; a write that fails for any other reason below is
+                // transient and stays owed.
+                if let Err(e) = super::barrier::check_contained(&self.cfg.root, path) {
+                    plan.push((path, entry, Owed::Refused(e)));
+                    continue;
+                }
+                // Review 2026-09-18, H7: dirt was judged by the scan at step 1,
+                // and a whole-tree sync fetches for minutes after it; a path
+                // the agent writes since then is modified, and its version
+                // wins. So the fetch asks for the licence once more against a
+                // fresh stat, with the bytes in the temp, immediately before
+                // the rename (`Licence::WhileClean`).
+                super::barrier::consume_window("before-write", path);
+                plan.push((path, entry, Owed::Fetch));
+                fetch.push((path, entry, baseline.entries.get(path).cloned()));
+            }
+            if plan.is_empty() {
+                break;
+            }
+            // A store failure other than a 404 or 412 ends the sync here, as
+            // the first failed GET always did.
+            let mut fetched = self.take_owed(fetch).await?;
+            for (path, entry, owed) in plan {
+                let etag = &entry.etag;
+                let record = |kind: String| ConflictRecord {
                     path: path.clone(),
                     foreign_etag: etag.clone(),
                     preserved_key: None, // remote version stays in the bucket
-                    kind: "sync-dirty".into(),
+                    kind,
                     at_unix: now_unix(),
-                })?;
-                report.conflicts.push(path.clone());
-                dirty_skips.insert(path.clone());
-                continue;
-            }
-            let fetched = self.store.get_whole(key, Some(etag)).await;
-            let (meta, body) = match fetched {
-                Ok(ok) => ok,
-                Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) => {
-                    // Superseded mid-sync, or not readable yet: owed still.
+                };
+                let outcome = match owed {
+                    Owed::Unreadable => {
+                        self.state.append_conflict(&unreadable(path))?;
+                        report.conflicts.push(path.clone());
+                        dirty_skips.insert(path.clone());
+                        continue;
+                    }
+                    Owed::Identical(be) => {
+                        baseline.entries.insert(path.clone(), be);
+                        report.applied.push(path.clone());
+                        continue;
+                    }
+                    Owed::Dirty => {
+                        self.state.append_conflict(&record("sync-dirty".into()))?;
+                        report.conflicts.push(path.clone());
+                        dirty_skips.insert(path.clone());
+                        continue;
+                    }
+                    Owed::Refused(e) => {
+                        self.state.append_conflict(&record(format!("sync-refused-containment: {e}")))?;
+                        report.conflicts.push(path.clone());
+                        continue;
+                    }
+                    Owed::Fetch => fetched.remove(path),
+                };
+                let Some(f) = outcome else {
+                    // Unreachable (every planned fetch has an outcome); owed still.
                     left = true;
                     failed.insert(path.clone());
                     continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-            // The document's mode, as the consume and checkout apply.
-            let mode = cited_mode;
-            // VERIFIED before it is written, exactly as checkout's fresh
-            // fetch is: against the writer's CRC for this etag (the
-            // manifest's), else the backend's attestation when it offers
-            // one. What the baseline records is OURS, over the bytes
-            // written.
-            let got = crc64_to_b64(crc64_nvme(&body));
-            let want =
-                remote_crc.get(path).cloned().flatten().or_else(|| meta.crc64_b64.clone());
-            if let Some(want) = want {
-                if want != got {
-                    return Err(LeanError::State(format!(
-                        "sync: {path} (etag {etag}) is cited with CRC-64 {want}, but the bytes \
-                         fetched under that etag hash to {got} — the object is corrupt or the \
-                         store returned the wrong bytes; refusing to apply it (nothing written)"
-                    )));
-                }
-            }
-            // A path this tree can never safely materialise is refused and
-            // NOT left owed (as the consume does); a write that fails for
-            // any other reason below is transient and stays owed.
-            if let Err(e) = super::barrier::check_contained(&self.cfg.root, path) {
-                self.state.append_conflict(&ConflictRecord {
-                    path: path.clone(),
-                    foreign_etag: etag.clone(),
-                    preserved_key: None,
-                    kind: format!("sync-refused-containment: {e}"),
-                    at_unix: now_unix(),
-                })?;
-                report.conflicts.push(path.clone());
-                continue;
-            }
-            super::barrier::consume_window("before-write", path);
-            // Review 2026-09-18, H7: dirt was judged by the scan at step 1,
-            // and a whole-tree sync fetches for minutes after it; a path
-            // the agent writes since then is modified, and its version
-            // wins. So the licence is checked once more against a fresh
-            // stat, with the temp written, immediately before the rename.
-            let local = self.cfg.root.join(path);
-            let base = baseline.entries.get(path).cloned();
-            let still_clean = || !super::barrier::local_dirty(&local, base.as_ref());
-            let written = super::barrier::contained_path(&self.cfg.root, path).and_then(|target| {
-                if self.cfg.tree_reserve {
-                    super::safefs::leave_the_reserve(&self.cfg.root, path, body.len() as u64, self.cfg.tree_room_for_tests)?;
-                }
-                super::barrier::write_file_atomic_if(&target, &body, mode, &still_clean)
-            });
-            let st = match written {
-                Ok(Some(st)) => st,
-                Ok(None) => {
-                    self.state.append_conflict(&ConflictRecord {
-                        path: path.clone(),
-                        foreign_etag: etag.clone(),
-                        preserved_key: None, // remote version stays in the bucket
-                        kind: "sync-dirty".into(),
-                        at_unix: now_unix(),
-                    })?;
-                    report.conflicts.push(path.clone());
-                    dirty_skips.insert(path.clone());
-                    continue;
-                }
-                Err(e) => {
+                };
+                match (f.not_taken, f.be) {
+                    (None, Some(be)) => {
+                        // The baseline records the inode this sync wrote (its
+                        // fstat), never a fresh stat of the path an agent may
+                        // have written since (H7).
+                        super::barrier::consume_window("after-rename", path);
+                        baseline.entries.insert(path.clone(), be);
+                        report.applied.push(path.clone());
+                    }
+                    // Superseded mid-sync, or not readable yet: owed still.
+                    (Some(NotTaken::Missing), _) | (Some(NotTaken::NotAttempted), _) | (None, None) => {
+                        left = true;
+                        failed.insert(path.clone());
+                    }
+                    // VERIFIED before it is written, exactly as checkout's
+                    // fresh fetch is: against the writer's CRC for this etag
+                    // (the manifest's), else the backend's attestation when it
+                    // offers one.
+                    (Some(NotTaken::Corrupt { want, got }), _) => {
+                        return Err(LeanError::State(format!(
+                            "sync: {path} (etag {etag}) is cited with CRC-64 {want}, but the bytes \
+                             fetched under that etag hash to {got} — the object is corrupt or the \
+                             store returned the wrong bytes; refusing to apply it (nothing written)"
+                        )));
+                    }
+                    // The agent wrote it during the sync: its version wins.
+                    (Some(NotTaken::Kept), _) => {
+                        self.state.append_conflict(&record("sync-dirty".into()))?;
+                        report.conflicts.push(path.clone());
+                        dirty_skips.insert(path.clone());
+                    }
                     // TRANSIENT (a full disk, a directory it cannot write
                     // to): surfaced, never a wedge, and still owed.
-                    self.state.append_conflict(&ConflictRecord {
-                        path: path.clone(),
-                        foreign_etag: etag.clone(),
-                        preserved_key: None,
-                        kind: format!("sync-write-failed (will retry): {e}"),
-                        at_unix: now_unix(),
-                    })?;
-                    report.conflicts.push(path.clone());
-                    left = true;
-                    failed.insert(path.clone());
-                    continue;
+                    (Some(NotTaken::WriteFailed(e)), _) => {
+                        self.state.append_conflict(&record(format!("sync-write-failed (will retry): {e}")))?;
+                        report.conflicts.push(path.clone());
+                        left = true;
+                        failed.insert(path.clone());
+                    }
                 }
-            };
-            // The baseline records the inode this sync wrote (its fstat),
-            // never a fresh stat of the path an agent may have written
-            // since (H7).
-            super::barrier::consume_window("after-rename", path);
-            let stamps = GenerationStamps::from_meta(&meta.meta);
-            baseline.entries.insert(
-                path.clone(),
-                BaselineEntry {
-                    etag: meta.etag.clone(),
-                    key: Some(key.clone()),
-                    generation: stamps.map(|s| s.generation).unwrap_or(0),
-                    size: st.len(),
-                    mtime_unix: mtime_of(&st),
-                    mtime_nanos: Some(mtime_nanos_of(&st)),
-                    mode: cited_mode.map(|m| m & scan::PERM_BITS),
-                    racy: super::barrier::racy_stat(&st),
-                    change: Some(super::scan::ChangeStamp::of(&st)),
-                    crc64_b64: Some(got),
-                },
-            );
-            report.applied.push(path.clone());
+            }
         }
 
         // 5. What this sync leaves owed. Whole-tree, the sync derived against

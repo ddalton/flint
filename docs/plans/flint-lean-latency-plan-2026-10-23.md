@@ -1506,3 +1506,190 @@ nothing: `bench_arm()` sent every arm it did not list to `shipped`, so
 were run-to-run noise. It now lists both and refuses an unknown arm, and
 each result line records the arm the binary printed. Every number above
 is from runs whose log says `arm=nogate`, `arm=nowait` or `arm=shipped`.
+
+## 18. What a tree is owed, fetched as a checkout fetches (step 1a)
+
+**Added 2026-11-12.** Step 1a of the simplification assessment of
+2026-11-11 (the Claude Doc "Lean protocol: what can still be simplified,
+and what it does to latency"). It changes no rule of `LeanP1.tla`, as
+nothing in this plan does.
+
+**What it was.** A barrier's consume (`barrier.rs` `consume_owed`) and a
+`sync` (`sync.rs` step 4) took the files a tree is owed one at a time:
+one `get_whole` per path, the body held in memory until it was written.
+A checkout fetches the same objects through `materialize`: 128 requests
+in flight over up to 8 driver tasks, an object of at least
+`range_get_min_bytes` that is more than one `range_get_chunk_bytes`
+range (so, shipped, over 16 MiB) as parallel ranges written at their
+offsets, and at most `fetch_inflight_max_bytes` of bodies in memory. So a
+peer's bulk publish reached every other tree at one round trip per file,
+and a large object took its own size of the worker's memory (1 Gi by
+default in `flint-s3-csi-chart/values.yaml`). The door drill of
+2026-09-12 measured what the fan-out is worth on real S3: a 20,000-file
+checkout took 5.29–5.93 s shipped and 252 s at fan-out 1 (one run). No
+bench had ever given a consume more than one owed file (§8).
+
+**The licence.** A checkout's fetcher may write any admitted path: the
+tree is its to fill, and nothing else writes it before the marker. A live
+tree is the agent's, and the consume's rule was that a path is overwritten
+only while it still reads as its baseline entry, asked once more with the
+bytes in the temp, immediately before the rename (H7, `FINDINGS.md`
+L-116). So the fetcher now takes each path with a licence
+(`checkout.rs` `Licence`):
+
+- `Fill` is a checkout's and a rescope's widen, unchanged: the resume
+  keeps a present path that already holds the cited bytes, and a citation
+  that cannot be served is an error.
+- `WhileClean(base)` is the consume's and the sync's. Nothing is resumed.
+  H7's last check runs inside the fetcher, on the whole-object arm
+  (`write_file_atomic_if`, as before) and on the ranged arm (new:
+  `RangedTmp::commit_if`, the check after the last range is in the temp).
+  The baseline records the written inode's own `fstat`, on both arms. What
+  is not the store's failure comes back as a value for the caller's
+  record (`NotTaken`): `Missing` for a 404 or 412, `Corrupt` for bytes
+  that do not hash to the cited CRC-64 (else the backend's), `Kept` for an
+  agent write that came first, `WriteFailed` for a tree that would not
+  take the bytes (the reserve, a directory that cannot be made, a full
+  disk). An entry whose CRC-64 does not parse takes the whole-object arm,
+  where the backend's checksum can stand in.
+
+**The callers.** `Syncer::take_owed` runs the fetcher under `WhileClean`.
+The consume and the sync each take what they owe in three phases: decide
+each path in path order (refused, converged or identical, the agent's,
+or to fetch), fetch the ones to fetch together, then record each outcome
+in path order. So the conflict records, the trace and a sync's report
+read in the order they always did. The test-only write windows
+(`consume_window`) open in the decide phase on the caller's task, since
+their hooks are thread-local. They do so before the fetch rather than
+before the write: the window is wider, not narrower, and the fetcher's
+last check is the one H7 needs.
+
+**Two bounds.**
+- *Failure.* The consume stopped at its first failed GET, and the sync did
+  too. With the fetches in flight together, the fetcher raises a flag at
+  the first error, and under `WhileClean` no fetch starts after it
+  (`NotTaken::NotAttempted`, never returned). Up to `fanout` already in
+  flight finish, so a store that answers nothing costs one timeout, not
+  128 waited out in turn. What they wrote is on disk but not recorded,
+  and the next derive adopts it by content convergence.
+- *Memory.* A pass decides, fetches and records `take_batch` paths at a
+  time (8,192, a new `LeanConfig` field), so what it holds for the paths
+  in flight does not grow with the size of the arrival, and a path's
+  licence is first read at most one batch before its bytes land. LPT
+  ordering is within a batch.
+
+**What reads differently.** In a sync: a path that can never be written
+here is refused before its object is fetched, not after; a version whose
+object has no generation stamp is recorded with the document's
+generation, not 0; and a document entry with no CRC-64 is checked against
+the backend's, as the consume always did, where the sync used to fail.
+In both: the parent directory is made before the fetch, so a failed fetch
+can leave an empty directory. Not touched: the sync's identical-bytes arm
+still reads the whole local file into memory (`std::fs::read`), and the
+sync still walks the tree twice (step 1b of the assessment would remove
+both).
+
+**Tests.** `tests_owed.rs`, ten:
+- the consume and the sync fetch 24 owed files together (peak in flight
+  at least half of them, at 5 ms a request);
+- a 3 MiB object owed to a tree set to range from 1 MiB arrives in
+  ranges, byte-identical, and is never fetched whole, by a consume and by
+  a sync, and the next barrier publishes nothing;
+- H7 on the ranged arm: an agent write while the object is fetched stays,
+  no temp is left, the consume records the path as the agent's and the
+  barrier publishes it, the sync records `sync-dirty`;
+- a ranged object whose bytes are not the cited ones is refused, no temp
+  is left, the path stays owed and the refusal repeats, and the file
+  beside it arrives;
+- a cited object that is gone leaves the path owed and uncited, and the
+  rest arrives;
+- a consume whose store fails starts no fetch after one has failed, and
+  takes everything once the store answers;
+- a batch of five over 24 paths with three of them the agent's, on both
+  sides of a batch edge: nothing lost, the sync's report in path order.
+
+On origin/main seven of these fail, as intended: 24 files fetched one at a
+time, the large object fetched whole, the ranged arm never taken. The one
+on a failing store passes there (one GET at a time stops at the first),
+and the batch and gone-object tests were written after that run.
+
+**Controls.** Each a one-line change, each against the whole battery, each
+killed by a FAILED test line: H7 dropped on the whole arm (4 tests) and on
+the ranged arm (2); fetches started after a failure (1); a 404/412 under
+`WhileClean` made an error (2), and a CRC mismatch on the whole arm (2) and
+on the ranged arm (1), the reserve's refusal (1) and a failed write (3); the
+consume forgetting the agent's path (2), and that a gone object leaves the
+path owed (1, the new test; none of the tests there before kill it); the sync
+forgetting the same (2); the ranged fold unchecked (2); a batch edge
+dropping a path, in the consume and in the sync (1 each). One is not
+killed and is equivalent: letting the resume run on a live tree, where a
+present path holding the cited bytes reads clean against a baseline that
+already cites them, so no path the consume or sync owes reaches it.
+The controls on `checkout.rs` alone ran before the batching was added
+(their lines did not move); those on the callers ran after it.
+
+**Battery** (the Linux box, uid 1000, `--locked`, 2026-11-14): the
+syncer's library 423 passed, 0 failed, 3 ignored, 0 SKIPPED; both
+binaries build with `--features s3` (one warning, the drain arm's, as
+before); the gateway 69 passed, 0 failed; the code-trace check
+(`lean/formal/trace/trace-check-core.sh`, tla-mc 0.2.2) 84 of 84 as
+required, on 32 traces regenerated from this tree.
+
+**Bench.** `tests_bench.rs` `bulk_arrival_cost`, three legs over the step
+that fetches and nothing else: `consume_small` (`FLINT_BENCH_OWED` files of
+`FLINT_BENCH_OWED_BYTES`), `sync_small` (as many again), and
+`consume_large` (`FLINT_BENCH_LARGE` objects of `FLINT_BENCH_LARGE_MIB`,
+with the peak RSS above where the leg began). The taking tree reads
+through a store that hands back a copy of every body, as a client reading
+a socket holds its own: the in-memory double shares its buffers, so a
+fetched object would cost nothing. Every leg checks the bytes it took.
+`FLINT_BENCH_ARM=seqtake` is the control from the same binary: fan-out 1,
+one driver, no ranges. The before arm is origin/main with only the bench
+leg applied. musl with mimalloc, as shipped.
+
+**Results.** Three interleaved rounds on the box (8 cores, quiet), musl
+with mimalloc, in-memory store, ranges over the three runs. Every run's
+log names its arm, and every leg checked the bytes it took. Files are
+8 KiB.
+
+| | origin/main | 1a | `seqtake` (1a, one at a time) |
+|---|---|---|---|
+| **25 ms a request:** consume, 2,000 files | 53.2–53.4 s | **0.59–0.63 s** | 53.4–53.7 s |
+| **25 ms:** sync, 2,000 files | 53.5–53.6 s | **0.83 s** | 53.6–53.8 s |
+| 0 ms: consume, 2,000 files | 87–97 ms | 62–103 ms | 110–114 ms |
+| 0 ms: sync, 2,000 files | 317–334 ms | 292–294 ms | 338–344 ms |
+| 0 ms: consume, 20,000 files | 814–820 ms | 518–533 ms | not run |
+| 0 ms: sync, 20,000 files | 3.11–3.12 s | 2.80–2.81 s | not run |
+| 0 ms: consume, 200 files | 22–24 ms | 29–33 ms | 24–37 ms |
+| 0 ms: consume, two 512 MiB objects | 1.13–1.22 s | **0.50 s** | 1.16–1.38 s |
+
+- **The latency is the fan-out.** At 25 ms a request the peak in flight
+  was 1 before and 128 after, and the one-at-a-time arm of the same
+  binary times as origin/main does, so nothing else in the change moved
+  the number. One round trip per file before: 2,002 GETs at 25 ms is
+  50 s of the 53.
+- **The requests are the same** for small files: 2,002 GETs for 2,000,
+  20,005 for 20,000, either way. The two large objects were 4 GETs (two
+  whole bodies, two for the document) and are 66 (32 ranges of 16 MiB
+  for each object, and the same two).
+- **The CPU is not free.** At memory speed the wall time barely moves,
+  and the fetch costs more CPU, most of it system time: at 20,000 files
+  the consume used 0.74 s of CPU before and 1.79–1.84 s after, the sync
+  3.2 s and 4.2 s; the two large objects 0.96–1.02 s and 1.76–1.88 s. A
+  200-file consume at memory speed went from 22–24 ms to 29–33 ms.
+  Against a real store the round trips dominate, as above.
+- **The memory is not measured here.** The leg reports the peak RSS above
+  where it began: 323–352 MiB before, 196–212 MiB after. But the
+  before figure is below the 512 MiB body it held, so the allocator was
+  reusing pages already resident (the in-memory store and the seed's
+  buffers share the process), and one `seqtake` run held 867 MiB where
+  the others held 354–356. What bounds the memory is structural: the
+  ranged arm holds `range_get_parallelism` × `range_get_chunk_bytes`
+  (64 MiB) per object under the `fetch_inflight_max_bytes` window, as a
+  checkout does, and `a_consume_takes_a_large_object_in_ranges_never_whole`
+  shows the body is never fetched whole. A clean measure needs the taking
+  tree in its own process, against a real store.
+
+Not run: 20,000 files at 25 ms (about 530 s a run before), and a real
+S3. The door drill's checkout figures above are the real-S3 evidence for
+the same fetcher.

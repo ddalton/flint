@@ -31,6 +31,12 @@
 //!   1 = one worker). Unset, the shipped default.
 //! - `walk_cost_alone`: the walk by itself, `FLINT_BENCH_WALKS` times, with
 //!   the user and system CPU each walk took.
+//! - `bulk_arrival_cost`: a peer publishes `FLINT_BENCH_OWED` small files
+//!   (`FLINT_BENCH_OWED_BYTES` each), then as many again, then
+//!   `FLINT_BENCH_LARGE` objects of `FLINT_BENCH_LARGE_MIB`; a second tree
+//!   takes the first batch with a consume, the second with a sync, the
+//!   large ones with a consume. `FLINT_BENCH_ARM=seqtake` fetches one
+//!   object at a time and never in ranges.
 
 use super::*;
 use flint_store::memory::MemoryStore;
@@ -78,6 +84,9 @@ fn bench_arm() -> &'static str {
         // without its wait.
         Ok("nogate") => "nogate",
         Ok("nowait") => "nowait",
+        // `bulk_arrival_cost`'s control: what a tree is owed fetched one
+        // object at a time and never in ranges, from the same binary.
+        Ok("seqtake") => "seqtake",
         Ok("shipped") | Err(_) => "shipped",
         // An arm this list lacks would run as shipped and time as a
         // control that is not one.
@@ -112,6 +121,11 @@ fn bench_syncer(store: &Arc<dyn ObjectStore>, root: &std::path::Path, prefix: &s
     }
     if bench_arm() == "nowait" {
         cfg.racy_wait_min = 0;
+    }
+    if bench_arm() == "seqtake" {
+        cfg.fanout = 1;
+        cfg.fetch_drivers = 1;
+        cfg.range_get_min_bytes = 0;
     }
     // Lever E's arms from one binary: the walk's thread count.
     if let Some(n) = bench_scan_threads() {
@@ -332,5 +346,206 @@ async fn barrier_cost_against_workspace_size() {
         b.state.baseline_parses(),
         kib("VmHWM:"),
         kib("VmRSS:")
+    );
+}
+
+/// User and system CPU of this process so far, in milliseconds.
+fn cpu_ms() -> (u64, u64) {
+    let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r) };
+    let ms = |t: libc::timeval| t.tv_sec as u64 * 1000 + t.tv_usec as u64 / 1000;
+    (ms(r.ru_utime), ms(r.ru_stime))
+}
+
+/// A `/proc/self/status` field, in MiB.
+fn status_mib(key: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find(|l| l.starts_with(key))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|kib| kib / 1024)
+        .unwrap_or(0)
+}
+
+/// Start the peak-RSS mark (`VmHWM`) again from the current RSS, and
+/// return that RSS in MiB.
+fn reset_peak_rss() -> u64 {
+    std::fs::write("/proc/self/clear_refs", "5").expect("reset VmHWM through /proc/self/clear_refs");
+    status_mib("VmRSS:")
+}
+
+/// What a peer's bulk arrival costs the tree that takes it (latency plan
+/// 2026-10-23, addendum 2026-11-11: step 1a). Three legs, each timed over
+/// the step that fetches and nothing else:
+///
+/// - `consume_small`: `FLINT_BENCH_OWED` files (default 2000) of
+///   `FLINT_BENCH_OWED_BYTES` (default 8192), taken by a consume;
+/// - `sync_small`: as many again, taken by a sync;
+/// - `consume_large`: `FLINT_BENCH_LARGE` objects (default 0) of
+///   `FLINT_BENCH_LARGE_MIB` (default 256), taken by a consume, with the
+///   most memory the process held above where the leg began.
+///
+/// The taking tree reads through a store that hands back a COPY of every
+/// body, as a client reading a socket holds its own: the in-memory double
+/// shares its buffers, and a fetched object would otherwise cost nothing.
+/// Every leg checks the bytes it took, so an arm that skipped work fails
+/// instead of timing as fast.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn bulk_arrival_cost() {
+    use super::tests::Hooked;
+    let env = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let small = env("FLINT_BENCH_OWED", 2000);
+    let small_bytes = env("FLINT_BENCH_OWED_BYTES", 8192);
+    let large = env("FLINT_BENCH_LARGE", 0);
+    let large_mib = env("FLINT_BENCH_LARGE_MIB", 256);
+    let delay = env("FLINT_BENCH_DELAY_MS", 0) as u64;
+
+    let inner = Arc::new(MemoryStore::new());
+    let copying = Arc::new(Hooked(inner.clone(), Default::default()));
+    copying.copy_bodies(true);
+    let store_a: Arc<dyn ObjectStore> = inner.clone();
+    let store_b: Arc<dyn ObjectStore> = copying.clone();
+    let prefix = format!("bench/{}", uuid::Uuid::new_v4());
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut a = bench_syncer(&store_a, dir_a.path(), &prefix);
+    let mut b = bench_syncer(&store_b, dir_b.path(), &prefix);
+    let mut ops = Ops::new(&store_a);
+    a.checkout().await.unwrap();
+    b.checkout().await.unwrap();
+    println!(
+        "OWED arm={} delay_ms={delay} small={small} small_bytes={small_bytes} large={large} large_mib={large_mib} \
+         fanout={} fetch_drivers={} range_min={} range_chunk={} range_par={} inflight_max={} tree={}",
+        bench_arm(),
+        b.cfg.fanout,
+        b.cfg.fetch_drivers,
+        b.cfg.range_get_min_bytes,
+        b.cfg.range_get_chunk_bytes,
+        b.cfg.range_get_parallelism,
+        b.cfg.fetch_inflight_max_bytes,
+        dir_b.path().display(),
+    );
+
+    // One batch of small files: `tag` in every body, so a batch that was
+    // not taken cannot pass for the one before it.
+    let body = |tag: &str, i: usize| {
+        let mut s = format!("{tag} {i} ");
+        while s.len() < small_bytes {
+            s.push((b'a' + (s.len() % 23) as u8) as char);
+        }
+        s
+    };
+    let rel = |tag: &str, i: usize| format!("{tag}/d{:03}/f{i:06}.txt", i / 500);
+    async fn publish(a: &mut Syncer, want: usize) {
+        let mut done = 0;
+        for _ in 0..6 {
+            done += a.run_barrier().await.unwrap().uploaded.len();
+            if done >= want {
+                break;
+            }
+        }
+        assert_eq!(done, want, "the peer never published the batch");
+        // The peer's tree shares this filesystem with the taking tree's,
+        // and a consume ends in syncfs(2): a real peer is on another
+        // machine.
+        unsafe { libc::sync() };
+    }
+    let write_batch = |root: &std::path::Path, tag: &str| {
+        for i in 0..small {
+            let p = root.join(rel(tag, i));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body(tag, i)).unwrap();
+        }
+    };
+    let check_batch = |root: &std::path::Path, tag: &str| {
+        for i in 0..small {
+            let got = std::fs::read_to_string(root.join(rel(tag, i))).ok();
+            assert_eq!(got.as_deref(), Some(body(tag, i).as_str()), "{} did not arrive", rel(tag, i));
+        }
+    };
+
+    // Leg 1: the consume.
+    write_batch(dir_a.path(), "c");
+    publish(&mut a, small).await;
+    ops.take();
+    inner.inject_request_delay_ms(delay);
+    inner.reset_peak_requests_in_flight();
+    let (u0, s0) = cpu_ms();
+    let t = Instant::now();
+    let (taken, _) = b.consume_owed().await.unwrap();
+    let ms = t.elapsed().as_millis();
+    let (u1, s1) = cpu_ms();
+    inner.inject_request_delay_ms(0);
+    assert_eq!(taken, small, "the consume did not take the batch");
+    check_batch(dir_b.path(), "c");
+    println!(
+        "OWED leg=consume_small taken={taken} ms={ms} user_ms={} sys_ms={} peak_in_flight={} ops: {}",
+        u1 - u0,
+        s1 - s0,
+        inner.peak_requests_in_flight(),
+        ops.take()
+    );
+
+    // Leg 2: the sync.
+    write_batch(dir_a.path(), "s");
+    publish(&mut a, small).await;
+    ops.take();
+    inner.inject_request_delay_ms(delay);
+    inner.reset_peak_requests_in_flight();
+    let (u0, s0) = cpu_ms();
+    let t = Instant::now();
+    let r = b.sync().await.unwrap();
+    let ms = t.elapsed().as_millis();
+    let (u1, s1) = cpu_ms();
+    inner.inject_request_delay_ms(0);
+    assert_eq!((r.applied.len(), r.conflicts.len()), (small, 0), "the sync did not take the batch");
+    check_batch(dir_b.path(), "s");
+    println!(
+        "OWED leg=sync_small applied={} ms={ms} user_ms={} sys_ms={} peak_in_flight={} ops: {}",
+        r.applied.len(),
+        u1 - u0,
+        s1 - s0,
+        inner.peak_requests_in_flight(),
+        ops.take()
+    );
+
+    // Leg 3: large objects, and the memory they are held in.
+    if large == 0 {
+        return;
+    }
+    let big_rel = |i: usize| format!("large/w{i:02}.bin");
+    let mut crcs = vec![];
+    std::fs::create_dir_all(dir_a.path().join("large")).unwrap();
+    for i in 0..large {
+        // Non-uniform, and different per object.
+        let bytes: Vec<u8> = (0..large_mib * 1024 * 1024).map(|k| ((k / 7 + k % 251 + i) % 256) as u8).collect();
+        crcs.push(flint_store::crc64_nvme(&bytes));
+        std::fs::write(dir_a.path().join(big_rel(i)), &bytes).unwrap();
+    }
+    publish(&mut a, large).await;
+    ops.take();
+    inner.inject_request_delay_ms(delay);
+    let rss0 = reset_peak_rss();
+    let (u0, s0) = cpu_ms();
+    let t = Instant::now();
+    let (taken, _) = b.consume_owed().await.unwrap();
+    let ms = t.elapsed().as_millis();
+    let (u1, s1) = cpu_ms();
+    let peak = status_mib("VmHWM:");
+    inner.inject_request_delay_ms(0);
+    assert_eq!(taken, large, "the consume did not take the large objects");
+    for (i, want) in crcs.iter().enumerate() {
+        let got = super::barrier::file_crc(dir_b.path(), &big_rel(i)).unwrap();
+        assert_eq!(got, *want, "{} did not arrive whole", big_rel(i));
+    }
+    println!(
+        "OWED leg=consume_large taken={taken} ms={ms} user_ms={} sys_ms={} rss_before_mib={rss0} \
+         peak_rss_mib={peak} held_above_mib={} ops: {}",
+        u1 - u0,
+        s1 - s0,
+        peak.saturating_sub(rss0),
+        ops.take()
     );
 }

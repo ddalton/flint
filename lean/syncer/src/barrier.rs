@@ -16,6 +16,7 @@ use super::inbox;
 use super::docview::{CommitDocs, DocView, Opened};
 use super::manifest::{self, LeanEntry};
 use super::scan;
+use super::checkout::NotTaken;
 use super::state::{BaselineEntry, Carrier, ConflictRecord, IntentJournal};
 use super::{now_unix, LeanError, LeanResult, Syncer};
 
@@ -363,38 +364,47 @@ impl Syncer {
             baseline.prev_scan.remove(&path);
         }
 
-        for (path, e) in &doc.entries {
-            let be = baseline.entries.get(path).cloned();
-            if be.as_ref().is_some_and(|b| same(&b.etag, &e.etag) && b.cites_mode(e.mode)) {
-                continue;
-            }
-            let held = be.is_some() || scope.as_ref().is_none_or(|s| s.covers(path));
-            if !held {
-                continue;
-            }
-            if let Err(err) = check_contained(&self.cfg.root, path) {
-                // A path this tree can never safely materialise: surfaced,
-                // and not left owed — nothing here will ever take it.
-                self.state.append_conflict(&ConflictRecord {
-                    path: path.clone(),
-                    foreign_etag: e.etag.clone(),
-                    preserved_key: None,
-                    kind: format!("consume-refused-containment: {err}"),
-                    at_unix: now_unix(),
-                })?;
-                self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "refused"}));
-                continue;
-            }
-            let local = self.cfg.root.join(path);
-            if local_dirty(&local, be.as_ref()) {
-                // CONTENT CONVERGENCE: the tree's bytes are the document's.
-                let converged = std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_file() && m.len() == e.size)
-                    && file_crc(&self.cfg.root, path).is_ok_and(|c| same(&crc64_to_b64(c), &e.crc64_b64));
-                if converged {
-                    let st = std::fs::metadata(&local)?;
-                    baseline.entries.insert(
-                        path.clone(),
-                        BaselineEntry {
+        // What each path the document changed is owed, decided in path
+        // order BEFORE anything is fetched: the fetches then run together
+        // (`Syncer::take_owed`, checkout's fan-out: one whole-object GET
+        // at a time was the wall clock of a peer's bulk arrival, and held
+        // each body in memory whatever its size), and the outcomes are
+        // recorded in path order after them. A batch of paths at a time
+        // (`take_batch`), so the records and the trace read in path order
+        // as they always did, and a bulk arrival is not held in memory.
+        enum Owed {
+            /// Never materialisable here: surfaced, not left owed.
+            Refused(LeanError),
+            /// The tree's bytes are already the document's.
+            Converged(BaselineEntry),
+            /// The agent's work, not owed until it backs out.
+            Skipped,
+            /// Clean against this baseline entry: to fetch.
+            Fetch,
+        }
+        let mut entries = doc.entries.iter();
+        loop {
+            let mut plan: Vec<(&String, &LeanEntry, Owed)> = Vec::new();
+            let mut fetch: Vec<(&String, &LeanEntry, Option<BaselineEntry>)> = Vec::new();
+            for (path, e) in entries.by_ref() {
+                let be = baseline.entries.get(path).cloned();
+                if be.as_ref().is_some_and(|b| same(&b.etag, &e.etag) && b.cites_mode(e.mode)) {
+                    continue;
+                }
+                let held = be.is_some() || scope.as_ref().is_none_or(|s| s.covers(path));
+                if !held {
+                    continue;
+                }
+                let local = self.cfg.root.join(path);
+                let owed = if let Err(err) = check_contained(&self.cfg.root, path) {
+                    Owed::Refused(err)
+                } else if local_dirty(&local, be.as_ref()) {
+                    // CONTENT CONVERGENCE: the tree's bytes are the document's.
+                    let converged = std::fs::symlink_metadata(&local).is_ok_and(|m| m.is_file() && m.len() == e.size)
+                        && file_crc(&self.cfg.root, path).is_ok_and(|c| same(&crc64_to_b64(c), &e.crc64_b64));
+                    if converged {
+                        let st = std::fs::metadata(&local)?;
+                        Owed::Converged(BaselineEntry {
                             etag: e.etag.clone(),
                             key: Some(e.key.clone()),
                             generation: e.generation,
@@ -409,109 +419,111 @@ impl Syncer {
                             racy: super::barrier::racy_stat(&st),
                             change: Some(super::scan::ChangeStamp::of(&st)),
                             crc64_b64: Some(e.crc64_b64.clone()),
-                        },
-                    );
-                    baseline.prev_scan.insert(path.clone());
-                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "converged"}));
-                    taken += 1;
+                        })
+                    } else {
+                        Owed::Skipped
+                    }
                 } else {
-                    // The agent's work, not owed — until it backs out.
-                    skipped.insert(path.clone());
+                    // The licence to overwrite is this stat, and it is asked
+                    // again by the fetch with the bytes in the temp,
+                    // immediately before the rename (H7): a write between the
+                    // two is the agent's, and it stays (and publishes).
+                    consume_window("before-write", path);
+                    fetch.push((path, e, be));
+                    Owed::Fetch
+                };
+                plan.push((path, e, owed));
+                if plan.len() >= self.cfg.take_batch.max(1) {
+                    break;
                 }
-                continue;
             }
-            let (meta, body) = match self.store.get_whole(&e.key, Some(&e.etag)).await {
-                Ok(got) => got,
-                // A newer document replaced it (and its collector took the
-                // handle): owed again against that one.
-                Err(StoreError::NotFound(_)) | Err(StoreError::PreconditionFailed(_)) => {
-                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "missing"}));
+            if plan.is_empty() {
+                break;
+            }
+            // A store failure other than a 404 or 412 ends the consume here,
+            // as the first failed GET always did.
+            let mut fetched = self.take_owed(fetch).await?;
+            for (path, e, owed) in plan {
+                let record = |kind: String| ConflictRecord {
+                    path: path.clone(),
+                    foreign_etag: e.etag.clone(),
+                    preserved_key: None,
+                    kind,
+                    at_unix: now_unix(),
+                };
+                let trace = |action: &str| {
+                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": action}))
+                };
+                let outcome = match owed {
+                    Owed::Refused(err) => {
+                        // A path this tree can never safely materialise: surfaced,
+                        // and not left owed — nothing here will ever take it.
+                        self.state.append_conflict(&record(format!("consume-refused-containment: {err}")))?;
+                        trace("refused");
+                        continue;
+                    }
+                    Owed::Converged(be) => {
+                        baseline.entries.insert(path.clone(), be);
+                        baseline.prev_scan.insert(path.clone());
+                        trace("converged");
+                        taken += 1;
+                        continue;
+                    }
+                    Owed::Skipped => {
+                        // The agent's work, not owed — until it backs out.
+                        skipped.insert(path.clone());
+                        continue;
+                    }
+                    Owed::Fetch => fetched.remove(path),
+                };
+                let Some(f) = outcome else {
+                    // Unreachable (every planned fetch has an outcome); owed still.
                     left = true;
                     continue;
-                }
-                Err(err) => return Err(err.into()),
-            };
-            // VERIFIED before it is written, as checkout's fetch is: against
-            // the CRC the document cites, else the backend's attestation.
-            let got = crc64_to_b64(crc64_nvme(&body));
-            let want = Some(e.crc64_b64.clone()).filter(|c| !c.is_empty()).or_else(|| meta.crc64_b64.clone());
-            if let Some(want) = want {
-                if want != got {
-                    self.state.append_conflict(&ConflictRecord {
-                        path: path.clone(),
-                        foreign_etag: e.etag.clone(),
-                        preserved_key: None,
-                        kind: format!(
+                };
+                match (f.not_taken, f.be) {
+                    // The mode the DOCUMENT cites, as checkout applies — not the
+                    // object's stamp, which a gateway write does not carry (its
+                    // file came out 0644 here and its cited mode in a checkout).
+                    (None, Some(be)) => {
+                        consume_window("after-rename", path);
+                        // The baseline records the inode this consume WROTE (H7).
+                        baseline.entries.insert(path.clone(), be);
+                        baseline.prev_scan.insert(path.clone());
+                        trace("adopted");
+                        taken += 1;
+                    }
+                    // A newer document replaced it (and its collector took the
+                    // handle): owed again against that one.
+                    (Some(NotTaken::Missing), _) => {
+                        trace("missing");
+                        left = true;
+                    }
+                    // VERIFIED before it is written, as checkout's fetch is: against
+                    // the CRC the document cites, else the backend's attestation.
+                    (Some(NotTaken::Corrupt { want, got }), _) => {
+                        self.state.append_conflict(&record(format!(
                             "consume-refused-checksum: etag {} is cited with CRC-64 {want} but the \
                              bytes fetched under it hash to {got}",
                             e.etag
-                        ),
-                        at_unix: now_unix(),
-                    })?;
-                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "refused-checksum"}));
-                    left = true;
-                    continue;
-                }
-            }
-            // The mode the DOCUMENT cites, as checkout applies — not the
-            // object's stamp, which a gateway write does not carry (its
-            // file came out 0644 here and its cited mode in a checkout).
-            let mode = Some(e.mode);
-            consume_window("before-write", path);
-            // H7: the licence to overwrite is re-checked with the temp
-            // written, immediately before the rename; a write since is the
-            // agent's, and it stays (and publishes).
-            let still_clean = || !local_dirty(&local, be.as_ref());
-            let st = match contained_path(&self.cfg.root, path)
-                .and_then(|target| {
-                    if self.cfg.tree_reserve {
-                        super::safefs::leave_the_reserve(&self.cfg.root, path, body.len() as u64, self.cfg.tree_room_for_tests)?;
+                        )))?;
+                        trace("refused-checksum");
+                        left = true;
                     }
-                    write_file_atomic_if(&target, &body, mode, &still_clean)
-                })
-            {
-                Ok(Some(st)) => st,
-                // The agent wrote first: as a dirty path above.
-                Ok(None) => {
-                    skipped.insert(path.clone());
-                    continue;
-                }
-                Err(err) => {
+                    // The agent wrote first: as a dirty path above.
+                    (Some(NotTaken::Kept), _) => {
+                        skipped.insert(path.clone());
+                    }
                     // TRANSIENT (a full disk is not a planted symlink): the
                     // path stays owed and the record repeats.
-                    self.state.append_conflict(&ConflictRecord {
-                        path: path.clone(),
-                        foreign_etag: e.etag.clone(),
-                        preserved_key: None,
-                        kind: format!("consume-write-failed (will retry): {err}"),
-                        at_unix: now_unix(),
-                    })?;
-                    self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "deferred"}));
-                    left = true;
-                    continue;
+                    (Some(NotTaken::WriteFailed(err)), _) => {
+                        self.state.append_conflict(&record(format!("consume-write-failed (will retry): {err}")))?;
+                        trace("deferred");
+                        left = true;
+                    }
+                    (Some(NotTaken::NotAttempted), _) | (None, None) => left = true,
                 }
-            };
-            consume_window("after-rename", path);
-            // The baseline records the inode this consume WROTE (H7).
-            let stamps = GenerationStamps::from_meta(&meta.meta);
-            baseline.entries.insert(
-                path.clone(),
-                BaselineEntry {
-                    etag: meta.etag.clone(),
-                    key: Some(e.key.clone()),
-                    generation: stamps.map(|s| s.generation).unwrap_or(e.generation),
-                    size: st.len(),
-                    mtime_unix: mtime_of(&st),
-                    mtime_nanos: Some(mtime_nanos_of(&st)),
-                    mode: Some(e.mode & scan::PERM_BITS),
-                    racy: super::barrier::racy_stat(&st),
-                    change: Some(super::scan::ChangeStamp::of(&st)),
-                    crc64_b64: Some(got),
-                },
-            );
-            baseline.prev_scan.insert(path.clone());
-            self.trace("consume", serde_json::json!({"path": path, "etag": e.etag, "from": "manifest", "action": "adopted"}));
-            taken += 1;
+            }
         }
         baseline.derived_etag = (!left).then(|| current.etag.clone());
         baseline.skipped.sync_to(&skipped);
