@@ -43,6 +43,43 @@ covered by the stability guarantee.
   through bdev_nvme and ublk 49.4k, 61.5k and 61.6k.
 - `scripts/spdk-patches.sh test` also runs the nvmf controller unit test,
   which links again: patch 0001 gained the stub it needed.
+- **lean: a tree takes what a peer published in parallel, and a large
+  object in ranges** (2026-11-11; `lean/syncer/src/checkout.rs`,
+  `barrier.rs`, `sync.rs`;
+  `docs/plans/flint-lean-latency-plan-2026-10-23.md` §18). A barrier's
+  consume and a `sync` fetched the files a tree is owed one whole-object
+  GET at a time, and held each body in memory until it was on disk. A
+  peer's bulk publish therefore arrived at one round trip per file, and a
+  large object took its own size of the worker's memory, whose limit is
+  1 Gi by default. Both now use the fetcher a checkout uses: `fanout`
+  requests in flight (128), an object larger than one 16 MiB range as
+  parallel ranges written at their offsets, and at most
+  `fetch_inflight_max_bytes` (128 MiB) of bodies in memory. Measured on
+  the in-memory store at 25 ms a request (three runs each), a consume of
+  2,000 files of 8 KiB went from 53.2–53.4 s to 0.59–0.63 s and a sync
+  from 53.5–53.6 s to 0.83 s, with the same 2,002 GETs. At memory speed
+  the wall time barely moves and the fetch takes more CPU: 0.74 s and
+  1.8 s for a 20,000-file consume.
+  - What a live tree needs is kept. A path the agent writes while its
+    object is being fetched is never renamed over: the check is made again
+    with the bytes in the temp file, immediately before the rename, for a
+    ranged object as for a whole one. An object that is gone, or whose
+    bytes do not hash to the cited CRC-64, leaves the path owed under the
+    record it always had. The conflict records, the trace and a sync's
+    report are still in path order.
+  - A store failure still ends the pass. The fetches already in flight
+    (up to `fanout`) finish, and no other is started.
+  - Paths are decided, fetched and recorded 8,192 at a time, so the
+    memory a pass holds does not grow with the size of the arrival.
+  - Three things read differently in a `sync`. A path that can never be
+    written here is refused before its object is fetched, not after. A
+    version whose object carries no generation stamp is recorded with the
+    document's generation, not 0. A document entry with no CRC-64 is
+    checked against the store's own checksum, as the consume always did;
+    the sync used to fail on it.
+  - In a sync and a consume alike, a path's parent directory is now made
+    before its fetch, so a fetch that fails can leave an empty directory
+    behind.
 
 ### Fixed
 

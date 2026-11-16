@@ -266,6 +266,44 @@ impl RangedTmp {
     /// materialised file reads to the next scan as the agent's own
     /// truncation and publishes back over the good version.
     pub(crate) fn commit(self) -> LeanResult<()> {
+        self.ready()?;
+        drop(self.file);
+        rename_into(&self.tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&self.tmp);
+            refuse(&self.path, &format!("rename from temp: {e}"))
+        })
+    }
+
+    /// `commit`, but the rename happens only if `proceed()` still says so
+    /// with every range written: the last check before the name moves, as
+    /// `write_via_tmp_fast_if` makes it for a whole body (the consume: the
+    /// agent may write the path while a large object is fetched).
+    /// `Ok(None)` when it did not: the temp is removed and the target is
+    /// untouched. Otherwise the written file's own metadata, read through
+    /// the descriptor AFTER the rename, as `write_via_tmp_opts` reads it:
+    /// the inode this write made, with the ctime the rename left, never a
+    /// fresh stat of a path the agent may have written since.
+    pub(crate) fn commit_if(self, proceed: &dyn Fn() -> bool) -> LeanResult<Option<std::fs::Metadata>> {
+        self.ready()?;
+        if !proceed() {
+            drop(self.file);
+            let _ = std::fs::remove_file(&self.tmp);
+            return Ok(None);
+        }
+        rename_into(&self.tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&self.tmp);
+            refuse(&self.path, &format!("rename from temp: {e}"))
+        })?;
+        let meta = self
+            .file
+            .metadata()
+            .map_err(|e| LeanError::State(format!("fstat {}: {e}", self.path.display())))?;
+        Ok(Some(meta))
+    }
+
+    /// Every expected byte is in the temp, and it carries its mode: what
+    /// both commits check before the name may move.
+    fn ready(&self) -> LeanResult<()> {
         let written = self.written.load(std::sync::atomic::Ordering::Relaxed);
         if written != self.expect {
             let _ = std::fs::remove_file(&self.tmp);
@@ -285,11 +323,7 @@ impl RangedTmp {
                 return Err(refuse(&self.tmp, &format!("mode: {e}")));
             }
         }
-        drop(self.file);
-        rename_into(&self.tmp, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&self.tmp);
-            refuse(&self.path, &format!("rename from temp: {e}"))
-        })
+        Ok(())
     }
 }
 

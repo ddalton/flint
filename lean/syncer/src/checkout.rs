@@ -17,7 +17,10 @@ use std::collections::BTreeSet;
 
 use flint_store::StoreError;
 
-use super::barrier::{contained_path, contained_path_stat, mode_of, mtime_nanos_of, mtime_of, write_file_atomic};
+use super::barrier::{
+    contained_path, contained_path_stat, local_dirty, mode_of, mtime_nanos_of, mtime_of, write_file_atomic,
+    write_file_atomic_if,
+};
 use super::manifest;
 use super::state::BaselineEntry;
 use super::{LeanError, LeanResult, Syncer};
@@ -75,6 +78,14 @@ pub struct CheckoutReport {
 /// Every other error propagates after the per-range retries: a transport
 /// failure is a failure, not a quiet fallback that would hide a broken
 /// network behind a slower code path.
+///
+/// `over` is a while-clean licence (`Licence::WhileClean`): the path the
+/// agent may be writing, and the baseline entry it must still read as
+/// when every range is in the temp. Under it the three outcomes that are
+/// not the store's failure come back as values, for the caller's record,
+/// instead of ending the pass: the agent wrote first (`Kept`), the bytes
+/// are not the cited ones (`Corrupt`), the tree could not take them
+/// (`WriteFailed`). Without it they are errors, as a checkout needs.
 async fn fetch_ranged(
     store: &std::sync::Arc<dyn flint_store::ObjectStore>,
     key: &str,
@@ -86,13 +97,17 @@ async fn fetch_ranged(
     chunk_bytes: u64,
     parallelism: usize,
     expect_crc: u64,
-) -> LeanResult<Option<u64>> {
+    over: Option<(std::path::PathBuf, Option<BaselineEntry>)>,
+) -> LeanResult<Ranged> {
     use futures::stream::StreamExt;
 
     /// A range that failed for a reason the caller must distinguish.
     enum RangeFail {
         /// 412/404 — the whole-object arm owns this policy.
         Fallback,
+        /// The temp would not take the range (a full disk): the tree's
+        /// failure, not the store's.
+        Write(LeanError),
         Fatal(LeanError),
     }
 
@@ -107,7 +122,7 @@ async fn fetch_ranged(
     }
     if parts.len() < 2 {
         // One range is one whole GET with extra steps.
-        return Ok(None);
+        return Ok(Ranged::Declined);
     }
 
     // SHARED so each range writes ITSELF, on the blocking pool. Before
@@ -117,7 +132,11 @@ async fn fetch_ranged(
     // i4i.large against an in-memory S3: system time beat user time 6:1
     // and the process never exceeded 1.31 of 2 cores, flat from 4
     // streams to 32.
-    let sink = std::sync::Arc::new(super::safefs::RangedTmp::create(target, tmp, size, mode)?);
+    let sink = match super::safefs::RangedTmp::create(target, tmp, size, mode) {
+        Ok(sink) => std::sync::Arc::new(sink),
+        Err(e) if over.is_some() => return Ok(Ranged::WriteFailed(e)),
+        Err(e) => return Err(e),
+    };
     let mut ranges = futures::stream::iter(parts.into_iter().map(|(off, len)| {
         let store = store.clone();
         let key = key.to_string();
@@ -188,7 +207,7 @@ async fn fetch_ranged(
                     "write task for {key} at {off} did not complete: {e}"
                 )))
             })?
-            .map_err(RangeFail::Fatal)?;
+            .map_err(RangeFail::Write)?;
             Ok((off, n, crc))
         }
     }))
@@ -205,7 +224,12 @@ async fn fetch_ranged(
             Err(RangeFail::Fallback) => {
                 drop(ranges);
                 let _ = std::fs::remove_file(tmp);
-                return Ok(None);
+                return Ok(Ranged::Declined);
+            }
+            Err(RangeFail::Write(e)) => {
+                drop(ranges);
+                let _ = std::fs::remove_file(tmp);
+                return if over.is_some() { Ok(Ranged::WriteFailed(e)) } else { Err(e) };
             }
             Err(RangeFail::Fatal(e)) => {
                 drop(ranges);
@@ -242,18 +266,53 @@ async fn fetch_ranged(
     if folded != Some(expect_crc) {
         drop(sink);
         let _ = std::fs::remove_file(tmp);
+        let want = flint_store::crc64_to_b64(expect_crc);
+        let got = folded.map(flint_store::crc64_to_b64).unwrap_or_else(|| "nothing".into());
+        if over.is_some() {
+            return Ok(Ranged::Corrupt { want, got });
+        }
         return Err(LeanError::State(format!(
-            "manifest cites {key} at etag {etag} with CRC-64 {}, but the {} ranges fetched \
-             under that etag fold to {} — the object is corrupt or the store returned the \
+            "manifest cites {key} at etag {etag} with CRC-64 {want}, but the {} ranges fetched \
+             under that etag fold to {got} — the object is corrupt or the store returned the \
              wrong bytes; refusing to materialise {} (nothing renamed into place)",
-            flint_store::crc64_to_b64(expect_crc),
             crcs.len(),
-            folded.map(flint_store::crc64_to_b64).unwrap_or_else(|| "nothing".into()),
             target.display()
         )));
     }
-    sink.commit()?;
-    Ok(Some(bytes))
+    let Some((local, base)) = over else {
+        sink.commit()?;
+        return Ok(Ranged::Done { bytes, st: None });
+    };
+    // H7, for an object fetched over seconds: the licence is checked once
+    // more with every range in the temp, immediately before the rename. A
+    // write since is the agent's, and it stays. On the blocking pool: the
+    // check may have to hash the agent's file to tell.
+    let committed = tokio::task::spawn_blocking(move || sink.commit_if(&|| !local_dirty(&local, base.as_ref())))
+        .await
+        .map_err(|e| LeanError::State(format!("commit task for {key} did not complete: {e}")))?;
+    Ok(match committed {
+        Ok(Some(st)) => Ranged::Done { bytes, st: Some(st) },
+        Ok(None) => Ranged::Kept,
+        Err(e) => Ranged::WriteFailed(e),
+    })
+}
+
+/// How `fetch_ranged` left one object.
+enum Ranged {
+    /// Ranging does not apply, or the store answered 404 or 412: the
+    /// whole-object arm decides.
+    Declined,
+    /// Renamed into place. `st` is the written file's own metadata, read
+    /// through its descriptor: under a while-clean licence only (a
+    /// checkout stats the path, which nothing else writes yet).
+    Done { bytes: u64, st: Option<std::fs::Metadata> },
+    /// While clean: the agent wrote the path first, and its version stays.
+    Kept,
+    /// While clean: the ranges fetched under the cited etag do not fold to
+    /// the cited CRC-64. Nothing was renamed into place.
+    Corrupt { want: String, got: String },
+    /// While clean: the tree would not take the bytes.
+    WriteFailed(LeanError),
 }
 
 /// A read buffer for streaming a file of `size` bytes: the file's size,
@@ -284,17 +343,70 @@ fn local_crc64_b64(path: &std::path::Path) -> Option<String> {
 }
 
 /// One admitted citation's outcome from the fan-out materializer.
-    struct Fetched {
+    pub(super) struct Fetched {
         /// Took the ranged path (report-only).
-        ranged: bool,
-        path: String,
-        be: Option<BaselineEntry>,
-        skipped: bool,
-        bytes: u64,
+        pub(super) ranged: bool,
+        pub(super) path: String,
+        pub(super) be: Option<BaselineEntry>,
+        pub(super) skipped: bool,
+        pub(super) bytes: u64,
         /// A citation this checkout refused to materialize (D0.3 /
         /// containment): left cited, surfaced as a conflict.
-        refused: Option<String>,
+        pub(super) refused: Option<String>,
+        /// Under `Licence::WhileClean` only: why nothing was written.
+        pub(super) not_taken: Option<NotTaken>,
     }
+
+impl Fetched {
+    fn not_taken(path: &str, why: NotTaken) -> Fetched {
+        Fetched {
+            ranged: false,
+            path: path.to_string(),
+            be: None,
+            skipped: true,
+            bytes: 0,
+            refused: None,
+            not_taken: Some(why),
+        }
+    }
+}
+
+/// What entitles the fetcher to write an admitted path.
+pub(super) enum Licence {
+    /// A checkout, and a rescope's widen over the paths the tree does not
+    /// hold: the path is this pass's to fill. One that already holds the
+    /// cited bytes is kept (the resume); anything else there is
+    /// overwritten; and a citation that cannot be served is an error,
+    /// because the tree would be short of it.
+    Fill,
+    /// The consume and the sync: the agent is live, and the path is its
+    /// own to write at any moment. The path is overwritten only while it
+    /// still reads as this baseline entry (`None`: while it is absent),
+    /// asked once more with the bytes in the temp, immediately before
+    /// the rename (H7). Nothing is resumed, and what cannot be taken is
+    /// a `NotTaken` for the caller's record: the path stays owed.
+    WhileClean(Option<BaselineEntry>),
+}
+
+/// Why a path fetched under `Licence::WhileClean` was not written.
+#[derive(Debug)]
+pub(super) enum NotTaken {
+    /// The store answered 404 or 412 for the cited handle: a newer
+    /// document replaced it (and its collector took the handle). Owed
+    /// again against that one.
+    Missing,
+    /// The bytes fetched under the cited etag do not hash to the CRC-64
+    /// cited for it (`want`: the document's, else the backend's).
+    Corrupt { want: String, got: String },
+    /// The agent wrote the path while it was fetched: its version stays.
+    Kept,
+    /// The tree would not take the bytes (a directory that cannot be
+    /// made, the reserve, a full disk): transient.
+    WriteFailed(String),
+    /// Another fetch of this pass had already failed, so this one was
+    /// not started. `take_owed` returns that failure, never this.
+    NotAttempted,
+}
 
 /// Names a scope for a human in an error: the whole manifest, or the
 /// entries themselves. The entries matter — "a different scope" sends
@@ -320,7 +432,45 @@ impl Syncer {
     /// subset — this function refuses nothing on size.
     async fn materialize<'a>(
         &'a self,
-        mut admission: Vec<(&'a String, &'a super::manifest::LeanEntry)>,
+        admission: Vec<(&'a String, &'a super::manifest::LeanEntry)>,
+        sole_writer: bool,
+    ) -> Vec<LeanResult<Fetched>> {
+        self.fetch_all(admission.into_iter().map(|(p, e)| (p, e, Licence::Fill)).collect(), sole_writer).await
+    }
+
+    /// Take what a live tree is OWED from the document: the consume's and
+    /// the sync's fetch, through the fan-out a checkout uses instead of
+    /// one whole-object GET at a time. Each path comes with the baseline
+    /// entry it must still read as when its bytes are ready
+    /// (`Licence::WhileClean`).
+    ///
+    /// Keyed by path. A path that was not written says why in
+    /// `Fetched::not_taken`; one that was carries the baseline entry of
+    /// the inode this pass wrote. An error is the store's (anything but a
+    /// 404 or 412) or the pass's own: nothing is started after the first,
+    /// and what was written before it is not lost, only unrecorded (the
+    /// next derive finds the bytes there and adopts them).
+    pub(super) async fn take_owed<'a>(
+        &'a self,
+        owed: Vec<(&'a String, &'a super::manifest::LeanEntry, Option<BaselineEntry>)>,
+    ) -> LeanResult<std::collections::BTreeMap<String, Fetched>> {
+        let mut out = std::collections::BTreeMap::new();
+        if owed.is_empty() {
+            return Ok(out);
+        }
+        let admission = owed.into_iter().map(|(p, e, base)| (p, e, Licence::WhileClean(base))).collect();
+        for r in self.fetch_all(admission, false).await {
+            let f = r?;
+            out.insert(f.path.clone(), f);
+        }
+        Ok(out)
+    }
+
+    /// `materialize` and `take_owed`: one fan-out, each entry under its
+    /// own licence.
+    async fn fetch_all<'a>(
+        &'a self,
+        mut admission: Vec<(&'a String, &'a super::manifest::LeanEntry, Licence)>,
         sole_writer: bool,
     ) -> Vec<LeanResult<Fetched>> {
         // LARGEST FIRST. `m.entries` is a BTreeMap, so iterating it
@@ -367,20 +517,28 @@ impl Syncer {
         // and the per-request work spreads over that many cores.
         let drivers = this.cfg.fetch_drivers.max(1);
         let per_driver = (this.cfg.fanout.max(1) / drivers).max(1);
-        let mut shards: Vec<Vec<(String, super::manifest::LeanEntry)>> =
+        let mut shards: Vec<Vec<(String, super::manifest::LeanEntry, Licence)>> =
             (0..drivers).map(|_| Vec::new()).collect();
-        for (i, (path, entry)) in admission.into_iter().enumerate() {
-            shards[i % drivers].push((path.clone(), entry.clone()));
+        for (i, (path, entry, licence)) in admission.into_iter().enumerate() {
+            shards[i % drivers].push((path.clone(), entry.clone(), licence));
         }
         let store_all = this.store.clone();
         let root_all = this.cfg.root.clone();
+        // Raised by the first fetch that fails. Read under a while-clean
+        // licence only: a consume used to stop at its first failed GET,
+        // and against a store that answers nothing each further fetch is
+        // a timeout the barrier would wait out, 128 at a time.
+        let failed_all = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut set = tokio::task::JoinSet::new();
         for shard in shards {
             let store_d = store_all.clone();
             let root_d = root_all.clone();
             let gate_d = gate.clone();
+            let failed_d = failed_all.clone();
             set.spawn(async move {
-        stream::iter(shard.into_iter().map(|(path, entry)| {
+        stream::iter(shard.into_iter().map(|(path, entry, licence)| {
+            let failed = failed_d.clone();
+            let failed_set = failed_d.clone();
             let store = store_d.clone();
             let root = root_d.clone();
             let local = root_d.join(&path);
@@ -414,13 +572,22 @@ impl Syncer {
                 .div_ceil(FETCH_UNIT)
                 .clamp(1, budget_units as u64) as u32;
             let want = if ranged_eligible { ranged_units } else { whole_units };
-            async move {
+            let fetch = async move {
+                // `Some` under a while-clean licence: the baseline entry
+                // the path must still read as for its bytes to land.
+                let over: Option<Option<BaselineEntry>> = match licence {
+                    Licence::Fill => None,
+                    Licence::WhileClean(base) => Some(base),
+                };
                 // Held until this entry's bytes have reached disk.
                 let mut permit = gate
                     .clone()
                     .acquire_many_owned(want)
                     .await
                     .map_err(|_| LeanError::State("fetch budget closed".into()))?;
+                if over.is_some() && failed.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(Fetched::not_taken(&path, NotTaken::NotAttempted));
+                }
                 // D0.3: a legacy `files/.flint/...` citation is
                 // never materialized (it would collide with the
                 // control files); it stays cited and a conflict
@@ -430,6 +597,13 @@ impl Syncer {
                 // well, which is the resume check's whole question.
                 let (target, present) = match contained_path_stat(&root, &path) {
                     Ok(t) => t,
+                    // While clean, the caller has already refused what can
+                    // never be written here (`check_contained`, which
+                    // makes nothing): this is a directory that could not
+                    // be made, and the path stays owed.
+                    Err(e) if over.is_some() => {
+                        return Ok(Fetched::not_taken(&path, NotTaken::WriteFailed(e.to_string())))
+                    }
                     Err(e) => {
                         return Ok(Fetched {
                             ranged: false,
@@ -438,10 +612,14 @@ impl Syncer {
                             skipped: true,
                             bytes: 0,
                             refused: Some(e.to_string()),
+                            not_taken: None,
                         })
                     }
                 };
-                if let Some(st) = present {
+                // The resume is a checkout's: on a live tree a present
+                // path is the baseline's or the agent's, and the licence
+                // below is what tells them apart.
+                if let Some(st) = present.filter(|_| over.is_none()) {
                     // Resume: a present path is one THIS checkout
                     // already fetched, so re-downloading it would
                     // pay bucket GETs for bytes that are on disk.
@@ -491,6 +669,7 @@ impl Syncer {
                             skipped: true,
                             bytes: 0,
                             refused: None,
+                            not_taken: None,
                         });
                     }
                     // Fall through and re-materialize.
@@ -499,16 +678,24 @@ impl Syncer {
                 // tenant could not have written itself would spend the
                 // syncer's reserve (`safefs::leave_the_reserve`).
                 if tree_reserve {
-                    super::safefs::leave_the_reserve(&root, &path, entry.size, tree_room)?;
+                    if let Err(e) = super::safefs::leave_the_reserve(&root, &path, entry.size, tree_room) {
+                        if over.is_some() {
+                            return Ok(Fetched::not_taken(&path, NotTaken::WriteFailed(e.to_string())));
+                        }
+                        return Err(e);
+                    }
                 }
                 // RANGED FIRST, when the object is big enough to
-                // pay for it.
-                let ranged_bytes = if range_min > 0 && entry.size >= range_min {
+                // pay for it. While clean, only when the document cites a
+                // CRC-64 the fold can be held to: an entry without one is
+                // verified by the whole-object arm, against the backend's.
+                let cited_crc = flint_store::crc64_from_b64(&entry.crc64_b64);
+                let ranged = if range_min > 0 && entry.size >= range_min && (over.is_none() || cited_crc.is_some()) {
                     let tmp = target.with_file_name(format!(
                         "{}.flint-sync-tmp",
                         target.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
                     ));
-                    let want = flint_store::crc64_from_b64(&entry.crc64_b64).ok_or_else(|| {
+                    let want = cited_crc.ok_or_else(|| {
                         LeanError::State(format!(
                             "manifest cites {} with a CRC-64 that is not one: {:?}",
                             entry.key, entry.crc64_b64
@@ -525,13 +712,31 @@ impl Syncer {
                         range_chunk,
                         range_par,
                         want,
+                        over.clone().map(|base| (local.clone(), base)),
                     )
                     .await?
                 } else {
-                    None
+                    Ranged::Declined
                 };
-                if let Some(n) = ranged_bytes {
-                    let st = std::fs::metadata(&local)?;
+                let ranged_bytes = match ranged {
+                    Ranged::Declined => None,
+                    Ranged::Done { bytes, st } => Some((bytes, st)),
+                    Ranged::Kept => return Ok(Fetched::not_taken(&path, NotTaken::Kept)),
+                    Ranged::Corrupt { want, got } => {
+                        return Ok(Fetched::not_taken(&path, NotTaken::Corrupt { want, got }))
+                    }
+                    Ranged::WriteFailed(e) => {
+                        return Ok(Fetched::not_taken(&path, NotTaken::WriteFailed(e.to_string())))
+                    }
+                };
+                if let Some((n, st)) = ranged_bytes {
+                    // While clean, the inode this fetch wrote (H7): never
+                    // a fresh stat of a path the agent may have written
+                    // since the rename.
+                    let st = match st {
+                        Some(st) => st,
+                        None => std::fs::metadata(&local)?,
+                    };
                     return Ok(Fetched {
                         ranged: true,
                         path: path.clone(),
@@ -552,6 +757,7 @@ impl Syncer {
                         skipped: false,
                         bytes: n,
                         refused: None,
+                        not_taken: None,
                     });
                 }
 
@@ -583,6 +789,13 @@ impl Syncer {
 
                 let (meta, body) = match store.get_whole(&entry.key, Some(&entry.etag)).await {
                         Ok(ok) => ok,
+                        // While clean, the reading that accuses nobody: a
+                        // newer document replaced the entry and its
+                        // collector took the handle. Owed again against
+                        // that one.
+                        Err(StoreError::PreconditionFailed(_)) | Err(StoreError::NotFound(_)) if over.is_some() => {
+                            return Ok(Fetched::not_taken(&path, NotTaken::Missing));
+                        }
                         // A cited HANDLE is immutable: nothing in the
                         // protocol writes one twice (P2: a UI save goes to
                         // a fresh handle and commits), so a handle whose
@@ -636,8 +849,17 @@ impl Syncer {
                 // 2026-09-12 the manifest's CRC was compared only on the
                 // RESUME path, so a corrupt fresh fetch was written, cited
                 // in the baseline and read by the agent as the file.
-                let expect_crc = Some(entry.crc64_b64.clone());
-                let (st, got) = {
+                let expect_crc = match &over {
+                    None => Some(entry.crc64_b64.clone()),
+                    // While clean, as the consume always verified: the CRC
+                    // the document cites, else the backend's attestation.
+                    Some(_) => Some(entry.crc64_b64.clone())
+                        .filter(|c| !c.is_empty())
+                        .or_else(|| meta.crc64_b64.clone()),
+                };
+                let wrote = {
+                    let over_w = over.clone();
+                    let local_w = local.clone();
                     let target_w = target.clone();
                     let body_w = body.clone(); // Bytes: a refcount bump, not a copy
                     let mode_w = entry.mode;
@@ -646,10 +868,13 @@ impl Syncer {
                     let etag_err = entry.etag.clone();
                     let rel_err = path.clone();
                     tokio::task::spawn_blocking(
-                        move || -> LeanResult<(std::fs::Metadata, String)> {
+                        move || -> LeanResult<Result<(std::fs::Metadata, String), NotTaken>> {
                             let got = flint_store::crc64_to_b64(flint_store::crc64_nvme(&body_w));
                             if let Some(want) = expect_crc {
                                 if got != want {
+                                    if over_w.is_some() {
+                                        return Ok(Err(NotTaken::Corrupt { want, got }));
+                                    }
                                     let who = format!("manifest cites {rel_err} ({key_crc} at etag {etag_err}) with");
                                     return Err(LeanError::State(format!(
                                         "{who} CRC-64 {want}, but the bytes fetched under that \
@@ -659,8 +884,22 @@ impl Syncer {
                                     )));
                                 }
                             }
-                            let st = write_file_atomic(&target_w, &body_w, Some(mode_w))?;
-                            Ok((st, got))
+                            let st = match &over_w {
+                                None => write_file_atomic(&target_w, &body_w, Some(mode_w))?,
+                                // H7: the licence to overwrite is asked
+                                // once more with the temp written,
+                                // immediately before the rename. A write
+                                // since is the agent's, and it stays.
+                                Some(base) => {
+                                    let still_clean = || !local_dirty(&local_w, base.as_ref());
+                                    match write_file_atomic_if(&target_w, &body_w, Some(mode_w), &still_clean) {
+                                        Ok(Some(st)) => st,
+                                        Ok(None) => return Ok(Err(NotTaken::Kept)),
+                                        Err(e) => return Ok(Err(NotTaken::WriteFailed(e.to_string()))),
+                                    }
+                                }
+                            };
+                            Ok(Ok((st, got)))
                         },
                     )
                     .await
@@ -670,13 +909,24 @@ impl Syncer {
                         ))
                     })??
                 };
+                let (st, got) = match wrote {
+                    Ok(done) => done,
+                    Err(why) => return Ok(Fetched::not_taken(&path, why)),
+                };
                 Ok(Fetched {
                     ranged: false,
                     path: path.clone(),
                     be: Some(BaselineEntry {
                         etag: meta.etag.clone(),
                         key: Some(entry.key.clone()),
-                        generation: entry.generation,
+                        generation: match &over {
+                            None => entry.generation,
+                            // While clean, the object's own stamp when it
+                            // carries one, as the consume recorded it.
+                            Some(_) => flint_store::GenerationStamps::from_meta(&meta.meta)
+                                .map(|s| s.generation)
+                                .unwrap_or(entry.generation),
+                        },
                         size: st.len(),
                         mtime_unix: mtime_of(&st),
                         mtime_nanos: Some(mtime_nanos_of(&st)),
@@ -688,7 +938,15 @@ impl Syncer {
                     skipped: false,
                     bytes: body.len() as u64,
                     refused: None,
+                    not_taken: None,
                 })
+            };
+            async move {
+                let fetched: LeanResult<Fetched> = fetch.await;
+                if fetched.is_err() {
+                    failed_set.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                fetched
             }
         }))
         .buffer_unordered(per_driver)

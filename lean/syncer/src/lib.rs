@@ -85,6 +85,7 @@ mod tests;
 #[cfg(test)] mod tests_baseline;
 #[cfg(test)] mod tests_walk;
 #[cfg(test)] mod tests_news;
+#[cfg(test)] mod tests_owed;
 // The binary's allocator (`fastalloc`, bin/flint_sync.rs) never reached
 // the test binary: the battery and the latency benches ran the system
 // malloc (glibc on the box) while flint-sync ships mimalloc. Under
@@ -471,6 +472,14 @@ pub struct LeanConfig {
     /// only where the fan-out has run out of objects to work on — which
     /// is exactly the tail this exists to shorten.
     pub range_get_parallelism: usize,
+    /// How many paths a consume or a sync decides, fetches and records at
+    /// a time (`Syncer::take_owed`). What a pass holds for the paths in
+    /// flight (its decisions, the fan-out's copies of their entries,
+    /// their outcomes) is bounded by this and not by how much a peer
+    /// published at once, and a path's licence to be overwritten is first
+    /// read at most one batch before its bytes land. Far above `fanout`,
+    /// so the tail of a batch costs little.
+    pub take_batch: usize,
 
     // --- boundary verbs (plan docs/plans/flint-lean-boundary-verbs-plan.md) ---
     /// Sentinel posture (D0.4 pre-flight override).
@@ -644,6 +653,7 @@ impl LeanConfig {
             range_get_min_bytes: 8 * 1024 * 1024,
             range_get_chunk_bytes: 16 * 1024 * 1024,
             range_get_parallelism: 4,
+            take_batch: 8192,
             sentinel_mode: SentinelMode::Auto,
             sentinel_min_interval_secs: 5,
             sentinel_hourly_budget: 60,
