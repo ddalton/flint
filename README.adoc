@@ -144,8 +144,9 @@ TIP: Charts are published to `oci://registry-1.docker.io/dilipdalton/<chart>`.
 Always pass `--version`: each chart shares its Docker Hub repository with an
 image of the same name, so an unpinned `helm install` can pick up an image
 tag and fail with `manifest does not contain minimum number of descriptors`.
-The versions below are the ones released with v1.62.1. A local checkout
-works too: use `./<chart-dir>` instead of the OCI URL.
+The versions below are each chart's newest: flint-lean, flint-s3-csi and
+flint-passthrough were released with v1.63.0, the others with v1.62.1. A
+local checkout works too: use `./<chart-dir>` instead of the OCI URL.
 
 [[flint-lite-a-shared-nfs-hub]]
 === flint-lite: a shared NFS hub
@@ -198,10 +199,10 @@ kubectl -n flint-system create secret generic s3 \
   --from-literal=AWS_REGION=us-west-1
 
 helm install flint-lean \
-  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.14 \
+  oci://registry-1.docker.io/dilipdalton/flint-lean --version 0.14.15 \
   -n flint-system --set operatorCredentialsSecret=s3
 helm install flint-s3-csi \
-  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.12 \
+  oci://registry-1.docker.io/dilipdalton/flint-s3-csi --version 0.5.13 \
   -n flint-system --set broker.static.secretRef=s3 --set node.region=us-west-1
 ----
 
@@ -249,7 +250,7 @@ prefix that other tools already own.
 ----
 # flint-s3-csi as above, then the CRD:
 helm install flint-passthrough \
-  oci://registry-1.docker.io/dilipdalton/flint-passthrough --version 0.5.14 \
+  oci://registry-1.docker.io/dilipdalton/flint-passthrough --version 0.5.15 \
   -n flint-system
 ----
 

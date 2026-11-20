@@ -12,6 +12,101 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Changed
+
+- **spdk-tgt is built on SPDK v26.09** (2026-11-02;
+  `spdk-csi-driver/spdk-patches/`, `docker/Dockerfile.spdk`). The base
+  moves from v26.05, and Flint's patch series moves with it: the raid
+  skip_rebuild and leased-quiesce patch (0006) now declares its RPCs in
+  v26.09's generated `schema/schema.yaml`, with its raid code unchanged,
+  and the other eleven carry over unchanged. The image is not published
+  yet: the chart pins spdk-tgt 1.7.3 (v26.05) until the next release
+  builds and pins the new one. The assessment and every check below are
+  in `spdk-csi-driver/docs/spdk-2609-upgrade/README.md`.
+- **An lvol or raid export still receives FLUSH on v26.09** (new patch
+  0013). v26.09 advertises a volatile write cache only for a bdev that
+  reports one, and lvol and raid bdevs never did. A kernel nvme-tcp host
+  then ran the device write-through and never sent FLUSH, so the lvol
+  FLUSH handler that commits blob metadata (the F5 fix) never ran.
+  Measured on the box: without 0013 the host reads `write through` and an
+  fsync sends no FLUSH; with it, `write back` and one FLUSH, as on v26.05.
+- **A read keeps costing one PDU on v26.09** (`nvme_recovery.rs`,
+  `spdk_native.rs`). v26.09 skips the response capsule after a READ's
+  data only for a host that disabled SQ flow control when it connected.
+  So every kernel `nvme connect` now passes `--disable-sqflow`, and every
+  TCP `bdev_nvme_attach_controller` asks for
+  `disable_sq_flow_control: true` when the local spdk-tgt is v26.09 or
+  later. An older target is never sent that parameter, since v26.05
+  refuses an attach that names it; a v26.05 target ignores the kernel
+  request. Measured over loopback (4 KiB random reads, QD1, IOPS):
+  kernel path 41.4k without the request, 62.8k with it, 61.9k on v26.05;
+  through bdev_nvme and ublk 49.4k, 61.5k and 61.6k.
+- `scripts/spdk-patches.sh test` also runs the nvmf controller unit test,
+  which links again: patch 0001 gained the stub it needed.
+### Fixed
+
+- **spdk-tgt: a snapshot no longer races a cluster allocation, and a write
+  is acknowledged only once its new cluster's mapping is on disk**
+  (2026-11-03; `spdk-csi-driver/spdk-patches/` 0008 and 0009). These are
+  two findings from an automated review of the SPDK changes we filed
+  (Gerrit 29555 and 29556). Both were reproduced against our own patches
+  on v26.09, and both have been in every spdk-tgt since 1.7.1.
+  - A snapshot taken while a cluster allocation's extent page write was in
+    flight swapped the volume's cluster map out from under it. If that
+    write then failed, the volume's allocated-cluster count wrapped to
+    2^64-1, and the cluster was freed while the snapshot's in-memory map
+    still held it. The live volume reads through that map, until the next
+    restart. A freeze now waits for the volume's in-flight allocations, so
+    the swap cannot happen mid-allocation.
+  - A write from a second SPDK thread to a cluster being allocated was
+    acknowledged before the cluster's mapping was on disk, and a FLUSH at
+    that moment was acknowledged too. A crash then lost the acknowledged,
+    flushed write. A new cluster is now mapped only once its extent page is
+    on disk, so such a write waits and lands in the same cluster. Flint's
+    default single reactor has one ublk thread and one NVMe-oF thread per
+    node, and no path was found where both write one volume; a reactor mask
+    in `spdkTarget.extraArgs` would have made it reachable.
+
+  No published image has the fixes yet: the chart still pins spdk-tgt
+  1.7.3.
+
+## [1.63.0] - 2026-11-20
+
+Two front ends move, together. **flint passthrough** can pull its images
+from a registry that needs a login (#85), and **flint lean** takes a
+peer's publish in parallel (lean 1a, #84). They move as one release
+because they ship as one: the `flint-s3-csi` chart runs the lean worker
+as well as the passthrough one, and the lean worker is built FROM
+`flint-sync` at the chart's own appVersion. Published at `1.63.0`,
+multi-arch (amd64 + arm64): `flint-s3-csi`, `flint-s3-worker`,
+`flint-s3-worker-lean`, `flint-passthrough-mounter`, `flint-sync` and
+`flint-lite-operator` (with its `flint-lean-operator` alias). Charts:
+`flint-passthrough` 0.5.15, `flint-s3-csi` 0.5.13 and `flint-lean`
+0.14.15, all at appVersion `1.63.0`.
+
+Nothing else republishes. The CSI driver, lite, lite-operator,
+nfs-client and forge charts stay at 1.62.1, and `spdk-tgt` stays at
+1.7.3, so the SPDK v26.09 work stays under Unreleased.
+`flint-lite-operator:1.63.0` also carries the lite operator from this
+tree, but the `flint-lite-operator` chart still pins 1.62.1, so no lite
+install runs it. The crates are not republished. Every image is built on
+the Chainguard bases that were current on 2026-11-20.
+
+Validated 2026-11-20, on the build box. On the PR's code, before the
+dependency and base-pin refresh: the `spdk-csi-driver` lib suite passed
+2826 / 0 failed, and the s3csi tests run as root passed 128 with nothing
+skipped. The new worker and parser tests each fail under a mutant.
+`tests/system/chart-s3csi-pull-secrets.sh` passes 13/13, and 12 of those
+checks fail on the 1.62.1 chart. `s3csi/e2e/private-registry.sh` passes
+28/28 on kind, against a registry that refuses an anonymous pull, with a
+control in which the worker's pull is refused. On the release tree: the
+advisory gate is clean across 7 lockfiles, and every Chainguard pin is
+current. Every shipped binary builds `--locked` for x86_64 and aarch64
+musl. The s3csi (128), passthrough CRD parity (8) and lean guide-pin
+tests pass. Of this release's binaries, only `flint-nfs-proxy` links
+SQLite. rust-ci and system-chainsaw ran on the release head before the
+merge (PR #86).
+
 ### Added
 
 - **flint-s3-csi pulls its images from a registry that needs a login**
@@ -53,35 +148,6 @@ covered by the stability guarantee.
 
 ### Changed
 
-- **spdk-tgt is built on SPDK v26.09** (2026-11-02;
-  `spdk-csi-driver/spdk-patches/`, `docker/Dockerfile.spdk`). The base
-  moves from v26.05, and Flint's patch series moves with it: the raid
-  skip_rebuild and leased-quiesce patch (0006) now declares its RPCs in
-  v26.09's generated `schema/schema.yaml`, with its raid code unchanged,
-  and the other eleven carry over unchanged. The image is not published
-  yet: the chart pins spdk-tgt 1.7.3 (v26.05) until the next release
-  builds and pins the new one. The assessment and every check below are
-  in `spdk-csi-driver/docs/spdk-2609-upgrade/README.md`.
-- **An lvol or raid export still receives FLUSH on v26.09** (new patch
-  0013). v26.09 advertises a volatile write cache only for a bdev that
-  reports one, and lvol and raid bdevs never did. A kernel nvme-tcp host
-  then ran the device write-through and never sent FLUSH, so the lvol
-  FLUSH handler that commits blob metadata (the F5 fix) never ran.
-  Measured on the box: without 0013 the host reads `write through` and an
-  fsync sends no FLUSH; with it, `write back` and one FLUSH, as on v26.05.
-- **A read keeps costing one PDU on v26.09** (`nvme_recovery.rs`,
-  `spdk_native.rs`). v26.09 skips the response capsule after a READ's
-  data only for a host that disabled SQ flow control when it connected.
-  So every kernel `nvme connect` now passes `--disable-sqflow`, and every
-  TCP `bdev_nvme_attach_controller` asks for
-  `disable_sq_flow_control: true` when the local spdk-tgt is v26.09 or
-  later. An older target is never sent that parameter, since v26.05
-  refuses an attach that names it; a v26.05 target ignores the kernel
-  request. Measured over loopback (4 KiB random reads, QD1, IOPS):
-  kernel path 41.4k without the request, 62.8k with it, 61.9k on v26.05;
-  through bdev_nvme and ublk 49.4k, 61.5k and 61.6k.
-- `scripts/spdk-patches.sh test` also runs the nvmf controller unit test,
-  which links again: patch 0001 gained the stub it needed.
 - **lean: a tree takes what a peer published in parallel, and a large
   object in ranges** (2026-11-11; `lean/syncer/src/checkout.rs`,
   `barrier.rs`, `sync.rs`;
@@ -136,31 +202,6 @@ covered by the stability guarantee.
   skips the alias in both its guards, and release.sh checks `flint-sync`
   with the four s3csi images.
 
-- **spdk-tgt: a snapshot no longer races a cluster allocation, and a write
-  is acknowledged only once its new cluster's mapping is on disk**
-  (2026-11-03; `spdk-csi-driver/spdk-patches/` 0008 and 0009). These are
-  two findings from an automated review of the SPDK changes we filed
-  (Gerrit 29555 and 29556). Both were reproduced against our own patches
-  on v26.09, and both have been in every spdk-tgt since 1.7.1.
-  - A snapshot taken while a cluster allocation's extent page write was in
-    flight swapped the volume's cluster map out from under it. If that
-    write then failed, the volume's allocated-cluster count wrapped to
-    2^64-1, and the cluster was freed while the snapshot's in-memory map
-    still held it. The live volume reads through that map, until the next
-    restart. A freeze now waits for the volume's in-flight allocations, so
-    the swap cannot happen mid-allocation.
-  - A write from a second SPDK thread to a cluster being allocated was
-    acknowledged before the cluster's mapping was on disk, and a FLUSH at
-    that moment was acknowledged too. A crash then lost the acknowledged,
-    flushed write. A new cluster is now mapped only once its extent page is
-    on disk, so such a write waits and lands in the same cluster. Flint's
-    default single reactor has one ublk thread and one NVMe-oF thread per
-    node, and no path was found where both write one volume; a reactor mask
-    in `spdkTarget.extraArgs` would have made it reachable.
-
-  No published image has the fixes yet: the chart still pins spdk-tgt
-  1.7.3.
-
 ### Security
 
 - **A release now refuses a stale Chainguard base pin** (2026-11-02,
@@ -178,6 +219,20 @@ covered by the stability guarantee.
   pins as the last edit before a release commit;
   `BASE_PIN_WAIVER="<why>"` lets one run through and is printed in the
   release log.
+
+- **The CVE gate is green again** (2026-11-20; `osv-scanner.toml`, five
+  `Cargo.lock`s). rustix moves to 1.1.6 in every lockfile that carries it
+  (RUSTSEC-2026-0486: its xattr calls marked unwritten bytes initialized
+  on a zero-length size query); in spdk-csi-driver that brings bitflags
+  2.13.2 and linux-raw-sys 0.12.1, which rustix 1.1 requires. Accepted
+  until 2027-01-20, each with its reason in `osv-scanner.toml`: pin-utils
+  (RUSTSEC-2026-0441) and chrono (RUSTSEC-2026-0543), unmaintained with no
+  fixed version and reached only transitively; and libsqlite3-sys 0.28
+  (RUSTSEC-2026-0459, CVE-2026-119375), a local read of stale memory that
+  needs a crafted database + `-wal` pair in flint's own state directory.
+  SQLite is linked by the NFS/pNFS state backend and the nfs proxy, and by
+  no s3csi or lean binary of this release. pin-utils had kept the daily
+  scan red since 2026-11-05.
 
 ## [1.62.1] - 2026-11-02
 
@@ -12198,7 +12253,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.62.1...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.63.0...HEAD
+[1.63.0]: https://github.com/ddalton/flint/compare/v1.62.1...v1.63.0
 [1.62.1]: https://github.com/ddalton/flint/compare/v1.62.0...v1.62.1
 [1.62.0]: https://github.com/ddalton/flint/compare/v1.61.3...v1.62.0
 [1.61.3]: https://github.com/ddalton/flint/compare/v1.61.2...v1.61.3

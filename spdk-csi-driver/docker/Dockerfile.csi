@@ -3,7 +3,7 @@
 #
 # The runtime base, used by the SECOND stage; declared before the first
 # FROM so it is in scope there. The builder stage is not shipped.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:fd50bd0cdeb808cf4f45c9c9189e0cc7f7fcc27195d69abd6622c80527e7e021
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
 
 FROM rust:1.92-alpine AS builder
 
