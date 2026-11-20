@@ -18,6 +18,10 @@
 //!   FLINT_S3CSI_CREDS_LIFETIME_SECS  900
 //!   FLINT_S3CSI_REGION               us-east-1 (AWS_REGION handed to workers)
 //!   FLINT_S3CSI_WORKER_PRIORITY_CLASS  unset
+//!   FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS  unset — Secret names in the
+//!                                    worker namespace, comma-separated, set
+//!                                    on every worker's imagePullSecrets
+//!   FLINT_S3CSI_WORKER_SERVICE_ACCOUNT  unset ⇒ the namespace's default
 //!   FLINT_S3CSI_COMM_SIZE            16Mi (the memory-backed comm emptyDir)
 //!   FLINT_S3CSI_SCRATCH_SIZE         1Gi  (the worker's /tmp)
 //!   FLINT_S3CSI_KUBELET_ROOT         /var/lib/kubelet

@@ -78,6 +78,19 @@ pub struct Config {
     /// the ceiling underneath (`worker_refused`).
     pub max_workers_per_node: Option<u32>,
     pub priority_class: Option<String>,
+    /// `workers.imagePullSecrets` (FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS):
+    /// the Secrets in `worker_namespace` that every worker pod names in
+    /// `spec.imagePullSecrets`, passthrough and lean alike (issue #85).
+    /// Chart-pinned like the image, so never from a CR or a tenant pod.
+    /// Empty leaves the field unset, and the pod pulls with whatever the
+    /// ServiceAccount carries.
+    pub worker_image_pull_secrets: Vec<String>,
+    /// `workers.serviceAccountName` (FLINT_S3CSI_WORKER_SERVICE_ACCOUNT):
+    /// the ServiceAccount in `worker_namespace` that every worker runs as.
+    /// None means the namespace's `default`. Its token is never mounted
+    /// (`automountServiceAccountToken: false`, which the admission policy
+    /// requires), so it matters only for the pull secrets it carries.
+    pub worker_service_account: Option<String>,
     /// How long a worker's preStop hook holds it open waiting for its
     /// volume to be released (FLINT_S3CSI_PRESTOP_SECS). This is the
     /// ordering mechanism for drain and node shutdown; there is no
@@ -137,6 +150,8 @@ impl std::fmt::Debug for Config {
             .field("worker_namespace", &self.worker_namespace)
             .field("passthrough_image", &self.passthrough_image)
             .field("lean_image", &self.lean_image)
+            .field("worker_image_pull_secrets", &self.worker_image_pull_secrets)
+            .field("worker_service_account", &self.worker_service_account)
             .field("broker", &self.broker.as_ref().map(|b| b.base_url().to_string()))
             .field("creds_lifetime_secs", &self.creds_lifetime_secs)
             .field("identity_modes", &self.identity_modes)
@@ -240,6 +255,10 @@ impl Config {
             shared_worker_resources,
             max_workers_per_node,
             priority_class: opt("FLINT_S3CSI_WORKER_PRIORITY_CLASS"),
+            worker_image_pull_secrets: parse_worker_pull_secrets(
+                &opt("FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS").unwrap_or_default(),
+            )?,
+            worker_service_account: parse_worker_service_account(opt("FLINT_S3CSI_WORKER_SERVICE_ACCOUNT").as_deref())?,
             prestop_secs: opt("FLINT_S3CSI_PRESTOP_SECS").and_then(|v| v.parse().ok()),
             quiesce_secs: opt("FLINT_S3CSI_QUIESCE_SECS").and_then(|v| v.parse().ok()).unwrap_or(30),
             quota: opt("FLINT_S3CSI_QUOTA").map(|v| v == "true").unwrap_or(false),
@@ -1080,6 +1099,8 @@ impl S3Node {
             lean_tree_hostpath: None,
             grace_secs: Some(30),
             priority_class: self.cfg.priority_class.clone(),
+            image_pull_secrets: self.cfg.worker_image_pull_secrets.clone(),
+            service_account: self.cfg.worker_service_account.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
             cache_host_dir: st.cache_dir.clone(),
@@ -1373,6 +1394,8 @@ impl S3Node {
                 lean_tree_hostpath: None,
                 grace_secs: Some(30),
                 priority_class: self.cfg.priority_class.clone(),
+                image_pull_secrets: self.cfg.worker_image_pull_secrets.clone(),
+                service_account: self.cfg.worker_service_account.clone(),
                 comm_size: self.cfg.comm_size.clone(),
                 scratch_size: self.cfg.scratch_size.clone(),
                 cache_host_dir: sm.cache_dir.clone(),
@@ -2184,6 +2207,8 @@ impl S3Node {
             lean_tree_hostpath: Some(st.src.clone()),
             grace_secs: Some(st.grace_secs.unwrap_or(30) as i64),
             priority_class: self.cfg.priority_class.clone(),
+            image_pull_secrets: self.cfg.worker_image_pull_secrets.clone(),
+            service_account: self.cfg.worker_service_account.clone(),
             comm_size: self.cfg.comm_size.clone(),
             scratch_size: self.cfg.scratch_size.clone(),
             cache_host_dir: None,
@@ -3101,6 +3126,49 @@ pub fn parse_mount_options_allow(v: Option<&str>) -> Result<MountOptionsAllow, S
     }
 }
 
+/// A name a Secret or a ServiceAccount can have: a DNS-1123 subdomain, that
+/// is lowercase letters, digits, `-` and `.`, at most 253 characters, each
+/// dot-separated label starting and ending with a letter or digit.
+pub fn is_dns_subdomain(s: &str) -> bool {
+    s.len() <= 253
+        && s.split('.').all(|l| {
+            !l.is_empty()
+                && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+        })
+}
+
+/// `FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS`: Secret names separated by
+/// commas or whitespace, in order, with duplicates folded. Empty means
+/// none. A name no Secret can have would match nothing at pull time, and
+/// the worker would pull with no credential, the failure this knob exists
+/// to remove (issue #85). So such a name is a startup error that names the
+/// knob and the word.
+pub fn parse_worker_pull_secrets(s: &str) -> Result<Vec<String>, String> {
+    let names = words(s);
+    if let Some(bad) = names.iter().find(|n| !is_dns_subdomain(n)) {
+        return Err(format!(
+            "FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS (workers.imagePullSecrets): {bad:?} is not a Secret name \
+             (lowercase letters, digits, '-' and '.')"
+        ));
+    }
+    Ok(names)
+}
+
+/// `FLINT_S3CSI_WORKER_SERVICE_ACCOUNT`: one ServiceAccount name, or unset
+/// for the namespace's `default`.
+pub fn parse_worker_service_account(v: Option<&str>) -> Result<Option<String>, String> {
+    match v {
+        None => Ok(None),
+        Some(n) if is_dns_subdomain(n) => Ok(Some(n.to_string())),
+        Some(n) => Err(format!(
+            "FLINT_S3CSI_WORKER_SERVICE_ACCOUNT (workers.serviceAccountName): {n:?} is not a ServiceAccount name \
+             (lowercase letters, digits, '-' and '.')"
+        )),
+    }
+}
+
 /// `FLINT_S3CSI_ENDPOINT_ALLOW`: hosts, lowercased.
 pub fn parse_host_list(s: &str) -> Vec<String> {
     words(s).into_iter().map(|w| w.to_ascii_lowercase()).collect()
@@ -3514,6 +3582,36 @@ mod tests {
                 "{bad}: {e}"
             );
         }
+    }
+
+    /// `workers.imagePullSecrets` and `workers.serviceAccountName` (issue
+    /// #85). Unset or empty means none, so the pod spec leaves both fields
+    /// alone. A list keeps its order and folds duplicates, with commas or
+    /// spaces as the chart joins it. A name no Secret or ServiceAccount can
+    /// have is a startup error that names the knob and the word, not a
+    /// worker that pulls with no credential.
+    #[test]
+    fn worker_pull_secrets_and_account_parse_in_order_and_refuse_a_name_no_object_can_have() {
+        assert_eq!(parse_worker_pull_secrets("").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_worker_pull_secrets(" , ").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_worker_pull_secrets("regcred,mirror.pull regcred").unwrap(),
+            ["regcred", "mirror.pull"]
+        );
+        for bad in ["Regcred", "reg_cred", "-regcred", "regcred-", "a..b", "reg/cred"] {
+            let e = parse_worker_pull_secrets(&format!("ok,{bad}")).unwrap_err();
+            assert!(
+                e.contains("FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS (workers.imagePullSecrets)") && e.contains(bad),
+                "{bad}: {e}"
+            );
+        }
+        assert!(!is_dns_subdomain(&"a".repeat(254)));
+        assert!(is_dns_subdomain(&"a".repeat(253)));
+
+        assert_eq!(parse_worker_service_account(None).unwrap(), None);
+        assert_eq!(parse_worker_service_account(Some("flint-s3-worker")).unwrap().as_deref(), Some("flint-s3-worker"));
+        let e = parse_worker_service_account(Some("Flint")).unwrap_err();
+        assert!(e.contains("FLINT_S3CSI_WORKER_SERVICE_ACCOUNT (workers.serviceAccountName)") && e.contains("Flint"), "{e}");
     }
 
     /// The webIdentity re-register period sits under half the broker's

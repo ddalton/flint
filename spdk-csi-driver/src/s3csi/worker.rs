@@ -19,7 +19,7 @@ use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerPort, ContainerStatus, EmptyDirVolumeSource, EnvVar, ExecAction,
     HostPathVolumeSource, Lifecycle,
-    LifecycleHandler, Pod, PodSecurityContext,
+    LifecycleHandler, LocalObjectReference, Pod, PodSecurityContext,
     PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -114,6 +114,14 @@ pub struct WorkerInputs<'a> {
     /// Lean: the derived drain budget.
     pub grace_secs: Option<i64>,
     pub priority_class: Option<String>,
+    /// `workers.imagePullSecrets`: Secrets in `namespace` that the pod
+    /// names in `spec.imagePullSecrets`, so kubelet can pull the image
+    /// from a registry that needs a login (issue #85). Chart-pinned like
+    /// the image. Empty leaves the field unset.
+    pub image_pull_secrets: Vec<String>,
+    /// `workers.serviceAccountName`. None leaves the field unset, so the
+    /// pod runs as the namespace's `default`. The token is never mounted.
+    pub service_account: Option<String>,
     pub comm_size: String,
     pub scratch_size: String,
     /// Passthrough: the cache's private directory on the PLACED device
@@ -292,6 +300,20 @@ pub fn build_pod(i: &WorkerInputs) -> Pod {
         spec: Some(PodSpec {
             node_name: Some(i.node_name.clone()),
             restart_policy: Some(if lean { "OnFailure".into() } else { "Never".into() }),
+            // The pull credential (issue #85). The worker image is
+            // `IfNotPresent`, and the node plugin's prepull put it on the
+            // node, but that is not enough: kubelet can make a pod that
+            // presents no credential pull an image again even when it is
+            // already present, if a credential pulled it in the first place
+            // (KubeletEnsureSecretPulledImages). A node that has
+            // garbage-collected the image pulls it again too. Left unset when
+            // the chart names none. The ServiceAccount admission plugin
+            // copies the account's own list only into a pod that names none,
+            // so a Secret put on the account by hand still applies then.
+            image_pull_secrets: (!i.image_pull_secrets.is_empty()).then(|| {
+                i.image_pull_secrets.iter().map(|n| LocalObjectReference { name: n.clone() }).collect()
+            }),
+            service_account_name: i.service_account.clone(),
             automount_service_account_token: Some(false),
             enable_service_links: Some(false),
             // kubelet counts the preStop hook AGAINST this budget, so the
@@ -671,10 +693,55 @@ mod tests {
             lean_tree_hostpath: tree,
             grace_secs: Some(90),
             priority_class: None,
+            image_pull_secrets: Vec::new(),
+            service_account: None,
             comm_size: "16Mi".into(),
             scratch_size: "1Gi".into(),
             cache_host_dir: None,
             shared_key: None,
+        }
+    }
+
+    /// ISSUE #85: A WORKER CAN PULL FROM A REGISTRY THAT NEEDS A LOGIN.
+    /// Before, the worker named no pull secret and no ServiceAccount, so it
+    /// pulled with whatever the namespace's `default` account carried. With
+    /// nothing put on that account by hand, the pull went out with no
+    /// credential, and the worker sat in ImagePullBackOff with its tenant
+    /// stuck in ContainerCreating.
+    ///
+    /// The configured list must reach every kind of worker: passthrough,
+    /// the shared read-only mounter, and the lean syncer. It must keep its
+    /// order. The control is the empty list, which must leave the field
+    /// UNSET rather than set to `[]`. The ServiceAccount admission plugin
+    /// copies the account's own list only into a pod that names none, so an
+    /// empty list written out would look the same here and lose a Secret an
+    /// operator had put on the account.
+    #[test]
+    fn the_configured_pull_secrets_and_account_reach_every_worker_and_none_leaves_both_unset() {
+        let t = tenant();
+        let (hash, key) = super::super::state::share_key("n1", "team-a", "datasets", 1001, 1001, "broker", &["b".to_string()]);
+        let mut shared = inputs("passthrough", &t, None);
+        shared.volume_id = &hash;
+        shared.shared_key = Some(&key);
+        let arms = [
+            ("passthrough", inputs("passthrough", &t, None)),
+            ("shared", shared),
+            ("lean", inputs("lean", &t, Some("/var/lib/flint/ws".into()))),
+        ];
+        for (arm, base) in arms {
+            let mut on = WorkerInputs { image_pull_secrets: vec!["regcred".into(), "mirror.pull".into()], ..base };
+            on.service_account = Some("flint-s3-worker".into());
+            let spec = build_pod(&on).spec.unwrap();
+            let names: Vec<&str> =
+                spec.image_pull_secrets.as_ref().expect("a pull secret list").iter().map(|r| r.name.as_str()).collect();
+            assert_eq!(names, ["regcred", "mirror.pull"], "{arm}: the configured list, in order");
+            assert_eq!(spec.service_account_name.as_deref(), Some("flint-s3-worker"), "{arm}");
+            assert_eq!(spec.automount_service_account_token, Some(false), "{arm}: an account, still no token");
+
+            let off = WorkerInputs { image_pull_secrets: Vec::new(), service_account: None, ..on };
+            let spec = build_pod(&off).spec.unwrap();
+            assert_eq!(spec.image_pull_secrets, None, "{arm}: none configured is the field UNSET, not []");
+            assert_eq!(spec.service_account_name, None, "{arm}: none configured is the namespace's default");
         }
     }
 

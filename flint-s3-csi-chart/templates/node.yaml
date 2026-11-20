@@ -38,6 +38,11 @@
 {{- end }}
 {{- end }}{{- end }}{{- end }}
 {{- end }}
+{{- with .Values.workers.serviceAccountName }}
+{{- if or (gt (len .) 253) (not (regexMatch (include "flint-s3-csi.dnsSubdomainRe" $) .)) }}
+{{- fail (printf "workers.serviceAccountName %q is not a ServiceAccount name (lowercase letters, digits, '-' and '.')" .) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -61,6 +66,11 @@ spec:
         app.kubernetes.io/component: node
     spec:
       serviceAccountName: {{ include "flint-s3-csi.node.name" . }}
+{{- with include "flint-s3-csi.podPullSecrets" (dict "root" . "own" .Values.node.imagePullSecrets "key" "node.imagePullSecrets") }}
+      # The plugin, its sidecars and the prepull init containers (which
+      # pull the WORKER images) all pull under this list.
+{{ . | indent 6 }}
+{{- end }}
       hostNetwork: false
       hostPID: false
       priorityClassName: {{ .Values.node.priorityClassName }}
@@ -156,6 +166,14 @@ spec:
             - { name: FLINT_S3CSI_QUOTA, value: {{ .Values.workers.quota | quote }} }
 {{- if .Values.workers.priorityClassName }}
             - { name: FLINT_S3CSI_WORKER_PRIORITY_CLASS, value: {{ .Values.workers.priorityClassName | quote }} }
+{{- end }}
+{{- with include "flint-s3-csi.pullSecrets" (dict "root" . "own" .Values.workers.imagePullSecrets "key" "workers.imagePullSecrets") }}
+            # Every worker's spec.imagePullSecrets: Secrets in the workers'
+            # namespace. Chart-pinned, like the images above.
+            - { name: FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS, value: {{ . | quote }} }
+{{- end }}
+{{- if .Values.workers.serviceAccountName }}
+            - { name: FLINT_S3CSI_WORKER_SERVICE_ACCOUNT, value: {{ .Values.workers.serviceAccountName | quote }} }
 {{- end }}
 {{- if .Values.workers.commSize }}
             - { name: FLINT_S3CSI_COMM_SIZE, value: {{ .Values.workers.commSize | quote }} }

@@ -58,6 +58,41 @@ event on the tenant, which stays ContainerCreating and is NOT
 rescheduled) until capacity frees. Size nodes for two pods per
 S3-mounted tenant, or let read-only consumers of one dataset share a
 mounter (spec.sharing.readOnly).
+{{- $nodeSecrets := include "flint-s3-csi.pullSecrets" (dict "root" . "own" .Values.node.imagePullSecrets "key" "node.imagePullSecrets") }}
+{{- $brokerSecrets := "" }}
+{{- if .Values.broker.enabled }}
+{{- $brokerSecrets = include "flint-s3-csi.pullSecrets" (dict "root" . "own" .Values.broker.imagePullSecrets "key" "broker.imagePullSecrets") }}
+{{- end }}
+{{- $workerSecrets := include "flint-s3-csi.pullSecrets" (dict "root" . "own" .Values.workers.imagePullSecrets "key" "workers.imagePullSecrets") }}
+{{- $releaseSecrets := without (splitList "," (printf "%s,%s" $nodeSecrets $brokerSecrets)) "" | uniq }}
+{{- if or $releaseSecrets $workerSecrets }}
+
+PULL SECRETS. Nothing in this chart can check that a named Secret exists,
+and a pod whose Secret is missing pulls with no credential. Make sure
+these exist:
+{{- if $releaseSecrets }}
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ join " " $releaseSecrets }}
+{{- end }}
+{{- if $workerSecrets }}
+
+  kubectl -n {{ .Values.workers.namespace }} get secret {{ splitList "," $workerSecrets | join " " }}
+
+Every worker pod names the second list. A worker without one stays in
+ImagePullBackOff, and its tenant's FailedMount event names the worker.
+{{- if .Values.workers.createNamespace }}
+The chart creates {{ .Values.workers.namespace }}, so put the Secrets
+there after the install and before the first mount.
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.workers.serviceAccountName }}
+
+Every worker runs as ServiceAccount {{ .Values.workers.serviceAccountName }}, which the chart
+does not create:
+
+  kubectl -n {{ .Values.workers.namespace }} get serviceaccount {{ .Values.workers.serviceAccountName }}
+{{- end }}
 
 The tenant pod carries no credential and no privilege and is admissible
 under PodSecurity `restricted`. The node plugin is the privileged

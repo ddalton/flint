@@ -70,6 +70,9 @@ spec:
         app.kubernetes.io/component: broker
     spec:
       serviceAccountName: {{ include "flint-s3-csi.broker.name" . }}
+{{- with include "flint-s3-csi.podPullSecrets" (dict "root" . "own" .Values.broker.imagePullSecrets "key" "broker.imagePullSecrets") }}
+{{ . | indent 6 }}
+{{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
