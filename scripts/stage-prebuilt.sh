@@ -69,9 +69,10 @@ BINS="csi-driver flint-nfs-server flint-pnfs-mds flint-pnfs-ds flint-lite-operat
 #
 # An S3CSI-scoped release publishes the flint-s3-csi chart (the node
 # DaemonSet + broker image and the two worker images), the CRD-only
-# flint-passthrough chart, and the mounter base image. The mounter base
-# carries no flint binary — it is a Debian base with mount-s3 from AWS's
-# .deb — so it stages nothing here. `passthrough` is accepted as the
+# flint-passthrough chart, the mounter base image, and the flint-sync
+# image the lean worker is FROM. The mounter base carries no flint
+# binary — it is a Debian base with mount-s3 from AWS's .deb — so it
+# stages nothing here. `passthrough` is accepted as the
 # same scope: that chart is now the CRD, and its delivery is this one.
 SCOPE=${1:-all}
 case "$SCOPE" in
@@ -117,10 +118,15 @@ esac
 LEAN_BINS="flint-sync"
 GW_BINS="flint-lean-gateway"
 
-# An s3csi release publishes neither lean image, so it stages neither
-# lean binary; it stages the worker crate's binary instead (below).
+# An s3csi release publishes neither image of the flint-lean CHART, so it
+# stages no gateway; it stages the worker crate's binary (below) — and
+# `flint-sync`, because the s3csi chart's own lean worker image is FROM
+# flint-sync:<version> (Dockerfile.s3worker-lean) and release.sh refuses
+# any other base. Until 2026-11-20 this scope staged neither, and no
+# s3csi-scoped release at a new version could build its lean worker: the
+# base it names had never been published.
 if [ "$SCOPE" = s3csi ]; then
-    LEAN_BINS=""
+    LEAN_BINS="flint-sync"
     GW_BINS=""
 fi
 # A forge release stages `flint-sync` and nothing else from the lean

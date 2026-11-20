@@ -122,6 +122,20 @@ covered by the stability guarantee.
 
 ### Fixed
 
+- **An s3csi-scoped release can publish** (2026-11-20;
+  `scripts/stage-prebuilt.sh`, `scripts/publish-images.sh`,
+  `scripts/release.sh`). The scope had not cut a release since the lean
+  worker image moved FROM `flint-sync:<version>`, and two defects were
+  found by reading it before the first one. It never staged or published
+  `flint-sync`, so the lean worker's base did not exist at any new
+  version. And it republished the `flint-lean-operator` alias from a
+  `flint-lite-operator:<version>` it never builds, the hole the forge and
+  lite scopes had already closed. The scope now stages and publishes
+  `flint-sync` before the lean worker, unless the release's lean scope has
+  already published it (it is never rebuilt over a published tag). It
+  skips the alias in both its guards, and release.sh checks `flint-sync`
+  with the four s3csi images.
+
 - **spdk-tgt: a snapshot no longer races a cluster allocation, and a write
   is acknowledged only once its new cluster's mapping is on disk**
   (2026-11-03; `spdk-csi-driver/spdk-patches/` 0008 and 0009). These are
