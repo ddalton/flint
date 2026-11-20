@@ -36,7 +36,7 @@
 # Pinned by the multi-arch INDEX digest (`docker buildx imagetools
 # inspect cgr.dev/chainguard/static:latest`); a bump is that digest
 # and nothing else. Override with --build-arg BASE_IMAGE=<mirror>.
-ARG BASE_IMAGE=cgr.dev/chainguard/static:latest@sha256:fc42af33e643f20d08baf03cddcc1c02ba57052dfb02edb0d79f3fc47bcea8d9
+ARG BASE_IMAGE=cgr.dev/chainguard/static:latest@sha256:8658e9eaeb2294fa0e49b0667f7d66b4e21fa7690b8d2a4c30cd1d013ceb9eb7
 FROM ${BASE_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt
