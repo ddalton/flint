@@ -26,3 +26,34 @@ reason = "panic must come from the hash's own compress fn, which RustCrypto's do
 id = "RUSTSEC-2024-0449"
 ignoreUntil = 2027-01-27
 reason = "unmaintained, no fix; via serde_yaml 0.9 in spdk-csi-driver; replacing serde_yaml is its own change"
+
+# pin-utils 0.1.0 — unmaintained (repository archived 2026-10-01), no fixed
+# version. Reached only through futures-util in every crate's graph; flint
+# calls no pin-utils macro itself. Goes when futures-util drops it.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0441"
+ignoreUntil = 2027-01-20
+reason = "unmaintained, no fix; transitive via futures-util, no direct use; accepted 2026-11-20 for 1.63.0 (user)"
+
+# chrono — unmaintained, every version affected, no fixed version. Reached
+# through kube / k8s-openapi in spdk-csi-driver (their timestamp types);
+# moving off it is those crates' change, not one flint can make alone.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-01-20
+reason = "unmaintained, no fix; via kube/k8s-openapi in spdk-csi-driver; accepted 2026-11-20 for 1.63.0 (user)"
+
+# libsqlite3-sys 0.28.0 (bundled SQLite < 3.54.0, CVE-2026-119375): a
+# CRAFTED database + `-wal` pair with mismatched page sizes can make
+# queries return stale page-cache memory. Local: the attacker must plant
+# both files where the process opens its database. rusqlite (bundled) is
+# the NFSv4/pNFS state backend (state_backend/sqlite.rs) and the nfs
+# proxy's own proxy.db, each in a state directory flint creates; the
+# s3csi plugin and broker and the lean binaries do not link it (checked in
+# the 1.63.0 release binaries: no "SQLite format 3"). The fix is
+# libsqlite3-sys 0.39, which needs rusqlite past 0.31: its own change,
+# with the NFS/pNFS state tests.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0459"
+ignoreUntil = 2027-01-20
+reason = "local: needs a crafted db+wal pair in flint's own state dir; NFS/pNFS state + nfs proxy only, not in s3csi/lean binaries; fix = rusqlite upgrade, its own change; accepted 2026-11-20 for 1.63.0 (user)"
