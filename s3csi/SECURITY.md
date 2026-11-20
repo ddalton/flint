@@ -107,7 +107,7 @@ the mounter runs where privilege cannot reach.
 | | enforced by | in code |
 |---|---|---|
 | the worker pod: non-root, all capabilities dropped, not privileged, no escalation, read-only root fs, seccomp RuntimeDefault, no SA token | `build_pod` | `s3csi/worker.rs` |
-| admission pins workers to the caller's node and image and refuses privileged/hostNetwork/hostPID/hostIPC/foreign hostPaths/SA tokens | ValidatingAdmissionPolicy | `flint-s3-csi-chart/templates/workers-policy.yaml` |
+| admission pins workers to the caller's node, image and ServiceAccount (`workers.serviceAccountName`, else `default`) and refuses privileged/hostNetwork/hostPID/hostIPC/foreign hostPaths/SA tokens | ValidatingAdmissionPolicy | `flint-s3-csi-chart/templates/workers-policy.yaml` |
 | the plugin is the privileged DaemonSet; it never uses hostNetwork or hostPID | `node.yaml` | `flint-s3-csi-chart/templates/node.yaml` |
 | the worker never opens `/dev/fuse`: it receives the descriptor | `open_and_mount` runs in the plugin; `SCM_RIGHTS` | `s3csi/fuse.rs` |
 

@@ -95,8 +95,18 @@
 # each image's own `registry`). Consumers that mirror images to a private
 # registry (e.g. awc-core) set this once instead of editing `repository` — no
 # registry host is hardcoded in this chart.
+#
+# global.imagePullSecrets: the Secrets that log in to that registry, as names
+# (`[regcred]`, or `[{name: regcred}]` as other charts spell it). Every pod
+# this chart runs takes this list unless its component names its own
+# (node.imagePullSecrets, broker.imagePullSecrets,
+# workers.imagePullSecrets). A name here must therefore exist as a Secret in
+# BOTH namespaces: the release namespace, for the node DaemonSet and the
+# broker, and workers.namespace, for every worker pod. Empty means none, and
+# each pod pulls with whatever its ServiceAccount carries.
 global:
   imageRegistry: ""
+  imagePullSecrets: []
 
 node:
   # The plugin image, {registry}/{repository}:{tag|appVersion}. Carries BOTH
@@ -108,6 +118,14 @@ node:
     repository: dilipdalton/flint-s3-csi
     tag: ""
     pullPolicy: IfNotPresent
+
+  # Pull secrets for the node DaemonSet's pods: the plugin, its two CSI
+  # sidecars, and the workers.prepull init containers. Those init
+  # containers pull the WORKER images under this list, so it must reach the
+  # worker images' registry too. The Secrets live in the release namespace.
+  # null means global.imagePullSecrets. [] means none, whatever global
+  # says.
+  imagePullSecrets: null
 
   # RUST_LOG for the plugin. `volume_context` is never logged wholesale
   # at any level — it carries the pod-bound token.
@@ -253,6 +271,40 @@ workers:
     registry: ""
     repository: dilipdalton/flint-s3-worker-lean
     tag: ""
+
+  # Pull secrets for EVERY worker pod, passthrough and lean
+  # (FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS). The plugin names them in each
+  # worker's spec.imagePullSecrets. Like the images, this list is fixed by
+  # the chart: neither a CR nor a tenant pod can name one. null means
+  # global.imagePullSecrets. [] means none, whatever global says.
+  #
+  # THE SECRETS MUST EXIST IN workers.namespace. The plugin has no Secrets
+  # RBAC and cannot check them. A missing one leaves the worker pulling with
+  # no credential: it stays in ImagePullBackOff, and its tenant's
+  # FailedMount event names the worker. With createNamespace: true the chart
+  # creates the namespace at install, so put the Secrets there before the
+  # first mount.
+  #
+  # The prepull below does not make this unnecessary. Under kubelet's
+  # KubeletEnsureSecretPulledImages, an image the node plugin pulled with a
+  # credential is still checked again for a pod that presents none, which
+  # then goes to the registry and is refused. A node that garbage-collected
+  # the image, or joined after the plugin started, pulls it again as well.
+  #
+  # When this list is set, it REPLACES the pull secrets on the worker's
+  # ServiceAccount: Kubernetes copies an account's imagePullSecrets only
+  # into a pod that names none. When it is empty, a Secret patched onto
+  # that account still applies (the workaround before this knob existed).
+  imagePullSecrets: null
+
+  # The ServiceAccount every worker runs as
+  # (FLINT_S3CSI_WORKER_SERVICE_ACCOUNT). Use it on a cluster that manages
+  # pull credentials on ServiceAccounts rather than through the list above.
+  # It must exist in workers.namespace; the chart does not create it. Its
+  # token is never mounted: the admission policy requires
+  # automountServiceAccountToken: false, and it admits only this account.
+  # Empty means the namespace's `default`.
+  serviceAccountName: ""
 
   # Resources for EVERY worker (FLINT_S3CSI_WORKER_RESOURCES). No
   # per-mount override: the CR is tenant-writable. `{}` ⇒ no requests or
@@ -621,6 +673,11 @@ broker:
   requireRegistration: true
 
   logLevel: info
+
+  # Pull secrets for the broker's pods, which run node.image. The Secrets
+  # live in the release namespace. null means global.imagePullSecrets. []
+  # means none, whatever global says.
+  imagePullSecrets: null
 
   resources:
     requests: { cpu: 50m, memory: 64Mi }

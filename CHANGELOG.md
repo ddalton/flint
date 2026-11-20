@@ -12,6 +12,45 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **flint-s3-csi pulls its images from a registry that needs a login**
+  (2026-11-19, #85; `flint-s3-csi-chart`, `s3csi/worker.rs`,
+  `s3csi/node.rs`). Before, no pod in the chart could be given a pull
+  secret. A worker named neither `imagePullSecrets` nor a ServiceAccount,
+  so it pulled with whatever the namespace's `default` account carried. On
+  a private registry it sat in ImagePullBackOff, and every S3 mount on the
+  cluster hung in ContainerCreating. The node plugin's prepull did not
+  cover this: under kubelet's `KubeletEnsureSecretPulledImages`, a pod
+  that presents no credential is sent back to the registry even for an
+  image already on the node.
+  - `global.imagePullSecrets` (Secret names, or `{name: ...}` maps)
+    reaches the node DaemonSet's pod (its prepull init containers
+    included), the broker's pod, and every worker, passthrough and lean.
+    `node.`, `broker.` and `workers.imagePullSecrets` override it per
+    component, and an empty list there means none.
+  - The workers' list reaches the plugin as
+    `FLINT_S3CSI_WORKER_IMAGE_PULL_SECRETS`, and the plugin sets it on
+    every worker's `spec.imagePullSecrets`. Like the worker images, it is
+    fixed by the chart: neither a CR nor a tenant pod can name one. The
+    Secrets must exist in `workers.namespace`, and NOTES prints the
+    `kubectl get secret` to check them, per namespace.
+  - `workers.serviceAccountName` (`FLINT_S3CSI_WORKER_SERVICE_ACCOUNT`)
+    runs every worker as a ServiceAccount the operator manages in place of
+    `default`, still with no token mounted. The worker admission policy now
+    admits only that account (or `default` when it is unset).
+  - A name no Secret or ServiceAccount can have fails the render, and the
+    plugin refuses it at startup, each naming the key.
+    `tests/system/chart-s3csi-pull-secrets.sh` checks the rendered objects
+    in CI. `s3csi/e2e/private-registry.sh` runs the chart on kind against
+    a registry that refuses an anonymous pull, with every image the chart
+    runs served from it. With the workers given no secret, the worker's
+    pull is refused (the control). With the fix, a mount on a node without
+    the worker image reads the seeded bytes, and no ServiceAccount is
+    patched. The admission policy, asked as the plugin's own token, admits
+    a worker only under the configured account. The prepull pulls under
+    the node's list. 28/28 on the box, 2026-11-20.
+
 ### Changed
 
 - **spdk-tgt is built on SPDK v26.09** (2026-11-02;

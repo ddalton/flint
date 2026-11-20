@@ -110,6 +110,9 @@ jobs:
       - name: tests/system/chart-kerberos-defaults.sh
         run: tests/system/chart-kerberos-defaults.sh
 
+      - name: tests/system/chart-s3csi-pull-secrets.sh
+        run: tests/system/chart-s3csi-pull-secrets.sh
+
       - name: tests/system/kind-nfs-only.sh
         env:
           TAG: ci-${{ github.sha }}
