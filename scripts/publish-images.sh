@@ -128,12 +128,16 @@ fi
 # nothing of ours inside it — in this script because the tag the worker
 # image builds FROM must be the release's, not a hand push), then the
 # plugin+broker image and the two worker images. Order matters: the
-# worker images are FROM the mounter and the sync images by tag.
+# worker images are FROM the mounter and the sync images by tag, so
+# flint-sync is built and pushed here, before the lean worker. Until
+# 2026-11-20 it was not, and the lean worker's FROM named a tag that a
+# scoped release at a new version had never published.
 if [ "$SCOPE" = s3csi ]; then
     set -- \
         "flint-passthrough-mounter:docker/Dockerfile.passthrough" \
         "flint-s3-csi:docker/Dockerfile.s3csi.prebuilt" \
         "flint-s3-worker:docker/Dockerfile.s3worker" \
+        "flint-sync:docker/Dockerfile.sync.prebuilt" \
         "flint-s3-worker-lean:docker/Dockerfile.s3worker-lean"
 fi
 
@@ -165,6 +169,22 @@ for spec in "$@"; do
     dockerfile=${spec#*:}
     repo="dilipdalton/$name"
     echo "=== $repo ==="
+
+    # A release that runs the LEAN scope as well has already published
+    # flint-sync at this version, and verified the lean worker's base is
+    # that digest. Building it again here would push a NEW digest under a
+    # tag that is already out. So under s3csi an existing flint-sync:$ver
+    # is used as it stands; only the registry's plain "not found" builds
+    # it, and any other answer stops the release rather than guessing.
+    if [ "$SCOPE" = s3csi ] && [ "$name" = flint-sync ]; then
+        if out=$(docker buildx imagetools inspect "$repo:$ver" 2>&1); then
+            echo "  $repo:$ver is already published; not rebuilt (the lean worker is built FROM it)"
+            continue
+        elif ! printf '%s' "$out" | grep -qiE 'not found|manifest unknown'; then
+            echo "cannot tell whether $repo:$ver is published, refusing to guess: $out" >&2
+            exit 1
+        fi
+    fi
 
     # Only the prebuilt recipes take BIN_DIR. Passing it to one that
     # does not (the mounter image) is a warning docker prints and a
@@ -231,7 +251,10 @@ set -- "flint-lite-operator:flint-lean-operator"
 # flint-lite-operator:1.48.0 that does not exist — failing at best, and
 # at worst repointing `latest` for the lean chart's users at a digest
 # from a release they did not ask for.
-if [ "$SCOPE" = forge ] || [ "$SCOPE" = lite ]; then
+# …and of an S3CSI-scoped release, which builds no operator image either.
+# The scope had never cut a release when this was found (2026-11-20),
+# reading the script before the first one; it had the same hole.
+if [ "$SCOPE" = forge ] || [ "$SCOPE" = lite ] || [ "$SCOPE" = s3csi ]; then
     set --
 fi
 
@@ -255,6 +278,6 @@ fi
 # Two conditions, one fact. This line and the alias loop above were
 # guarded SEPARATELY on the scope, so adding `lite` to one and not the
 # other made the release log assert an alias it had just skipped.
-if [ "$SCOPE" != forge ] && [ "$SCOPE" != lite ]; then
+if [ "$SCOPE" != forge ] && [ "$SCOPE" != lite ] && [ "$SCOPE" != s3csi ]; then
     echo "aliased   flint-lite-operator -> flint-lean-operator at the same digest"
 fi

@@ -768,7 +768,7 @@ EOF
     if [ -d "$s3_dir" ] && in_scope "all s3csi"; then
         s3_version=$(python3 -c "import yaml; print(yaml.safe_load(open('$s3_dir/Chart.yaml'))['version'])")
         s3_app=$(python3 -c "import yaml; print(yaml.safe_load(open('$s3_dir/Chart.yaml'))['appVersion'])")
-        for img in flint-s3-csi flint-s3-worker flint-s3-worker-lean flint-passthrough-mounter; do
+        for img in flint-s3-csi flint-s3-worker flint-s3-worker-lean flint-passthrough-mounter flint-sync; do
             if ! tag_exists "$img" "$s3_app"; then
                 echo "REFUSING to push flint-s3-csi $s3_version:" \
                      "$hub_ns/$img:$s3_app is not on Docker Hub." >&2
