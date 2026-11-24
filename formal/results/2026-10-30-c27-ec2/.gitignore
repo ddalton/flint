@@ -1,0 +1,14 @@
+# Generated output stays out of the repo (logs, run output, traces, tarballs); the inputs
+# that ran are here, and INPUTS.tsv (where present) lists every one by md5.
+out/
+out-*/
+jobs/
+*.out
+*.log
+*.time
+*.tgz
+*.sha256
+box-snap-*/
+sproof-out/
+box-isa/fin*/
+box-isa/rec/*/

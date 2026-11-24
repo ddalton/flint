@@ -1,0 +1,9 @@
+isa-rec start 2026-11-01T00:41:07Z host master tlapm bfa9468 (/mnt/nvme/tlaps/unpack/tlapm/bin/tlapm)
+md5 FlintCatchupSProof.tla 9ed5580a (want 9ed5580a)
+md5 FlintCatchupSInd.tla c70f9660 (want c70f9660)
+md5 FlintCatchupS.tla 61ae6829 (want 61ae6829)
+run minprop md5 9ed5580a c70f9660 61ae6829 range 122 139 00:41:07Z
+run readat md5 9ed5580a c70f9660 61ae6829 range 1250 1263 00:41:07Z
+minprop rc=0 secs=61 | [INFO]: All 23 obligations proved. | isabelle: @!!loc:131:5:131:7 @!!status:proved @!!meth:auto; time-limit: 1500; time-used: 0.6 (0%)
+readat rc=0 secs=84 | [INFO]: All 5 obligations proved. | isabelle: @!!loc:1262:3:1262:5 @!!status:proved @!!meth:auto; time-limit: 1500; time-used: 0.3 (0%)
+isa-rec done 2026-11-01T00:42:31Z

@@ -3237,7 +3237,11 @@ and decided by the user:
          fail under more than one flip and are the first to rerun
          alone with more time. Memory differed from the record: the
          range at lines 7980-8872 peaked at 59 to 87 GB here, against
-         13.6 GB on c31.
+         13.6 GB on c31. The rerun is scripted (2026-11-23):
+         `formal/results/2026-11-23-catchup-open-runs/tlapm-rerun.sh`
+         reruns one line under one control on a fresh cache at stretch
+         20, asserting the three input md5s and the flipped proof's
+         recorded md5.
    - [x] The three-replica zombie arm as a full pass (c27 bounded it at
          depth 27), or the user's explicit acceptance of the bound. Not
          feasible on the box: depth 27 was 2,429,420,385 distinct
@@ -3377,7 +3381,14 @@ and decided by the user:
          `raid1_resize`'s minimum over bases less the reserve), then
          hours on the box at two replicas full and three bounded. If
          excluded, the code refuses expansion of a stamped volume, and
-         that refusal ships with its callers.
+         that refusal ships with its callers. Status (2026-11-09): rev 18
+         (`formal/FlintCatchupSR.tla`, `a202f0f8`) passes in full at two
+         replicas; at three, under SYMMETRY and VIEW, the lost mark is a
+         full pass (6,317,146,257 distinct, depth 55), the crash arm was
+         stopped short of its end (5,509,586,077 seen, no violation) and
+         the zombie arm has not run. Both open arms are set up for one
+         large machine in `formal/results/2026-11-23-catchup-open-runs/`
+         (`run.sh item7-crash item7-zombie`, the same cfgs and md5s).
    - [x] The monitor-skips question classed by a rev 10 or later arm
          with the pre-stamp write legal (c21's arm neither confirms nor
          refutes it); a follow-up unless the patch adopts the ungated
@@ -3396,13 +3407,30 @@ and decided by the user:
          and the patch has it. At two replicas all four arms hold
          (tables-vc-local.md `4d05d888`); with the drain off the skip
          holds to depth 30, bounded.
-   - [ ] The model files pushed by PR at the user's word, so every md5
+   - [x] The model files pushed by PR at the user's word, so every md5
          the table cites is on main: FlintCatchupT with its modules,
          inductive invariant, proof and cfgs; FlintCatchupS for each
          cited revision, rev 7 to rev 12, each md5 reproduced or copied
          from its batch directory and verified; the reachability files,
          cfgs, results without generated logs, and the table script;
          FlintCatchup's proof. About half a day to assemble and verify.
+         **Assembled 2026-11-23 from the workstation that ran the
+         batches (`formal/CATCHUP-MODELS.md` maps every file):** every
+         md5 in the table above now names a file on main. The rev 8 to
+         17 models and their cfgs regenerate byte for byte from the kept
+         generators (`formal/check-catchup-gen.sh`); rev 7 and the
+         older reachability files are the as-run copies
+         (`results/2026-10-29-flintcatchupt/as-run/`, `MD5SUMS`). The
+         EC2 job directories keep each input once, with an `INPUTS.tsv`
+         listing every file as it ran and `results/restore-inputs.sh`
+         to rebuild them. c30's wrapper (`b719dbbf`) was rebuilt from
+         its successor and hashes to the cited md5. Left out: logs,
+         traces and tarballs; 88 uncited drafts of the stamp proof
+         (listed by md5). Two files cited only in the narrative, not
+         in the table, are on neither the workstation nor in git:
+         FlintCatchupT rev 13 (`2dbea4a0`, §5) and FlintCatchupS rev 4
+         (`d32f4f23`, above); `CATCHUP-MODELS.md` says how to look for
+         them on the box.
    The premises' pins are code and sit in step 4, not here. The
    decisions in this list are the user's: whether to buy the stamp
    proof or the three-replica zombie run, whether two-replica liveness
