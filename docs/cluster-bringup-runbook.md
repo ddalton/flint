@@ -132,11 +132,13 @@ Clone parameters from `flint-spdk`: `numReplicas`, `autoRebuild`,
 `thinProvision`, `nfsEmptyDir`.
 
 An NFS-served volume (RWX, ROX, or any `nfsEmptyDir` volume) exports a root
-owned by root with mode 0755, which only a root pod can write. For pods that
-run as other uids, set `nfs.chert.us/dirMode` (octal, e.g. `"1777"`): the
-per-volume server gives the export root that mode at every start. A mode that
-denies "other" is refused at provision, because there is no `dirGid` for this
-path.
+owned by root with mode 0755. Where the server enforces permissions
+(`nfs.enforcePermissions: enforce`, the default under Kerberos), only a root
+pod can write it. Under the AUTH_SYS default, `warn`, the server denies
+nothing and logs what it would deny. For pods that run as other uids, set
+`nfs.chert.us/dirMode` (octal, e.g. `"1777"`): the per-volume server gives the
+export root that mode at every start. A mode that denies "other" is refused at
+provision, because there is no `dirGid` for this path.
 
 ---
 
