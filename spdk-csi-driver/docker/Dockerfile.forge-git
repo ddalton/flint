@@ -39,7 +39,7 @@
 # alpine:3.20 shipped 2.45), which is the CVE point of the move and also
 # a git upgrade forge's e2e must cover. Pinned by the multi-arch index
 # digest; override with --build-arg BASE_IMAGE.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:b71197549d072ad4f359219953cb065745604010f24d884d75ab46d651da9a0b
 FROM ${BASE_IMAGE}
 
 ARG BIN_DIR=docker/prebuilt

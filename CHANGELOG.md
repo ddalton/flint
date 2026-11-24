@@ -12,6 +12,47 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+## [1.64.0] - 2026-11-24
+
+The CSI driver moves, and every image and chart moves with it. A
+per-volume NFS volume's export root can now be given a mode
+(`nfs.chert.us/dirMode`, a new StorageClass parameter, so this is a minor
+release). `spdk-tgt` moves to SPDK v26.09 as **1.8.0**, the first
+published image with patch 0013 and the 0008/0009 fixes. Published at
+`1.64.0` (and `1.64`, `1`, `latest`), multi-arch (amd64 + arm64):
+`flint-driver`, `flint-pnfs`, `flint-lite-operator` (with its
+`flint-lean-operator` alias), `flint-sync`, `flint-passthrough-mounter`,
+`flint-s3-csi`, `flint-s3-worker`, `flint-s3-worker-lean`,
+`flint-forge-operator`, `flint-forge-syncer` and `flint-forge-git`; and
+`spdk-tgt:1.8.0`, amd64 as before. Charts, all at appVersion `1.64.0`:
+`flint-csi-driver-chart` 1.64.0, `flint-lite` 0.7.12,
+`flint-lite-operator` 0.6.12, `flint-nfs-client` 0.2.12, `flint-forge`
+0.8.10, `flint-lean` 0.14.16, `flint-passthrough` 0.5.16 and
+`flint-s3-csi` 0.5.14. The crates are not republished. Every image is
+built on the Chainguard bases that were current on 2026-11-24.
+
+**The restart gate was waived by the user for this release**, although
+it changes two things on that gate's list: the `spdk-tgt` image, and the
+arguments of every kernel `nvme connect` (`--disable-sqflow`). No
+restart drill (`tests/chaos/restart-gate.sh`) has run against
+`spdk-tgt` 1.8.0 or this driver, and neither have the cluster-only
+v26.09 checks (hot-rejoin scrub, the F5 dirty-restart drill, the
+adversarial set).
+
+Validated 2026-11-24, on the build box, on the release tree (main at
+#89 plus this release's pins). The advisory gate is clean across 7
+lockfiles, every Chainguard pin is current, and the lite chart render
+matches its fixture. Every shipped binary builds `--locked` for x86_64
+and aarch64 musl, and the binaries carry the new pins and #89. The
+`spdk-csi-driver` lib suite passes 2833 with 0 failed (7 ignored), and
+the s3csi tests run as root pass 128. The `spdk-tgt` 1.8.0 build
+reproduces, layer for layer, the image built on 2026-11-03 for the
+0008/0009 fixes (image `sha256:98721fab…`), and no input to it has
+changed since. The v26.09 checks of 2026-11-02 (`spdk-2609-upgrade/`)
+ran on the image before those two fixes. #89 was tested
+end to end on kind before its merge, as its entry says, and rust-ci and
+system-chainsaw (nfs-only, Kerberos) passed on it and on main after it.
+
 ### Added
 
 - **`nfs.chert.us/dirMode`: the export root's mode for per-volume NFS
@@ -42,10 +83,10 @@ covered by the stability guarantee.
   moves from v26.05, and Flint's patch series moves with it: the raid
   skip_rebuild and leased-quiesce patch (0006) now declares its RPCs in
   v26.09's generated `schema/schema.yaml`, with its raid code unchanged,
-  and the other eleven carry over unchanged. The image is not published
-  yet: the chart pins spdk-tgt 1.7.3 (v26.05) until the next release
-  builds and pins the new one. The assessment and every check below are
-  in `spdk-csi-driver/docs/spdk-2609-upgrade/README.md`.
+  and the other eleven carry over unchanged. Published as `spdk-tgt`
+  1.8.0, which the chart now pins; 1.7.3 was the last v26.05 image. The
+  assessment and every check below are in
+  `spdk-csi-driver/docs/spdk-2609-upgrade/README.md`.
 - **An lvol or raid export still receives FLUSH on v26.09** (new patch
   0013). v26.09 advertises a volatile write cache only for a bdev that
   reports one, and lvol and raid bdevs never did. A kernel nvme-tcp host
@@ -90,8 +131,23 @@ covered by the stability guarantee.
     node, and no path was found where both write one volume; a reactor mask
     in `spdkTarget.extraArgs` would have made it reachable.
 
-  No published image has the fixes yet: the chart still pins spdk-tgt
-  1.7.3.
+  `spdk-tgt` 1.8.0 is the first published image with the fixes.
+
+### Security
+
+- **The CVE gate is green again** (2026-11-24; five `Cargo.lock`s,
+  `osv-scanner.toml`). url moves to 2.5.9 in every lockfile
+  (RUSTSEC-2026-0592: `Url::origin()` on a deeply nested `blob:` URL
+  overflowed the stack; flint never calls it), with form_urlencoded
+  1.2.3, which url 2.5.9 requires. The daily scan had been red since
+  2026-11-22. libsqlite3-sys 0.28 (RUSTSEC-2026-0459, CVE-2026-119375)
+  stays accepted until 2027-01-20, re-accepted by the user for this
+  release. Unlike 1.63.0, this release ships the binaries that link
+  SQLite: `flint-nfs-server` in `flint-driver`, `flint-pnfs-mds` in
+  `flint-pnfs`, and `flint-nfs-proxy` in `flint-lite-operator`. The
+  ground is that the read is local: it needs a crafted database + `-wal`
+  pair planted in flint's own state directory.
+  The fix, rusqlite past 0.31, is its own change.
 
 ## [1.63.0] - 2026-11-20
 
@@ -12276,7 +12332,8 @@ neither tag represents a supported upgrade source.
 
 No security advisories at this release.
 
-[Unreleased]: https://github.com/ddalton/flint/compare/v1.63.0...HEAD
+[Unreleased]: https://github.com/ddalton/flint/compare/v1.64.0...HEAD
+[1.64.0]: https://github.com/ddalton/flint/compare/v1.63.0...v1.64.0
 [1.63.0]: https://github.com/ddalton/flint/compare/v1.62.1...v1.63.0
 [1.62.1]: https://github.com/ddalton/flint/compare/v1.62.0...v1.62.1
 [1.62.0]: https://github.com/ddalton/flint/compare/v1.61.3...v1.62.0
