@@ -31,7 +31,7 @@
 # bin/mount-s3 is byte-identical to the .deb's for 1.24.0 on both arches,
 # and its sha256 is pinned below, so a version bump that forgets the
 # checksums fails the BUILD.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:b71197549d072ad4f359219953cb065745604010f24d884d75ab46d651da9a0b
 
 # The download runs on the BUILD platform: it only fetches and unpacks,
 # so an amd64 image built on an arm64 host emulates nothing here.

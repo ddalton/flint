@@ -9,8 +9,8 @@
 > inputs for resolving that rebase.
 
 > **2026-11-02: the upgrade is done in the source tree.** `spdk-patches/BASE` is v26.09
-> (`0bbb7fe4d`). The chart still pins spdk-tgt 1.7.3 (v26.05) until a release builds and
-> pins the next image. The three ports this directory held became series patches:
+> (`0bbb7fe4d`). Released as spdk-tgt 1.8.0 with v1.64.0 (2026-11-24); the chart pins it.
+> 1.7.3 was the last v26.05 image. The three ports this directory held became series patches:
 > `raid-skip-rebuild-2609.patch` is 0006, `write-cache-advertise.patch` is 0013, and the
 > corrected `nvmf-hostlog.patch` is folded into 0001. They and the two
 > `Dockerfile.spdk-2609*` drafts are removed; git history has them. Patches 0007-0012,

@@ -50,10 +50,13 @@ reason = "unmaintained, no fix; via kube/k8s-openapi in spdk-csi-driver; accepte
 # the NFSv4/pNFS state backend (state_backend/sqlite.rs) and the nfs
 # proxy's own proxy.db, each in a state directory flint creates; the
 # s3csi plugin and broker and the lean binaries do not link it (checked in
-# the 1.63.0 release binaries: no "SQLite format 3"). The fix is
-# libsqlite3-sys 0.39, which needs rusqlite past 0.31: its own change,
-# with the NFS/pNFS state tests.
+# the 1.63.0 release binaries: no "SQLite format 3"). 1.64.0 is an all-scope
+# release, so it DOES ship the binaries that link it (the per-volume NFS
+# server, pNFS, the lite nfs proxy); re-accepted for that by the user on
+# 2026-11-23 on the local-only ground alone. The fix is libsqlite3-sys 0.39,
+# which needs rusqlite past 0.31: its own change, with the NFS/pNFS state
+# tests.
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0459"
 ignoreUntil = 2027-01-20
-reason = "local: needs a crafted db+wal pair in flint's own state dir; NFS/pNFS state + nfs proxy only, not in s3csi/lean binaries; fix = rusqlite upgrade, its own change; accepted 2026-11-20 for 1.63.0 (user)"
+reason = "local: needs a crafted db+wal pair in flint's own state dir; linked by the NFS/pNFS state backend + nfs proxy, which 1.64.0 ships; fix = rusqlite upgrade, its own change; accepted 2026-11-20 for 1.63.0, re-accepted 2026-11-23 for 1.64.0 (user)"

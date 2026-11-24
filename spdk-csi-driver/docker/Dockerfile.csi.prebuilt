@@ -21,7 +21,7 @@
 # The runtime stage below must stay IDENTICAL to Dockerfile.csi's — same
 # base (and BASE_IMAGE digest), same packages, same format pins, same
 # setcap line. If you change one, change both.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:b71197549d072ad4f359219953cb065745604010f24d884d75ab46d651da9a0b
 # BASE: Chainguard `wolfi-base` (glibc, busybox, apk) instead of
 # ubuntu:24.04 — the binaries are musl-static, so the base only carries
 # the tools below. Pinned by the multi-arch index digest; override with
