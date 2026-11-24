@@ -59,9 +59,13 @@ system-chainsaw (nfs-only, Kerberos) passed on it and on main after it.
   volumes** (2026-11-24; StorageClass parameter, chart
   `storageClass.parameters.dirMode`). The per-volume server exports its
   backing directory as it is: an emptyDir or the lvol's filesystem root,
-  both owned by root with mode 0755. So a pod running as any other uid got
-  EACCES on its first create: an agent platform whose runners run as uid
-  65532 found their RWX scratch claim unwritable. pNFS volumes have had
+  both owned by root with mode 0755. Where the server enforces
+  permissions (`nfs.enforcePermissions: enforce`, or under Kerberos, whose
+  default is enforce), a pod running as any other uid got EACCES on its
+  first create: an agent platform whose runners run as uid 65532 found
+  their RWX scratch claim unwritable. Under the chart's AUTH_SYS default,
+  `warn`, the server evaluates permissions but denies nothing, so such a
+  pod could already write. pNFS volumes have had
   `pnfs.chert.us/dirMode`; this is the same parameter for RWX, ROX and
   `nfsEmptyDir` volumes. It takes the same octal forms (`1777`, `0777`,
   `0o777`), from 1 to 7777. CreateVolume refuses anything else with
@@ -70,7 +74,8 @@ system-chainsaw (nfs-only, Kerberos) passed on it and on main after it.
   to the export root at every start, after F30 has accepted the export.
   If the mode can't be applied, the server fails to start. A mode that
   gives "other" no access is refused, as pNFS refuses one without a
-  `dirGid`: the root is root's, so only a root pod could write. A volume
+  `dirGid`: the root is root's, so under enforced permissions only a root
+  pod could write. A volume
   whose class doesn't set it, including every existing one, is served
   exactly as before. Tests: `nfs_dir_mode` (parsing, refusals, the
   context round trip, applying a mode to a directory) and
