@@ -19,5 +19,8 @@ parameters:
   autoRebuild: "{{ .Values.storageClass.parameters.autoRebuild }}"
   thinProvision: "{{ .Values.storageClass.parameters.thinProvision }}"
   nfsEmptyDir: "{{ .Values.storageClass.parameters.nfsEmptyDir | default "false" }}"
+  {{- with .Values.storageClass.parameters.dirMode }}
+  nfs.chert.us/dirMode: {{ . | quote }}
+  {{- end }}
 {{- end }}
 {{- end }}{{- /* end lite-profile guard */}}

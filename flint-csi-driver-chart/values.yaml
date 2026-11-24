@@ -252,6 +252,7 @@ storageClass:
     autoRebuild: "true"  # "false" opts this SC's volumes out of automatic replica re-placement after permanent node loss (U11); rebuild-on-return (catch-up) is unaffected
     thinProvision: "true"  # Thin provisioning (space allocated on write). Set to "false" for thick (full allocation up front, zeroed as it is created -- creation takes about as long as writing the volume; note: the first snapshot converts the head to thin and pins the full image — see docs/incremental-replica-rebuild.md §5)
     nfsEmptyDir: "false"  # Set to "true" for Kind/dev clusters (bypasses kernel block device requirement)
+    dirMode: ""  # nfs.chert.us/dirMode: octal mode for the export root of NFS-served volumes (RWX/ROX, and every nfsEmptyDir volume), e.g. "1777" for pods running as arbitrary uids. Empty leaves the backing's own 0755, owned by root. A mode that denies "other" is refused at provision
 
 # VolumeSnapshotClass configuration
 snapshotClass:
