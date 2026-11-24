@@ -12,6 +12,29 @@ covered by the stability guarantee.
 
 ## [Unreleased]
 
+### Added
+
+- **`nfs.chert.us/dirMode`: the export root's mode for per-volume NFS
+  volumes** (2026-11-24; StorageClass parameter, chart
+  `storageClass.parameters.dirMode`). The per-volume server exports its
+  backing directory as it is: an emptyDir or the lvol's filesystem root,
+  both owned by root with mode 0755. So a pod running as any other uid got
+  EACCES on its first create: an agent platform whose runners run as uid
+  65532 found their RWX scratch claim unwritable. pNFS volumes have had
+  `pnfs.chert.us/dirMode`; this is the same parameter for RWX, ROX and
+  `nfsEmptyDir` volumes. It takes the same octal forms (`1777`, `0777`,
+  `0o777`), from 1 to 7777. CreateVolume refuses anything else with
+  INVALID_ARGUMENT and records it in the volume context. The controller
+  passes it to the server pod (`--dir-mode`), and the server applies it
+  to the export root at every start, after F30 has accepted the export.
+  If the mode can't be applied, the server fails to start. A mode that
+  gives "other" no access is refused, as pNFS refuses one without a
+  `dirGid`: the root is root's, so only a root pod could write. A volume
+  whose class doesn't set it, including every existing one, is served
+  exactly as before. Tests: `nfs_dir_mode` (parsing, refusals, the
+  context round trip, applying a mode to a directory) and
+  `rwx_nfs::tests::the_class_dir_mode_reaches_the_server`.
+
 ### Changed
 
 - **spdk-tgt is built on SPDK v26.09** (2026-11-02;

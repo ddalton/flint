@@ -65,6 +65,7 @@ pub mod httpserve;  // warp 0.4 serving: a bind that reports its port, and TLS (
 pub mod netaddr;  // host:port joining that brackets IPv6 literals — the derived `status.address` path had no bracketing while the CRD's CEL rule demanded it
 pub mod nfs;  // NFSv4.2 server for RWX volume support
 pub mod rwx_nfs;  // ReadWriteMany (RWX) support via NFS pods (isolated module - zero regression)
+pub mod nfs_dir_mode;  // nfs.chert.us/dirMode: the permission bits of a per-volume NFS server's export root
 pub mod pnfs;  // pNFS (Parallel NFS) support - metadata/data server separation (experimental)
 pub mod pnfs_csi;  // CSI driver-side client to the pNFS MDS (used by main.rs when layout: pnfs)
 pub mod pnfs_block_session;  // csi-node nvme session management for pnfs-block volumes (§5)

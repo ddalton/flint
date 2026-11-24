@@ -78,6 +78,7 @@ pub fn nfs_server_args(
     verbose: bool,
     read_only: bool,
     backend: &NfsBackend,
+    dir_mode: Option<u32>,
 ) -> Vec<String> {
     let mut args = vec![
         "--export-path".to_string(),
@@ -102,6 +103,11 @@ pub fn nfs_server_args(
     // stamped at NodeStage, and an empty one must still be refused.
     if *backend == NfsBackend::EmptyDir {
         args.push("--fresh-backing".to_string());
+    }
+    // The class's nfs.chert.us/dirMode, which the server gives the export root.
+    if let Some(mode) = dir_mode {
+        args.push("--dir-mode".to_string());
+        args.push(format!("{:o}", mode));
     }
     args
 }
@@ -436,6 +442,13 @@ pub async fn create_nfs_server_pod(
     // Kerberos (chart nfs.kerberos): the volume's own server principal
     // (asked of krb5-operator; the pod waits for its Secret), and the
     // security env.
+    // A mode CreateVolume did not record in a form it accepts can only come from a hand-edited
+    // PV. The volume is served with its root as it is rather than not at all.
+    let dir_mode = crate::nfs_dir_mode::from_context(volume_context).unwrap_or_else(|e| {
+        eprintln!("⚠️  [NFS] {} ignored for volume {}: {}", crate::nfs_dir_mode::KEY, volume_id, e);
+        None
+    });
+
     let (security, krb5_name) = config.security.for_volume(volume_id, volume_context);
     if krb5_name.is_some() {
         crate::nfs_krb5::ensure_volume_principal(&kube_client, &config.namespace, &security, volume_id)
@@ -486,6 +499,7 @@ pub async fn create_nfs_server_pod(
                     config.verbose,
                     read_only,
                     &backend,
+                    dir_mode,
                 )),
                 ports: Some(vec![ContainerPort {
                     name: Some("nfs".to_string()),
@@ -1396,16 +1410,30 @@ mod tests {
     /// empty export must keep failing F30 loudly.
     #[test]
     fn only_the_emptydir_backend_tells_the_server_its_backing_is_fresh() {
-        let empty = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::EmptyDir);
+        let empty = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::EmptyDir, None);
         assert!(empty.iter().any(|a| a == "--fresh-backing"), "{:?}", empty);
-        let pvc = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::Pvc);
+        let pvc = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::Pvc, None);
         assert!(!pvc.iter().any(|a| a == "--fresh-backing"), "{:?}", pvc);
         assert_eq!(
             &pvc[..6],
             &["--export-path", "/mnt/volume", "--volume-id", "pvc-1", "--port", "2049"]
         );
-        let rox = nfs_server_args("pvc-1", 2049, true, true, &NfsBackend::Pvc);
+        let rox = nfs_server_args("pvc-1", 2049, true, true, &NfsBackend::Pvc, None);
         assert!(rox.iter().any(|a| a == "--verbose") && rox.iter().any(|a| a == "--read-only"));
+    }
+
+    /// nfs.chert.us/dirMode reaches the server, for either backing, in the octal
+    /// the server parses; a class without it passes nothing.
+    #[test]
+    fn the_class_dir_mode_reaches_the_server() {
+        for backend in [NfsBackend::EmptyDir, NfsBackend::Pvc] {
+            let args = nfs_server_args("pvc-1", 2049, false, false, &backend, Some(0o1777));
+            let at = args.iter().position(|a| a == "--dir-mode").expect("--dir-mode");
+            assert_eq!(args[at + 1], "1777");
+            assert_eq!(crate::nfs_dir_mode::parse(&args[at + 1]), Ok(0o1777));
+        }
+        let none = nfs_server_args("pvc-1", 2049, false, false, &NfsBackend::EmptyDir, None);
+        assert!(!none.iter().any(|a| a == "--dir-mode"), "{:?}", none);
     }
 
     #[test]

@@ -131,6 +131,13 @@ Trove creates `flint-spdk` (primary, `WaitForFirstConsumer`) and
 Clone parameters from `flint-spdk`: `numReplicas`, `autoRebuild`,
 `thinProvision`, `nfsEmptyDir`.
 
+An NFS-served volume (RWX, ROX, or any `nfsEmptyDir` volume) exports a root
+owned by root with mode 0755, which only a root pod can write. For pods that
+run as other uids, set `nfs.chert.us/dirMode` (octal, e.g. `"1777"`): the
+per-volume server gives the export root that mode at every start. A mode that
+denies "other" is refused at provision, because there is no `dirGid` for this
+path.
+
 ---
 
 ## 4. pNFS

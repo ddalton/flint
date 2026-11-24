@@ -1958,6 +1958,14 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             .map(|v| v == "true")
             .unwrap_or(false);
 
+        // nfs.chert.us/dirMode: checked before anything is created, and recorded only on the
+        // NFS-served volumes below, the only ones with an export root.
+        let nfs_dir_mode = spdk_csi_driver::nfs_dir_mode::from_parameters(&req.parameters)
+            .map_err(|msg| {
+                eprintln!("❌ [NFS] bad StorageClass parameters: {}", msg);
+                tonic::Status::invalid_argument(format!("NFS StorageClass: {}", msg))
+            })?;
+
         // NFS emptyDir mode: skip SPDK entirely, serve all volumes via NFS with emptyDir backing
         if nfs_empty_dir {
             println!("📡 [NFS-EMPTYDIR] Volume {} will be served via NFS with emptyDir backend", volume_id);
@@ -1967,6 +1975,12 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
             volume_context.insert("nfs.chert.us/enabled".to_string(), "true".to_string());
             volume_context.insert("nfs.chert.us/backend".to_string(), "emptydir".to_string());
             volume_context.insert("size".to_string(), format!("{}Gi", size_bytes / (1024 * 1024 * 1024)));
+            if let Some(mode) = nfs_dir_mode {
+                volume_context.insert(
+                    spdk_csi_driver::nfs_dir_mode::KEY.to_string(),
+                    spdk_csi_driver::nfs_dir_mode::context_value(mode),
+                );
+            }
             // NOTE: for emptyDir volumes the canonical role can be Block
             // (RWO PVC) while the SERVING path is NFS — a pre-existing
             // backend quirk, which is why the publish-side divergence
@@ -2133,7 +2147,13 @@ impl spdk_csi_driver::csi::controller_server::Controller for MinimalControllerSe
                         "nfs.chert.us/enabled".to_string(),
                         "true".to_string(),
                     );
-                    
+                    if let Some(mode) = nfs_dir_mode {
+                        volume_context.insert(
+                            spdk_csi_driver::nfs_dir_mode::KEY.to_string(),
+                            spdk_csi_driver::nfs_dir_mode::context_value(mode),
+                        );
+                    }
+
                     // Store all replica nodes (for NFS pod node affinity)
                     let replica_nodes: Vec<String> = result.replicas
                         .iter()

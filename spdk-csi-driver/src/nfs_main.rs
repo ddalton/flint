@@ -52,6 +52,13 @@ struct Args {
     /// refused.
     #[arg(long)]
     fresh_backing: bool,
+
+    /// Permission bits for the export root, in octal: the class's
+    /// `nfs.chert.us/dirMode`. Applied at every start, once the export has
+    /// passed F30. Without it the root keeps its backing's own mode (0755,
+    /// owned by root), which only a root pod can write.
+    #[arg(long, value_parser = spdk_csi_driver::nfs_dir_mode::parse)]
+    dir_mode: Option<u32>,
 }
 
 /// Async worker count: FLINT_NFS_WORKER_THREADS, else every core on the
@@ -201,6 +208,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             );
             error!("F30: identity marker check failed on {:?}: {}", args.export_path, e);
             std::process::exit(57);
+        }
+    }
+
+    // nfs.chert.us/dirMode, after F30: the mode lands only on an export that is this volume. A
+    // root the class asked to open but that stays 0755 would fail every non-root pod's first
+    // write, so not applying it fails the start.
+    if let Some(mode) = args.dir_mode {
+        match spdk_csi_driver::nfs_dir_mode::apply(&args.export_path, mode) {
+            Ok(true) => info!("📂 Export root mode set to {:o} ({})", mode, spdk_csi_driver::nfs_dir_mode::KEY),
+            Ok(false) => info!("📂 Export root mode is {:o} ({})", mode, spdk_csi_driver::nfs_dir_mode::KEY),
+            Err(e) => {
+                eprintln!("dirMode: cannot give {:?} mode {:o}: {}", args.export_path, mode, e);
+                error!("dirMode: cannot give {:?} mode {:o}: {}", args.export_path, mode, e);
+                return Err(format!("cannot set the export root's mode: {}", e).into());
+            }
         }
     }
 
