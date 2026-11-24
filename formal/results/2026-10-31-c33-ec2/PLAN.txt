@@ -1,0 +1,31 @@
+c33 on EC2, 2026-10-31: the box's queue and the stamp proof's first tlapm pass, in parallel (gate item 2 and the
+rule-vs-premise probes).  The box (8 cores) runs at load ~11 with flint-91's 1.61.3 release build on it.
+
+APPROVAL: the user, in flint-e4's own session, ~21:16Z, chose "Launch it (Recommended)" for: "a second spot
+instance (r7i.16xlarge, ~$0.67/h, 8 h hard cap, <= ~$5.40) to run the probe/peel queue and tlapm passes in
+parallel".  (The 300 GB gp3 root adds ~$0.03/h, ~$0.25 over the cap.)
+
+WHAT (in/run.sh; tla-mc 0.2.1 compiled, as the box's batches; every input md5 asserted, tlapm's tarball by sha256):
+  A. at once, in parallel:
+     d15  FlintCatchupS rev 15 3d409f1b, the drain probe (flint-cb 10-31): D15Id (the identity, must count
+          7,286,102 / d36), D15NN D15NNA D15GN D15GNA D15NS D15GS D15GSA; 3 workers each, the box's caps 900/1200 s.
+     sp5  FlintCatchupSInd v4 697dd704 over S 8e54566d: the box's peel.sh on the 37-invariant v4 set, bases P1L
+          P1C P1Z (2 replicas, full: must count 3,627,109 / 5,326,386 / 29,140,655 as sp4; cap 1800 s, 4 workers)
+          and P1L3 P1C3 P1Z3 (3 replicas, bounded 600 s, 2 workers as the box).
+     t1   tlapm bfa9468 on FlintCatchupSProof.tla d7511e2f: fresh cache, stretch 3, 16 threads (the box's sp.sh).
+  J. an inbox for later tlapm / peel jobs: s3://flint-c33-20261031/inbox/<name>.tgz + <name>.sha256 (job.sh, cap);
+     inbox/STOP ends the session (final sync, shutdown in 5 min; the instance terminates on shutdown).
+  Moved off the box: sp5 (stopped there 21:17:21Z after ~1 min) and the d15 waiter.  Q14N3 stays on the box.
+
+COST (spot, read-only lookup 21:13Z): r7i.16xlarge $0.667/h us-west-1c + 300 GB gp3 ~$0.03/h.  Hard cap: shutdown
+-h +480 in userdata: worst case ~$5.60.  Deadline in run.sh: 455 min.  Phase A is expected in ~45 min.
+TEARDOWN: inbox/STOP, then teardown.sh (pull out/, terminate, cancel the spot request, delete the inline policy and
+the bucket, the zero-set check in us-east-1/2, us-west-1/2).
+
+LAUNCH (as run): launch.sh made the bucket + policy and uploaded in/ (21:19Z), then run-instances in us-west-1 was
+refused: MaxSpotInstanceCountExceeded (us-west-1's spot quota is 192 vCPU, all of it c31's m7i.48xlarge; us-west-2,
+us-east-1 and us-east-2 have 64 each; us-east-2 has 24 in use by other instances).  launch2.sh: m7i.16xlarge spot
+us-east-1f ($0.6265/h, 64 vCPU / 256 GiB, cheaper than the approved r7i), Ubuntu 24.04 ami-0d6dd9e8265d48906, the
+bucket left in us-west-1 (AWS_DEFAULT_REGION=us-west-1 on the instance), fpmem/queue-mem 4096 (half RAM).  Launched
+21:22:38Z: i-0ac5876cab9ffd6bd, spot sir-9pkznffj.  (in/run.sh's header says "21:32Z" for the refusal: it was ~21:20Z.)
+TEARDOWN: teardown2.sh (the instance is in us-east-1).

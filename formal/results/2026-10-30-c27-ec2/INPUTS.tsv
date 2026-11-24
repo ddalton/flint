@@ -1,0 +1,50 @@
+# Every input file of this batch as it ran: md5, path in this directory, and where it is.
+# "here" = committed at that path; a repo path = a byte-identical copy committed there (not
+# repeated); "absent: ..." = not in the repo.  formal/results/restore-inputs.sh rebuilds the
+# tree from this list and checks every md5.
+1e737564a5fae88a3fbd706478776ee2	PLAN.txt	here
+76de108540a849931ea4c971ba16d041	cutz.sh	here
+fdefc4576e6e3f723070865fb69aba42	diskguard.sh	here
+3ccd7b9fc42db6b7005507de518f1ff0	endafter.sh	here
+2115e1c4c68bc5bdb2f00b135f99bb02	in/recT-ec2.sh	here
+bce0998a8e255cd1f76b79db3a117c43	in/run.sh	here
+f415a84da621ad1a0660506d6a3122f9	launch.sh	here
+8ac3cf005cc1a236fbdb1c464157e260	stage/formal/mc16/FlintCatchupT.tla	formal/FlintCatchupT.tla
+cd549ce308056ba54167e1536cf1a4bf	stage/formal/mc16/FlintCatchupTDFTieANL.cfg	formal/FlintCatchupTDFTieANL.cfg
+a216f580d4070f71031524eba1c7fa44	stage/formal/mc16/FlintCatchupTDFTieNNL.cfg	formal/FlintCatchupTDFTieNNL.cfg
+2099fec010965ebe9170984540f4ac69	stage/formal/mc16/FlintCatchupTDFTrustANL.cfg	formal/FlintCatchupTDFTrustANL.cfg
+1ba49f88ea6ae655034ecd30e7b54609	stage/formal/mc16/FlintCatchupTDFTrustNNL.cfg	formal/FlintCatchupTDFTrustNNL.cfg
+55cbf291d897d77ea66bfe181ab1f5dd	stage/formal/mc16/FlintCatchupTDNTieANL.cfg	formal/FlintCatchupTDNTieANL.cfg
+fdccb20234b43176537c9fa25c85e58f	stage/formal/mc16/FlintCatchupTDNTieNNL.cfg	formal/FlintCatchupTDNTieNNL.cfg
+b0a7dfce5e83dc6483826b8b74249fac	stage/formal/mc16/FlintCatchupTDNTrustANL.cfg	formal/FlintCatchupTDNTrustANL.cfg
+8ef0b681cd8f59dbb8d5923281515b7f	stage/formal/mc16/FlintCatchupTDNTrustNNL.cfg	formal/FlintCatchupTDNTrustNNL.cfg
+cfe3bc5f6bd41e57dfcc5623a12b43ef	stage/formal/mc16/FlintCatchupTNAC.cfg	formal/FlintCatchupTNAC.cfg
+0d8ea84209ad254303d07cdf5e8ab679	stage/formal/mc16/FlintCatchupTNACrashTieANL11.cfg	formal/FlintCatchupTNACrashTieANL11.cfg
+f3f04e0a589fb7a6ef2e931151b07ebb	stage/formal/mc16/FlintCatchupTNAL.cfg	formal/FlintCatchupTNAL.cfg
+1d0703da221314a3659f05b8177fdb11	stage/formal/mc16/FlintCatchupTNALostTieANL.cfg	formal/FlintCatchupTNALostTieANL.cfg
+f0be9ae062a191b586df3b9374882891	stage/formal/mc16/FlintCatchupTNAZ.cfg	formal/FlintCatchupTNAZ.cfg
+b07c0870a8f6966544117f38b490b138	stage/formal/mc16/FlintCatchupTNAZombieTieGuardANLAsm.cfg	formal/FlintCatchupTNAZombieTieGuardANLAsm.cfg
+0f6eb36c099a7cdb6cfa7e414cf4e0a9	stage/formal/mc16/FlintCatchupTTFC.cfg	formal/FlintCatchupTTFC.cfg
+f174b99bec8b951f7404f53c5b052f94	stage/formal/mc16/FlintCatchupTTFL.cfg	formal/FlintCatchupTTFL.cfg
+2d0c4f62f9e185de56505a9bdb1bf6ce	stage/formal/mc16/FlintCatchupTTFZ.cfg	formal/FlintCatchupTTFZ.cfg
+780c1009de70123e9125f200dab19838	stage/formal/mc16/FlintCatchupTTieNA.tla	formal/FlintCatchupTTieNA.tla
+8e54566d891d3641426f82147e68d41d	stage/formal/ms12/FlintCatchupS.tla	formal/results/2026-10-29-flintcatchupt/as-run/ms12/FlintCatchupS.tla
+d3f1d910534be2295236371a7cad5496	stage/formal/ms12/FlintCatchupSId12.cfg	formal/FlintCatchupSId12.cfg
+2e19254044224daee2608cdf09b24c2a	stage/formal/ms12/FlintCatchupSReach.tla	formal/FlintCatchupSReach-r10.tla
+8ac3cf005cc1a236fbdb1c464157e260	stage/formal/ms12/FlintCatchupT.tla	formal/FlintCatchupT.tla
+72ae6c87b2ee9db71e7e559c589c5b3b	stage/formal/ms12/FlintCatchupX4ZTNJ.cfg	formal/FlintCatchupX4ZTNJ.cfg
+8693daec837cc01099d15d25d81cafd9	stage/formal/ms12/FlintCatchupXAck.cfg	formal/FlintCatchupXAck.cfg
+398281197c92b4d6026b6109c03ff492	stage/formal/ms12/FlintCatchupXCTNJ.cfg	formal/FlintCatchupXCTNJ.cfg
+130d08a5a0ccc8d79b56746e3439180f	stage/formal/ms12/FlintCatchupXLSole.cfg	formal/FlintCatchupXLSole.cfg
+b892d62ac341b814ea91682aac8c574c	stage/formal/ms12/FlintCatchupXLTNJ.cfg	formal/FlintCatchupXLTNJ.cfg
+26f4076564a2c45755ff07ad89c09827	stage/formal/ms12/FlintCatchupXZSole.cfg	formal/FlintCatchupXZSole.cfg
+044dcbcb51585aaa07355b59bb373164	stage/formal/ms12/FlintCatchupXZTNJ.cfg	formal/FlintCatchupXZTNJ.cfg
+1529db3283a4748f67994be3a9f0d7ad	stage/formal/ms12/FlintCatchupXZTNJRisk.cfg	formal/FlintCatchupXZTNJRisk.cfg
+8ac3cf005cc1a236fbdb1c464157e260	stage/proof/FlintCatchupT.tla	formal/FlintCatchupT.tla
+d5039bf8dba3dfab1a4f51c74d1bb3b9	stage/proof/FlintCatchupTInd.tla	formal/FlintCatchupTInd.tla
+cf71b06af96e0cf7f9bd7d679181e471	stage/proof/FlintCatchupTProof.tla	formal/FlintCatchupTProof.tla
+27735e027465e31c20b68f39a6e4335b	swap190.sh	here
+859e3d23ffa2f3617a6f792a20ffb1d0	tables-c27.md	here
+f14ecf7f7c8f686a61e1f17febc5ae23	teardown.sh	here
+dffdc5f098a1223a09b3cf757ea72f75	userdata.final.sh	here
+30c13005b7a80411bdde078531612449	userdata.sh	here

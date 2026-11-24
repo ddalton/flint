@@ -1,0 +1,30 @@
+c31 on EC2, 2026-10-31: the gate's items 5+6 (flint-cb's list; the raid1 patch waits on the models and proofs).
+
+APPROVAL: the user's word relayed by flint-cb (verbatim): "go ahead with the EC2 session. Use compiled model with
+tla-mc 0.2.2. Build it first."  flint-e4 launches only after the user confirms in flint-e4's own session.
+
+WHAT: FlintCatchupS rev 12 (8e54566d, Reach 2e192540; the c26/c27 model), three replicas, rev 12's full rule set
+(MajorityRead count, RelView, EvenVouch decree, TornExcluded, ZombiePreStampLegal, TornNeverSole; trust,
+CutStampsAll FALSE), tla-mc 0.2.2 compiled, 190 workers, -fpmem/-queue-mem 180000 MB, one arm at a time:
+  SId12      the identity on this machine: must be 7,286,102 / d36 (900 s cap)
+  XAck       lost mark, Inv_AckStamped: full pass; must count as XLTNJ 1,774,204,193 / d45 (c27: 629 s at 160 workers)
+  XLSole     lost mark, Inv_SoleOnly: full pass; the same space
+  XCAck      crash, Inv_AckStamped: full pass; must count as XCTNJ 2,325,892,812 / d46 (c27: 824 s at 190)
+  XZTNJRisk  zombie + the expiry, TornJunkMarked + LossMarked: bounded, 1 h cap
+  XZSole     zombie, Inv_SoleOnly: bounded, 1 h cap
+  X4ZTNJ     FOUR replicas, zombie, NNL3 + TornJunkMarked: bounded, 1 h cap
+"BUILD IT FIRST" (agreed with flint-cb): a box-built binary cannot ship (tla-mc compiles with target-cpu=native for
+the box's i3-12100 and links the box's glibc 2.42; the instance's Ubuntu 24.04 has 2.39).  So: (1) on the box,
+2026-10-31, tla-mc 0.2.2 built every arm's checker and ran it (the identity in full: 7,286,102 / d36 exact; the
+others 90 s each); (2) each arm's generated source (src/, md5) and its locked dependency set (name+version,
+md5) are pinned in in/gensrc.expect; (3) the instance installs tla-mc 0.2.2 --locked, builds every arm first and
+ASSERTS both md5s per arm before any arm runs; any mismatch: nothing runs, the instance shuts down.
+
+INPUTS (in/, every file checked in S3 at its size before run-instances): run.sh, formal.tgz (ms12: the model, Reach,
+7 cfgs), gensrc.expect.  run.sh asserts every model and cfg md5 and the tla-mc version.
+
+COST (spot, read-only lookup 19:08Z): m7i.48xlarge $1.48/h us-west-1a + 2 TB gp3 16k IOPS 1000 MB/s ~$0.36/h.
+~25 min setup + ~10 min build + ~45 min of full passes + 3 h bounded = ~4.5 h, ~$8.30.  Hard cap: shutdown -h +360
+in userdata (the instance terminates on shutdown): worst case ~$11.  Deadline in run.sh: 330 min.
+TEARDOWN: teardown.sh (pull out/, terminate, cancel the spot request, delete the inline policy and the bucket, the
+zero-set check in us-east-1/2, us-west-1/2).

@@ -1,0 +1,40 @@
+c27 on EC2 (prepared 2026-10-30 ~18:20Z; launch ONLY on the user's go)
+
+WHY: turn the §12 verdict table's three-replica rows (today "no violation to d17-d23, bounded") into full-space
+passes on rev 12's full rule set, and run the owed TLAPS record + 13 controls and c16 off the shared box.
+
+INSTANCE: m7i.48xlarge one-time spot, us-west-1a (192 vCPU, 768 GiB, x86 for tlapm), Ubuntu 24.04 (ami-03f6db1ed30590f8a),
+2 TB gp3 root (16k IOPS, 1000 MB/s), terminate on shutdown, userdata `shutdown -h +720` (hard cap 12 h).
+Spot at 18:10Z: m7i.48xlarge 1.4873 $/h (c7i 1.30, c7a 1.23, c8g 1.20; other regions 1.6-3.6). EBS ~0.36 $/h.
+~1.85 $/h; worst case (cap) ~22 $; expected 6-8 h, ~11-15 $.  Spot vCPU quota us-west-1 = 192 (this instance fills it).
+
+INPUTS (in/): formal.tgz (ms12: FlintCatchupS rev 12 8e54566d, Reach 2e192540, X*.cfg, SId12.cfg; mc16: FlintCatchupT
+8ac3cf00, TieNA 780c1009, 17 cfgs), proof.tgz (FlintCatchupT 8ac3cf00, Ind d5039bf8, Proof cf71b06a), tlaps.tgz (tlapm
+bfa9468 from the box), run.sh (ONE script; asserts every md5).
+
+RUN (run.sh): TLAPS record (threads 24) then 13 controls (6 at a time, threads 4) in the background; in the foreground,
+one arm at a time at 160 workers (tla-mc 0.2.1 compiled, -fpmem/-queue-mem 180000 MB, spill to the gp3):
+  SId12 identity (must be 7,286,102) -> XZTNJ 3h -> XLTNJ 2h -> XCTNJ 2h -> c16's 17 arms (30 min caps) ->
+  XZTNJRisk 1.5h -> XZSole 1h -> XLSole 1h -> XAck 1h -> X4ZTNJ 1.5h; every cap clipped to the deadline (690 min).
+OUTPUTS: s3://flint-c27-20261030/out every 5 min: c27.txt, c16.txt (the box's batch formats), recT.txt, RESULTS.txt, res.txt.
+
+SCRIPTS: launch.sh (bucket, inline policy flint-c27-20261030-bucket on role TroveSSMInstanceProfile, upload, run-instances;
+writes launch.out), teardown.sh (pull out/, terminate, cancel spot, delete policy, rb bucket, zero set in 4 regions).
+CHECKED 10-30: syntax; role + instance profile exist (no inline policies before); default subnets 1a/1c public; the exact
+run-instances call passes --dry-run; every new cfg runs 45 s clean on the box (tla-mc 0.2.1); -checkpoint 0 accepted.
+
+LAUNCHED 2026-10-30 18:22:15Z: i-0815b757c33e41679, spot sir-qvgfq5xg, us-west-1a. Three faults fixed over SSM by 18:33Z
+(aws-cli snap failed at boot; tlaps.tgz missing from the bucket; a GitHub tlapm download was build 941f894, not bfa9468).
+userdata.sh / launch.sh patched afterwards (AWS CLI v2 installer; every in/ file verified in S3 before run-instances).
+
+10-30 18:40Z CHANGE (the user: "go with your recommendation"): the zombie arm cannot finish a full pass
+(d26 1.64B distinct, x1.5/level, queue spilling ~60 GB/min), so: XZTNJ runs until diskguard.sh cuts it at
+88% of the root disk (its last full depth is the bound); XLTNJ and XCTNJ (3 replicas, lost mark / crash, two
+failures: the shape of the real loss, smaller spaces, the only arms that may give a 3-replica FULL pass) run;
+then endafter.sh stops run.sh, cuts recT if not done, final-syncs out/ and shuts the instance down.  Dropped:
+XZTNJRisk XZSole XLSole XAck X4ZTNJ.  c16 (17 arms) and the TLAPS record move to the Linux box.  Then
+teardown.sh on the Mac (policy, bucket, zero set) and message flint-91.  Latest end ~23:15Z, ~$9 total.
+18:49Z XZTNJ CUT at the user's word ("we should stop the run, if it is not going to be of much use"): bounded,
+no violation, last full depth 27 (2,429,420,385 distinct); disk-bound from d25 (~20 of 192 vCPUs busy, gp3 at
+its 1000 MB/s cap).  18:58Z swap190.sh (the user: "allocate 190 cores for the next run"): after XLTNJ's line it
+stops run.sh's group and runs XCTNJ with 190 workers in run.sh's format; endafter.sh still ends the run.
